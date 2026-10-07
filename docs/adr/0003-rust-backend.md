@@ -16,12 +16,12 @@ Groundwork is TypeScript on TanStack Start with Drizzle. Its conventions do not 
 - `punchlist-core` is a pure crate with no I/O. It holds the workflow types and parser, the gates as functions over recorded evidence, and the transition rules. Every other crate depends on it.
 - The runner starts from Kata Symphony's orchestrator, adapted to claim work from the Punchlist server.
 - Library choices for HTTP, database access and the job queue are made in the first slice that needs them.
-- The frontend is a separate decision, made after a Gate 0 spike that builds the issue list both in GPUI and as a web app.
+- The frontend is a separate decision; see ADR 0004.
 
 ## Consequences
 
 - Server, runner and CLI enforce the same rules because they call the same code.
-- `punchlist-core` compiles to WebAssembly, so either frontend can validate a workflow or preview a gate in the client.
+- `punchlist-core` compiles to WebAssembly, so the web client can validate a workflow or preview a gate with the same code.
 - Symphony's tested orchestration logic moves in as code rather than as ideas to port.
 - Rust builds are slower than TypeScript ones, which lengthens agent edit-and-check loops. Splitting the workspace into small crates and checking with `cargo check` keeps the loop short.
 - Groundwork and Punchlist no longer share a stack, so conventions and tooling are set up separately.

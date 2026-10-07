@@ -10,7 +10,7 @@ Punchlist is an open-source issue tracker where coding agents do the work and th
 
 - Backend: Rust in one Cargo workspace (ADR 0003). `punchlist-core` is pure and holds the workflow types and parser, the gates and the transition rules. The server, runner, `pl` CLI and MCP server depend on it. Postgres is the store.
 - The runner starts from Kata Symphony's orchestrator in `~/dev/kata-symphony/apps/symphony`.
-- Frontend: not decided. A Gate 0 spike builds the issue list in GPUI and as a web app, and an ADR records the choice.
+- Frontend: a web app in TypeScript, React and Vite, served by the Rust server, with API types generated from Rust (ADR 0004). Tailwind with shadcn/ui, as in Groundwork.
 - License: MIT or Apache-2.0 (ADR 0002). Every crate sets `license = "MIT OR Apache-2.0"`.
 
 Keep setup, scripts and layout documented here as slices land.

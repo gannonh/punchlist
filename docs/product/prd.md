@@ -6,7 +6,7 @@ Oct 7, 2026 · @Gannon · Working name, draft v0.1
 
 Punchlist is an open-source issue tracker where coding agents do the work and the tracker enforces how the work gets done.
 
-The issue is the unit of work. A runner on the team's own machine claims issues that are ready, runs Claude Code, Codex or Cursor in an isolated worktree, opens a pull request, and moves the issue through the team's workflow. The workflow is a versioned file that the tracker enforces: the statuses, who may move an issue between them, and the checks that must pass first. Today those rules live as prose in agent prompt files, and nothing enforces them.
+The issue is the unit of work. A runner on the team's own machine claims issues that are ready, runs Claude Code, Codex, OpenCode, Pi or Cursor in an isolated worktree, opens a pull request, and moves the issue through the team's workflow. The workflow is a versioned file that the tracker enforces: the statuses, who may move an issue between them, and the checks that must pass first. Today those rules live as prose in agent prompt files, and nothing enforces them.
 
 The first release targets solo developers and small teams, 1 to 10 people, who already run several coding agents in parallel. Teams bring their own agents and subscriptions. The core is open source under MIT or Apache-2.0, at the user's choice, and self-hostable.
 
@@ -27,7 +27,6 @@ Gannon's own setup shows the cost. About 90 lines of a global `CLAUDE.md` define
 - Teams share and fork workflow files the way they share CI configs.
 - Every finished issue carries its evidence: the pull request, CI results, review threads, and a verification run with screenshots and video.
 - Groundwork links each issue to the customer problem behind it, so the path from customer quote to merged code is one chain of links.
-- A hosted cloud runs managed runners for teams that do not want to host their own.
 
 ## Market and positioning
 
@@ -49,7 +48,7 @@ Trackers are putting agents on issues, and orchestrators are turning trackers in
 
 **Positioning.** For small teams that ship with coding agents, Punchlist is the open-source issue tracker that dispatches the agents and enforces the workflow. Linear, Plane and Multica put agents on issues but leave the rules in prompts. Symphony-style orchestrators run agents beside a tracker and keep a second copy of issue state. Punchlist holds the issue, the workflow, the runs and the proof in one place, and it imports Symphony workflows.
 
-**Stance toward incumbents.** Import from Linear once, then Punchlist is the source of truth. GitHub stays the code host. Agents are whatever the team already pays for: Punchlist dispatches Claude Code, Codex and Cursor and does not resell inference in v1.
+**Stance toward incumbents.** Import from Linear once, then Punchlist is the source of truth. GitHub stays the code host. Agents are whatever the team already uses. Punchlist dispatches Claude Code first, then Codex, OpenCode, Pi and Cursor, each on the team's own subscription.
 
 ## Users and jobs to be done
 
@@ -194,7 +193,7 @@ The server publishes a JSON Schema for `workflow.toml`, so editors with a TOML l
 | --- | --- |
 | Workspace | Members, agents, runners, repositories, workflow |
 | Issue | Title, body (spec and acceptance criteria), status, project, milestone, labels, parent, assignee |
-| Actor | A person or an agent: role, token; for agents, kind (Claude Code, Codex, Cursor), model and owner |
+| Actor | A person or an agent: role, token; for agents, kind (Claude Code, Codex, OpenCode, Pi, Cursor), model and owner |
 | Workflow | A parsed, versioned workflow file: statuses, transitions, gates, locks, dispatch rules |
 | Transition | From, to, actor, gate results, reason, time. Append-only; the latest one is the issue's status |
 | Runner | Machine registration, capabilities, lease heartbeat |
@@ -245,6 +244,8 @@ A developer running five agents spends the day starting runs by hand, checking w
 
 ### Functional requirements
 
+A requirement's priority names the phase that ships it: P0 in Gate 1, P1 in Phase 2, P2 in Phase 3 and P3 in Phase 4. The P0 rows are v1.
+
 | ID | Requirement | Priority |
 | --- | --- | --- |
 | R1 | Issues: create and edit with a Markdown body, labels, project, milestone, parent and child, assignee (person or agent) | P0 |
@@ -255,7 +256,7 @@ A developer running five agents spends the day starting runs by hand, checking w
 | R6 | Append-only event log and timeline per issue | P0 |
 | R7 | Separate identities, roles and API tokens for people and agents | P0 |
 | R8 | Runner: register, heartbeat, claim with a lease, one worktree per issue, start Claude Code and Codex, stream logs, recover after restart | P0 |
-| R9 | Runner support for the Cursor agent CLI | P1 |
+| R9 | Runner support for OpenCode and Pi | P1 |
 | R10 | MCP server and `pl` CLI: read an issue, comment, attach proof, request a transition | P0 |
 | R11 | GitHub App: link a pull request to its issue by branch name or ID; transition on draft opened, merged, and closed unmerged | P0 |
 | R12 | Show the pull request's checks and review threads on the issue page | P1 |
@@ -268,7 +269,11 @@ A developer running five agents spends the day starting runs by hand, checking w
 | R19 | Search across issues and comments | P1 |
 | R20 | Docker Compose self-host: web app, worker, Postgres | P0 |
 | R21 | Custom gates that run a command or call a webhook | P2 |
-| R22 | Convert a Symphony `WORKFLOW.md` and its prompts into a Punchlist workflow | P2 |
+| R22 | Convert a Symphony `WORKFLOW.md` and its prompts into a Punchlist workflow | P3 |
+| R23 | Runner support for the Cursor agent CLI | P3 |
+| R24 | Run each issue's live checks on `main` and on the branch, and attach the results, screenshots and video as proof | P2 |
+| R25 | `proof_verified` gate: passes only when Punchlist's own verification run passed every live check on the issue | P2 |
+| R26 | Link an issue to the Groundwork opportunity behind it and show that opportunity's quotes on the issue page | P3 |
 
 ### Non-functional requirements
 
@@ -276,7 +281,7 @@ A developer running five agents spends the day starting runs by hand, checking w
 - **Correctness.** A transition and its gate checks commit in one transaction. A claim is a lease. A run is idempotent per issue and attempt.
 - **Security.** Repository credentials and agent subscriptions stay on the runner; the server never sees them. Agent tokens are scoped to one workspace and role. Text from outside the team, such as issue bodies and review comments, reaches an agent only inside a fence that the text cannot close, and branch names are screened for control characters.
 - **Traceability.** Every transition stores the actor, the workflow version and each gate's result.
-- **Stack.** Rust for everything behind the UI: the server, the runner, the `pl` CLI and the MCP server, in one Cargo workspace, with Postgres as the store. A pure core crate holds the workflow parser, gates and transition rules, and every other crate depends on it. The runner starts from Kata Symphony's orchestrator. See `docs/adr/0003-rust-backend.md`. The frontend is open: a web app in TypeScript, or a native GPUI client.
+- **Stack.** Rust for everything behind the UI: the server, the runner, the `pl` CLI and the MCP server, in one Cargo workspace, with Postgres as the store. A pure core crate holds the workflow parser, gates and transition rules, and every other crate depends on it. The runner starts from Kata Symphony's orchestrator. See `docs/adr/0003-rust-backend.md`. The frontend is a web app in TypeScript, React and Vite, served by the Rust server, with API types generated from Rust. See `docs/adr/0004-web-frontend.md`.
 
 ### What carries over from earlier projects
 
@@ -285,6 +290,7 @@ Kata Symphony, Factory, Kata Code and Agentis wind down. Their code is mostly a 
 | Part | Source | Use |
 | --- | --- | --- |
 | Orchestrator loop: claim, run, retry with capped backoff, reconcile, detect stalls | Kata Symphony `apps/symphony/src/orchestrator.rs` (v2.3.3, about 1,150 tests) | Candidate v1 runner behind a Punchlist tracker adapter (its `TrackerAdapter` trait has five methods) |
+| Agent adapters for Codex (app-server) and Pi (RPC), with token accounting | Kata Symphony `src/codex/app_server.rs`, `src/pi_agent/` | Port; the Claude Code and OpenCode adapters are new |
 | Prompts and agent choice per status | Kata Symphony `.symphony/prompts/`, `prompts.by_state`, `model_by_state` | Port the idea into `dispatch.status` |
 | Worktree per issue, lifecycle hooks, path safety | Kata Symphony `workspace.rs`, `path_safety.rs` | Port; copy `path_safety` as is |
 | Gate computed from evidence; verifier cannot waive a failing criterion | Kata Symphony `src/verification/gate.rs`, ADRs 0001 to 0006 | Model for R4 and phase 3 |
@@ -305,7 +311,6 @@ All targets are hypotheses to revisit after the dogfood phase.
 | Groundwork pull requests that start from a runner dispatch | 80% or more | Gate 1: dogfood |
 | Agent actions on issues in a status locked to people | 0 | All |
 | Runs lost or duplicated across runner restarts | 0 | All |
-| Design-partner teams running it weekly without help | 5 | 2: design partners |
 | Weekly active workspaces, 90 days after launch | 50 | 4: launch |
 
 ## Roadmap
@@ -314,20 +319,12 @@ Punchlist is the second product, and Groundwork's Gate 1 comes first. Months ass
 
 | Phase | Timing | Scope | Exit criteria |
 | --- | --- | --- | --- |
-| Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend, frontend and sync; a spike that builds the issue list both in GPUI and on the web; three prototype variants each for the issue list and the issue page | Frontend chosen, a prototype variant chosen, and Gate 1 sliced in Linear |
-| Gate 1. Dogfood | Nov to Dec 2026 | P0 requirements | Groundwork's and Punchlist's own issues run from Punchlist for 14 days |
-| Phase 2. Design partners | Jan to Feb 2027 | P1 requirements; five small teams | Five teams run it weekly without help |
-| Phase 3. Verified pull requests | Mar to Apr 2027 | Punchlist runs the issue's verification scenarios on `main` and the branch and attaches screenshots and video; `proof_attached` becomes `proof_verified` | Every dogfood pull request carries a Punchlist-run verification |
-| Phase 4. Launch and cloud | Q2 2027 | Public repository and docs; hosted cloud with managed runners; Groundwork links issues to customer evidence | Launch metrics tracking toward 90-day targets |
-| Phase 5. Team scale | H2 2027 | Cycles, roadmaps, notifications, SSO, Jira import | Decide after phase 4 |
-
-## Business model
-
-The hosted cloud earns the revenue once it exists. Self-hosting stays free and complete.
-
-**Licensing.** Dual-licensed under MIT or Apache-2.0, the Rust ecosystem's convention, with no contributor license agreement. See `docs/adr/0002-dual-license.md`.
-
-**Pricing.** Pricing waits for the design-partner phase. The working hypothesis is a per-workspace price for hosting, with managed runners metered by compute time. Agent inference stays on the team's own subscriptions. For reference, Linear costs $10 (Basic) or $16 (Business) per user per month billed yearly, and its agent sessions draw on AI credits. Plane meters agents by credits per seat.
+| Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend and frontend; three prototype variants each for the issue list and the issue page; a guide to live checks for every surface | A variant picked for each prototype, the verification guide approved, and Gate 1 sliced in Linear |
+| Gate 1. Dogfood | Nov to Dec 2026 | P0: R1 to R8, R10, R11, R13 to R15, R20 | Groundwork's and Punchlist's own issues run from Punchlist for 14 days |
+| Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19 | Every P1 requirement is Done, and Gannon runs both projects from Punchlist with no workaround outside it |
+| Phase 3. Verified pull requests | Mar to Apr 2027 | P2: R21, R24, R25. Punchlist runs each issue's live checks itself, and `proof_verified` replaces `proof_attached` | Every dogfood pull request carries a Punchlist-run verification |
+| Phase 4. Launch | Q2 2027 | P3: R22, R23, R26; public docs and a 1.0 release | Launch metrics tracking toward 90-day targets |
+| Phase 5. Team scale | H2 2027 | No requirements yet. Candidates: cycles, roadmaps, email and push notifications, SSO, Jira import | Decide after Phase 4 |
 
 ## Risks and open questions
 
@@ -337,7 +334,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 | --- | --- |
 | Linear or GitHub adds enforced gates and per-transition permissions | Stay open source and self-hosted with bring-your-own agents; ship the workflow file and gates first |
 | Multica or Plane adds enforced gates | Ship gates first; a permissive license against Plane's AGPL and Multica's hosting limits; import Symphony workflows |
-| Open-source orchestrators struggle to sustain themselves: Vibe Kanban shut down in April 2026 and Terragon in January 2026 | Plan the hosted cloud as the revenue source; prove the tool on Groundwork, so it pays for itself in Gannon's own work either way |
+| Open-source orchestrators struggle to sustain themselves: Vibe Kanban shut down in April 2026 and Terragon in January 2026 | Prove the tool on Groundwork, so it earns its keep in Gannon's own work either way; keep the scope small enough for one maintainer |
 | Teams will not switch trackers | Target small teams; import from Linear in minutes; prove it on Groundwork |
 | Tracker parity has no end | Hold the non-goals; keep P0 to the agent loop |
 | Agent CLIs change flags, auth or terms for headless use | One adapter per agent; pin CLI versions; the runner checks capabilities at startup |
@@ -347,7 +344,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 ### Open questions
 
 - [x] Runner language? Rust, starting from Kata Symphony's orchestrator, decided Oct 7, 2026 (ADR 0003).
-- [ ] Frontend: a web app in TypeScript, React and Vite served by the Rust server, or a native GPUI client using GPUI Kit, with its WebAssembly build for links? A Gate 0 spike builds the issue list both ways and measures speed, load size, accessibility, and whether agents and Playwright can build and drive it.
+- [x] Frontend? A web app in TypeScript, React and Vite, decided Oct 7, 2026 (ADR 0004).
 - [x] Markdown or structured config for the workflow? Structured config plus Markdown prompts per status, decided Oct 7, 2026.
 - [x] TOML or YAML? TOML, decided Oct 7, 2026 (ADR 0001).
 - [x] License? MIT or Apache-2.0, decided Oct 7, 2026 (ADR 0002).
