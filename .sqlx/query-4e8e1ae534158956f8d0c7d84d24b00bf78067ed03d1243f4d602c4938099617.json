@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                t.from_status, t.to_status, t.workflow_version\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         JOIN transition t ON t.id = e.transition_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2 AND ($3::bigint IS NULL OR e.seq = $3)\n         ORDER BY e.seq",
+  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                t.from_status, t.to_status, t.workflow_version\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         JOIN transition t ON t.id = e.transition_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
   "describe": {
     "columns": [
       {
@@ -106,8 +106,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Text",
-        "Int8"
+        "Text"
       ]
     },
     "nullable": [
@@ -122,5 +121,5 @@
       false
     ]
   },
-  "hash": "70971208ef8e2c8d67a7a3aa28f15ac42865fcfd0540359c43011f54b43143b7"
+  "hash": "4e8e1ae534158956f8d0c7d84d24b00bf78067ed03d1243f4d602c4938099617"
 }

@@ -7,7 +7,6 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_api::{CreateIssue, Event, EventDetail, Issue};
 use punchlist_client::Client;
-use punchlist_core::display_name;
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
@@ -100,13 +99,11 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         }
         IssueCommand::Move { id, status } => {
             let moved = client.move_issue(&id, &status).await?;
-            let EventDetail::Transition { from, .. } = &moved.event.detail;
+            let EventDetail::Transition { from_name, .. } = &moved.event.detail;
             writeln!(
                 out,
                 "{}  {} → {}",
-                moved.issue.id,
-                display_name(from),
-                moved.issue.status_name
+                moved.issue.id, from_name, moved.issue.status_name
             )?;
         }
     }
@@ -128,14 +125,16 @@ fn render_show(issue: &Issue, events: &[Event]) -> String {
         text.push_str("  No transitions yet.\n");
     }
     for event in events {
-        let EventDetail::Transition { from, to, .. } = &event.detail;
+        let EventDetail::Transition {
+            from_name, to_name, ..
+        } = &event.detail;
         text.push_str(&format!(
             "  {}  {} ({})  {} → {}\n",
             event.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
             event.actor.name,
             event.actor.role,
-            display_name(from),
-            display_name(to),
+            from_name,
+            to_name,
         ));
     }
     text

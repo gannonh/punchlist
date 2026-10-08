@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
-punchlist-core.workspace = true
+punchlist-core = { workspace = true, features = ["openapi"] }
 serde.workspace = true
 utoipa.workspace = true
 uuid.workspace = true

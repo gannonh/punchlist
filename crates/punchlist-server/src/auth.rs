@@ -14,7 +14,25 @@ use crate::{ApiError, AppState};
 pub struct Actor {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub name: String,
     pub role: Role,
+}
+
+impl From<&Actor> for punchlist_api::Actor {
+    fn from(actor: &Actor) -> punchlist_api::Actor {
+        punchlist_api::Actor {
+            id: actor.id,
+            name: actor.name.clone(),
+            role: actor.role,
+        }
+    }
+}
+
+/// Reads an `actor.role` column. Its `CHECK` constraint allows only known roles, so an
+/// unknown one is corrupt data, not a bad request.
+pub fn parse_role(value: &str) -> Result<Role, sqlx::Error> {
+    Role::parse(value)
+        .ok_or_else(|| sqlx::Error::Decode(format!("unknown actor role `{value}`").into()))
 }
 
 /// SHA-256 of a bearer token, in hex. Only the hash is stored.
@@ -36,17 +54,17 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
         let row = sqlx::query!(
-            "SELECT id, workspace_id, role FROM actor WHERE token_hash = $1",
+            "SELECT id, workspace_id, name, role FROM actor WHERE token_hash = $1",
             hash_token(token)
         )
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::Unauthorized)?;
-        let role = Role::parse(&row.role).ok_or(ApiError::Unauthorized)?;
         Ok(Actor {
             id: row.id,
             workspace_id: row.workspace_id,
-            role,
+            role: parse_role(&row.role)?,
+            name: row.name,
         })
     }
 }

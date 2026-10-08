@@ -15,7 +15,6 @@ anyhow.workspace = true
 clap.workspace = true
 punchlist-api.workspace = true
 punchlist-client.workspace = true
-punchlist-core.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true

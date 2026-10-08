@@ -22,6 +22,7 @@ pub fn default_workflow() -> &'static Workflow {
 
 /// Who asks for a transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Person,

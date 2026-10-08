@@ -1,9 +1,12 @@
 //! Request and response types for the Punchlist API (ADR 0008).
 //!
 //! The server and the Rust client share these types, and utoipa derives their schemas for
-//! the OpenAPI document. Core types that cross the API are mirrored here.
+//! the OpenAPI document. Core types that cross the API, such as `Role`, are re-exported
+//! with their schemas from `punchlist-core`'s `openapi` feature.
 
 use chrono::{DateTime, Utc};
+pub use punchlist_core::Role;
+use punchlist_core::display_name;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -55,40 +58,6 @@ pub struct Moved {
     pub event: Event,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    Person,
-    Agent,
-    Runner,
-}
-
-impl From<punchlist_core::Role> for Role {
-    fn from(role: punchlist_core::Role) -> Role {
-        match role {
-            punchlist_core::Role::Person => Role::Person,
-            punchlist_core::Role::Agent => Role::Agent,
-            punchlist_core::Role::Runner => Role::Runner,
-        }
-    }
-}
-
-impl From<Role> for punchlist_core::Role {
-    fn from(role: Role) -> punchlist_core::Role {
-        match role {
-            Role::Person => punchlist_core::Role::Person,
-            Role::Agent => punchlist_core::Role::Agent,
-            Role::Runner => punchlist_core::Role::Runner,
-        }
-    }
-}
-
-impl std::fmt::Display for Role {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        punchlist_core::Role::from(*self).fmt(f)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Actor {
     pub id: Uuid,
@@ -112,10 +81,27 @@ pub struct Event {
 pub enum EventDetail {
     Transition {
         from: String,
+        /// `from` as people read it, such as `In Progress`.
+        from_name: String,
         to: String,
+        /// `to` as people read it.
+        to_name: String,
         /// The content hash of the workflow the transition was checked against.
         workflow_version: String,
     },
+}
+
+impl EventDetail {
+    /// A transition between two status keys, with their display names filled in.
+    pub fn transition(from: String, to: String, workflow_version: String) -> EventDetail {
+        EventDetail::Transition {
+            from_name: display_name(&from),
+            to_name: display_name(&to),
+            from,
+            to,
+            workflow_version,
+        }
+    }
 }
 
 /// The body of every error response.
@@ -133,14 +119,14 @@ mod tests {
 
     #[test]
     fn event_detail_is_tagged_by_kind() {
-        let detail = EventDetail::Transition {
-            from: "backlog".into(),
-            to: "todo".into(),
-            workflow_version: "sha256:ab".into(),
-        };
+        let detail = EventDetail::transition(
+            "in_progress".into(),
+            "agent_review".into(),
+            "sha256:ab".into(),
+        );
         assert_eq!(
             serde_json::to_string(&detail).unwrap(),
-            r#"{"kind":"transition","from":"backlog","to":"todo","workflow_version":"sha256:ab"}"#
+            r#"{"kind":"transition","from":"in_progress","from_name":"In Progress","to":"agent_review","to_name":"Agent Review","workflow_version":"sha256:ab"}"#
         );
     }
 

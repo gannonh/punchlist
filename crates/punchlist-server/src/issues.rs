@@ -7,12 +7,12 @@ use chrono::{DateTime, Utc};
 use punchlist_api::{
     CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
 };
-use punchlist_core::{Role, default_workflow, display_name};
+use punchlist_core::{default_workflow, display_name};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
-use crate::auth::Actor;
+use crate::auth::{Actor, parse_role};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -59,14 +59,9 @@ struct EventRow {
 }
 
 impl TryFrom<EventRow> for Event {
-    type Error = ApiError;
+    type Error = sqlx::Error;
 
-    fn try_from(row: EventRow) -> Result<Event, ApiError> {
-        let role = Role::parse(&row.actor_role).ok_or_else(|| {
-            ApiError::Database(sqlx::Error::Decode(
-                format!("unknown actor role `{}`", row.actor_role).into(),
-            ))
-        })?;
+    fn try_from(row: EventRow) -> Result<Event, sqlx::Error> {
         Ok(Event {
             seq: row.seq,
             issue_id: row.issue_id,
@@ -74,13 +69,9 @@ impl TryFrom<EventRow> for Event {
             actor: punchlist_api::Actor {
                 id: row.actor_id,
                 name: row.actor_name,
-                role: role.into(),
+                role: parse_role(&row.actor_role)?,
             },
-            detail: EventDetail::Transition {
-                from: row.from_status,
-                to: row.to_status,
-                workflow_version: row.workflow_version,
-            },
+            detail: EventDetail::transition(row.from_status, row.to_status, row.workflow_version),
         })
     }
 }
@@ -256,25 +247,27 @@ async fn move_issue(
     )
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query!(
+    let created_at = sqlx::query_scalar!(
         "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, transition_id)
-         VALUES ($1, $2, $3, 'transition', $4, $5)",
+         VALUES ($1, $2, $3, 'transition', $4, $5) RETURNING created_at",
         actor.workspace_id,
         seq,
         id,
         actor.id,
         transition_id,
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let event = fetch_events(&mut tx, actor.workspace_id, &id, Some(seq))
-        .await?
-        .pop()
-        .ok_or_else(|| ApiError::Database(sqlx::Error::RowNotFound))?;
     tx.commit().await?;
     Ok(Json(Moved {
         issue: issue.into(),
-        event,
+        event: Event {
+            seq,
+            issue_id: id,
+            actor: (&actor).into(),
+            created_at,
+            detail: EventDetail::transition(from, request.to, workflow.version().to_string()),
+        },
     }))
 }
 
@@ -305,18 +298,6 @@ async fn issue_events(
     if !exists {
         return Err(ApiError::IssueNotFound(id));
     }
-    Ok(Json(
-        fetch_events(&mut conn, actor.workspace_id, &id, None).await?,
-    ))
-}
-
-/// The issue's events, or only the one with sequence number `seq`.
-async fn fetch_events(
-    conn: &mut sqlx::PgConnection,
-    workspace_id: Uuid,
-    issue_id: &str,
-    seq: Option<i64>,
-) -> Result<Vec<Event>, ApiError> {
     let rows = sqlx::query_as!(
         EventRow,
         "SELECT e.seq, e.issue_id, e.created_at,
@@ -325,13 +306,16 @@ async fn fetch_events(
          FROM event e
          JOIN actor a ON a.id = e.actor_id
          JOIN transition t ON t.id = e.transition_id
-         WHERE e.workspace_id = $1 AND e.issue_id = $2 AND ($3::bigint IS NULL OR e.seq = $3)
+         WHERE e.workspace_id = $1 AND e.issue_id = $2
          ORDER BY e.seq",
-        workspace_id,
-        issue_id,
-        seq,
+        actor.workspace_id,
+        id,
     )
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await?;
-    rows.into_iter().map(Event::try_from).collect()
+    let events = rows
+        .into_iter()
+        .map(Event::try_from)
+        .collect::<Result<_, _>>()?;
+    Ok(Json(events))
 }

@@ -69,6 +69,7 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
     assert_eq!(issue["status_name"], "Backlog");
     assert_eq!(issue["body"], "Body");
 
+    let mut returned = Vec::new();
     for to in ["todo", "start"] {
         let (status, moved) = call(
             &app,
@@ -80,7 +81,26 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
         .await;
         assert_eq!(status, StatusCode::OK, "{moved}");
         assert_eq!(moved["issue"]["status"], to);
+        returned.push(moved["event"].clone());
     }
+    let event = &returned[1];
+    assert_eq!(event["seq"], 2);
+    assert_eq!(event["issue_id"], "PL-1");
+    assert_eq!(
+        event["actor"],
+        json!({"id": person.actor_id, "name": "Gannon", "role": "person"})
+    );
+    assert_eq!(
+        event["detail"],
+        json!({
+            "kind": "transition",
+            "from": "todo",
+            "from_name": "Todo",
+            "to": "start",
+            "to_name": "Start",
+            "workflow_version": punchlist_core::default_workflow().version(),
+        })
+    );
 
     let status = sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
         .fetch_one(&pool)
@@ -127,6 +147,8 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
     let (status, timeline) =
         call(&app, &person.token, "GET", "/api/issues/PL-1/events", None).await;
     assert_eq!(status, StatusCode::OK);
+    // The events `move` returned are the ones the timeline reads back.
+    assert_eq!(timeline.as_array().unwrap(), &returned);
     let timeline: Vec<(&str, &str, &str, &str)> = timeline
         .as_array()
         .unwrap()

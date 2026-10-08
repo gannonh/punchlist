@@ -1240,7 +1240,6 @@ dependencies = [
  "insta",
  "punchlist-api",
  "punchlist-client",
- "punchlist-core",
  "punchlist-server",
  "serde",
  "sqlx",
@@ -1268,6 +1267,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror",
  "toml",
+ "utoipa",
 ]
 
 [[package]]
