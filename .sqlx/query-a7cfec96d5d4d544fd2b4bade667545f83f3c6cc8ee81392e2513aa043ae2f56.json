@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_event_seq FROM workspace WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_event_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "last_event_seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a7cfec96d5d4d544fd2b4bade667545f83f3c6cc8ee81392e2513aa043ae2f56"
+}

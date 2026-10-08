@@ -1,0 +1,38 @@
+[package]
+name = "punchlist-server"
+description = "The Punchlist server: API, Postgres and the transition rules."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "punchlist-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+punchlist-api.workspace = true
+punchlist-core.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+utoipa-axum.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+http-body-util = "0.1"
+serde_json.workspace = true
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

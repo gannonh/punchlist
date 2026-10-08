@@ -1,0 +1,31 @@
+[package]
+name = "punchlist-cli"
+description = "pl, the Punchlist command line."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+punchlist-api.workspace = true
+punchlist-client.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+axum.workspace = true
+insta = { workspace = true, features = ["filters"] }
+punchlist-server.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,20 @@
+# Postgres for development. Port 5433 keeps it clear of other projects' Postgres on 5432.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: punchlist
+      POSTGRES_PASSWORD: punchlist
+      POSTGRES_DB: punchlist
+    ports:
+      - "127.0.0.1:${PUNCHLIST_DB_PORT:-5433}:5432"
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U punchlist -d punchlist"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  db:

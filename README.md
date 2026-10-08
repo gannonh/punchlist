@@ -6,7 +6,37 @@ A runner on your own machine claims issues that are ready, runs Claude Code, Cod
 
 ## Status
 
-Pre-alpha. There is no code yet, only the spec and the decisions behind it:
+Pre-alpha. The server and the `pl` CLI can create issues and move them along the built-in workflow, checking who may make each move. There is no runner, GitHub integration, gates or web app yet.
+
+## Run it
+
+You need Rust (through [rustup](https://rustup.rs), which reads `rust-toolchain.toml`), Node 24, pnpm and Docker.
+
+```sh
+pnpm dev                                    # Postgres on 127.0.0.1:5433, then the server on 127.0.0.1:7878
+```
+
+In another terminal, create a workspace and a person, and save the printed config. It holds the person's token, so only you can read it:
+
+```sh
+(umask 077 && mkdir -p ~/.config/punchlist &&
+  DATABASE_URL=postgres://punchlist:punchlist@127.0.0.1:5433/punchlist \
+  cargo run -q -p punchlist-server -- bootstrap --person "Your Name" > ~/.config/punchlist/config.toml)
+```
+
+Then drive it with `pl`:
+
+```sh
+cargo run -q -p punchlist-cli -- issue create --title "First" --body "Body"   # PL-1
+cargo run -q -p punchlist-cli -- issue move PL-1 todo
+cargo run -q -p punchlist-cli -- issue show PL-1
+cargo run -q -p punchlist-cli -- issue list
+```
+
+`pnpm check` runs formatting, clippy, the tests and the generated-file checks. `docker compose down -v` removes the database.
+
+## Docs
+
 
 - [Product vision and v1 PRD](docs/product/prd.md)
 - [ADR 0001: Workflow in TOML, prompts in Markdown](docs/adr/0001-workflow-config-and-prompts.md)

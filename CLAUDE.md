@@ -34,11 +34,16 @@ web/                       React app; src/api/ is generated
 docker-compose.yml         Postgres for development; the self-host stack
 ```
 
-- `pnpm dev`: Postgres in Docker, the server, and Vite proxying `/api`.
-- `pnpm check`: rustfmt, clippy with `-D warnings`, `cargo test`, the web typecheck, lint and unit tests, and stale-generated-file checks. Run it before a pull request.
-- `pnpm gen:api`: regenerate the OpenAPI document and TypeScript types.
-- `pnpm build`: build `web/dist`, then the release binaries.
-- `pnpm e2e`: Playwright against a built server.
+Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client` and `punchlist-cli`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
+
+- Rust comes from rustup, which reads `rust-toolchain.toml`. Both machines get it from devops' `bin/machine-setup`.
+- `pnpm dev`: Postgres in Docker on `127.0.0.1:5433`, then the server on `127.0.0.1:7878`. Local defaults for `DATABASE_URL` and `PUNCHLIST_BIND` are in `scripts/env.sh`; they are not secrets.
+- `pnpm check`: rustfmt, clippy with `-D warnings`, `punchlist-core` for wasm32, `cargo test` (starts Postgres; the sqlx tests need it), and the `.sqlx/` staleness check. Run it before a pull request. CI runs the same script.
+- `pnpm db:prepare`: after changing a query or a migration, migrate the dev database and regenerate `.sqlx/`. Needs `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features postgres,rustls`).
+- `punchlist-server bootstrap --person <name>` creates a workspace, its repository and one person, and prints a `pl` config with the person's token.
+- `pl` reads `server_url` and `token` from `~/.config/punchlist/config.toml`, or from the file in `PUNCHLIST_CONFIG`.
+- Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
+- `.claude/skills/verify-punchlist/` says how to run a live check.
 
 Keep setup, scripts and layout documented here as slices land.
 

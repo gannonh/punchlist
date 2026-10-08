@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Drive an isolated Punchlist instance for live checks. See ../SKILL.md.
+#
+#   control-punchlist up [RUN_ID]         start Postgres, a fresh database and the server; bootstrap a person
+#   control-punchlist doctor RUN_ID       read-only health check
+#   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
+#   control-punchlist sql RUN_ID QUERY    run a query on the run's database; record it
+#   control-punchlist curl RUN_ID ARGS... curl with the run's token (e.g. "$SERVER_URL/api/issues")
+#   control-punchlist down RUN_ID         stop the server and drop the database; keep evidence
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
+STATE_ROOT="${TMPDIR:-/tmp}/punchlist-verify"
+EVIDENCE_ROOT="$REPO/verify-artifacts"
+DB_PORT="${PUNCHLIST_DB_PORT:-5433}"
+ADMIN_URL="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/punchlist"
+
+die() { echo "control-punchlist: $*" >&2; exit 1; }
+state() { echo "$STATE_ROOT/$1"; }
+load() {
+  [ -n "${1:-}" ] || die "missing RUN_ID"
+  [ -f "$(state "$1")/run.env" ] || die "no run $1 (expected $(state "$1")/run.env)"
+  # shellcheck disable=SC1091
+  source "$(state "$1")/run.env"
+}
+token() { sed -n 's/^token = "\(.*\)"$/\1/p' "$CONFIG"; }
+# curl with the run's bearer token, passed on stdin so it never shows in a process listing.
+curl_auth() { printf 'Authorization: Bearer %s\n' "$(token)" | curl -H @- "$@"; }
+record() { # record EVIDENCE_FILE LABEL COMMAND... ; prints stdout/stderr, logs all, returns the exit code
+  local file="$1" label="$2"; shift 2
+  local out err code
+  out="$(mktemp)"; err="$(mktemp)"
+  set +e; "$@" >"$out" 2>"$err"; code=$?; set -e
+  {
+    printf '$ %s\n' "$label"
+    printf -- '--- stdout\n'; cat "$out"
+    printf -- '--- stderr\n'; cat "$err"
+    printf -- '--- exit %s\n\n' "$code"
+  } >>"$file"
+  cat "$out"; cat "$err" >&2
+  rm -f "$out" "$err"
+  return "$code"
+}
+
+cmd_up() {
+  local run_id="${1:-$(date +%Y%m%d-%H%M%S)-$$}"
+  local dir; dir="$(state "$run_id")"
+  [ -e "$dir" ] && die "run $run_id already exists at $dir"
+  # The run directory holds the person's token.
+  (umask 077 && mkdir -p "$dir")
+  mkdir -p "$EVIDENCE_ROOT/$run_id"
+  local db="punchlist_verify_${run_id//[^a-zA-Z0-9]/_}"
+  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  local url="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/$db"
+
+  # Written first, so a failure anywhere below can be cleaned up by `down`.
+  cat >"$dir/run.env" <<ENV
+RUN_ID=$run_id
+RUN_DIR=$dir
+EVIDENCE=$EVIDENCE_ROOT/$run_id
+DB=$db
+DATABASE_URL=$url
+PORT=$port
+SERVER_URL=http://127.0.0.1:$port
+CONFIG=$dir/config.toml
+ENV
+  # Any failure below exits the script; clean up what this run made. Cleared on success.
+  # shellcheck disable=SC2064
+  trap "echo 'control-punchlist: up failed; cleaning up' >&2; cmd_down '$run_id'" EXIT
+
+  (cd "$REPO" && docker compose up -d --wait db) >/dev/null
+  psql "$ADMIN_URL" -qc "CREATE DATABASE $db" >/dev/null
+  (cd "$REPO" && SQLX_OFFLINE=true cargo build -q -p punchlist-server -p punchlist-cli)
+
+  # pnpm dev in its own process group so `down` stops exactly this tree.
+  (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="127.0.0.1:$port" \
+     exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
+  local pgid=$!
+  echo "$pgid" >"$dir/server.pgid"
+  for _ in $(seq 1 120); do
+    grep -q "listening on" "$dir/server.log" 2>/dev/null && break
+    kill -0 -- "-$pgid" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
+
+  (umask 077 && "$REPO/target/debug/punchlist-server" --database-url "$url" bootstrap \
+     --person "Verify Person" --server-url "http://127.0.0.1:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
+    { cat "$dir/bootstrap.err" >&2; die "bootstrap failed"; }
+  trap - EXIT
+  echo "$run_id"
+  echo "server  http://127.0.0.1:$port   database $db" >&2
+  echo "evidence $EVIDENCE_ROOT/$run_id" >&2
+}
+
+cmd_doctor() {
+  load "${1:-}"
+  local ok=0
+  local pgid; pgid="$(cat "$RUN_DIR/server.pgid")"
+  if kill -0 -- "-$pgid" 2>/dev/null; then echo "ok   server process group $pgid is running"; else echo "FAIL server process group $pgid is not running"; ok=1; fi
+  local listen; listen="$(grep -o 'listening on http://[0-9.:]*' "$RUN_DIR/server.log" | tail -1 || true)"
+  if [ "$listen" = "listening on $SERVER_URL" ]; then echo "ok   our server logged: $listen"; else echo "FAIL server log does not show $SERVER_URL (got: ${listen:-nothing})"; ok=1; fi
+  local code; code="$(curl -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/openapi.json" || true)"
+  if [ "$code" = 200 ]; then echo "ok   $SERVER_URL/api/openapi.json answers 200"; else echo "FAIL openapi.json answered ${code:-nothing}"; ok=1; fi
+  code="$(curl_auth -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/issues" || true)"
+  if [ "$code" = 200 ]; then echo "ok   the run's token is accepted"; else echo "FAIL GET /api/issues with the run's token answered ${code:-nothing}"; ok=1; fi
+  if psql "$DATABASE_URL" -tAc "SELECT 1" >/dev/null 2>&1; then echo "ok   database $DB reachable"; else echo "FAIL database $DB unreachable"; ok=1; fi
+  echo "     pl $("$REPO/target/debug/pl" --version | cut -d' ' -f2), git $(git -C "$REPO" rev-parse --short HEAD)"
+  return $ok
+}
+
+cmd_pl() {
+  load "${1:-}"; shift
+  local quoted; quoted="$(printf '%q ' "$@")"
+  record "$EVIDENCE/transcript.txt" "pl ${quoted% }" \
+    env PUNCHLIST_CONFIG="$CONFIG" "$REPO/target/debug/pl" "$@"
+}
+
+cmd_sql() {
+  load "${1:-}"; shift
+  record "$EVIDENCE/transcript.txt" "psql: $*" psql "$DATABASE_URL" -X -P pager=off -c "$*"
+}
+
+cmd_curl() {
+  load "${1:-}"; shift
+  curl_auth -s "$@"
+}
+
+cmd_down() {
+  load "${1:-}"
+  local pgid; pgid="$(cat "$RUN_DIR/server.pgid" 2>/dev/null || true)"
+  if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
+    kill -- "-$pgid" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 -- "-$pgid" 2>/dev/null || break; sleep 0.25; done
+    kill -9 -- "-$pgid" 2>/dev/null || true
+  fi
+  cp "$RUN_DIR/server.log" "$EVIDENCE/server.log" 2>/dev/null || true
+  psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null 2>&1 || true
+  rm -rf "$RUN_DIR"
+  echo "stopped $RUN_ID; evidence kept in $EVIDENCE" >&2
+}
+
+case "${1:-}" in
+  up) shift; cmd_up "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  pl) shift; cmd_pl "$@" ;;
+  curl) shift; cmd_curl "$@" ;;
+  sql) shift; cmd_sql "$@" ;;
+  down) shift; cmd_down "$@" ;;
+  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

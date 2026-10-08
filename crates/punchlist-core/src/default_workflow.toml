@@ -1,0 +1,61 @@
+# The built-in workflow a new workspace starts with (PRD, "The workflow file").
+version = 1
+statuses = ["backlog", "todo", "start", "in_progress", "agent_review",
+            "human_review", "merging", "done", "canceled"]
+
+[[transition]]
+from = "backlog"
+to = "todo"
+by = ["person"]                  # approval
+
+[[transition]]
+from = "todo"
+to = "start"
+by = ["person"]                  # start signal
+
+[[transition]]
+from = "start"
+to = "in_progress"
+by = ["runner"]                  # a runner claims the issue
+
+[[transition]]
+from = "in_progress"
+to = "agent_review"
+by = ["agent"]
+gates = ["pr_open", "pr_ready", "pr_names_issue"]
+
+[[transition]]
+from = "agent_review"
+to = "human_review"
+by = ["agent"]
+gates = ["ci_green", "mergeable", "no_open_threads", "proof_attached"]
+
+[[transition]]
+from = "human_review"
+to = "merging"
+by = ["person"]
+
+[[transition]]
+from = "merging"
+to = "done"
+on = "pr_merged"
+
+[[transition]]
+from = ["in_progress", "agent_review"]
+to = "todo"
+on = "pr_closed_unmerged"
+require = ["comment"]
+
+[lock]
+human_review = ["agent", "runner"]   # stand-down: agents cannot comment, push or be dispatched
+
+[dispatch]
+max_concurrent = 5
+
+[dispatch.status.in_progress]
+agent = "claude-code"
+prompt = "prompts/in_progress.md"
+
+[dispatch.status.agent_review]
+agent = "codex"
+prompt = "prompts/agent_review.md"
