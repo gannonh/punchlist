@@ -2,8 +2,8 @@
 //! server.
 
 use punchlist_api::{
-    AppendLog, Claim, ClaimRequest, CreateIssue, ErrorBody, Event, FinishRun, Issue, IssueList,
-    MoveIssue, Moved, RegisterRunner, RegisteredRunner, Run, RunLog, Runner, RunnerList,
+    AppendLog, Claim, ClaimRequest, CreateIssue, ErrorBody, Event, FinishRun, Heartbeat, Issue,
+    IssueList, MoveIssue, Moved, RegisterRunner, RegisteredRunner, Run, RunLog, Runner, RunnerList,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -92,10 +92,19 @@ impl Client {
         self.send::<(), _>(Method::GET, &["runners"], None).await
     }
 
-    /// Records a heartbeat and renews the runner's leases. Runner token.
-    pub async fn heartbeat(&self, runner_id: &str) -> Result<Runner, ClientError> {
-        self.send::<(), _>(Method::POST, &["runners", runner_id, "heartbeat"], None)
-            .await
+    /// Records a heartbeat and renews the leases of the attempts in `heartbeat.held`.
+    /// Runner token.
+    pub async fn heartbeat(
+        &self,
+        runner_id: &str,
+        heartbeat: &Heartbeat,
+    ) -> Result<Runner, ClientError> {
+        self.send(
+            Method::POST,
+            &["runners", runner_id, "heartbeat"],
+            Some(heartbeat),
+        )
+        .await
     }
 
     /// Claims one issue in Start, waiting up to `wait_seconds` for one. `None` when there

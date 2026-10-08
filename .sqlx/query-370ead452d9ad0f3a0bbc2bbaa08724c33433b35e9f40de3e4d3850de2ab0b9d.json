@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(max(line_no), 0) AS \"max!\" FROM run_log WHERE run_id = $1 AND attempt = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "370ead452d9ad0f3a0bbc2bbaa08724c33433b35e9f40de3e4d3850de2ab0b9d"
+}

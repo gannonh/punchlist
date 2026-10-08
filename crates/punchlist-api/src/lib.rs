@@ -172,10 +172,30 @@ pub struct Claim {
     pub lease_expires_at: DateTime<Utc>,
 }
 
+/// An attempt a runner is working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+pub struct HeldAttempt {
+    pub run_id: Uuid,
+    pub attempt: i32,
+}
+
+/// `POST /api/runners/{id}/heartbeat`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Heartbeat {
+    /// The attempts the runner is working on. Only these leases are renewed; any other
+    /// running attempt of this runner expires and the sweep fails it.
+    #[serde(default)]
+    pub held: Vec<HeldAttempt>,
+}
+
 /// `POST /api/runs/{id}/log`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AppendLog {
     pub attempt: i32,
+    /// The 1-based number, within this attempt, of the first line in `lines`. The lines are
+    /// consecutive numbers from here. A resent batch keeps its `first_line`, so the server
+    /// stores each numbered line once. Gaps between batches are fine.
+    pub first_line: i64,
     pub lines: Vec<String>,
 }
 

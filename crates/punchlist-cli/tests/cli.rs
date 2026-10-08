@@ -223,6 +223,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
             &run_id,
             &AppendLog {
                 attempt: claim.attempt,
+                first_line: 1,
                 lines: vec!["cloning".into(), "editing".into(), "x".repeat(250)],
             },
         )

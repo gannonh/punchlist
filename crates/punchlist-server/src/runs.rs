@@ -242,6 +242,9 @@ async fn append_log(
             "a log line can be at most {MAX_LOG_LINE_BYTES} bytes"
         )));
     }
+    if request.first_line < 1 {
+        return Err(ApiError::Invalid("first_line starts at 1".into()));
+    }
     ensure_run(&state.pool, &actor, id).await?;
     if request.lines.is_empty() {
         hold_attempt(&state.pool, id, request.attempt, &runner).await?;
@@ -263,7 +266,22 @@ async fn append_log(
     if held.is_none() {
         return Err(stale(id, request.attempt));
     }
-    let count = request.lines.len() as i64;
+    // Lines numbered at or below the stored maximum arrived in an earlier, retried batch.
+    let stored = sqlx::query_scalar!(
+        r#"SELECT coalesce(max(line_no), 0) AS "max!" FROM run_log WHERE run_id = $1 AND attempt = $2"#,
+        id,
+        request.attempt,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let skip = (stored - request.first_line + 1).clamp(0, request.lines.len() as i64) as usize;
+    let fresh = &request.lines[skip..];
+    if fresh.is_empty() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let first_new = request.first_line + skip as i64;
+    let line_nos: Vec<i64> = (first_new..first_new + fresh.len() as i64).collect();
+    let count = fresh.len() as i64;
     let last = sqlx::query_scalar!(
         "UPDATE run SET last_log_seq = last_log_seq + $2 WHERE id = $1 RETURNING last_log_seq",
         id,
@@ -273,12 +291,14 @@ async fn append_log(
     .await?;
     let seqs: Vec<i64> = (last - count + 1..=last).collect();
     sqlx::query!(
-        "INSERT INTO run_log (run_id, seq, attempt, line)
-         SELECT $1, t.seq, $2, t.line FROM UNNEST($3::bigint[], $4::text[]) AS t(seq, line)",
+        "INSERT INTO run_log (run_id, seq, attempt, line_no, line)
+         SELECT $1, t.seq, $2, t.line_no, t.line
+         FROM UNNEST($3::bigint[], $4::bigint[], $5::text[]) AS t(seq, line_no, line)",
         id,
         request.attempt,
         &seqs,
-        &request.lines,
+        &line_nos,
+        fresh,
     )
     .execute(&mut *tx)
     .await?;

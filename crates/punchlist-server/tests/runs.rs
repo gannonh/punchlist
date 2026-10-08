@@ -238,8 +238,9 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
     let (app, person) = setup(&pool, Duration::from_secs(1)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Lease", &["todo", "start"]).await;
-    let (status, _) = claim(&app, &r1, 0).await;
+    let (status, claimed) = claim(&app, &r1, 0).await;
     assert_eq!(status, StatusCode::OK);
+    let held = json!({"held": [{"run_id": claimed["run_id"], "attempt": 1}]});
 
     tokio::time::sleep(Duration::from_millis(700)).await;
     let (status, hb) = call(
@@ -247,7 +248,7 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
         &r1.token,
         "POST",
         &format!("/api/runners/{}/heartbeat", r1.id),
-        None,
+        Some(held),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -288,6 +289,59 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Orphan", &["todo", "start"]).await;
+    let (status, claimed) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK);
+    let heartbeat_uri = format!("/api/runners/{}/heartbeat", r1.id);
+
+    // The runner never received the claim, so it never lists the attempt as held.
+    for wait in [600, 600] {
+        tokio::time::sleep(Duration::from_millis(wait)).await;
+        let (status, _) = call(
+            &app,
+            &r1.token,
+            "POST",
+            &heartbeat_uri,
+            Some(json!({"held": []})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(expire_leases(&pool).await.unwrap(), 1);
+    let attempt = sqlx::query!("SELECT state, failure_reason FROM attempt WHERE issue_id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempt.state, "failed");
+    assert_eq!(
+        attempt.failure_reason.as_deref(),
+        Some("lease expired: runner r1 stopped sending heartbeats")
+    );
+
+    // A second issue whose attempt the runner does hold stays running past its first lease.
+    create_and_move(&app, &person.token, "Held", &["todo", "start"]).await;
+    let (status, claimed2) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let held = json!({"held": [{"run_id": claimed2["run_id"], "attempt": 1}]});
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let (status, _) = call(&app, &r1.token, "POST", &heartbeat_uri, Some(held.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // 1.8 s after the claim, past the original 1 s lease.
+    assert_eq!(expire_leases(&pool).await.unwrap(), 0);
+    let state = sqlx::query_scalar!("SELECT state FROM attempt WHERE issue_id = 'PL-2'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+}
+
+#[sqlx::test]
 async fn a_lapsed_lease_is_not_renewed_and_refuses_logs_and_finish_before_the_sweep(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(1)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
@@ -302,7 +356,7 @@ async fn a_lapsed_lease_is_not_renewed_and_refuses_logs_and_finish_before_the_sw
         &r1.token,
         "POST",
         &format!("/api/runners/{}/heartbeat", r1.id),
-        None,
+        Some(json!({"held": [{"run_id": run_id, "attempt": 1}]})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -319,7 +373,7 @@ async fn a_lapsed_lease_is_not_renewed_and_refuses_logs_and_finish_before_the_sw
         &r1.token,
         "POST",
         &format!("/api/runs/{run_id}/log"),
-        Some(json!({"attempt": 1, "lines": ["late"]})),
+        Some(json!({"attempt": 1, "first_line": 1, "lines": ["late"]})),
     )
     .await;
     assert_eq!(
@@ -425,7 +479,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 1, "lines": ["one", "two"]})),
+        Some(json!({"attempt": 1, "first_line": 1, "lines": ["one", "two"]})),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -435,7 +489,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 1, "lines": many})),
+        Some(json!({"attempt": 1, "first_line": 3, "lines": many})),
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -446,7 +500,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 2, "lines": ["x"]})),
+        Some(json!({"attempt": 2, "first_line": 1, "lines": ["x"]})),
     )
     .await;
     assert_eq!(
@@ -458,7 +512,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 1, "lines": ["x".repeat(64 * 1024 + 1)]})),
+        Some(json!({"attempt": 1, "first_line": 31, "lines": ["x".repeat(64 * 1024 + 1)]})),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -467,7 +521,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 1, "lines": vec!["x"; 1001]})),
+        Some(json!({"attempt": 1, "first_line": 31, "lines": vec!["x"; 1001]})),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -517,7 +571,7 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &r1.token,
         "POST",
         &log_uri,
-        Some(json!({"attempt": 1, "lines": ["late"]})),
+        Some(json!({"attempt": 1, "first_line": 1, "lines": ["late"]})),
     )
     .await;
     assert_eq!(
@@ -557,4 +611,54 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
 
     let (status, _) = call(&app, &person.token, "GET", "/api/issues/PL-9/runs", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn a_retried_log_batch_is_stored_once_and_first_line_starts_at_one(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Retry", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r1, 0).await;
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+    let log_uri = format!("/api/runs/{run_id}/log");
+
+    let batch = json!({"attempt": 1, "first_line": 1, "lines": ["a", "b", "c"]});
+    for _ in 0..2 {
+        let (status, _) = call(&app, &r1.token, "POST", &log_uri, Some(batch.clone())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &log_uri,
+        Some(json!({"attempt": 1, "first_line": 3, "lines": ["c", "d"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, log) = call(&app, &person.token, "GET", &log_uri, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let got: Vec<(i64, &str)> = log["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| (l["seq"].as_i64().unwrap(), l["line"].as_str().unwrap()))
+        .collect();
+    assert_eq!(got, [(1, "a"), (2, "b"), (3, "c"), (4, "d")]);
+    let last = sqlx::query_scalar!("SELECT last_log_seq FROM run WHERE issue_id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(last, 4);
+
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &log_uri,
+        Some(json!({"attempt": 1, "first_line": 0, "lines": ["z"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }

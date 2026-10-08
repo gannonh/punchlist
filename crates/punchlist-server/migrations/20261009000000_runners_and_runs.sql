@@ -62,12 +62,16 @@ CREATE TABLE attempt (
 CREATE INDEX attempt_running_lease ON attempt (lease_expires_at) WHERE state = 'running';
 CREATE INDEX attempt_runner ON attempt (runner_id) WHERE state = 'running';
 
--- Append-only. Lines are numbered per run in the order the server received them.
+-- Append-only. seq numbers the lines per run in the order the server received them;
+-- line_no is the runner's own 1-based number within the attempt, so a resent batch is
+-- stored once.
 CREATE TABLE run_log (
     run_id     uuid NOT NULL REFERENCES run (id),
     seq        bigint NOT NULL,
     attempt    integer NOT NULL,
+    line_no    bigint NOT NULL,
     line       text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (run_id, seq)
+    PRIMARY KEY (run_id, seq),
+    UNIQUE (run_id, attempt, line_no)
 );

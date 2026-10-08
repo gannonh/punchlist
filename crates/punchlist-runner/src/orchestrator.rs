@@ -2,13 +2,17 @@
 //! The claim loop: register, heartbeat, claim up to `max_concurrent` issues and run each
 //! attempt, backing off on server errors.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use punchlist_api::{AppendLog, Claim, FinishRun, RegisterRunner, RunOutcome};
+use punchlist_api::{
+    AppendLog, Claim, FinishRun, Heartbeat, HeldAttempt, RegisterRunner, RunOutcome,
+};
 use punchlist_client::{Client, ClientError};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
+use uuid::Uuid;
 
 use crate::RunnerConfig;
 use crate::agent::{AgentExit, AgentResult, build_prompt, run_claude};
@@ -35,6 +39,28 @@ const LOG_CHANNEL_LINES: usize = 1000;
 
 fn is_code(error: &ClientError, wanted: &str) -> bool {
     matches!(error, ClientError::Refused { code, .. } if code == wanted)
+}
+
+/// The attempts this runner is working on; the heartbeat renews exactly these leases.
+type Held = Arc<Mutex<HashSet<(Uuid, i32)>>>;
+
+/// Removes its attempt from the held set when dropped, however the attempt ends.
+struct HeldGuard {
+    held: Held,
+    key: (Uuid, i32),
+}
+
+impl HeldGuard {
+    fn new(held: Held, key: (Uuid, i32)) -> HeldGuard {
+        held.lock().expect("held set").insert(key);
+        HeldGuard { held, key }
+    }
+}
+
+impl Drop for HeldGuard {
+    fn drop(&mut self) {
+        self.held.lock().expect("held set").remove(&self.key);
+    }
 }
 
 struct Context {
@@ -79,15 +105,25 @@ pub(crate) async fn run_with_worktrees(
     let client = Client::new(&config.server_url, &registered.token)?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let held: Held = Arc::default();
     let heartbeat = {
         let client = client.clone();
+        let held = held.clone();
         let interval = config.heartbeat_interval;
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                if let Err(e) = client.heartbeat(&runner_id).await {
+                let snapshot = Heartbeat {
+                    held: held
+                        .lock()
+                        .expect("held set")
+                        .iter()
+                        .map(|&(run_id, attempt)| HeldAttempt { run_id, attempt })
+                        .collect(),
+                };
+                if let Err(e) = client.heartbeat(&runner_id, &snapshot).await {
                     tracing::warn!("heartbeat failed: {e}");
                 }
             }
@@ -126,8 +162,10 @@ pub(crate) async fn run_with_worktrees(
             Ok(Some(claim)) => {
                 failures = 0;
                 let ctx = ctx.clone();
+                let guard = HeldGuard::new(held.clone(), (claim.run_id, claim.attempt));
                 attempts.spawn(async move {
                     run_attempt(&ctx, claim).await;
+                    drop(guard);
                     drop(permit);
                 });
             }
@@ -175,6 +213,8 @@ async fn flush_logs(
     stop: Arc<watch::Sender<bool>>,
 ) -> bool {
     let mut pending: Vec<String> = Vec::new();
+    // The number of the first pending line; the lines of an attempt are numbered 1, 2, 3...
+    let mut first_line: i64 = 1;
     let mut stale = false;
     let mut closed = false;
     while !closed {
@@ -197,10 +237,14 @@ async fn flush_logs(
         }
         let request = AppendLog {
             attempt,
+            first_line,
             lines: pending.clone(),
         };
         match client.append_log(&run_id, &request).await {
-            Ok(()) => pending.clear(),
+            Ok(()) => {
+                first_line += pending.len() as i64;
+                pending.clear();
+            }
             Err(e) if is_code(&e, "stale_attempt") => {
                 tracing::warn!("run {run_id}: lease lost; stopping the agent");
                 stale = true;
@@ -212,6 +256,7 @@ async fn flush_logs(
                 if pending.len() > LOG_PENDING_CAP {
                     let excess = pending.len() - LOG_PENDING_CAP;
                     pending.drain(..excess);
+                    first_line += excess as i64;
                 }
             }
         }

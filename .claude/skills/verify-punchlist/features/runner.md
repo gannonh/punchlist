@@ -5,11 +5,11 @@
 ## Sub-features
 
 - `register` makes a runner actor (role `runner`) and a `runner` row; `pl runner list` shows it with its last heartbeat.
-- `heartbeat` updates `runner.last_heartbeat` and renews the runner's running leases.
+- `heartbeat` updates `runner.last_heartbeat` and renews only the leases of the attempts the body lists in `held`; a claim the runner never received expires.
 - `claim` moves `start → in_progress` as the runner, writes a `run` row and an `attempt` row with `attempt = 1`.
 - `claim-taken` is what a second runner gets when it raced for the same issue: its log says `claim taken: PL-<n> was claimed by runner <name>`, and no second `attempt` row exists.
 - `worktree` is a checkout under the runner's `--worktree-root` on the issue's branch.
-- `log` streams the agent's stdout (stream-json lines) and stderr (`stderr: ` prefix) to `run_log`.
+- `log` streams the agent's stdout (stream-json lines) and stderr (`stderr: ` prefix) to `run_log`. Each line carries its per-attempt `line_no`, so a resent batch is stored once.
 - `finish` records `succeeded` or `failed`, `duration_ms`, `input_tokens` and `output_tokens`.
 - `lease-expiry` fails an attempt whose runner stopped heartbeating with `lease expired: runner <name> stopped sending heartbeats`.
 

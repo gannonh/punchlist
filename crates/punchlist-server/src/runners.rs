@@ -1,10 +1,11 @@
 //! `/api/runners`: register a runner, list runners and record heartbeats.
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use punchlist_api::{ErrorBody, RegisterRunner, RegisteredRunner, Runner, RunnerList};
+use punchlist_api::{ErrorBody, Heartbeat, RegisterRunner, RegisteredRunner, Runner, RunnerList};
 use punchlist_core::Role;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -148,13 +149,15 @@ async fn list_runners(
     }))
 }
 
-/// Record a heartbeat and renew the leases on the runner's running attempts. A lease that
-/// already lapsed is not renewed: the attempt is lost and the sweep fails it. Runner token,
+/// Record a heartbeat and renew the leases of the attempts the body lists as held. A running
+/// attempt that is not listed, or whose lease already lapsed, is not renewed: it expires and
+/// the sweep fails it. The body is optional; without it no lease is renewed. Runner token,
 /// for the runner's own id only.
 #[utoipa::path(
     post,
     path = "/api/runners/{id}/heartbeat",
     params(("id" = Uuid, Path, description = "Runner id")),
+    request_body(content = Heartbeat, description = "Optional."),
     responses(
         (status = 200, body = Runner),
         (status = 401, body = ErrorBody),
@@ -166,7 +169,14 @@ async fn heartbeat(
     State(state): State<AppState>,
     actor: Actor,
     Path(id): Path<Uuid>,
+    body: Bytes,
 ) -> Result<Json<Runner>, ApiError> {
+    let held: Heartbeat = if body.iter().all(u8::is_ascii_whitespace) {
+        Heartbeat::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::Invalid(format!("invalid heartbeat body: {e}")))?
+    };
     let known = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM runner WHERE id = $1 AND workspace_id = $2) AS "exists!""#,
         id,
@@ -183,6 +193,8 @@ async fn heartbeat(
             "a runner can only send its own heartbeat".into(),
         ));
     }
+    let run_ids: Vec<Uuid> = held.held.iter().map(|h| h.run_id).collect();
+    let attempts: Vec<i32> = held.held.iter().map(|h| h.attempt).collect();
     let mut tx = state.pool.begin().await?;
     let row = sqlx::query_as!(
         RunnerRow,
@@ -194,9 +206,12 @@ async fn heartbeat(
     .await?;
     sqlx::query!(
         "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $2)
-         WHERE runner_id = $1 AND state = 'running' AND lease_expires_at > now()",
+         WHERE runner_id = $1 AND state = 'running' AND lease_expires_at > now()
+             AND (run_id, attempt) IN (SELECT * FROM UNNEST($3::uuid[], $4::int[]))",
         id,
         state.lease.as_secs_f64(),
+        &run_ids,
+        &attempts,
     )
     .execute(&mut *tx)
     .await?;
