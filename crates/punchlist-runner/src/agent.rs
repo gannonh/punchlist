@@ -274,14 +274,24 @@ mod tests {
     async fn run_fake(script: &str, prompt: &str) -> (AgentExit, Vec<String>) {
         let temp = tempfile::tempdir().unwrap();
         let command = fake_claude(temp.path(), script);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_stop_tx, stop_rx) = watch::channel(false);
-        let exit = run_claude(&command, Some("haiku"), temp.path(), prompt, tx, stop_rx).await;
-        let mut out = Vec::new();
-        while let Some(line) = rx.recv().await {
-            out.push(line);
+        // A test thread that forks while another writes its fake script holds the write
+        // handle until it execs, so the exec here can fail with ETXTBSY. Retry that only.
+        for _ in 0..20 {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (_stop_tx, stop_rx) = watch::channel(false);
+            let exit = run_claude(&command, Some("haiku"), temp.path(), prompt, tx, stop_rx).await;
+            if matches!(&exit, AgentExit::Finished(r) if r.reason.as_deref().is_some_and(|m| m.contains("Text file busy")))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+            let mut out = Vec::new();
+            while let Some(line) = rx.recv().await {
+                out.push(line);
+            }
+            return (exit, out);
         }
-        (exit, out)
+        panic!("the fake claude stayed busy");
     }
 
     const ECHO_THEN_RESULT: &str = r#"cat

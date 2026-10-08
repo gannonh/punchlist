@@ -1409,6 +1409,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "axum",
+ "chrono",
  "clap",
  "insta",
  "punchlist-api",
@@ -1420,6 +1421,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tracing-subscriber",
 ]
 
 [[package]]
