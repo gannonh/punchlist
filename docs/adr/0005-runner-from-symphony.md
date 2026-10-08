@@ -1,6 +1,6 @@
 # 5. Copy Symphony's orchestrator into the runner crate, and keep runner state on the server
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 

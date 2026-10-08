@@ -1,6 +1,6 @@
 # 8. Generate the TypeScript API client from an OpenAPI document derived from the Rust code
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 

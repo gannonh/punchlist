@@ -1,6 +1,6 @@
 # 10. One repository per workspace in v1, with the workflow file in that repository
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 

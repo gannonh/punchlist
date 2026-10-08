@@ -1,6 +1,6 @@
 # 6. Keep state on the server, with optimistic edits and a live event stream
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 
@@ -23,6 +23,7 @@ The data is small. A workspace has 1 to 10 people and a few thousand issues, so 
 - The client uses TanStack Query for the cache and TanStack Router for routes, as Groundwork does.
 - On first load the client fetches the workspace's full issue list in one request. Lists, filters and the board read from the cache.
 - Each event in the log has a sequence number that increases per workspace. The server streams new events over Server-Sent Events at `GET /api/workspaces/{id}/events?after={seq}`. The client applies each event to its cache and reconnects from the last sequence it saw.
+- The issue list response carries the sequence number of the last event it includes, read in the same database snapshot as the list. The client opens the stream with that number as `after`, so no event is skipped or applied twice between the list and the stream.
 - Edits to an issue's fields (title, body, labels, assignee, project, milestone, parent) are optimistic: the cache changes at once and rolls back if the server refuses.
 - Transitions are not optimistic. The issue shows the requested status as pending until the server answers, then settles or shows the failing gate and its reason.
 - The API is resource-shaped JSON over HTTP. Every write returns the changed resource and the sequence number of the event it recorded, so the client can drop that event when the stream delivers it.

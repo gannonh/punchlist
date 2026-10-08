@@ -1,6 +1,6 @@
 # 9. Keep the Cargo workspace and the web app in one repository, driven by pnpm scripts
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 

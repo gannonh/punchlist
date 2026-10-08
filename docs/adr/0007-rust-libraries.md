@@ -1,6 +1,6 @@
 # 7. Use axum, sqlx, a Postgres job table and clap
 
-Date: 2026-10-07. Status: proposed.
+Date: 2026-10-07. Status: accepted.
 
 ## Context
 
@@ -25,6 +25,7 @@ Punchlist's hard queries are the transition transaction, lease claims with compa
 - Async runtime: tokio. HTTP: axum 0.8 with tower-http for static files, tracing and timeouts.
 - Postgres: sqlx with the `postgres` and `migrate` features. Queries use the compile-time checked macros, and `.sqlx/` is committed so builds and CI work without a database. Migrations are SQL files in `crates/punchlist-server/migrations/`, embedded with `sqlx::migrate!` and run when the server starts.
 - Jobs: a `job` table in Postgres, claimed with `FOR UPDATE SKIP LOCKED`, with a lease, an attempt count and capped backoff. Code enqueues a job inside the transaction that records its event. The worker runs inside the server process.
+- Delivery is at least once, so every job is idempotent. A job that only writes to Postgres commits its writes and its completion in one transaction. A job with an outside effect, such as a call to GitHub or Linear, carries an idempotency key and records each effect under that key, so a rerun skips what already happened.
 - CLI: clap 4 with derive, for `pl` and for the server's own flags.
 - Shared crates: serde and serde_json; thiserror in library crates and anyhow in binaries; tracing with tracing-subscriber; reqwest as the HTTP client.
 - Workflow parsing in `punchlist-core`: the `toml` crate with serde, with spans so a validation error names the line (ADR 0001), and schemars to generate the published JSON Schema.
@@ -35,4 +36,4 @@ Punchlist's hard queries are the transition transaction, lease claims with compa
 - The copied Symphony code compiles against the same libraries it was written for.
 - SQL changes that break a query fail the build. A developer who changes a query regenerates `.sqlx/` with `cargo sqlx prepare`, and CI fails when it is stale.
 - The job queue is one table and a worker loop that Punchlist owns and tests, and it shares the lease pattern with runner claims. Features such as cron schedules and an admin UI are not included; none is in the v1 requirements.
-- A job and its event commit together, so webhook processing and gate re-evaluation are never lost or doubled by a crash.
+- A job and its event commit together, so a crash never loses webhook processing or gate re-evaluation. A crash mid-job runs the job again, and idempotency keeps that rerun from doubling its effects.
