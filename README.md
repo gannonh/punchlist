@@ -13,6 +13,12 @@ Pre-alpha. There is no code yet, only the spec and the decisions behind it:
 - [ADR 0002: MIT or Apache-2.0](docs/adr/0002-dual-license.md)
 - [ADR 0003: Rust backend](docs/adr/0003-rust-backend.md)
 - [ADR 0004: Web frontend](docs/adr/0004-web-frontend.md)
+- [ADR 0005: Runner copied from Symphony, state on the server](docs/adr/0005-runner-from-symphony.md)
+- [ADR 0006: Server state with optimistic updates](docs/adr/0006-server-state-with-optimistic-updates.md)
+- [ADR 0007: Rust libraries](docs/adr/0007-rust-libraries.md)
+- [ADR 0008: API types through OpenAPI](docs/adr/0008-api-types-through-openapi.md)
+- [ADR 0009: Repository layout and commands](docs/adr/0009-repo-layout.md)
+- [ADR 0010: One repository per workspace](docs/adr/0010-one-repository-per-workspace.md)
 
 ## License
 

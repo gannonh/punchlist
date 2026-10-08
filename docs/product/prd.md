@@ -277,7 +277,7 @@ A requirement's priority names the phase that ships it: P0 in Gate 1, P1 in Phas
 
 ### Non-functional requirements
 
-- **Speed.** Lists and issue pages respond in under 100 ms after first load. The sync approach is an ADR.
+- **Speed.** Lists and issue pages respond in under 100 ms after first load. The client keeps server state in a cache, with optimistic edits and a live event stream. See `docs/adr/0006-server-state-with-optimistic-updates.md`.
 - **Correctness.** A transition and its gate checks commit in one transaction. A claim is a lease. A run is idempotent per issue and attempt.
 - **Security.** Repository credentials and agent subscriptions stay on the runner; the server never sees them. Agent tokens are scoped to one workspace and role. Text from outside the team, such as issue bodies and review comments, reaches an agent only inside a fence that the text cannot close, and branch names are screened for control characters.
 - **Traceability.** Every transition stores the actor, the workflow version and each gate's result.
@@ -348,9 +348,9 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 - [x] Markdown or structured config for the workflow? Structured config plus Markdown prompts per status, decided Oct 7, 2026.
 - [x] TOML or YAML? TOML, decided Oct 7, 2026 (ADR 0001).
 - [x] License? MIT or Apache-2.0, decided Oct 7, 2026 (ADR 0002).
-- [ ] Sync approach for an instant UI: a sync engine, or server state with optimistic updates?
-- [ ] Does the workflow file live in the code repository or in the workspace, for teams with several repositories?
-- [ ] One repository per workspace in v1, or several?
+- [x] Sync approach for an instant UI: a sync engine, or server state with optimistic updates? Server state with optimistic edits and a live event stream, decided Oct 7, 2026 (ADR 0006).
+- [x] Does the workflow file live in the code repository or in the workspace, for teams with several repositories? In the repository, on its default branch, decided Oct 7, 2026 (ADR 0010).
+- [x] One repository per workspace in v1, or several? One, decided Oct 7, 2026 (ADR 0010).
 - [ ] Merge from Punchlist, or leave merging on GitHub?
 - [ ] Trademark and domain check for the name; punchlist.com is a design-feedback product.
 
