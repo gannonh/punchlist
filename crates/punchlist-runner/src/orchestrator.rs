@@ -32,10 +32,28 @@ pub fn retry_delay_ms(attempt: u32, max_backoff_ms: i64) -> i64 {
 
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_BATCH_LINES: usize = 50;
-const LOG_PENDING_CAP: usize = 2000;
+/// The server refuses lines over 64 KiB; longer ones are cut to this many bytes.
+const LOG_LINE_MAX_BYTES: usize = 60 * 1024;
+/// Tries per batch before it is dropped, so a server that keeps failing cannot hold the
+/// flusher (and with it the attempt) forever.
+const LOG_BATCH_TRIES: u32 = 8;
 /// Lines buffered between the agent's pipes and the log flusher. When the server is slow the
 /// readers wait here, which pauses the agent's output instead of growing memory.
 const LOG_CHANNEL_LINES: usize = 1000;
+
+/// Cuts a line the server would refuse for its size, on a character boundary.
+fn clip(mut line: String) -> String {
+    if line.len() > LOG_LINE_MAX_BYTES {
+        line.truncate(line.floor_char_boundary(LOG_LINE_MAX_BYTES));
+        line.push_str("… [truncated]");
+    }
+    line
+}
+
+/// A 4xx other than a refusal: sending the same batch again gets the same answer.
+fn is_permanent(error: &ClientError) -> bool {
+    matches!(error, ClientError::Api { status, .. } if status.is_client_error())
+}
 
 fn is_code(error: &ClientError, wanted: &str) -> bool {
     matches!(error, ClientError::Refused { code, .. } if code == wanted)
@@ -203,8 +221,10 @@ pub(crate) async fn run_with_worktrees(
     Ok(())
 }
 
-/// Batches log lines: a flush after 500 ms or 50 lines. Returns true when the server said
-/// the attempt is stale, after signalling `stop`.
+/// Batches log lines: a flush after 500 ms or 50 lines. A batch the server refuses as
+/// invalid is dropped; one that keeps failing is retried with backoff, then dropped after
+/// `LOG_BATCH_TRIES`. Returns true when the server said the attempt is stale, after
+/// signalling `stop`.
 async fn flush_logs(
     client: Client,
     run_id: String,
@@ -217,17 +237,19 @@ async fn flush_logs(
     let mut first_line: i64 = 1;
     let mut stale = false;
     let mut closed = false;
-    while !closed {
+    let mut tries: u32 = 0;
+    // After the agent's output closes, keep going until the last batch is sent or dropped.
+    while !closed || !pending.is_empty() {
         if pending.is_empty() {
             match lines.recv().await {
-                Some(line) => pending.push(line),
+                Some(line) => pending.push(clip(line)),
                 None => break,
             }
         }
         let deadline = tokio::time::Instant::now() + LOG_FLUSH_INTERVAL;
-        while pending.len() < LOG_BATCH_LINES {
+        while !closed && pending.len() < LOG_BATCH_LINES {
             match tokio::time::timeout_at(deadline, lines.recv()).await {
-                Ok(Some(line)) => pending.push(line),
+                Ok(Some(line)) => pending.push(clip(line)),
                 Ok(None) => {
                     closed = true;
                     break;
@@ -244,6 +266,7 @@ async fn flush_logs(
             Ok(()) => {
                 first_line += pending.len() as i64;
                 pending.clear();
+                tries = 0;
             }
             Err(e) if is_code(&e, "stale_attempt") => {
                 tracing::warn!("run {run_id}: lease lost; stopping the agent");
@@ -252,11 +275,20 @@ async fn flush_logs(
                 break;
             }
             Err(e) => {
-                tracing::warn!("run {run_id}: cannot send log lines: {e}");
-                if pending.len() > LOG_PENDING_CAP {
-                    let excess = pending.len() - LOG_PENDING_CAP;
-                    pending.drain(..excess);
-                    first_line += excess as i64;
+                tries += 1;
+                let give_up = is_permanent(&e) || tries >= LOG_BATCH_TRIES;
+                if give_up {
+                    tracing::warn!(
+                        "run {run_id}: dropping {} log line(s) after {tries} tries: {e}",
+                        pending.len()
+                    );
+                    first_line += pending.len() as i64;
+                    pending.clear();
+                    tries = 0;
+                } else {
+                    tracing::warn!("run {run_id}: cannot send log lines, will retry: {e}");
+                    let backoff = Duration::from_millis(250 * 2u64.pow(tries - 1));
+                    tokio::time::sleep(backoff.min(Duration::from_secs(8))).await;
                 }
             }
         }
@@ -298,42 +330,49 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
         })
     };
 
-    let exit = match ctx
-        .worktrees
-        .prepare(&claim.repository, &claim.branch, &claim.issue.id)
-        .await
-    {
-        Ok(path) => {
-            tracing::info!("worktree ready: {}", path.display());
-            let _ = lines_tx
-                .send(format!(
-                    "worktree {} on branch {}",
-                    path.display(),
-                    claim.branch
-                ))
-                .await;
-            let prompt = build_prompt(&claim.issue, &claim.repository, &claim.branch);
-            run_claude(
-                &ctx.config.claude_command,
-                ctx.config.model.as_deref(),
-                &path,
-                &prompt,
-                lines_tx.clone(),
-                stop_rx,
-            )
-            .await
+    // Stopping the runner drops the preparation, which kills the git command it is running.
+    let prepared = {
+        let mut stop = stop_rx.clone();
+        tokio::select! {
+            prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.issue.id) => Some(prepared),
+            _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
         }
-        Err(reason) => {
-            let _ = lines_tx
-                .send(format!("worktree preparation failed: {reason}"))
-                .await;
-            AgentExit::Finished(AgentResult {
-                outcome: RunOutcome::Failed,
-                reason: Some(format!("worktree preparation failed: {reason}")),
-                input_tokens: None,
-                output_tokens: None,
-            })
-        }
+    };
+    let exit = match prepared {
+        None => AgentExit::Stopped,
+        Some(prepared) => match prepared {
+            Ok(path) => {
+                tracing::info!("worktree ready: {}", path.display());
+                let _ = lines_tx
+                    .send(format!(
+                        "worktree {} on branch {}",
+                        path.display(),
+                        claim.branch
+                    ))
+                    .await;
+                let prompt = build_prompt(&claim.issue, &claim.repository, &claim.branch);
+                run_claude(
+                    &ctx.config.claude_command,
+                    ctx.config.model.as_deref(),
+                    &path,
+                    &prompt,
+                    lines_tx.clone(),
+                    stop_rx,
+                )
+                .await
+            }
+            Err(reason) => {
+                let _ = lines_tx
+                    .send(format!("worktree preparation failed: {reason}"))
+                    .await;
+                AgentExit::Finished(AgentResult {
+                    outcome: RunOutcome::Failed,
+                    reason: Some(format!("worktree preparation failed: {reason}")),
+                    input_tokens: None,
+                    output_tokens: None,
+                })
+            }
+        },
     };
     drop(lines_tx);
     forward.abort();
@@ -394,6 +433,102 @@ async fn finish_with_retry(client: &Client, run_id: &str, request: &FinishRun) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use punchlist_api::CreateIssue;
+    use punchlist_server::{AppState, Bootstrap, bootstrap, router};
+
+    #[test]
+    fn clip_cuts_oversized_lines_on_a_char_boundary() {
+        assert_eq!(clip("short".into()), "short");
+        let long = "é".repeat(40 * 1024); // 80 KiB of two-byte characters
+        let clipped = clip(long);
+        assert!(clipped.ends_with("… [truncated]"));
+        assert_eq!(clipped.len(), LOG_LINE_MAX_BYTES + "… [truncated]".len());
+    }
+
+    #[test]
+    fn only_client_errors_are_permanent() {
+        let api = |status: u16| ClientError::Api {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            code: "x".into(),
+            message: "x".into(),
+        };
+        assert!(is_permanent(&api(422)));
+        assert!(!is_permanent(&api(500)));
+        assert!(!is_permanent(&ClientError::Refused {
+            code: "stale_attempt".into(),
+            message: "x".into(),
+        }));
+    }
+
+    /// The flusher against a real server: an oversized line is stored clipped, and the
+    /// flusher ends once the agent's output closes.
+    #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+    async fn the_flusher_stores_an_oversized_line_clipped_and_ends(pool: sqlx::PgPool) {
+        let person = bootstrap(
+            &pool,
+            &Bootstrap {
+                workspace_name: "Punchlist".into(),
+                issue_prefix: "PL".into(),
+                repository_owner: "gannonh".into(),
+                repository_name: "punchlist-sandbox".into(),
+                person_name: "Gannon".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = router(AppState::new(pool.clone()));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let people = Client::new(&url, &person.token).unwrap();
+        people
+            .create_issue(&CreateIssue {
+                title: "Log".into(),
+                body: String::new(),
+            })
+            .await
+            .unwrap();
+        people.move_issue("PL-1", "todo").await.unwrap();
+        people.move_issue("PL-1", "start").await.unwrap();
+        let registered = people
+            .register_runner(&RegisterRunner {
+                name: "r1".into(),
+                agents: vec!["claude-code".into()],
+            })
+            .await
+            .unwrap();
+        let runner = Client::new(&url, &registered.token).unwrap();
+        let claim = runner.claim(0).await.unwrap().unwrap();
+
+        let (tx, rx) = mpsc::channel(16);
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let run_id = claim.run_id.to_string();
+        let flusher = tokio::spawn(flush_logs(
+            runner.clone(),
+            run_id.clone(),
+            claim.attempt,
+            rx,
+            Arc::new(stop_tx),
+        ));
+        tx.send("short".into()).await.unwrap();
+        tx.send("x".repeat(70 * 1024)).await.unwrap();
+        drop(tx);
+        let stale = tokio::time::timeout(Duration::from_secs(10), flusher)
+            .await
+            .expect("the flusher ends")
+            .unwrap();
+        assert!(!stale);
+
+        let log = runner.run_log(&run_id).await.unwrap();
+        let lines: Vec<&str> = log.lines.iter().map(|l| l.line.as_str()).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "short");
+        assert_eq!(
+            lines[1],
+            format!("{}… [truncated]", "x".repeat(LOG_LINE_MAX_BYTES))
+        );
+    }
 
     #[test]
     fn retry_delay_doubles_and_caps() {

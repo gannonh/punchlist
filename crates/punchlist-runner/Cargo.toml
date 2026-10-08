@@ -21,6 +21,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+punchlist-server.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 
 [lints]

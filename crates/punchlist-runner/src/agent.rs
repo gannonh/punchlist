@@ -245,7 +245,7 @@ pub async fn run_claude(
 
 /// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
 /// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
-fn kill_group(leader: Option<u32>) {
+pub(crate) fn kill_group(leader: Option<u32>) {
     if let Some(pid) = leader {
         let _ = std::process::Command::new("kill")
             .args(["-KILL", "--", &format!("-{pid}")])
