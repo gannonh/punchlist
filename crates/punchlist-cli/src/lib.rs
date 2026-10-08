@@ -89,8 +89,7 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             writeln!(out, "{}", issue.id)?;
         }
         IssueCommand::Show { id } => {
-            let issue = client.get_issue(&id).await?;
-            let events = client.issue_events(&id).await?;
+            let (issue, events) = issue_with_timeline(client, &id).await?;
             write!(out, "{}", render_show(&issue, &events))?;
         }
         IssueCommand::List => {
@@ -108,6 +107,25 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         }
     }
     Ok(())
+}
+
+/// The issue and its timeline from two requests. A move landing between them would show an
+/// old status above a timeline that already has the new move, so read again until the last
+/// move matches the status.
+async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue, Vec<Event>)> {
+    let mut attempts = 0;
+    loop {
+        let issue = client.get_issue(id).await?;
+        let events = client.issue_events(id).await?;
+        let consistent = events.last().is_none_or(|event| {
+            let EventDetail::Transition { to, .. } = &event.detail;
+            *to == issue.status
+        });
+        attempts += 1;
+        if consistent || attempts == 3 {
+            return Ok((issue, events));
+        }
+    }
 }
 
 fn render_show(issue: &Issue, events: &[Event]) -> String {

@@ -69,7 +69,7 @@ $C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"
 $C sql "$RUN" "SELECT id, name, role FROM actor"
 ```
 
-Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `curl -s -H "Authorization: Bearer $(sed -n 's/^token = "\(.*\)"$/\1/p' "$CONFIG")" "$SERVER_URL/api/issues"`. Do not paste the token into evidence.
+Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
 The feature map in `features/` has a recipe per feature. Read `features/README.md` first.
 

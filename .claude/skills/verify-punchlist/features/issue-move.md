@@ -7,7 +7,7 @@ A person moves an issue along the workflow with `pl issue move`. The server chec
 - `move-ok` prints `<id>  <From> → <To>` and changes the status.
 - `move-records` writes one `transition` row and one `event` row per move, both naming the actor.
 - `move-version` records the workflow's content hash (`sha256:...`) on the transition.
-- `timeline` shows each move, oldest first, as `<time>  <actor> (<role>)  <From> → <To>`.
+- `timeline` shows each move, oldest first, as `<time>  <actor> (<role>)  <From> → <To>`, where `<time>` is UTC in the form `YYYY-MM-DD HH:MM:SS UTC`, such as `2026-10-08 19:21:48 UTC`.
 
 ## How to get to it (user POV)
 
@@ -22,7 +22,7 @@ Preconditions:
 
 - **To Todo.** Run `$C pl "$RUN" issue move PL-1 todo`. Exit `0`, stdout `PL-1  Backlog → Todo`.
 - **To Start.** Run `$C pl "$RUN" issue move PL-1 start`. Exit `0`, stdout `PL-1  Todo → Start`.
-- **Timeline.** Run `$C pl "$RUN" issue show PL-1`. Stdout has `Status: Start` and exactly two timeline lines, `Verify Person (person)  Backlog → Todo` then `Verify Person (person)  Todo → Start`, each after a UTC time.
+- **Timeline.** Run `$C pl "$RUN" issue show PL-1`. Stdout has `Status: Start` and exactly two timeline lines, each matching `^  \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC  Verify Person \(person\)  ` followed by `Backlog → Todo` on the first and `Todo → Start` on the second.
 - **Rows.** Run `$C sql "$RUN" "SELECT from_status, to_status, actor_id FROM transition ORDER BY created_at"` and `$C sql "$RUN" "SELECT id, name, role FROM actor"`. Two rows, `backlog | todo` and `todo | start`, both with the actor id of `Verify Person`.
 - **Events.** Run `$C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"`. Rows `1 | PL-1 | transition` and `2 | PL-1 | transition`, same actor id.
 - **Version.** Run `$C sql "$RUN" "SELECT DISTINCT workflow_version FROM transition"`. One row starting `sha256:`.

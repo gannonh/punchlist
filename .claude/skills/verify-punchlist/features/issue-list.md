@@ -27,7 +27,7 @@ Preconditions:
   PL-2  Backlog  Second
   ```
 
-- **Sequence.** `source /tmp/punchlist-verify/$RUN/run.env` and `curl -s -H "Authorization: Bearer $(sed -n 's/^token = "\(.*\)"$/\1/p' "$CONFIG")" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":2`.
+- **Sequence.** `source /tmp/punchlist-verify/$RUN/run.env` and `$C curl "$RUN" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":2`.
 
 ## Gotchas
 

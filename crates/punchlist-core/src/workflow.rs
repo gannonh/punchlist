@@ -1,7 +1,7 @@
 //! The workflow: statuses, transitions and who may make each one.
 //!
-//! Only the parts Slice 1 enforces are typed here. Gates, locks and dispatch rules are
-//! read by later slices.
+//! Only the parts Slice 1 enforces are typed here. Gates are read but not yet evaluated, so
+//! a gated transition is always refused. Locks and dispatch rules are read by later slices.
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -104,6 +104,8 @@ pub struct Transition {
     pub to: Status,
     pub by: Vec<Role>,
     pub on: Option<String>,
+    /// Gates that must pass on recorded evidence before the move.
+    pub gates: Vec<String>,
 }
 
 /// A parsed and validated workflow.
@@ -149,6 +151,13 @@ pub enum Refusal {
         role: Role,
         allowed: Vec<Role>,
     },
+    /// Gates are not evaluated yet, so a gated move fails closed rather than skipping them.
+    #[error("{from} → {to} needs gates {}, which Punchlist does not evaluate yet", gates.join(", "))]
+    GatesNotEvaluated {
+        from: String,
+        to: String,
+        gates: Vec<String>,
+    },
 }
 
 impl Refusal {
@@ -159,6 +168,7 @@ impl Refusal {
             Refusal::NoTransition { .. } => "no_transition",
             Refusal::EventOnly { .. } => "event_only",
             Refusal::RoleNotAllowed { .. } => "role_not_allowed",
+            Refusal::GatesNotEvaluated { .. } => "gates_not_evaluated",
         }
     }
 }
@@ -208,6 +218,7 @@ impl Workflow {
                 to,
                 by: t.by,
                 on: t.on,
+                gates: t.gates,
             });
         }
         Ok(Workflow {
@@ -239,7 +250,8 @@ impl Workflow {
         self.statuses.iter().find(|s| s.0 == name)
     }
 
-    /// Applies the `by` rules: may `role` move an issue from `from` to `to`?
+    /// Applies the `by` rules: may `role` move an issue from `from` to `to`? A gated move is
+    /// refused until gates are evaluated.
     pub fn check_transition(
         &self,
         from: &str,
@@ -262,6 +274,13 @@ impl Workflow {
                 to: to.to_string(),
             })?;
         if transition.by.contains(&role) {
+            if !transition.gates.is_empty() {
+                return Err(Refusal::GatesNotEvaluated {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                    gates: transition.gates.clone(),
+                });
+            }
             return Ok(transition);
         }
         match (&transition.on, transition.by.is_empty()) {
@@ -300,6 +319,8 @@ struct RawTransition {
     #[serde(default)]
     by: Vec<Role>,
     on: Option<String>,
+    #[serde(default)]
+    gates: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -316,7 +337,8 @@ mod tests {
     use Role::{Agent, Person, Runner};
 
     /// Every transition in the default workflow, crossed with every role. `Ok` means the
-    /// role may make the move; otherwise the refusal code.
+    /// role may make the move; otherwise the refusal code. Gated moves are refused for the
+    /// roles in `by` too, until gates are evaluated.
     const DEFAULT_RULES: &[(&str, &str, Role, Result<(), &str>)] = &[
         ("backlog", "todo", Person, Ok(())),
         ("backlog", "todo", Agent, Err("role_not_allowed")),
@@ -333,7 +355,12 @@ mod tests {
             Person,
             Err("role_not_allowed"),
         ),
-        ("in_progress", "agent_review", Agent, Ok(())),
+        (
+            "in_progress",
+            "agent_review",
+            Agent,
+            Err("gates_not_evaluated"),
+        ),
         (
             "in_progress",
             "agent_review",
@@ -346,7 +373,12 @@ mod tests {
             Person,
             Err("role_not_allowed"),
         ),
-        ("agent_review", "human_review", Agent, Ok(())),
+        (
+            "agent_review",
+            "human_review",
+            Agent,
+            Err("gates_not_evaluated"),
+        ),
         (
             "agent_review",
             "human_review",
@@ -416,6 +448,10 @@ mod tests {
         assert_eq!(
             message("merging", "done", Person),
             "merging → done happens only on the `pr_merged` event, not on request"
+        );
+        assert_eq!(
+            message("in_progress", "agent_review", Agent),
+            "in_progress → agent_review needs gates pr_open, pr_ready, pr_names_issue, which Punchlist does not evaluate yet"
         );
         assert_eq!(
             message("backlog", "shipped", Person),

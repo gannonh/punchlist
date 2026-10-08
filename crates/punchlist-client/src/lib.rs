@@ -36,7 +36,9 @@ impl Client {
         let base_url =
             Url::parse(base_url).map_err(|_| ClientError::BadUrl(base_url.to_string()))?;
         Ok(Client {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .user_agent(concat!("punchlist-client/", env!("CARGO_PKG_VERSION")))
+                .build()?,
             base_url,
             token: token.to_string(),
         })

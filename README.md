@@ -16,12 +16,12 @@ You need Rust (through [rustup](https://rustup.rs), which reads `rust-toolchain.
 pnpm dev                                    # Postgres on 127.0.0.1:5433, then the server on 127.0.0.1:7878
 ```
 
-In another terminal, create a workspace and a person, and save the printed config:
+In another terminal, create a workspace and a person, and save the printed config. It holds the person's token, so only you can read it:
 
 ```sh
-mkdir -p ~/.config/punchlist
-DATABASE_URL=postgres://punchlist:punchlist@127.0.0.1:5433/punchlist \
-  cargo run -q -p punchlist-server -- bootstrap --person "Your Name" > ~/.config/punchlist/config.toml
+(umask 077 && mkdir -p ~/.config/punchlist &&
+  DATABASE_URL=postgres://punchlist:punchlist@127.0.0.1:5433/punchlist \
+  cargo run -q -p punchlist-server -- bootstrap --person "Your Name" > ~/.config/punchlist/config.toml)
 ```
 
 Then drive it with `pl`:
