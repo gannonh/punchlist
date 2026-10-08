@@ -319,7 +319,7 @@ Punchlist is the second product, and Groundwork's Gate 1 comes first. Months ass
 
 | Phase | Timing | Scope | Exit criteria |
 | --- | --- | --- | --- |
-| Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend and frontend; three prototype variants each for the issue list and the issue page; a guide to live checks for every surface | A variant picked for each prototype, the verification guide approved, and Gate 1 sliced in Linear |
+| Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend and frontend; three prototype variants each for the issue list and the issue page; ADRs for the stack questions Gate 1 depends on | A variant picked for each prototype, the stack ADRs accepted, and Gate 1 sliced in Linear |
 | Gate 1. Dogfood | Nov to Dec 2026 | P0: R1 to R8, R10, R11, R13 to R15, R20 | Groundwork's and Punchlist's own issues run from Punchlist for 14 days |
 | Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19 | Every P1 requirement is Done, and Gannon runs both projects from Punchlist with no workaround outside it |
 | Phase 3. Verified pull requests | Mar to Apr 2027 | P2: R21, R24, R25. Punchlist runs each issue's live checks itself, and `proof_verified` replaces `proof_attached` | Every dogfood pull request carries a Punchlist-run verification |
