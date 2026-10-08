@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,\n                duration_ms = $6, input_tokens = $7, output_tokens = $8\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n         RETURNING id",
+  "query": "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,\n                duration_ms = $6, input_tokens = $7, output_tokens = $8\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now()\n         RETURNING id",
   "describe": {
     "columns": [
       {
@@ -31,5 +31,5 @@
       false
     ]
   },
-  "hash": "0727b17c76ca69db8fa0bef68434ededfe5115d738b40eb411971214821e8b20"
+  "hash": "d9fc5b9b6c0eb6f14bc11eda7259f909d0cc7c41f1075ecefc2363133ff299ad"
 }

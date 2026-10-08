@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $2)\n         WHERE runner_id = $1 AND state = 'running' AND lease_expires_at > now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34c7e3493632be809ef45b1869a20c9b21bab87fe2efbda8b6b0944e30083ba2"
+}

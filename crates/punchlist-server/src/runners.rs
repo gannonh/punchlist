@@ -148,7 +148,8 @@ async fn list_runners(
     }))
 }
 
-/// Record a heartbeat and renew the leases on the runner's running attempts. Runner token,
+/// Record a heartbeat and renew the leases on the runner's running attempts. A lease that
+/// already lapsed is not renewed: the attempt is lost and the sweep fails it. Runner token,
 /// for the runner's own id only.
 #[utoipa::path(
     post,
@@ -193,7 +194,7 @@ async fn heartbeat(
     .await?;
     sqlx::query!(
         "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $2)
-         WHERE runner_id = $1 AND state = 'running'",
+         WHERE runner_id = $1 AND state = 'running' AND lease_expires_at > now()",
         id,
         state.lease.as_secs_f64(),
     )

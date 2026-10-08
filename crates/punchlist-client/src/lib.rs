@@ -41,6 +41,9 @@ impl Client {
         Ok(Client {
             http: reqwest::Client::builder()
                 .user_agent(concat!("punchlist-client/", env!("CARGO_PKG_VERSION")))
+                // Above the longest claim long-poll (30 s), so a hung request fails instead
+                // of blocking a caller, such as the runner's log flusher, forever.
+                .timeout(std::time::Duration::from_secs(90))
                 .build()?,
             base_url,
             token: token.to_string(),

@@ -154,14 +154,16 @@ fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult
 }
 
 /// Runs `claude` in `worktree` with `prompt` on stdin. Stdout lines go to `lines` as they
-/// arrive; stderr lines go there prefixed with `stderr: `. Returns `Stopped` after killing
-/// the agent when `stop` becomes true.
+/// arrive; stderr lines go there prefixed with `stderr: `. The channel is bounded, so a slow
+/// server slows the agent rather than growing the runner's memory. The agent runs in its own
+/// process group; when `stop` becomes true the whole group is killed and this returns
+/// `Stopped`. Anything left in the group after the agent exits is killed too.
 pub async fn run_claude(
     claude_command: &Path,
     model: Option<&str>,
     worktree: &Path,
     prompt: &str,
-    lines: mpsc::UnboundedSender<String>,
+    lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
     let failed = |reason: String| {
@@ -179,6 +181,7 @@ pub async fn run_claude(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
+        .process_group(0)
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
@@ -187,6 +190,7 @@ pub async fn run_claude(
         }
     };
 
+    let group = child.id();
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let prompt = prompt.to_string();
     tokio::spawn(async move {
@@ -203,7 +207,7 @@ pub async fn run_claude(
             if let Some(parsed) = parse_result_line(&line) {
                 result = Some(parsed);
             }
-            let _ = stdout_lines.send(line);
+            let _ = stdout_lines.send(line).await;
         }
         result
     });
@@ -211,19 +215,21 @@ pub async fn run_claude(
     let stderr_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            let _ = lines.send(format!("stderr: {line}"));
+            let _ = lines.send(format!("stderr: {line}")).await;
         }
     });
 
     let status = tokio::select! {
         status = child.wait() => status,
         _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => {
+            kill_group(group);
             let _ = child.kill().await;
             stdout_task.abort();
             stderr_task.abort();
             return AgentExit::Stopped;
         }
     };
+    kill_group(group);
     let grace = Duration::from_secs(5);
     let result = tokio::time::timeout(grace, stdout_task)
         .await
@@ -234,6 +240,18 @@ pub async fn run_claude(
     match status {
         Ok(status) => AgentExit::Finished(outcome_of(status.code(), result)),
         Err(e) => failed(format!("cannot wait for claude: {e}")),
+    }
+}
+
+/// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
+/// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
+fn kill_group(leader: Option<u32>) {
+    if let Some(pid) = leader {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -277,7 +295,8 @@ mod tests {
         // A test thread that forks while another writes its fake script holds the write
         // handle until it execs, so the exec here can fail with ETXTBSY. Retry that only.
         for _ in 0..20 {
-            let (tx, mut rx) = mpsc::unbounded_channel();
+            // Drained only after the agent exits, so big enough for a whole run.
+            let (tx, mut rx) = mpsc::channel(10_000);
             let (_stop_tx, stop_rx) = watch::channel(false);
             let exit = run_claude(&command, Some("haiku"), temp.path(), prompt, tx, stop_rx).await;
             if matches!(&exit, AgentExit::Finished(r) if r.reason.as_deref().is_some_and(|m| m.contains("Text file busy")))
@@ -417,7 +436,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     #[tokio::test]
     async fn a_missing_executable_fails_with_a_spawn_error() {
         let temp = tempfile::tempdir().unwrap();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let missing = temp.path().join("nope");
         let exit = run_claude(&missing, None, temp.path(), "p", tx, stop_rx).await;
@@ -432,7 +451,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     async fn the_stop_signal_kills_the_agent() {
         let temp = tempfile::tempdir().unwrap();
         let command = fake_claude(temp.path(), "sleep 30");
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let handle =
             tokio::spawn(
@@ -441,5 +460,66 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop_tx.send(true).unwrap();
         assert_eq!(handle.await.unwrap(), AgentExit::Stopped);
+    }
+
+    /// True once `pid` is gone or a zombie waiting to be reaped.
+    fn dead(pid: &str) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z')),
+        }
+    }
+
+    async fn assert_dies(pid: &str) {
+        for _ in 0..40 {
+            if dead(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("process {pid} outlived the agent");
+    }
+
+    #[tokio::test]
+    async fn the_stop_signal_kills_commands_the_agent_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let pidfile = temp.path().join("child.pid");
+        let script = format!("sleep 30 &\necho $! > {}\nwait", pidfile.display());
+        let command = fake_claude(temp.path(), &script);
+        let (tx, _rx) = mpsc::channel(16);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let dir = temp.path().to_path_buf();
+        let handle =
+            tokio::spawn(async move { run_claude(&command, None, &dir, "p", tx, stop_rx).await });
+        let mut pid = String::new();
+        for _ in 0..40 {
+            pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
+            if !pid.trim().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = pid.trim().to_string();
+        assert!(!pid.is_empty(), "the fake agent never started its child");
+        assert!(!dead(&pid));
+        stop_tx.send(true).unwrap();
+        assert_eq!(handle.await.unwrap(), AgentExit::Stopped);
+        assert_dies(&pid).await;
+    }
+
+    #[tokio::test]
+    async fn commands_left_behind_when_the_agent_exits_are_killed() {
+        let temp = tempfile::tempdir().unwrap();
+        let pidfile = temp.path().join("child.pid");
+        let script = format!(
+            "sleep 30 >/dev/null 2>&1 &\necho $! > {}\necho '{{\"type\":\"result\",\"is_error\":false,\"usage\":{{}}}}'",
+            pidfile.display()
+        );
+        let (exit, _) = run_fake(&script, "p").await;
+        assert!(matches!(exit, AgentExit::Finished(ref r) if r.outcome == RunOutcome::Succeeded));
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        assert_dies(pid.trim()).await;
     }
 }

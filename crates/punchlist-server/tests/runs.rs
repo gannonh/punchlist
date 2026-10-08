@@ -288,6 +288,66 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn a_lapsed_lease_is_not_renewed_and_refuses_logs_and_finish_before_the_sweep(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Paused", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r1, 0).await;
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+
+    // The runner was paused past its lease; the sweep has not run yet.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runners/{}/heartbeat", r1.id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let lapsed = sqlx::query_scalar!(
+        r#"SELECT lease_expires_at < now() AS "lapsed!" FROM attempt WHERE issue_id = 'PL-1'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(lapsed, "the heartbeat must not renew a lapsed lease");
+
+    let (status, body) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/log"),
+        Some(json!({"attempt": 1, "lines": ["late"]})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("stale_attempt"))
+    );
+    let (status, body) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/finish"),
+        Some(json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 10})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("stale_attempt"))
+    );
+
+    assert_eq!(expire_leases(&pool).await.unwrap(), 1);
+    let state = sqlx::query_scalar!("SELECT state FROM attempt WHERE issue_id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "failed");
+}
+
+#[sqlx::test]
 async fn registering_needs_a_person_and_heartbeats_are_own_runner_only(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;

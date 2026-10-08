@@ -29,6 +29,9 @@ pub fn retry_delay_ms(attempt: u32, max_backoff_ms: i64) -> i64 {
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_BATCH_LINES: usize = 50;
 const LOG_PENDING_CAP: usize = 2000;
+/// Lines buffered between the agent's pipes and the log flusher. When the server is slow the
+/// readers wait here, which pauses the agent's output instead of growing memory.
+const LOG_CHANNEL_LINES: usize = 1000;
 
 fn is_code(error: &ClientError, wanted: &str) -> bool {
     matches!(error, ClientError::Refused { code, .. } if code == wanted)
@@ -168,7 +171,7 @@ async fn flush_logs(
     client: Client,
     run_id: String,
     attempt: i32,
-    mut lines: mpsc::UnboundedReceiver<String>,
+    mut lines: mpsc::Receiver<String>,
     stop: Arc<watch::Sender<bool>>,
 ) -> bool {
     let mut pending: Vec<String> = Vec::new();
@@ -230,7 +233,7 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
         claim.branch
     );
 
-    let (lines_tx, lines_rx) = mpsc::unbounded_channel();
+    let (lines_tx, lines_rx) = mpsc::channel(LOG_CHANNEL_LINES);
     let (stop_tx, stop_rx) = watch::channel(false);
     let stop_tx = Arc::new(stop_tx);
     let flusher = tokio::spawn(flush_logs(
@@ -257,11 +260,13 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
     {
         Ok(path) => {
             tracing::info!("worktree ready: {}", path.display());
-            let _ = lines_tx.send(format!(
-                "worktree {} on branch {}",
-                path.display(),
-                claim.branch
-            ));
+            let _ = lines_tx
+                .send(format!(
+                    "worktree {} on branch {}",
+                    path.display(),
+                    claim.branch
+                ))
+                .await;
             let prompt = build_prompt(&claim.issue, &claim.repository, &claim.branch);
             run_claude(
                 &ctx.config.claude_command,
@@ -274,7 +279,9 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
             .await
         }
         Err(reason) => {
-            let _ = lines_tx.send(format!("worktree preparation failed: {reason}"));
+            let _ = lines_tx
+                .send(format!("worktree preparation failed: {reason}"))
+                .await;
             AgentExit::Finished(AgentResult {
                 outcome: RunOutcome::Failed,
                 reason: Some(format!("worktree preparation failed: {reason}")),

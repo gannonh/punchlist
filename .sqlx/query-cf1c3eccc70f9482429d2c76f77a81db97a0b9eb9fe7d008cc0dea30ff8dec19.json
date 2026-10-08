@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT attempt FROM attempt\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n         FOR UPDATE",
+  "query": "SELECT attempt FROM attempt\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now()\n         FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "d72efc4e7454317d21ded40f4bc6bc414b0aed3fbdbca6c5dc498a61f9ae934e"
+  "hash": "cf1c3eccc70f9482429d2c76f77a81db97a0b9eb9fe7d008cc0dea30ff8dec19"
 }

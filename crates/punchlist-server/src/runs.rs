@@ -252,6 +252,7 @@ async fn append_log(
     let held = sqlx::query_scalar!(
         "SELECT attempt FROM attempt
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
+             AND lease_expires_at > now()
          FOR UPDATE",
         id,
         request.attempt,
@@ -287,7 +288,7 @@ async fn append_log(
 
 fn stale(run_id: Uuid, attempt: i32) -> ApiError {
     ApiError::StaleAttempt(format!(
-        "attempt {attempt} of run {run_id} is not running under this runner"
+        "attempt {attempt} of run {run_id} is not running under this runner, or its lease expired"
     ))
 }
 
@@ -299,7 +300,8 @@ async fn hold_attempt(
 ) -> Result<(), ApiError> {
     let held = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM attempt
-           WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running')
+           WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
+             AND lease_expires_at > now())
            AS "held!""#,
         run_id,
         attempt,
@@ -385,6 +387,7 @@ async fn finish_run(
         "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,
                 duration_ms = $6, input_tokens = $7, output_tokens = $8
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
+             AND lease_expires_at > now()
          RETURNING id",
         id,
         request.attempt,

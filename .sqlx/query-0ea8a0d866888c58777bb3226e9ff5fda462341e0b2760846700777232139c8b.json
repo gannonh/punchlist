@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT EXISTS (SELECT 1 FROM attempt\n           WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running')\n           AS \"held!\"",
+  "query": "SELECT EXISTS (SELECT 1 FROM attempt\n           WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now())\n           AS \"held!\"",
   "describe": {
     "columns": [
       {
@@ -21,5 +21,5 @@
       null
     ]
   },
-  "hash": "dbd7c23fd8bd813ea3a8b7b191eabf22605844659812aab15ec752b2dd220534"
+  "hash": "0ea8a0d866888c58777bb3226e9ff5fda462341e0b2760846700777232139c8b"
 }
