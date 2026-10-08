@@ -282,35 +282,42 @@ mod tests {
         }
     }
 
+    /// Writes an executable fake `claude`. Another test thread that forks while the file is
+    /// open for writing holds the write handle until its child execs, and an exec of the
+    /// file fails with ETXTBSY meanwhile. Probe until one exec succeeds: the handle is then
+    /// gone from every process, and nothing can copy it again, so later execs are safe.
     fn fake_claude(dir: &Path, script: &str) -> PathBuf {
         let path = dir.join("claude");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{script}\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        for _ in 0..100 {
+            match std::process::Command::new(&path).arg("--probe").status() {
+                Ok(_) => return path,
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("cannot run the fake claude: {e}"),
+            }
+        }
+        panic!("the fake claude stayed busy");
     }
 
     async fn run_fake(script: &str, prompt: &str) -> (AgentExit, Vec<String>) {
         let temp = tempfile::tempdir().unwrap();
         let command = fake_claude(temp.path(), script);
-        // A test thread that forks while another writes its fake script holds the write
-        // handle until it execs, so the exec here can fail with ETXTBSY. Retry that only.
-        for _ in 0..20 {
-            // Drained only after the agent exits, so big enough for a whole run.
-            let (tx, mut rx) = mpsc::channel(10_000);
-            let (_stop_tx, stop_rx) = watch::channel(false);
-            let exit = run_claude(&command, Some("haiku"), temp.path(), prompt, tx, stop_rx).await;
-            if matches!(&exit, AgentExit::Finished(r) if r.reason.as_deref().is_some_and(|m| m.contains("Text file busy")))
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                continue;
-            }
-            let mut out = Vec::new();
-            while let Some(line) = rx.recv().await {
-                out.push(line);
-            }
-            return (exit, out);
+        // Drained only after the agent exits, so big enough for a whole run.
+        let (tx, mut rx) = mpsc::channel(10_000);
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let exit = run_claude(&command, Some("haiku"), temp.path(), prompt, tx, stop_rx).await;
+        let mut out = Vec::new();
+        while let Some(line) = rx.recv().await {
+            out.push(line);
         }
-        panic!("the fake claude stayed busy");
+        (exit, out)
     }
 
     const ECHO_THEN_RESULT: &str = r#"cat
