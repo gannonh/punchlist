@@ -4,12 +4,11 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
 
 use punchlist_api::{Issue, Repository, RunOutcome};
 use punchlist_core::{FenceError, fence};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
 
@@ -91,6 +90,54 @@ struct ResultLine {
     subtype: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+}
+
+/// The most of one output record the runner keeps. The rest of a longer record, up to its
+/// newline, is read and discarded, so one record cannot grow memory without limit. Large
+/// enough for a `result` line; the log flusher clips what it sends further.
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+
+/// Reads one newline-terminated record, keeping at most `max` bytes of it. `None` at the end
+/// of input. A cut record ends with `… [truncated]`. A trailing `\r` is dropped, as
+/// `lines()` does.
+async fn read_record<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<String>> {
+    let mut record: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    let mut read_any = false;
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            if !read_any {
+                return Ok(None);
+            }
+            break;
+        }
+        read_any = true;
+        let (chunk, used, done) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (&buf[..i], i + 1, true),
+            None => (buf, buf.len(), false),
+        };
+        let room = max.saturating_sub(record.len());
+        if chunk.len() > room {
+            truncated = true;
+        }
+        record.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        reader.consume(used);
+        if done {
+            break;
+        }
+    }
+    if record.last() == Some(&b'\r') {
+        record.pop();
+    }
+    let mut text = String::from_utf8_lossy(&record).into_owned();
+    if truncated {
+        text.push_str("… [truncated]");
+    }
+    Ok(Some(text))
 }
 
 fn parse_result_line(line: &str) -> Option<ResultLine> {
@@ -200,10 +247,10 @@ pub async fn run_claude(
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let stdout_lines = lines.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
+    let mut stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
         let mut result = None;
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = read_record(&mut reader, MAX_RECORD_BYTES).await {
             if let Some(parsed) = parse_result_line(&line) {
                 result = Some(parsed);
             }
@@ -212,9 +259,9 @@ pub async fn run_claude(
         result
     });
     let stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_task = tokio::spawn(async move {
-        let mut reader = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
+    let mut stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        while let Ok(Some(line)) = read_record(&mut reader, MAX_RECORD_BYTES).await {
             let _ = lines.send(format!("stderr: {line}")).await;
         }
     });
@@ -229,14 +276,23 @@ pub async fn run_claude(
             return AgentExit::Stopped;
         }
     };
+    // Nothing the agent left behind may hold its pipes open, so the readers reach the end.
     kill_group(group);
-    let grace = Duration::from_secs(5);
-    let result = tokio::time::timeout(grace, stdout_task)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten();
-    let _ = tokio::time::timeout(grace, stderr_task).await;
+    // Wait for every record to be read and handed to the log, however slowly the server
+    // takes them: the result line may be among the last. Only a stop cuts this short.
+    let drained = tokio::select! {
+        drained = async {
+            let result = (&mut stdout_task).await.ok().flatten();
+            let _ = (&mut stderr_task).await;
+            result
+        } => Some(drained),
+        _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
+    };
+    let Some(result) = drained else {
+        stdout_task.abort();
+        stderr_task.abort();
+        return AgentExit::Stopped;
+    };
     match status {
         Ok(status) => AgentExit::Finished(outcome_of(status.code(), result)),
         Err(e) => failed(format!("cannot wait for claude: {e}")),
@@ -260,6 +316,70 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::time::Duration;
+
+    async fn records(input: &[u8], max: usize) -> Vec<String> {
+        let mut reader = BufReader::with_capacity(8, input);
+        let mut out = Vec::new();
+        while let Some(record) = read_record(&mut reader, max).await.unwrap() {
+            out.push(record);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn read_record_splits_lines_and_drops_carriage_returns() {
+        assert_eq!(
+            records(b"one\ntwo\r\n\nlast", 100).await,
+            ["one", "two", "", "last"]
+        );
+        assert!(records(b"", 100).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_record_keeps_at_most_max_bytes_and_reads_on() {
+        let mut input = vec![b'x'; 5000];
+        input.extend_from_slice(b"\nnext\n");
+        assert_eq!(
+            records(&input, 16).await,
+            [
+                format!("{}… [truncated]", "x".repeat(16)),
+                "next".to_string()
+            ]
+        );
+    }
+
+    /// The result line comes last, after more output than the log channel holds, and the
+    /// log is taken slower than the old five-second grace. The outcome still counts it.
+    #[tokio::test]
+    async fn the_result_survives_a_slow_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = r#"i=0
+while [ $i -lt 30 ]; do echo "line $i"; i=$((i+1)); done
+echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":5,"output_tokens":7}}'"#;
+        let command = fake_claude(temp.path(), script);
+        let (tx, mut rx) = mpsc::channel(1);
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let drain = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            let mut n = 0;
+            while rx.recv().await.is_some() {
+                n += 1;
+            }
+            n
+        });
+        let exit = run_claude(&command, None, temp.path(), "p", tx, stop_rx).await;
+        assert_eq!(
+            exit,
+            AgentExit::Finished(AgentResult {
+                outcome: RunOutcome::Succeeded,
+                reason: None,
+                input_tokens: Some(5),
+                output_tokens: Some(7),
+            })
+        );
+        assert_eq!(drain.await.unwrap(), 31);
+    }
 
     fn issue(body: &str) -> Issue {
         let now = chrono::Utc::now();

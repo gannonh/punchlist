@@ -404,12 +404,55 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
         input_tokens: result.input_tokens,
         output_tokens: result.output_tokens,
     };
-    finish_with_retry(&ctx.client, &run_id, &request).await;
+    finish_with_retry(
+        &ctx.client,
+        &run_id,
+        &request,
+        ctx.shutdown.clone(),
+        FINAL_REPORT_TIMEOUT,
+    )
+    .await;
 }
 
-async fn finish_with_retry(client: &Client, run_id: &str, request: &FinishRun) {
+/// Once shutdown starts, how long the outcome report may still take before the runner
+/// gives up and leaves the attempt to its lease.
+const FINAL_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reports the outcome, retrying with backoff. When shutdown starts, a request in flight
+/// gets `final_timeout` more, a backoff ends at once and one last try gets `final_timeout`.
+/// Then the runner gives up: the lease expires and the server fails the attempt.
+async fn finish_with_retry(
+    client: &Client,
+    run_id: &str,
+    request: &FinishRun,
+    mut shutdown: watch::Receiver<bool>,
+    final_timeout: Duration,
+) {
+    let mut stopping = *shutdown.borrow();
     for failures in 1..=5u32 {
-        match client.finish_run(run_id, request).await {
+        let report = async {
+            if stopping {
+                tokio::time::timeout(final_timeout, client.finish_run(run_id, request))
+                    .await
+                    .ok()
+            } else {
+                let mut watch = shutdown.clone();
+                tokio::select! {
+                    done = client.finish_run(run_id, request) => Some(done),
+                    _ = async {
+                        let _ = watch.wait_for(|s| *s).await;
+                        tokio::time::sleep(final_timeout).await;
+                    } => None,
+                }
+            }
+        };
+        let Some(done) = report.await else {
+            tracing::error!(
+                "run {run_id}: shutting down before the outcome was recorded; the lease will expire"
+            );
+            return;
+        };
+        match done {
             Ok(_) => {
                 tracing::info!("finished run {run_id}: {}", request.outcome.as_str());
                 return;
@@ -418,12 +461,21 @@ async fn finish_with_retry(client: &Client, run_id: &str, request: &FinishRun) {
                 tracing::warn!("run {run_id}: lease lost before the outcome was recorded");
                 return;
             }
+            Err(e) if stopping || *shutdown.borrow() => {
+                tracing::error!(
+                    "run {run_id}: cannot record the outcome while shutting down: {e}; the lease will expire"
+                );
+                return;
+            }
             Err(e) => {
                 let delay = retry_delay_ms(failures, MAX_RETRY_BACKOFF_MS) as u64;
                 tracing::warn!(
                     "run {run_id}: cannot record the outcome: {e}; retrying in {delay} ms"
                 );
-                tokio::time::sleep(Duration::from_millis(delay)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
+                    _ = shutdown.wait_for(|s| *s) => stopping = true,
+                }
             }
         }
     }
@@ -435,6 +487,60 @@ mod tests {
     use super::*;
     use punchlist_api::CreateIssue;
     use punchlist_server::{AppState, Bootstrap, bootstrap, router};
+
+    fn finish_request() -> FinishRun {
+        FinishRun {
+            attempt: 1,
+            outcome: RunOutcome::Succeeded,
+            reason: None,
+            duration_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+        }
+    }
+
+    /// Reports an outcome to `url` with a 200 ms final timeout, sends shutdown after
+    /// `shutdown_after`, and returns how long the report took.
+    async fn report_with_shutdown(url: &str, shutdown_after: Duration) -> Duration {
+        let client = Client::new(url, "token").unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let started = Instant::now();
+        let report = tokio::spawn(async move {
+            finish_with_retry(
+                &client,
+                "run",
+                &finish_request(),
+                shutdown_rx,
+                Duration::from_millis(200),
+            )
+            .await
+        });
+        tokio::time::sleep(shutdown_after).await;
+        shutdown_tx.send(true).unwrap();
+        report.await.unwrap();
+        started.elapsed()
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounds_an_outcome_report_in_flight() {
+        // Accepts connections and never answers, so the request hangs.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let took = report_with_shutdown(&url, Duration::from_millis(100)).await;
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn shutdown_skips_the_outcome_backoff() {
+        // Nothing listens here, so the first request fails at once and a 10 s backoff starts.
+        let url = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            format!("http://{}", listener.local_addr().unwrap())
+        };
+        let took = report_with_shutdown(&url, Duration::from_millis(300)).await;
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
 
     #[test]
     fn clip_cuts_oversized_lines_on_a_char_boundary() {
