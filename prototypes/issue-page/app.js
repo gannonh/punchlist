@@ -1,11 +1,11 @@
-// Issue page prototype: three layouts over the same mock issues. Nothing here is wired to production code.
+// Issue page prototype: the approved Sidebar layout over four mock issues. Nothing here is wired to production code.
 (function () {
   const { statuses, gates, actors, issues, liveLogMore } = window.PUNCHLIST_PAGE_MOCK;
   const statusById = Object.fromEntries(statuses.map((s) => [s.id, s]));
-  const VARIANTS = ["sidebar", "tabs", "pipeline"];
+  const VARIANTS = ["sidebar"];
   const STATES = issues.map((i) => i.key);
 
-  const state = { variant: "sidebar", issue: "running", viewer: "gannon", tab: "overview", feed: "all", liveIndex: 0 };
+  const state = { variant: "sidebar", issue: "running", viewer: "gannon", feed: "all", liveIndex: 0 };
 
   const $view = document.getElementById("view");
   const $shortcuts = document.getElementById("shortcuts");
@@ -71,15 +71,18 @@
     const lockedHere = isLocked(i.status, v.type);
 
     const forward = { to: s.next.to, by: s.next.by, event: s.next.event, gates: s.next.gates };
-    const canRole = forward.by === "event" ? false : forward.by === "runner" ? v.type === "runner" : forward.by === "person" ? v.type === "person" : true;
+    // Roles: `by` names the actor that normally drives the move. A person may make any move a
+    // person is not locked out of (gates still apply); an agent or runner may make only its own.
+    // A status lock (Human Review) stops agents and runners acting *inside* it, not entering it.
+    const canRole = forward.by === "event" ? false : v.type === "person" ? true : v.type === forward.by;
+    const override = v.type === "person" && forward.by !== "person" && forward.by !== "event";
     const fails = forward.gates.filter((g) => !(i.gates[g] && i.gates[g].pass));
     let verdict;
     if (lockedHere) verdict = { kind: "locked", text: `${esc(statusById[i.status].label)} is locked to people. ${esc(v.name)} cannot act here.` };
     else if (forward.by === "event") verdict = { kind: "event", text: `Moves on its own when GitHub reports ${esc(forward.event.replace(/_/g, " "))}.` };
-    else if (isLocked(forward.to, v.type)) verdict = { kind: "locked", text: `${esc(statusById[forward.to].label)} is locked to people. ${esc(v.name)} cannot enter it.` };
-    else if (!canRole) verdict = { kind: "locked", text: `Only a ${esc(forward.by)} can make this move.` };
+    else if (!canRole) verdict = { kind: "locked", text: `Only a ${esc(forward.by)} or a person can make this move.` };
     else if (fails.length) verdict = { kind: "blocked", gate: fails[0], text: `${esc(gates[fails[0]].label)}`, why: i.gates[fails[0]].reason, more: fails.length - 1 };
-    else verdict = { kind: "ok", text: forward.gates.length ? `All ${forward.gates.length} gates pass.` : "No gates on this move." };
+    else verdict = { kind: "ok", text: (forward.gates.length ? `All ${forward.gates.length} gates pass.` : "No gates on this move.") + (override ? ` Normally the ${esc(forward.by)}'s move; a person may make it.` : "") };
     out.push({ ...forward, verdict });
 
     // Side moves a person can always make; agents only outside locked statuses.
@@ -336,72 +339,6 @@
     </div>`;
   }
 
-  function renderTabs(i) {
-    const s = statusById[i.status];
-    const openThreads = i.pr ? i.pr.threads.filter((t) => t.state === "open").length : 0;
-    const next = s.next && s.next.gates.length ? s.next : null;
-    const failing = next ? next.gates.filter((g) => !(i.gates[g] && i.gates[g].pass)).length : 0;
-    const tabs = [
-      ["overview", "Overview", ""],
-      ["runs", "Runs", `<span class="n">${i.runs.length}</span>`],
-      ["gates", "Gates", failing ? `<span class="n bad">${failing} failing</span>` : `<span class="n">${next ? next.gates.length : Object.keys(i.lastGates || {}).length}</span>`],
-      ["pr", "Pull request", openThreads ? `<span class="n bad">${openThreads} open</span>` : ""],
-      ["timeline", "Activity", `<span class="n">${i.timeline.length}</span>`],
-    ];
-    const panel = {
-      overview: `<div class="tabpanel two"><div>${specPanelHtml(i)}</div><div>${proofPanelHtml(i)}</div></div>`,
-      runs: `<div class="tabpanel">${runsPanelHtml(i)}</div>`,
-      gates: `<div class="tabpanel two"><div>${gatesPanelHtml(i)}</div><div>${proofPanelHtml(i)}</div></div>`,
-      pr: `<div class="tabpanel">${prPanelHtml(i)}</div>`,
-      timeline: `<div class="tabpanel">${timelinePanelHtml(i)}</div>`,
-    }[state.tab];
-    return `<div class="page tabs">
-      <section class="panel head-card">
-        ${headHtml(i)}
-        ${noticeHtml(i)}
-        ${transitionsPanelHtml(i).replace('class="panel"', 'class="panel" style="padding:0;border:0"')}
-      </section>
-      <nav class="tabbar" role="tablist" aria-label="Sections">
-        ${tabs.map(([id, label, n]) => `<button type="button" role="tab" data-tab="${id}" aria-selected="${state.tab === id}">${label}${n}</button>`).join("")}
-      </nav>
-      ${panel}
-    </div>`;
-  }
-
-  function renderPipeline(i) {
-    const order = ["backlog", "todo", "start", "in_progress", "agent_review", "human_review", "merging", "done"];
-    const cur = i.status === "canceled" ? -1 : order.indexOf(i.status);
-    const steps = order.map((id, idx) => {
-      const s = statusById[id];
-      const cls = idx < cur ? "past" : idx === cur ? "current" : "future";
-      const edge = idx < order.length - 1 ? (() => {
-        const nx = s.next;
-        const isNext = idx === cur;
-        const chips = nx.gates.map((g) => { const r = isNext ? i.gates[g] : (idx < cur ? { pass: true } : null); return `<i class="${r ? (r.pass ? "pass" : "fail") : ""}" title="${esc(gates[g].label)}"></i>`; }).join("");
-        const by = nx.by === "event" ? esc(nx.event.replace(/_/g, " ")) : esc(nx.by);
-        return `<span class="edge ${isNext ? "next" : ""}"><span class="line"></span>${chips ? `<span class="chips">${chips}</span>` : ""}<span class="by">${by}</span></span>`;
-      })() : "";
-      return `<span class="step ${cls}" data-status="${id}" ${idx === cur ? 'aria-current="step"' : ""}>${statusDot(id)}${esc(s.label)}${s.lock ? `<span class="lock">${ICON.lock}</span>` : ""}</span>${edge}`;
-    }).join("");
-    return `<div class="page pipeline">
-      <section class="panel">${headHtml(i)}<div class="stepper-wrap" style="margin-top:12px"><div class="stepper" aria-label="Workflow">${steps}</div></div></section>
-      ${noticeHtml(i) ? `<div style="margin-top:12px">${noticeHtml(i)}</div>` : ""}
-      <div class="grid">
-        <div>
-          ${transitionsPanelHtml(i)}
-          ${runsPanelHtml(i)}
-          ${gatesPanelHtml(i)}
-          ${proofPanelHtml(i)}
-          ${prPanelHtml(i)}
-        </div>
-        <div>
-          ${specPanelHtml(i)}
-          ${timelinePanelHtml(i)}
-        </div>
-      </div>
-    </div>`;
-  }
-
   function render() {
     const i = current();
     document.querySelectorAll(".switcher [data-variant]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.variant === state.variant)));
@@ -410,21 +347,16 @@
     $view.dataset.issueState = state.issue;
     $view.dataset.issue = i.id;
     $view.dataset.viewer = state.viewer;
-    $view.innerHTML = state.variant === "sidebar" ? renderSidebar(i) : state.variant === "tabs" ? renderTabs(i) : renderPipeline(i);
+    $view.innerHTML = renderSidebar(i);
     renderShortcuts();
-    const wrap = $view.querySelector(".stepper-wrap"), cur = $view.querySelector(".step.current");
-    if (wrap && cur) wrap.scrollLeft = Math.max(0, cur.offsetLeft - wrap.clientWidth / 2 + cur.offsetWidth / 2);
     const url = new URL(location.href);
     url.searchParams.set("variant", state.variant); url.searchParams.set("state", state.issue); url.searchParams.set("as", state.viewer);
     history.replaceState(null, "", url);
   }
 
   function renderShortcuts() {
-    const title = { sidebar: "Sidebar", tabs: "Tabs", pipeline: "Pipeline" }[state.variant];
-    const keys = [["1 2 3", "switch layout"], ["j k", "next / previous mock issue"], ["v", "view as person / agent"]];
-    if (state.variant === "tabs") keys.push(["[ ]", "previous / next tab"]);
-    keys.push(["g", "jump to gates"], ["t", "jump to activity"], ["c", "comment"], ["Esc", "close"]);
-    $shortcuts.innerHTML = `<span class="title">${title} shortcuts</span>` + keys.map(([k, d]) => `<span>${k.split(" ").map((x) => `<kbd>${esc(x)}</kbd>`).join("")} ${esc(d)}</span>`).join("");
+    const keys = [["j k", "next / previous mock issue"], ["v", "view as person / agent"], ["g", "jump to gates"], ["t", "jump to activity"], ["c", "comment"], ["Esc", "close"]];
+    $shortcuts.innerHTML = `<span class="title">Shortcuts</span>` + keys.map(([k, d]) => `<span>${k.split(" ").map((x) => `<kbd>${esc(x)}</kbd>`).join("")} ${esc(d)}</span>`).join("");
   }
 
   // ---------- live log ----------
@@ -447,9 +379,9 @@
     toastTimer = setTimeout(() => { $overlay.innerHTML = ""; }, 2400);
   }
   function setVariant(v) { if (VARIANTS.includes(v)) { state.variant = v; render(); } }
-  function setIssue(k) { if (STATES.includes(k)) { state.issue = k; state.tab = "overview"; render(); } }
+  function setIssue(k) { if (STATES.includes(k)) { state.issue = k; render(); } }
   function setViewer(a) { state.viewer = a; $viewer.value = a; render(); }
-  function jump(id) { const el = document.getElementById(id); if (!el) { if (state.variant === "tabs") { state.tab = id; render(); } return; } el.scrollIntoView({ block: "start", behavior: "smooth" }); }
+  function jump(id) { const el = document.getElementById(id); if (el) el.scrollIntoView({ block: "start", behavior: "smooth" }); }
 
   document.addEventListener("keydown", (e) => {
     const focus = document.activeElement;
@@ -457,16 +389,12 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const idx = STATES.indexOf(state.issue);
     switch (e.key) {
-      case "1": setVariant("sidebar"); break;
-      case "2": setVariant("tabs"); break;
-      case "3": setVariant("pipeline"); break;
       case "j": case "ArrowDown": setIssue(STATES[Math.min(STATES.length - 1, idx + 1)]); e.preventDefault(); break;
       case "k": case "ArrowUp": setIssue(STATES[Math.max(0, idx - 1)]); e.preventDefault(); break;
       case "v": setViewer(state.viewer === "gannon" ? "claude" : "gannon"); break;
       case "g": jump("gates"); break;
       case "t": jump("timeline"); break;
       case "c": { jump("timeline"); const ta = document.querySelector("[data-composer] textarea"); if (ta && !ta.disabled) { setTimeout(() => ta.focus(), 50); e.preventDefault(); } break; }
-      case "[": case "]": if (state.variant === "tabs") { const tabs = ["overview", "runs", "gates", "pr", "timeline"]; const t = tabs.indexOf(state.tab); state.tab = tabs[(t + (e.key === "]" ? 1 : tabs.length - 1)) % tabs.length]; render(); } break;
       case "Escape": $overlay.innerHTML = ""; break;
     }
   });
@@ -474,7 +402,6 @@
   document.addEventListener("click", (e) => {
     const v = e.target.closest(".switcher [data-variant]"); if (v) { setVariant(v.dataset.variant); return; }
     const s = e.target.closest(".switcher [data-state]"); if (s) { setIssue(s.dataset.state); return; }
-    const tab = e.target.closest("[data-tab]"); if (tab) { state.tab = tab.dataset.tab; render(); return; }
     const feed = e.target.closest("[data-feed]"); if (feed) { state.feed = feed.dataset.feed; render(); return; }
     const move = e.target.closest("[data-transition]");
     if (move) {
@@ -483,8 +410,6 @@
       toast(`Requested ${i.id}: ${statusById[i.status].label} → ${statusById[move.dataset.transition].label} (mock, nothing moves)`);
       return;
     }
-    const a = e.target.closest('a[href^="#"]');
-    if (a) { const id = a.getAttribute("href").slice(1); if (!document.getElementById(id) && state.variant === "tabs") { e.preventDefault(); state.tab = id === "checks" || id === "threads" ? "pr" : id; render(); setTimeout(() => jump(id), 0); } }
   });
   $viewer.addEventListener("change", () => setViewer($viewer.value));
   document.addEventListener("submit", (e) => {
