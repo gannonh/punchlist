@@ -7,7 +7,7 @@ description: Launch and drive Punchlist (the punchlist-server API on Postgres an
 
 Punchlist today is a server (`punchlist-server`, axum on Postgres) and a terminal client (`pl`). A user drives it by running `pl` commands against a running server. There is no web app, runner or GitHub integration yet; extend this skill when a slice adds one.
 
-Everything here runs from the repository root on sartre. Rust lives in `~/.cargo/bin`, which is not on the default `PATH`; the helper adds it, but put it on `PATH` yourself for any `cargo` command: `export PATH="$HOME/.cargo/bin:$PATH"`.
+Everything here runs from the repository root on sartre.
 
 ## Fixed facts for live checks
 

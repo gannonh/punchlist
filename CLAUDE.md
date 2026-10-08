@@ -36,7 +36,7 @@ docker-compose.yml         Postgres for development; the self-host stack
 
 Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client` and `punchlist-cli`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
 
-- Rust comes from rustup, which reads `rust-toolchain.toml`. On sartre it lives in `~/.cargo/bin`, which is not on the default `PATH`: run `export PATH="$HOME/.cargo/bin:$PATH"` first.
+- Rust comes from rustup, which reads `rust-toolchain.toml`. Both machines get it from devops' `bin/machine-setup`.
 - `pnpm dev`: Postgres in Docker on `127.0.0.1:5433`, then the server on `127.0.0.1:7878`. Local defaults for `DATABASE_URL` and `PUNCHLIST_BIND` are in `scripts/env.sh`; they are not secrets.
 - `pnpm check`: rustfmt, clippy with `-D warnings`, `punchlist-core` for wasm32, `cargo test` (starts Postgres; the sqlx tests need it), and the `.sqlx/` staleness check. Run it before a pull request. CI runs the same script.
 - `pnpm db:prepare`: after changing a query or a migration, migrate the dev database and regenerate `.sqlx/`. Needs `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features postgres,rustls`).

@@ -9,7 +9,6 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
-export PATH="$HOME/.cargo/bin:$PATH"
 STATE_ROOT="${TMPDIR:-/tmp}/punchlist-verify"
 EVIDENCE_ROOT="$REPO/verify-artifacts"
 DB_PORT="${PUNCHLIST_DB_PORT:-5433}"
