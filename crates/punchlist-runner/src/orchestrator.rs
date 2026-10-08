@@ -32,6 +32,12 @@ pub fn retry_delay_ms(attempt: u32, max_backoff_ms: i64) -> i64 {
 
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_BATCH_LINES: usize = 50;
+/// A batch closes once its lines reach this many bytes, well under the server's 2 MiB
+/// request body limit even with one more clipped line.
+const LOG_BATCH_BYTES: usize = 1024 * 1024;
+/// A heartbeat that has not answered by now is abandoned so the next tick can renew the
+/// leases (30 s) in time.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The server refuses lines over 64 KiB; longer ones are cut to this many bytes.
 const LOG_LINE_MAX_BYTES: usize = 60 * 1024;
 /// Tries per batch before it is dropped, so a server that keeps failing cannot hold the
@@ -141,8 +147,17 @@ pub(crate) async fn run_with_worktrees(
                         .map(|&(run_id, attempt)| HeldAttempt { run_id, attempt })
                         .collect(),
                 };
-                if let Err(e) = client.heartbeat(&runner_id, &snapshot).await {
-                    tracing::warn!("heartbeat failed: {e}");
+                match tokio::time::timeout(
+                    HEARTBEAT_TIMEOUT,
+                    client.heartbeat(&runner_id, &snapshot),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!("heartbeat failed: {e}"),
+                    Err(_) => {
+                        tracing::warn!("heartbeat timed out after {}s", HEARTBEAT_TIMEOUT.as_secs())
+                    }
                 }
             }
         })
@@ -221,16 +236,19 @@ pub(crate) async fn run_with_worktrees(
     Ok(())
 }
 
-/// Batches log lines: a flush after 500 ms or 50 lines. A batch the server refuses as
-/// invalid is dropped; one that keeps failing is retried with backoff, then dropped after
-/// `LOG_BATCH_TRIES`. Returns true when the server said the attempt is stale, after
-/// signalling `stop`.
+/// Batches log lines: a flush after 500 ms, 50 lines or 1 MiB. A batch the server refuses
+/// as invalid is dropped; one that keeps failing is retried with backoff, then dropped after
+/// `LOG_BATCH_TRIES`. Once shutdown starts, a send gets `final_timeout`, and the first
+/// failure abandons the rest of the log. Returns true when the server said the attempt is
+/// stale, after signalling `stop`.
 async fn flush_logs(
     client: Client,
     run_id: String,
     attempt: i32,
     mut lines: mpsc::Receiver<String>,
     stop: Arc<watch::Sender<bool>>,
+    mut shutdown: watch::Receiver<bool>,
+    final_timeout: Duration,
 ) -> bool {
     let mut pending: Vec<String> = Vec::new();
     // The number of the first pending line; the lines of an attempt are numbered 1, 2, 3...
@@ -238,6 +256,7 @@ async fn flush_logs(
     let mut stale = false;
     let mut closed = false;
     let mut tries: u32 = 0;
+    let mut abandoned = false;
     // After the agent's output closes, keep going until the last batch is sent or dropped.
     while !closed || !pending.is_empty() {
         if pending.is_empty() {
@@ -247,9 +266,14 @@ async fn flush_logs(
             }
         }
         let deadline = tokio::time::Instant::now() + LOG_FLUSH_INTERVAL;
-        while !closed && pending.len() < LOG_BATCH_LINES {
+        let mut bytes: usize = pending.iter().map(String::len).sum();
+        while !closed && pending.len() < LOG_BATCH_LINES && bytes < LOG_BATCH_BYTES {
             match tokio::time::timeout_at(deadline, lines.recv()).await {
-                Ok(Some(line)) => pending.push(clip(line)),
+                Ok(Some(line)) => {
+                    let line = clip(line);
+                    bytes += line.len();
+                    pending.push(line);
+                }
                 Ok(None) => {
                     closed = true;
                     break;
@@ -262,7 +286,18 @@ async fn flush_logs(
             first_line,
             lines: pending.clone(),
         };
-        match client.append_log(&run_id, &request).await {
+        let Some(sent) = until_shutdown_grace(
+            client.append_log(&run_id, &request),
+            &shutdown,
+            final_timeout,
+        )
+        .await
+        else {
+            tracing::warn!("run {run_id}: shutting down; abandoning the rest of the log");
+            abandoned = true;
+            break;
+        };
+        match sent {
             Ok(()) => {
                 first_line += pending.len() as i64;
                 pending.clear();
@@ -272,6 +307,13 @@ async fn flush_logs(
                 tracing::warn!("run {run_id}: lease lost; stopping the agent");
                 stale = true;
                 let _ = stop.send(true);
+                break;
+            }
+            Err(e) if *shutdown.borrow() => {
+                tracing::warn!(
+                    "run {run_id}: cannot send log lines while shutting down: {e}; abandoning the rest of the log"
+                );
+                abandoned = true;
                 break;
             }
             Err(e) => {
@@ -288,12 +330,15 @@ async fn flush_logs(
                 } else {
                     tracing::warn!("run {run_id}: cannot send log lines, will retry: {e}");
                     let backoff = Duration::from_millis(250 * 2u64.pow(tries - 1));
-                    tokio::time::sleep(backoff.min(Duration::from_secs(8))).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff.min(Duration::from_secs(8))) => {}
+                        _ = shutdown.wait_for(|s| *s) => {}
+                    }
                 }
             }
         }
     }
-    if stale {
+    if stale || abandoned {
         // Keep draining so the agent's output pipe never blocks on a closed channel.
         while lines.recv().await.is_some() {}
     }
@@ -319,6 +364,8 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
         attempt,
         lines_rx,
         stop_tx.clone(),
+        ctx.shutdown.clone(),
+        FINAL_REPORT_TIMEOUT,
     ));
     let forward = {
         let mut shutdown = ctx.shutdown.clone();
@@ -418,9 +465,26 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
 /// gives up and leaves the attempt to its lease.
 const FINAL_REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Reports the outcome, retrying with backoff. When shutdown starts, a request in flight
-/// gets `final_timeout` more, a backoff ends at once and one last try gets `final_timeout`.
-/// Then the runner gives up: the lease expires and the server fails the attempt.
+/// Runs `fut` to the end, unless shutdown starts first: then it gets `final_timeout` more.
+/// `None` when it ran out.
+async fn until_shutdown_grace<T>(
+    fut: impl std::future::Future<Output = T>,
+    shutdown: &watch::Receiver<bool>,
+    final_timeout: Duration,
+) -> Option<T> {
+    let mut shutdown = shutdown.clone();
+    tokio::select! {
+        out = fut => Some(out),
+        _ = async {
+            let _ = shutdown.wait_for(|s| *s).await;
+            tokio::time::sleep(final_timeout).await;
+        } => None,
+    }
+}
+
+/// Reports the outcome, retrying with backoff. Once shutdown starts, a request gets
+/// `final_timeout`, a backoff ends at once, and the first failure gives up: the lease
+/// expires and the server fails the attempt.
 async fn finish_with_retry(
     client: &Client,
     run_id: &str,
@@ -428,25 +492,11 @@ async fn finish_with_retry(
     mut shutdown: watch::Receiver<bool>,
     final_timeout: Duration,
 ) {
-    let mut stopping = *shutdown.borrow();
     for failures in 1..=5u32 {
-        let report = async {
-            if stopping {
-                tokio::time::timeout(final_timeout, client.finish_run(run_id, request))
-                    .await
-                    .ok()
-            } else {
-                let mut watch = shutdown.clone();
-                tokio::select! {
-                    done = client.finish_run(run_id, request) => Some(done),
-                    _ = async {
-                        let _ = watch.wait_for(|s| *s).await;
-                        tokio::time::sleep(final_timeout).await;
-                    } => None,
-                }
-            }
-        };
-        let Some(done) = report.await else {
+        let Some(done) =
+            until_shutdown_grace(client.finish_run(run_id, request), &shutdown, final_timeout)
+                .await
+        else {
             tracing::error!(
                 "run {run_id}: shutting down before the outcome was recorded; the lease will expire"
             );
@@ -461,7 +511,7 @@ async fn finish_with_retry(
                 tracing::warn!("run {run_id}: lease lost before the outcome was recorded");
                 return;
             }
-            Err(e) if stopping || *shutdown.borrow() => {
+            Err(e) if *shutdown.borrow() => {
                 tracing::error!(
                     "run {run_id}: cannot record the outcome while shutting down: {e}; the lease will expire"
                 );
@@ -474,7 +524,7 @@ async fn finish_with_retry(
                 );
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
-                    _ = shutdown.wait_for(|s| *s) => stopping = true,
+                    _ = shutdown.wait_for(|s| *s) => {}
                 }
             }
         }
@@ -540,6 +590,37 @@ mod tests {
         };
         let took = report_with_shutdown(&url, Duration::from_millis(300)).await;
         assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_a_flusher_stuck_on_a_silent_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = Client::new(&url, "token").unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let started = Instant::now();
+        let flusher = tokio::spawn(flush_logs(
+            client,
+            "run".into(),
+            1,
+            rx,
+            Arc::new(stop_tx),
+            shutdown_rx,
+            Duration::from_millis(200),
+        ));
+        tx.send("one".into()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        shutdown_tx.send(true).unwrap();
+        // The agent keeps writing after shutdown; the flusher must not block it.
+        for n in 0..100 {
+            tx.send(format!("late {n}")).await.unwrap();
+        }
+        drop(tx);
+        assert!(!flusher.await.unwrap());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(listener);
     }
 
     #[test]
@@ -616,10 +697,18 @@ mod tests {
             claim.attempt,
             rx,
             Arc::new(stop_tx),
+            watch::channel(false).1,
+            Duration::from_secs(10),
         ));
         tx.send("short".into()).await.unwrap();
-        tx.send("x".repeat(70 * 1024)).await.unwrap();
-        drop(tx);
+        // 40 lines clipped to 60 KiB each: 2.4 MiB, over the server's 2 MiB body limit if
+        // they went in one request.
+        let sender = tokio::spawn(async move {
+            for _ in 0..40 {
+                tx.send("x".repeat(70 * 1024)).await.unwrap();
+            }
+        });
+        sender.await.unwrap();
         let stale = tokio::time::timeout(Duration::from_secs(10), flusher)
             .await
             .expect("the flusher ends")
@@ -628,12 +717,10 @@ mod tests {
 
         let log = runner.run_log(&run_id).await.unwrap();
         let lines: Vec<&str> = log.lines.iter().map(|l| l.line.as_str()).collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 41);
         assert_eq!(lines[0], "short");
-        assert_eq!(
-            lines[1],
-            format!("{}… [truncated]", "x".repeat(LOG_LINE_MAX_BYTES))
-        );
+        let clipped = format!("{}… [truncated]", "x".repeat(LOG_LINE_MAX_BYTES));
+        assert!(lines[1..].iter().all(|line| *line == clipped));
     }
 
     #[test]
