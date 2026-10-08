@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace SET next_issue_number = next_issue_number + 1 WHERE id = $1\n           RETURNING issue_prefix, next_issue_number - 1 AS \"number!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_prefix",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "issue_prefix"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "number!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "733952afd1a96668250591f6ca8432c57f84216885fb54bf870a7677f5de599e"
+}

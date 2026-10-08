@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1\n         RETURNING last_event_seq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_event_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "last_event_seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2117a9b5194498b5e8d1c3a70bb368f3ad84e2d453942d8e969966645fe529bc"
+}
