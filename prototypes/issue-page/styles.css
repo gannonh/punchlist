@@ -171,6 +171,24 @@ table.checks .detail { color: var(--bad); font-size: var(--text-caption); }
 .avatar.github { border-radius: 50%; background: #27272a; color: #fff; }
 .avatar.server { border-radius: 4px; background: var(--primary-soft); color: var(--primary); border: 1px solid var(--primary-line); }
 
+/* Activity filter and composer */
+.feed-filter { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; background: var(--card); padding: 1px; }
+.feed-filter button { border: 0; background: transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: var(--text-caption); font-weight: 500; color: var(--muted-foreground); text-transform: none; letter-spacing: 0; display: inline-flex; gap: 4px; align-items: center; }
+.feed-filter button[aria-pressed="true"] { background: var(--foreground); color: var(--card); }
+.feed-filter button .n { font-size: 10px; opacity: .8; }
+.composer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: start; }
+.composer .who { padding-top: 4px; }
+.composer .who .name, .composer .who .actor-type { display: none; }
+.composer textarea { font: inherit; color: inherit; width: 100%; resize: vertical; min-height: 44px; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; background: var(--card); }
+.composer textarea:focus { outline: 2px solid var(--ring); outline-offset: 1px; }
+.composer textarea:disabled { background: var(--secondary); color: var(--ink-3); cursor: not-allowed; }
+.composer .foot { grid-column: 2; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: var(--text-caption); }
+.composer .note { display: inline-flex; gap: 5px; align-items: center; color: var(--ink-3); }
+.composer .note svg { width: 11px; height: 11px; }
+.composer.locked .note { color: var(--warn); }
+.composer button { border: 1px solid var(--foreground); background: var(--foreground); color: var(--card); border-radius: 6px; padding: 5px 12px; cursor: pointer; font-weight: 500; }
+.composer button:disabled { background: var(--secondary); border-color: var(--border); color: var(--ink-3); cursor: not-allowed; }
+
 /* Properties (sidebar rail) */
 .props-list { display: grid; grid-template-columns: 84px 1fr; gap: 6px 10px; font-size: var(--text-meta); margin: 0; }
 .props-list dt { color: var(--ink-3); }

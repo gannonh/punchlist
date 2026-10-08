@@ -5,7 +5,7 @@
   const VARIANTS = ["sidebar", "tabs", "pipeline"];
   const STATES = issues.map((i) => i.key);
 
-  const state = { variant: "sidebar", issue: "running", viewer: "gannon", tab: "overview", liveIndex: 0 };
+  const state = { variant: "sidebar", issue: "running", viewer: "gannon", tab: "overview", feed: "all", liveIndex: 0 };
 
   const $view = document.getElementById("view");
   const $shortcuts = document.getElementById("shortcuts");
@@ -264,8 +264,30 @@
       </div>
     </li>`;
   }
+  const FEED = [["all", "All"], ["comments", "Comments"], ["transitions", "Transitions"]];
+  function feedEntries(i) {
+    if (state.feed === "comments") return i.timeline.filter((e) => e.kind === "comment");
+    if (state.feed === "transitions") return i.timeline.filter((e) => e.kind === "transition" || e.kind === "refused");
+    return i.timeline;
+  }
+  function composerHtml(i) {
+    const s = statusById[i.status];
+    const v = viewer();
+    const locked = !!(s.lock && s.lock.includes(v.type));
+    const terminal = !s.next;
+    const note = locked ? `${ICON.lock} ${esc(s.label)} is locked to people. ${esc(v.name)} cannot comment here.` : terminal ? `${esc(s.label)} is terminal. Comments stay open for the verify note.` : "";
+    return `<form class="composer ${locked ? "locked" : ""}" data-composer data-locked="${locked}">
+      <div class="who">${actorHtml(state.viewer)}</div>
+      <textarea name="body" rows="2" placeholder="${locked ? "Commenting is disabled for agents in " + esc(s.label) : "Comment as " + esc(v.name) + "…"}" ${locked ? "disabled" : ""} aria-label="New comment"></textarea>
+      <div class="foot">${note ? `<span class="note">${note}</span>` : `<span class="note muted">Comments are events in the log. Agent comments end with (agent).</span>`}<button type="submit" ${locked ? "disabled" : ""}>Comment</button></div>
+    </form>`;
+  }
   function timelinePanelHtml(i) {
-    return `<section class="panel" id="timeline" data-section="timeline"><h2>Timeline <span class="n">${i.timeline.length}</span></h2><ol class="timeline">${i.timeline.map(timelineEntryHtml).join("")}</ol></section>`;
+    const entries = feedEntries(i);
+    const comments = i.timeline.filter((e) => e.kind === "comment").length;
+    const filter = `<span class="feed-filter right" role="group" aria-label="Activity filter">${FEED.map(([id, label]) => `<button type="button" data-feed="${id}" aria-pressed="${state.feed === id}">${label}${id === "comments" ? ` <span class="n">${comments}</span>` : ""}</button>`).join("")}</span>`;
+    const body = entries.length ? `<ol class="timeline">${entries.map(timelineEntryHtml).join("")}</ol>` : `<div class="proof-empty">No ${esc(state.feed)} yet.</div>`;
+    return `<section class="panel" id="timeline" data-section="timeline"><h2>Activity <span class="n">${i.timeline.length}</span>${filter}</h2>${body}${composerHtml(i)}</section>`;
   }
 
   // ---------- header and properties ----------
@@ -321,7 +343,7 @@
       ["runs", "Runs", `<span class="n">${i.runs.length}</span>`],
       ["gates", "Gates", failing ? `<span class="n bad">${failing} failing</span>` : `<span class="n">${next ? next.gates.length : Object.keys(i.lastGates || {}).length}</span>`],
       ["pr", "Pull request", openThreads ? `<span class="n bad">${openThreads} open</span>` : ""],
-      ["timeline", "Timeline", `<span class="n">${i.timeline.length}</span>`],
+      ["timeline", "Activity", `<span class="n">${i.timeline.length}</span>`],
     ];
     const panel = {
       overview: `<div class="tabpanel two"><div>${specPanelHtml(i)}</div><div>${proofPanelHtml(i)}</div></div>`,
@@ -398,7 +420,7 @@
     const title = { sidebar: "Sidebar", tabs: "Tabs", pipeline: "Pipeline" }[state.variant];
     const keys = [["1 2 3", "switch layout"], ["j k", "next / previous mock issue"], ["v", "view as person / agent"]];
     if (state.variant === "tabs") keys.push(["[ ]", "previous / next tab"]);
-    keys.push(["g", "jump to gates"], ["t", "jump to timeline"], ["Esc", "close"]);
+    keys.push(["g", "jump to gates"], ["t", "jump to activity"], ["c", "comment"], ["Esc", "close"]);
     $shortcuts.innerHTML = `<span class="title">${title} shortcuts</span>` + keys.map(([k, d]) => `<span>${k.split(" ").map((x) => `<kbd>${esc(x)}</kbd>`).join("")} ${esc(d)}</span>`).join("");
   }
 
@@ -440,6 +462,7 @@
       case "v": setViewer(state.viewer === "gannon" ? "claude" : "gannon"); break;
       case "g": jump("gates"); break;
       case "t": jump("timeline"); break;
+      case "c": { jump("timeline"); const ta = document.querySelector("[data-composer] textarea"); if (ta && !ta.disabled) { setTimeout(() => ta.focus(), 50); e.preventDefault(); } break; }
       case "[": case "]": if (state.variant === "tabs") { const tabs = ["overview", "runs", "gates", "pr", "timeline"]; const t = tabs.indexOf(state.tab); state.tab = tabs[(t + (e.key === "]" ? 1 : tabs.length - 1)) % tabs.length]; render(); } break;
       case "Escape": $overlay.innerHTML = ""; break;
     }
@@ -449,6 +472,7 @@
     const v = e.target.closest(".switcher [data-variant]"); if (v) { setVariant(v.dataset.variant); return; }
     const s = e.target.closest(".switcher [data-state]"); if (s) { setIssue(s.dataset.state); return; }
     const tab = e.target.closest("[data-tab]"); if (tab) { state.tab = tab.dataset.tab; render(); return; }
+    const feed = e.target.closest("[data-feed]"); if (feed) { state.feed = feed.dataset.feed; render(); return; }
     const move = e.target.closest("[data-transition]");
     if (move) {
       const i = current();
@@ -460,6 +484,21 @@
     if (a) { const id = a.getAttribute("href").slice(1); if (!document.getElementById(id) && state.variant === "tabs") { e.preventDefault(); state.tab = id === "checks" || id === "threads" ? "pr" : id; render(); setTimeout(() => jump(id), 0); } }
   });
   $viewer.addEventListener("change", () => setViewer($viewer.value));
+  document.addEventListener("submit", (e) => {
+    const form = e.target.closest("[data-composer]");
+    if (!form) return;
+    e.preventDefault();
+    if (form.dataset.locked === "true") return;
+    const text = form.body.value.trim();
+    if (!text) return;
+    const i = current();
+    const v = viewer();
+    i.timeline.push({ at: "just now", actor: state.viewer, kind: "comment", text: v.type === "agent" ? `${text}\n\n(agent)` : text });
+    state.feed = state.feed === "transitions" ? "all" : state.feed;
+    render();
+    jump("timeline");
+    toast(`Comment posted as ${v.name} (mock)`);
+  });
 
   render();
 })();
