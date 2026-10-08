@@ -147,20 +147,28 @@ table.checks .detail { color: var(--bad); font-size: var(--text-caption); }
 .spec .ac li.done .box { background: var(--ok); border-color: var(--ok); }
 .spec .ac li.done { color: var(--muted-foreground); }
 
-/* Timeline */
-.timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
-.timeline li { display: grid; grid-template-columns: 24px 1fr; gap: 10px; padding: 8px 0; position: relative; }
-.timeline li + li::before { content: ""; position: absolute; left: 11px; top: -8px; height: 16px; border-left: 1px solid var(--border); }
-.timeline .who { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; font-size: var(--text-meta); color: var(--muted-foreground); }
-.timeline .who .name { font-weight: 600; color: var(--foreground); }
-.timeline .who .at { color: var(--ink-3); font-size: var(--text-caption); margin-left: auto; white-space: nowrap; }
-.timeline .body { margin-top: 3px; font-size: var(--text-meta); color: var(--muted-foreground); overflow-wrap: anywhere; white-space: pre-line; }
-.timeline .move { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Timeline: one line per event, comments as cards, a thin rail through the avatars */
+.timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+.timeline::before { content: ""; position: absolute; left: 9px; top: 10px; bottom: 10px; border-left: 1px solid var(--border); }
+.timeline li { position: relative; padding: 5px 0; }
+.timeline .row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: start; gap: 8px; font-size: var(--text-meta); color: var(--muted-foreground); }
+.timeline .row .c { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-height: 20px; }
+.timeline .row .avatar { width: 20px; height: 20px; flex: none; position: relative; z-index: 1; box-shadow: 0 0 0 3px var(--card); }
+.timeline .row .avatar.person { font-size: 8px; }
+.timeline .row .name { font-weight: 600; color: var(--foreground); }
+.timeline .row .verb { color: var(--ink-3); }
+.timeline .row .text { color: var(--muted-foreground); overflow-wrap: anywhere; }
+.timeline .row .at { color: var(--ink-3); font-size: var(--text-caption); white-space: nowrap; line-height: 20px; }
+.timeline .row .actor-type { font-size: 10px; padding: 0 4px; line-height: 15px; }
+.timeline .move { display: inline-flex; align-items: center; gap: 5px; color: var(--foreground); font-weight: 500; }
 .timeline .move .status-dot { width: 8px; height: 8px; }
-.timeline .move .arrow { color: var(--ink-3); }
-.timeline .gate-list { margin-top: 4px; }
-.timeline li.refused .body { color: var(--bad); }
-.timeline li.comment .body { background: var(--secondary); border-radius: 6px; padding: 6px 8px; color: var(--foreground); }
+.timeline .move .arrow { color: var(--ink-3); font-weight: 400; }
+.timeline .gates-note { color: var(--ok); font-size: var(--text-caption); cursor: default; }
+.timeline li.kind-refused .text { color: var(--bad); }
+.timeline li.kind-refused .text b { font-weight: 600; }
+.timeline li.kind-comment { padding: 6px 0; }
+.timeline li.kind-comment .bubble { margin: 6px 0 0 30px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: var(--text-body); color: var(--foreground); white-space: pre-line; overflow-wrap: anywhere; background: var(--card); }
+.timeline li.kind-comment[data-actor-type="agent"] .bubble { border-color: var(--agent-line); }
 .actor-type { font-size: var(--text-caption); font-weight: 500; border-radius: 4px; padding: 0 5px; border: 1px solid var(--border); color: var(--ink-3); }
 .actor-type.agent { color: var(--agent); background: var(--agent-soft); border-color: var(--agent-line); }
 .actor-type.runner { color: #0e7490; background: #ecfeff; border-color: #a5f3fc; }
@@ -176,17 +184,18 @@ table.checks .detail { color: var(--bad); font-size: var(--text-caption); }
 .feed-filter button { border: 0; background: transparent; border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: var(--text-caption); font-weight: 500; color: var(--muted-foreground); text-transform: none; letter-spacing: 0; display: inline-flex; gap: 4px; align-items: center; }
 .feed-filter button[aria-pressed="true"] { background: var(--foreground); color: var(--card); }
 .feed-filter button .n { font-size: 10px; opacity: .8; }
-.composer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; display: grid; grid-template-columns: auto 1fr; gap: 8px 10px; align-items: start; }
-.composer .who { padding-top: 4px; }
+.composer { margin-top: 10px; padding-top: 12px; border-top: 1px solid var(--border); display: grid; grid-template-columns: 20px 1fr; gap: 6px 10px; align-items: start; }
+.composer .who { padding-top: 6px; }
+.composer .who .avatar { width: 20px; height: 20px; }
 .composer .who .name, .composer .who .actor-type { display: none; }
-.composer textarea { font: inherit; color: inherit; width: 100%; resize: vertical; min-height: 44px; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; background: var(--card); }
+.composer textarea { font: inherit; color: inherit; width: 100%; resize: vertical; min-height: 56px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--card); }
 .composer textarea:focus { outline: 2px solid var(--ring); outline-offset: 1px; }
 .composer textarea:disabled { background: var(--secondary); color: var(--ink-3); cursor: not-allowed; }
 .composer .foot { grid-column: 2; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; font-size: var(--text-caption); }
 .composer .note { display: inline-flex; gap: 5px; align-items: center; color: var(--ink-3); }
 .composer .note svg { width: 11px; height: 11px; }
 .composer.locked .note { color: var(--warn); }
-.composer button { border: 1px solid var(--foreground); background: var(--foreground); color: var(--card); border-radius: 6px; padding: 5px 12px; cursor: pointer; font-weight: 500; }
+.composer button { border: 1px solid var(--foreground); background: var(--foreground); color: var(--card); border-radius: 6px; padding: 4px 12px; cursor: pointer; font-weight: 500; font-size: var(--text-meta); }
 .composer button:disabled { background: var(--secondary); border-color: var(--border); color: var(--ink-3); cursor: not-allowed; }
 
 /* Properties (sidebar rail) */

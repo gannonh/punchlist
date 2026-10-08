@@ -247,22 +247,25 @@
   // ---------- timeline ----------
   function timelineEntryHtml(e) {
     const a = actors[e.actor];
-    let body = "";
-    if (e.kind === "transition") {
-      body = `<span class="move">${statusDot(e.from)}${esc(statusById[e.from].label)}<span class="arrow">→</span>${statusDot(e.to)}${esc(statusById[e.to].label)}${e.event ? `<span class="muted">on ${esc(e.event.replace(/_/g, " "))}</span>` : ""}</span>`
-        + (e.gates ? `<div class="gate-list">${e.gates.map((g) => `<span class="pass">✓ ${esc(gates[g].label)}</span>`).join("")}</div>` : "");
-    } else if (e.kind === "refused") {
-      body = `Refused ${esc(actors[e.by].name)}'s request to enter ${esc(statusById[e.to].label)}: <b>${esc(gates[e.gate].label)}</b> · ${esc(e.reason)}`;
-    } else {
-      body = esc(e.text);
+    const chip = a.type === "person" || a.type === "github" ? "" : `<span class="actor-type ${a.type}">${esc(TYPE_LABEL[a.type])}</span>`;
+    const who = `${avatarHtml(a)}<span class="c"><span class="name">${esc(a.name)}</span>${chip}`;
+    const at = `<time class="at">${esc(e.at)}</time>`;
+    if (e.kind === "comment") {
+      return `<li class="kind-comment" data-actor-type="${a.type}" data-kind="comment">
+        <div class="row">${who}<span class="verb">commented</span></span>${at}</div>
+        <div class="bubble">${esc(e.text)}</div>
+      </li>`;
     }
-    return `<li class="${e.kind}" data-actor-type="${a.type}" data-kind="${e.kind}">
-      ${avatarHtml(a)}
-      <div>
-        <div class="who"><span class="name">${esc(a.name)}</span>${a.type === "person" ? "" : `<span class="actor-type ${a.type}">${esc(TYPE_LABEL[a.type])}</span>`}<span class="muted">${esc(e.kind === "transition" ? "moved" : e.kind === "comment" ? "commented" : e.kind === "claim" ? "claimed" : e.kind === "refused" ? "refused" : e.kind)}</span><span class="at">${esc(e.at)}</span></div>
-        <div class="body">${body}</div>
-      </div>
-    </li>`;
+    let text;
+    if (e.kind === "transition") {
+      const gatesNote = e.gates ? `<span class="gates-note" title="${esc(e.gates.map((g) => gates[g].label).join(", "))}">${e.gates.length} gates ✓</span>` : e.event ? `<span class="muted">on ${esc(e.event.replace(/_/g, " "))}</span>` : "";
+      text = `<span class="verb">moved</span><span class="move">${statusDot(e.from)}${esc(statusById[e.from].label)}<span class="arrow">→</span>${statusDot(e.to)}${esc(statusById[e.to].label)}</span>${gatesNote}`;
+    } else if (e.kind === "refused") {
+      text = `<span class="verb">refused</span><span class="text">${esc(actors[e.by].name)} → ${esc(statusById[e.to].label)}: <b>${esc(gates[e.gate].label)}</b> · ${esc(e.reason)}</span>`;
+    } else {
+      text = `<span class="text">${esc(e.text)}</span>`;
+    }
+    return `<li class="kind-${e.kind}" data-actor-type="${a.type}" data-kind="${e.kind}"><div class="row">${who}${text}</span>${at}</div></li>`;
   }
   const FEED = [["all", "All"], ["comments", "Comments"], ["transitions", "Transitions"]];
   function feedEntries(i) {
@@ -278,8 +281,8 @@
     const note = locked ? `${ICON.lock} ${esc(s.label)} is locked to people. ${esc(v.name)} cannot comment here.` : terminal ? `${esc(s.label)} is terminal. Comments stay open for the verify note.` : "";
     return `<form class="composer ${locked ? "locked" : ""}" data-composer data-locked="${locked}">
       <div class="who">${actorHtml(state.viewer)}</div>
-      <textarea name="body" rows="2" placeholder="${locked ? "Commenting is disabled for agents in " + esc(s.label) : "Comment as " + esc(v.name) + "…"}" ${locked ? "disabled" : ""} aria-label="New comment"></textarea>
-      <div class="foot">${note ? `<span class="note">${note}</span>` : `<span class="note muted">Comments are events in the log. Agent comments end with (agent).</span>`}<button type="submit" ${locked ? "disabled" : ""}>Comment</button></div>
+      <textarea name="body" rows="2" placeholder="${locked ? "Commenting is disabled for agents in " + esc(s.label) : "Leave a comment…"}" ${locked ? "disabled" : ""} aria-label="New comment"></textarea>
+      <div class="foot">${note ? `<span class="note">${note}</span>` : `<span class="note">as ${esc(v.name)}${v.type === "agent" ? " · ends with (agent)" : ""}</span>`}<button type="submit" ${locked ? "disabled" : ""}>Comment</button></div>
     </form>`;
   }
   function timelinePanelHtml(i) {
