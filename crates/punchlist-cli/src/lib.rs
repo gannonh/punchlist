@@ -162,6 +162,8 @@ fn init_logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        // Plain text when the log goes to a file.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .try_init();
 }
 
