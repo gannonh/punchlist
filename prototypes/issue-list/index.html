@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Punchlist · Issue list prototype</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Punchlist <span class="tag">prototype · issue list</span></div>
+    <div class="switcher" role="group" aria-label="Layout">
+      <button type="button" data-variant="list" aria-pressed="true"><kbd>1</kbd> List</button>
+      <button type="button" data-variant="board" aria-pressed="false"><kbd>2</kbd> Board</button>
+    </div>
+    <div class="filters">
+      <input id="search" type="search" placeholder="Filter issues  /" aria-label="Filter issues" />
+      <select id="who" aria-label="Assignee filter">
+        <option value="">Everyone</option>
+        <option value="people">People</option>
+        <option value="agents">Agents</option>
+        <option value="claude">Claude Code</option>
+        <option value="codex">Codex</option>
+        <option value="opencode">OpenCode</option>
+        <option value="none">Unassigned</option>
+      </select>
+      <label class="count"><input id="hide-closed" type="checkbox" checked /> hide Done and Canceled</label>
+      <span class="count" id="count"></span>
+    </div>
+  </header>
+
+  <main id="view" aria-live="polite"></main>
+
+  <footer class="shortcuts" id="shortcuts"></footer>
+
+  <div id="overlay"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
