@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, name, agents, registered_at, last_heartbeat\n         FROM runner WHERE workspace_id = $1 ORDER BY registered_at, id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agents",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "agents"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "registered_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "registered_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_heartbeat",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "last_heartbeat"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "509a9dc1ca7f2f91a297a5c00a2039f4df75262e5077e6a5b9dd034a8dbbc0a2"
+}

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use punchlist_server::{AppState, Bootstrap, MIGRATOR, bootstrap, router};
+use punchlist_server::{AppState, Bootstrap, MIGRATOR, bootstrap, expire_leases, router};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -65,7 +65,19 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Serve { bind } => {
-            let app = router(AppState { pool }).layer(TraceLayer::new_for_http());
+            let expiry_pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    tick.tick().await;
+                    match expire_leases(&expiry_pool).await {
+                        Ok(0) => {}
+                        Ok(n) => tracing::warn!(attempts = n, "expired attempt leases"),
+                        Err(error) => tracing::error!(%error, "expire leases"),
+                    }
+                }
+            });
+            let app = router(AppState::new(pool)).layer(TraceLayer::new_for_http());
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("listen on {bind}"))?;

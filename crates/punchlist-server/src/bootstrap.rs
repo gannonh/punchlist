@@ -22,7 +22,7 @@ pub struct Bootstrapped {
 }
 
 pub async fn bootstrap(pool: &PgPool, input: &Bootstrap) -> anyhow::Result<Bootstrapped> {
-    let token = format!("plt_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let token = crate::auth::new_token();
     let mut tx = pool.begin().await?;
     let workspace_id = sqlx::query_scalar!(
         "INSERT INTO workspace (name, issue_prefix) VALUES ($1, $2) RETURNING id",

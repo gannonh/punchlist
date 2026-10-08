@@ -23,7 +23,7 @@ async fn setup(pool: &PgPool) -> (Router, Bootstrapped) {
     )
     .await
     .unwrap();
-    (router(AppState { pool: pool.clone() }), person)
+    (router(AppState::new(pool.clone())), person)
 }
 
 async fn call(
@@ -268,7 +268,7 @@ async fn unknown_issue_is_not_found(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn openapi_document_lists_the_issue_routes(pool: PgPool) {
+async fn openapi_document_lists_the_routes(pool: PgPool) {
     let (app, person) = setup(&pool).await;
     let (status, doc) = call(&app, &person.token, "GET", "/api/openapi.json", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -285,7 +285,13 @@ async fn openapi_document_lists_the_issue_routes(pool: PgPool) {
             "/api/issues",
             "/api/issues/{id}",
             "/api/issues/{id}/events",
-            "/api/issues/{id}/transitions"
+            "/api/issues/{id}/runs",
+            "/api/issues/{id}/transitions",
+            "/api/runners",
+            "/api/runners/{id}/heartbeat",
+            "/api/runs/claim",
+            "/api/runs/{id}/finish",
+            "/api/runs/{id}/log"
         ]
     );
 }

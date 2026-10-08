@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)\n         VALUES ($1, $2, $3, $4, $5)\n         RETURNING id, name, agents, registered_at, last_heartbeat",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agents",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "agents"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "registered_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "registered_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_heartbeat",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "last_heartbeat"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "TextArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "14244d835d5df3046ed91b75bfeb35b1f1d97da9ebafb725090dd04e475f6cf7"
+}

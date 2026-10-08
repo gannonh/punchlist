@@ -29,11 +29,17 @@ pub struct RunnerConfig {
     pub claim_wait: Duration,
 }
 
+mod agent;
+pub mod error;
+mod orchestrator;
+pub mod path_safety;
+pub mod workspace;
+mod worktree;
+
 /// Registers, then heartbeats and claims until `shutdown` resolves.
 pub async fn run(
     config: RunnerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> anyhow::Result<()> {
-    let _ = (config, shutdown);
-    anyhow::bail!("the runner is not implemented yet")
+    orchestrator::run(config, shutdown).await
 }

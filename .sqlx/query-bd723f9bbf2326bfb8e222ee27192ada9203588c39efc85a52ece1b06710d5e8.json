@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT seq, attempt, line, created_at FROM run_log WHERE run_id = $1 ORDER BY seq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "run_log",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "run_log",
+            "name": "attempt"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "line",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run_log",
+            "name": "line"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "run_log",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bd723f9bbf2326bfb8e222ee27192ada9203588c39efc85a52ece1b06710d5e8"
+}
