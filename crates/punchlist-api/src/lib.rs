@@ -104,6 +104,169 @@ impl EventDetail {
     }
 }
 
+/// `POST /api/runners`, with a person's token. Registers a runner and creates its actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RegisterRunner {
+    /// A name people read, such as `sartre`.
+    pub name: String,
+    /// Agent keys the runner can start, such as `claude-code`.
+    pub agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Runner {
+    pub id: Uuid,
+    pub name: String,
+    pub agents: Vec<String>,
+    pub registered_at: DateTime<Utc>,
+    pub last_heartbeat: DateTime<Utc>,
+}
+
+/// The response to `POST /api/runners`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RegisteredRunner {
+    pub runner: Runner,
+    /// The runner actor's bearer token, for heartbeats, claims, logs and outcomes. Shown
+    /// once; only its hash is stored.
+    pub token: String,
+    /// How long a lease lasts without a heartbeat.
+    pub lease_seconds: u32,
+}
+
+/// `GET /api/runners`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunnerList {
+    pub runners: Vec<Runner>,
+}
+
+/// `POST /api/runs/claim`, with a runner's token.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ClaimRequest {
+    /// Wait up to this many seconds (at most 30) for an issue to enter Start before
+    /// answering 204.
+    #[serde(default)]
+    pub wait_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Repository {
+    pub owner: String,
+    pub name: String,
+    pub default_branch: String,
+}
+
+/// A claimed issue: the server moved it from Start to In Progress as the runner and leased
+/// the attempt to the runner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Claim {
+    pub run_id: Uuid,
+    /// The compare-and-set token for logs and the outcome.
+    pub attempt: i32,
+    /// The agent key from the dispatch rule, such as `claude-code`.
+    pub agent: String,
+    /// The issue after the move, in In Progress.
+    pub issue: Issue,
+    pub repository: Repository,
+    /// The branch to work on, `feature/<id>-<slug>`.
+    pub branch: String,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+/// `POST /api/runs/{id}/log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AppendLog {
+    pub attempt: i32,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl RunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOutcome::Running => "running",
+            RunOutcome::Succeeded => "succeeded",
+            RunOutcome::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RunOutcome> {
+        [
+            RunOutcome::Running,
+            RunOutcome::Succeeded,
+            RunOutcome::Failed,
+        ]
+        .into_iter()
+        .find(|outcome| outcome.as_str() == s)
+    }
+}
+
+/// `POST /api/runs/{id}/finish`. The outcome is `succeeded` or `failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FinishRun {
+    pub attempt: i32,
+    pub outcome: RunOutcome,
+    /// Why the attempt failed. Required when the outcome is `failed`.
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub duration_ms: i64,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub output_tokens: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunnerRef {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LogLine {
+    /// Increases per run, in the order the server received the lines.
+    pub seq: i64,
+    pub attempt: i32,
+    pub line: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A run and its latest attempt. `GET /api/issues/{id}/runs` returns these, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Run {
+    pub id: Uuid,
+    pub issue_id: String,
+    pub agent: String,
+    /// The agent as people read it, such as `Claude Code`.
+    pub agent_name: String,
+    pub branch: String,
+    pub outcome: RunOutcome,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    /// The latest attempt's number, runner, failure reason, duration and tokens.
+    pub attempt: i32,
+    pub runner: RunnerRef,
+    pub failure_reason: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    /// The last 20 log lines, oldest first.
+    pub log_tail: Vec<LogLine>,
+}
+
+/// `GET /api/runs/{id}/log`: every line, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunLog {
+    pub run_id: Uuid,
+    pub lines: Vec<LogLine>,
+}
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ErrorBody {

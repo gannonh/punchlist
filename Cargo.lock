@@ -1413,6 +1413,7 @@ dependencies = [
  "insta",
  "punchlist-api",
  "punchlist-client",
+ "punchlist-runner",
  "punchlist-server",
  "serde",
  "sqlx",
@@ -1441,6 +1442,25 @@ dependencies = [
  "thiserror",
  "toml",
  "utoipa",
+]
+
+[[package]]
+name = "punchlist-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "punchlist-api",
+ "punchlist-client",
+ "punchlist-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
