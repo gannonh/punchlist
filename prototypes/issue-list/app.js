@@ -24,7 +24,7 @@
   const params = new URLSearchParams(location.search);
   if (params.get("variant") && statusesVariant(params.get("variant"))) state.variant = params.get("variant");
   if (params.get("q")) state.search = params.get("q");
-  function statusesVariant(v) { return ["list", "board", "cards"].includes(v); }
+  function statusesVariant(v) { return ["list", "board"].includes(v); }
 
   // ---------- helpers ----------
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -137,7 +137,7 @@
     const list = visibleIssues();
     $count.textContent = `${list.length} of ${issues.length}`;
     document.querySelectorAll(".switcher button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.variant === state.variant)));
-    $view.className = state.variant === "list" ? "list" : state.variant === "board" ? "board-view" : "cards-view";
+    $view.className = state.variant === "list" ? "list" : "board-view";
     $view.dataset.variant = state.variant;
 
     if (!list.length) {
@@ -148,9 +148,7 @@
     const order = navOrder(list);
     if (!state.selected || !order.includes(state.selected)) state.selected = order[0] || null;
 
-    if (state.variant === "list") $view.innerHTML = renderList(list);
-    else if (state.variant === "board") $view.innerHTML = renderBoard(list);
-    else $view.innerHTML = renderCards(list);
+    $view.innerHTML = state.variant === "list" ? renderList(list) : renderBoard(list);
     renderShortcuts();
     const sel = $view.querySelector(`[data-issue="${state.selected}"]`);
     if (sel) sel.scrollIntoView({ block: "nearest" });
@@ -212,39 +210,15 @@
     return `${tabs}<div class="board">${cols}</div>`;
   }
 
-  // Variant C: cards with the gate checklist and run detail
-  function renderCards(list) {
-    return grouped(list)
-      .filter((g) => g.issues.length)
-      .map((g) => `<section class="group" data-status="${g.status.id}">
-        ${groupHead(g)}
-        <div class="grid" role="listbox" aria-label="${esc(g.status.label)}">
-          ${g.issues.map((i) => {
-            const gs = gateSummary(i);
-            return `<article class="card" role="option" data-issue="${i.id}" aria-selected="${i.id === state.selected}" tabindex="-1">
-              <div class="head"><span class="mono">${esc(i.id)}</span><span>${labelsHtml(i)}</span></div>
-              <div class="title">${esc(i.title)}</div>
-              <div class="line"><span class="k">who</span><span class="v">${assigneeHtml(i)}</span></div>
-              <div class="line"><span class="k">run</span><span class="v">${runHtml(i, true)}</span></div>
-              <div class="line"><span class="k">PR</span><span class="v">${prHtml(i)}</span></div>
-              <div class="line"><span class="k">gates</span><span class="v" style="white-space:normal">${gateListHtml(i)}</span></div>
-              ${gs.total ? `<div class="gate-sum"><span class="progress" aria-hidden="true"><b style="width:${(gs.pass / gs.total) * 100}%"></b></span><span class="gates ${gs.pass === gs.total ? "all" : ""}">${esc(gs.text)}</span></div>` : ""}
-            </article>`;
-          }).join("")}
-        </div>
-      </section>`).join("");
-  }
-
   function renderShortcuts() {
     const common = [
       ["j", "next issue"], ["k", "previous issue"], ["Enter", "open issue"], ["s", "change status"],
     ];
     const perVariant = {
-      list: [["/", "filter"], ["1 2 3", "switch variant"]],
-      board: [["h", "previous column"], ["l", "next column"], ["/", "filter"], ["1 2 3", "switch variant"]],
-      cards: [["/", "filter"], ["1 2 3", "switch variant"]],
+      list: [["/", "filter"], ["1 2", "switch layout"]],
+      board: [["h", "previous column"], ["l", "next column"], ["/", "filter"], ["1 2", "switch layout"]],
     };
-    const title = { list: "List", board: "Board", cards: "Cards" }[state.variant];
+    const title = { list: "List", board: "Board" }[state.variant];
     $shortcuts.innerHTML = `<span class="title">${title} shortcuts</span>` +
       [...common, ...perVariant[state.variant], ["Esc", "close"]]
         .map(([k, d]) => `<span>${k.split(" ").map((x) => `<kbd>${esc(x)}</kbd>`).join("")} ${esc(d)}</span>`).join("");
@@ -355,7 +329,6 @@
       case "/": $search.focus(); e.preventDefault(); break;
       case "1": setVariant("list"); break;
       case "2": setVariant("board"); break;
-      case "3": setVariant("cards"); break;
     }
   });
 

@@ -221,22 +221,11 @@ main { padding: 12px 16px; flex: 1; }
   .col-tabs button[aria-pressed="true"] svg { color: var(--warn-line); }
 }
 
-/* Variant C: cards */
-.cards-view .group { margin-bottom: 18px; }
-.cards-view .group-head { padding: 4px 2px 8px; }
-.cards-view .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
-@media (max-width: 639px) { .cards-view .grid { grid-template-columns: 1fr; } }
-.cards-view .card { padding: 10px 12px; gap: 8px; border-radius: var(--radius); }
-.cards-view .card .title { font-size: var(--text-lead); }
-.cards-view .line { display: flex; gap: 8px; align-items: center; font-size: var(--text-meta); color: var(--muted-foreground); min-height: 20px; }
-.cards-view .line .k { width: 44px; flex: none; color: var(--ink-3); font-size: var(--text-caption); text-transform: uppercase; letter-spacing: .04em; }
-.cards-view .line .v { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cards-view .detail { color: var(--ink-3); font-family: var(--font-mono); font-size: var(--text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Gate checklist and progress (issue sheet) */
 .gate-list { display: flex; flex-wrap: wrap; gap: 4px; }
 .gate-list span { font-size: var(--text-caption); border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--ink-3); background: var(--card); white-space: nowrap; }
 .gate-list span.pass { color: var(--ok); background: var(--ok-soft); border-color: #bfe6e0; }
 .gate-list span.fail { color: var(--bad); background: var(--bad-soft); border-color: #fcd0b5; }
-.cards-view .card .gate-sum { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; flex: 1; }
 .progress b { display: block; height: 100%; background: var(--ok); }
 
