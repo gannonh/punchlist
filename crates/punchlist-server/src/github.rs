@@ -324,8 +324,20 @@ pub(crate) async fn process(
             recompute_checks(tx, job.repository_id, &event.check_suite.head_sha).await?;
         }
         GithubEvent::PullRequestReviewThread(event) => {
-            let (pull_request_id, _, _) =
-                upsert_pull_request(tx, &job, &event.pull_request).await?;
+            // This event carries GitHub's short pull request, without `merged` or
+            // `mergeable_state`, so it records the pull request only if no `pull_request`
+            // event has yet; otherwise it would turn a merged one back into closed.
+            let known = sqlx::query_scalar!(
+                "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
+                job.repository_id,
+                event.pull_request.number,
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            let pull_request_id = match known {
+                Some(id) => id,
+                None => upsert_pull_request(tx, &job, &event.pull_request).await?.0,
+            };
             sqlx::query!(
                 "INSERT INTO review_thread (node_id, pull_request_id, resolved)
                  VALUES ($1, $2, $3)

@@ -520,3 +520,21 @@ async fn a_failing_job_is_retried_with_backoff_then_marked_failed(pool: PgPool) 
         .unwrap();
     assert_eq!(state, "failed");
 }
+
+#[sqlx::test]
+async fn a_thread_event_does_not_overwrite_a_merged_pull_request(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "d1", MERGED).await;
+    // The thread event's short pull request has no `merged`, and here it is newer.
+    let later = edited(THREAD, |v| {
+        v["pull_request"]["updated_at"] = json!("2026-10-09T19:00:00Z");
+    });
+    deliver(&s, "pull_request_review_thread", "d2", &later).await;
+    let row: (String, i32) =
+        sqlx::query_as("SELECT state, open_threads FROM pull_request WHERE number = 12")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((row.0.as_str(), row.1), ("merged", 0));
+}
