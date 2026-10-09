@@ -49,9 +49,24 @@ Fixture deliveries prove the server's handling. Real events need more, and a che
 - Only one run can receive real deliveries at a time: start it on the Funnel's port with `PUNCHLIST_VERIFY_PORT=7879 with-env $C up`. `up` refuses if 7879 is taken.
 - The run was started under `with-env` (`with-env $C up`) so the server's webhook secret is the App's. Without it GitHub's signatures fail with `401`.
 
-Then open a branch named `feature/pl-1-...` and a pull request in the sandbox repository and read the same rows as above. Do not paste the secret or the delivery payloads' tokens into evidence.
+The App is **Punchlist (gannonh)** (`punchlist-gannonh`, App id 5254938), installed on `gannonh/punchlist-sandbox` only. The Punchlist 1Password Environment holds `GITHUB_WEBHOOK_SECRET` (the App's webhook secret) and `GITHUB_APP_PRIVATE_KEY` (on one line; `bin/github-app` rebuilds the PEM).
+
+Then open a branch named `feature/pl-1-...` and a pull request in the sandbox repository (`gh api` to create the ref and a file, `gh pr create -R gannonh/punchlist-sandbox --draft`), and read the same rows as above. The sandbox's `ci` workflow gives every pull request one check run named `ok`.
+
+GitHub's delivery log is the first place to look when nothing arrives, and redelivery is how a check repeats a delivery (the same as the Redeliver button on the App's Advanced page):
+
+```sh
+A=.claude/skills/verify-punchlist/bin/github-app
+with-env $A GET '/app/hook/deliveries?per_page=10'       # delivered_at, event, action, guid, status_code, status
+with-env $A POST /app/hook/deliveries/<id>/attempts      # redeliver; the guid stays the same
+```
+
+A redelivery keeps its `guid`, so `SELECT count(*) FROM job WHERE idempotency_key = '<guid>'` stays `1`. GitHub's `delivered_at` is stamped after the server answers, so a job's `finished_at` can be a few milliseconds earlier. Do not paste the secret or the delivery payloads' tokens into evidence.
 
 ## Gotchas
+
+- `502 failed to connect to host` in the delivery log means GitHub could not reach the Funnel. Right after the Funnel is first turned on, public DNS for it can take some minutes; redeliver once `https://sartre.tail984796.ts.net:8443/api/github/webhook` answers from outside the tailnet.
+- CI's `check_run` and `check_suite` deliveries can land after the `pull_request` event that a check is counting; read `job` rows by `idempotency_key` rather than comparing totals.
 
 - `up` without `with-env` uses a random secret, so only `$C webhook` deliveries verify; a real GitHub delivery gets `401`.
 - The worker is asynchronous: the `webhook` command's `2xx` means queued, not processed. Poll the `job` row until `done` before reading other tables.
