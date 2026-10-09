@@ -88,6 +88,16 @@ pub enum EventDetail {
         to_name: String,
         /// The content hash of the workflow the transition was checked against.
         workflow_version: String,
+        /// The GitHub webhook delivery that caused the move, for moves made on a GitHub
+        /// event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_id: Option<String>,
+    },
+    /// A comment on the issue, such as the one a pull request closed without merging
+    /// requires.
+    Comment {
+        /// Markdown.
+        body: String,
     },
 }
 
@@ -100,6 +110,7 @@ impl EventDetail {
             from,
             to,
             workflow_version,
+            delivery_id: None,
         }
     }
 }
@@ -287,6 +298,106 @@ pub struct RunLog {
     pub lines: Vec<LogLine>,
 }
 
+/// A pull request's state on GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+
+impl PullRequestState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PullRequestState::Open => "open",
+            PullRequestState::Closed => "closed",
+            PullRequestState::Merged => "merged",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PullRequestState> {
+        [
+            PullRequestState::Open,
+            PullRequestState::Closed,
+            PullRequestState::Merged,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == s)
+    }
+}
+
+/// The check runs on a pull request's head commit, taken together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChecksState {
+    /// No check runs reported yet.
+    None,
+    /// At least one is still queued or in progress, and none has failed.
+    Pending,
+    /// Every one completed with success, neutral or skipped.
+    Passing,
+    /// At least one completed with another conclusion, such as failure or timed_out.
+    Failing,
+}
+
+impl ChecksState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChecksState::None => "none",
+            ChecksState::Pending => "pending",
+            ChecksState::Passing => "passing",
+            ChecksState::Failing => "failing",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ChecksState> {
+        [
+            ChecksState::None,
+            ChecksState::Pending,
+            ChecksState::Passing,
+            ChecksState::Failing,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == s)
+    }
+}
+
+/// A pull request on the workspace's repository, as recorded from GitHub's events.
+/// `GET /api/issues/{id}/pull-requests` and `GET /api/pull-requests/unlinked` return these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PullRequest {
+    pub number: i64,
+    pub title: String,
+    pub branch: String,
+    pub url: String,
+    pub author_login: String,
+    pub state: PullRequestState,
+    /// Meaningful while the state is `open`.
+    pub draft: bool,
+    /// GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`.
+    pub merge_state: String,
+    pub checks: ChecksState,
+    /// Check runs on the head commit, and how many of them passed.
+    pub checks_total: i32,
+    pub checks_passed: i32,
+    /// Review threads not yet resolved.
+    pub open_threads: i32,
+    /// The issue the branch or title names; `None` when it is unlinked.
+    pub issue_id: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl PullRequest {
+    /// The word people read for the state: `draft` for an open draft, otherwise the state.
+    pub fn state_word(&self) -> &'static str {
+        match self.state {
+            PullRequestState::Open if self.draft => "draft",
+            state => state.as_str(),
+        }
+    }
+}
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ErrorBody {
@@ -310,6 +421,17 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&detail).unwrap(),
             r#"{"kind":"transition","from":"in_progress","from_name":"In Progress","to":"agent_review","to_name":"Agent Review","workflow_version":"sha256:ab"}"#
+        );
+    }
+
+    #[test]
+    fn comment_detail_is_tagged_by_kind() {
+        let detail = EventDetail::Comment {
+            body: "Closed".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&detail).unwrap(),
+            r#"{"kind":"comment","body":"Closed"}"#
         );
     }
 

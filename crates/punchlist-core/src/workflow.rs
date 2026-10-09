@@ -29,16 +29,20 @@ pub enum Role {
     Person,
     Agent,
     Runner,
+    /// GitHub, through a webhook event. Makes only the transitions whose `on` names a
+    /// GitHub event; its actors are named after the GitHub user who caused the event.
+    Github,
 }
 
 impl Role {
-    pub const ALL: [Role; 3] = [Role::Person, Role::Agent, Role::Runner];
+    pub const ALL: [Role; 4] = [Role::Person, Role::Agent, Role::Runner, Role::Github];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Person => "person",
             Role::Agent => "agent",
             Role::Runner => "runner",
+            Role::Github => "github",
         }
     }
 
@@ -51,6 +55,7 @@ impl Role {
             Role::Person => "a person",
             Role::Agent => "an agent",
             Role::Runner => "a runner",
+            Role::Github => "GitHub",
         }
     }
 }
@@ -107,6 +112,8 @@ pub struct Transition {
     pub on: Option<String>,
     /// Gates that must pass on recorded evidence before the move.
     pub gates: Vec<String>,
+    /// What the move must carry, such as `comment`.
+    pub require: Vec<String>,
 }
 
 /// Which agent a runner starts when an issue enters a status.
@@ -233,6 +240,7 @@ impl Workflow {
                 by: t.by,
                 on: t.on,
                 gates: t.gates,
+                require: t.require,
             });
         }
         let mut dispatch = Vec::with_capacity(raw.dispatch.status.len());
@@ -329,6 +337,15 @@ impl Workflow {
             }),
         }
     }
+
+    /// The transition an event makes from `from`, such as `merging → done` on `pr_merged`.
+    /// `None` when the workflow has no transition on that event from that status: the event
+    /// is recorded as evidence and the issue stays where it is.
+    pub fn transition_on(&self, from: &str, event: &str) -> Option<&Transition> {
+        self.transitions
+            .iter()
+            .find(|t| t.on.as_deref() == Some(event) && t.from.iter().any(|f| f.0 == from))
+    }
 }
 
 fn content_hash(text: &str) -> String {
@@ -367,6 +384,8 @@ struct RawTransition {
     on: Option<String>,
     #[serde(default)]
     gates: Vec<String>,
+    #[serde(default)]
+    require: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -561,6 +580,28 @@ mod tests {
                 .unwrap_err(),
             LoadError::NoAgent("a".into())
         );
+    }
+
+    #[test]
+    fn events_move_only_from_their_from_statuses() {
+        let workflow = default_workflow();
+        let to = |from, event| {
+            workflow
+                .transition_on(from, event)
+                .map(|t| (t.to.as_str().to_string(), t.require.clone()))
+        };
+        assert_eq!(to("merging", "pr_merged"), Some(("done".into(), vec![])));
+        assert_eq!(to("human_review", "pr_merged"), None);
+        assert_eq!(
+            to("in_progress", "pr_closed_unmerged"),
+            Some(("todo".into(), vec!["comment".into()]))
+        );
+        assert_eq!(
+            to("agent_review", "pr_closed_unmerged"),
+            Some(("todo".into(), vec!["comment".into()]))
+        );
+        assert_eq!(to("merging", "pr_closed_unmerged"), None);
+        assert_eq!(to("todo", "pr_closed_unmerged"), None);
     }
 
     #[test]
