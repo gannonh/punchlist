@@ -435,7 +435,11 @@ fn render_show(issue: &Issue, pull_requests: &[PullRequest], events: &[Event]) -
             EventDetail::Comment { body } => {
                 text.push_str(&format!("{who}commented:\n"));
                 for line in body.trim_end().lines() {
-                    text.push_str(&format!("    {line}\n"));
+                    if line.is_empty() {
+                        text.push('\n');
+                    } else {
+                        text.push_str(&format!("    {line}\n"));
+                    }
                 }
             }
         }
@@ -625,7 +629,7 @@ mod tests {
                 punchlist_api::Role::Github,
                 "gannonh",
                 EventDetail::Comment {
-                    body: "Closed without merging.\nSee #12.\n".into(),
+                    body: "Closed without merging.\n\nSee #12.\n".into(),
                 },
             ),
         ];
@@ -637,6 +641,7 @@ mod tests {
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  In Progress → Agent Review  [delivery d-1]\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  commented:\n\
              \x20   Closed without merging.\n\
+             \n\
              \x20   See #12.\n"
         );
     }
