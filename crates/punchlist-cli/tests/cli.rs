@@ -512,3 +512,39 @@ fn runner_start_help_lists_the_flags() {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
     }
 }
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn workflow_show_transition_and_comment(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+
+    let show = pl.run(&["workflow", "show"]).await;
+    assert_eq!(show.code, 0, "{}", show.stderr);
+    assert_eq!(
+        show.stdout,
+        format!(
+            "Version   {}\nCommit    built-in\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n",
+            punchlist_core::default_workflow().version()
+        )
+    );
+
+    pl.run(&["issue", "create", "--title", "First"]).await;
+    let moved = pl.run(&["issue", "transition", "PL-1", "todo"]).await;
+    assert_eq!(
+        (moved.code, moved.stdout.as_str()),
+        (0, "PL-1  Backlog → Todo\n")
+    );
+    let commented = pl
+        .run(&["issue", "comment", "PL-1", "--body", "Looks right."])
+        .await;
+    assert_eq!(
+        (commented.code, commented.stdout.as_str()),
+        (0, "Commented on PL-1.\n")
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout
+            .contains("Gannon (person)  commented:\n    Looks right.\n"),
+        "{}",
+        show.stdout
+    );
+}

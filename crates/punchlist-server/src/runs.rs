@@ -11,7 +11,7 @@ use punchlist_api::{
     AppendLog, Claim, ClaimRequest, ErrorBody, FinishRun, LogLine, Repository, Run, RunLog,
     RunOutcome, RunnerRef,
 };
-use punchlist_core::{agent_display_name, branch_name, default_workflow};
+use punchlist_core::{agent_display_name, branch_name};
 use sqlx::PgPool;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
@@ -19,9 +19,10 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
-use crate::auth::Actor;
-use crate::issues::record_transition;
+use crate::auth::{Actor, hash_token, new_token};
+use crate::issues::{check_move, record_transition};
 use crate::runners::{RunnerRow, runner_of};
+use crate::workflow::active_workflow;
 use crate::{ApiError, AppState};
 
 const MAX_WAIT_SECONDS: u32 = 30;
@@ -52,21 +53,22 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 /// Claims one issue for the runner in one transaction: moves it Start to In Progress as the
-/// runner, creates the run and attempt 1, and leases the attempt.
+/// runner, creates the run, attempt 1 and the agent actor the run acts as, and leases the
+/// attempt.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
     runner: &RunnerRow,
     target: &Target,
 ) -> Result<Option<Claim>, ApiError> {
-    let workflow = default_workflow();
+    let mut tx = state.pool.begin().await?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let Some(dispatch) = workflow.dispatch_for("in_progress") else {
         return Ok(None);
     };
     if !runner.agents.contains(&dispatch.agent) {
         return Ok(None);
     }
-    let mut tx = state.pool.begin().await?;
     let id = match target {
         Target::Any => {
             let id = sqlx::query_scalar!(
@@ -105,8 +107,18 @@ async fn try_claim(
             id.clone()
         }
     };
-    workflow.check_transition("start", "in_progress", actor.role)?;
-    let moved = record_transition(&mut tx, actor, &id, "start".into(), "in_progress", None).await?;
+    let gates = check_move(&mut tx, &workflow, actor, &id, "start", "in_progress").await?;
+    let moved = record_transition(
+        &mut tx,
+        actor,
+        &id,
+        "start".into(),
+        "in_progress",
+        None,
+        workflow.version(),
+        &gates,
+    )
+    .await?;
     let branch = branch_name(&id, &moved.issue.title);
     let run_id = sqlx::query_scalar!(
         "INSERT INTO run (workspace_id, issue_id, status, agent, branch)
@@ -125,6 +137,17 @@ async fn try_claim(
             error.into()
         }
     })?;
+    let agent_token = new_token();
+    sqlx::query!(
+        "INSERT INTO actor (workspace_id, name, role, token_hash, run_id)
+         VALUES ($1, $2, 'agent', $3, $4)",
+        actor.workspace_id,
+        agent_display_name(&dispatch.agent),
+        hash_token(&agent_token),
+        run_id,
+    )
+    .execute(&mut *tx)
+    .await?;
     let lease_expires_at = sqlx::query_scalar!(
         "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
          VALUES ($1, $2, $3, 1, now() + make_interval(secs => $4))
@@ -152,6 +175,8 @@ async fn try_claim(
         repository,
         branch,
         lease_expires_at,
+        prompt: workflow.prompt_for("in_progress"),
+        agent_token,
     }))
 }
 

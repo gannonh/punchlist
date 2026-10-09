@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO comment (issue_id, actor_id, body, transition_id)\n             VALUES ($1, $2, $3, $4) RETURNING id",
+  "query": "INSERT INTO comment (issue_id, actor_id, body, transition_id)\n         VALUES ($1, $2, $3, $4) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -27,5 +27,5 @@
       false
     ]
   },
-  "hash": "65d0dc0249756e297467881de69e27a5b01992f88e0734b7dfc46bbaadaca921"
+  "hash": "d82093c0cdc3c7e65b4613607e7660c7ccda6846bb941f06456b820c24e2ceb9"
 }

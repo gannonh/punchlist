@@ -1,7 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
-    AppState, Bootstrap, MIGRATOR, bootstrap, expire_leases, router, work_jobs,
+    AppState, Bootstrap, GithubClient, MIGRATOR, bootstrap, expire_leases, queue_workflow_load,
+    router, work_jobs,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -29,6 +30,18 @@ enum Command {
         /// webhook route answers 503.
         #[arg(long, env = "GITHUB_WEBHOOK_SECRET", hide_env_values = true)]
         github_webhook_secret: Option<String>,
+        /// The GitHub App's id. With its private key, the server reads `.punchlist/` from
+        /// the repository's default branch.
+        #[arg(long, env = "GITHUB_APP_ID", requires = "github_app_private_key")]
+        github_app_id: Option<String>,
+        /// The GitHub App's private key, as PEM. One line is fine.
+        #[arg(
+            long,
+            env = "GITHUB_APP_PRIVATE_KEY",
+            hide_env_values = true,
+            requires = "github_app_id"
+        )]
+        github_app_private_key: Option<String>,
     },
     /// Create a workspace, its repository and one person, and print the person's token.
     Bootstrap {
@@ -73,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve {
             bind,
             github_webhook_secret,
+            github_app_id,
+            github_app_private_key,
         } => {
             let expiry_pool = pool.clone();
             tokio::spawn(async move {
@@ -91,6 +106,12 @@ async fn main() -> anyhow::Result<()> {
             match github_webhook_secret.filter(|secret| !secret.is_empty()) {
                 Some(secret) => state = state.with_github_webhook_secret(secret),
                 None => tracing::warn!("no GitHub webhook secret; the webhook route answers 503"),
+            }
+            match github_app_id.zip(github_app_private_key) {
+                Some((id, key)) => state = state.with_github(GithubClient::app(&id, &key)?),
+                None => tracing::warn!(
+                    "no GitHub App credentials; the workflow cannot load from the repository"
+                ),
             }
             tokio::spawn(work_jobs(state.clone()));
             let app = router(state).layer(TraceLayer::new_for_http());
@@ -125,6 +146,9 @@ async fn main() -> anyhow::Result<()> {
                 },
             )
             .await?;
+            // The server loads the repository's workflow when it runs the job.
+            let key = format!("workflow_load:bootstrap:{}", done.workspace_id);
+            queue_workflow_load(&mut *pool.acquire().await?, done.workspace_id, &key).await?;
             eprintln!(
                 "Created workspace {} and person {}. Save this as ~/.config/punchlist/config.toml; the token is not shown again.",
                 done.workspace_id, done.actor_id

@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (workspace_id, hash) DO UPDATE SET hash = EXCLUDED.hash\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "52a6d29ecbef9ca3962fb7d1ebe69689186347409d9001266f8c45c1d4326d1a"
+}

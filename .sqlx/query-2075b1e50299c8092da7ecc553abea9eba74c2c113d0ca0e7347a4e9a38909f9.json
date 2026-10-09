@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.gate, g.result, g.reason FROM transition_gate g\n         JOIN transition t ON t.id = g.transition_id\n         WHERE t.to_status = 'agent_review' ORDER BY g.position",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gate",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition_gate",
+            "name": "gate"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "result",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition_gate",
+            "name": "result"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition_gate",
+            "name": "reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2075b1e50299c8092da7ecc553abea9eba74c2c113d0ca0e7347a4e9a38909f9"
+}

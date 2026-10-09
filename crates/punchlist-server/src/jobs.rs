@@ -62,6 +62,9 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
         let mut tx = state.pool.begin().await?;
         match job.kind.as_str() {
             "github_event" => crate::github::process(&mut tx, job.payload).await?,
+            // ponytail: the GitHub reads run inside the transaction, holding a connection
+            // for their few seconds; fine at one load per push to `.punchlist/`.
+            "workflow_load" => crate::workflow::load(state, &mut tx, job.payload).await?,
             other => anyhow::bail!("unknown job kind `{other}`"),
         }
         let done = sqlx::query!(

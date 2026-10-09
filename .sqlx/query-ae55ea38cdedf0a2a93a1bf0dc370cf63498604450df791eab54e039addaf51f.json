@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT v.workflow_toml, v.prompts, v.commit_sha\n         FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id\n         WHERE w.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_toml",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "workflow_toml"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "prompts",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "prompts"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "commit_sha",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "commit_sha"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ae55ea38cdedf0a2a93a1bf0dc370cf63498604450df791eab54e039addaf51f"
+}

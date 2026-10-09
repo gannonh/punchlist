@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
     ChecksState, CreateIssue, Event, EventDetail, Issue, PullRequest, Run, RunOutcome, Runner,
+    WorkflowInfo,
 };
-use punchlist_client::Client;
+use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
@@ -38,6 +39,30 @@ pub enum Command {
     /// Work with pull requests.
     #[command(name = "pr", subcommand)]
     PullRequest(PullRequestCommand),
+    /// Read the workspace's workflow.
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
+    /// Serve Punchlist's MCP tools on stdio for one issue. The runner starts this for each
+    /// agent run.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Print the active workflow's version, source commit and statuses.
+    Show,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct McpArgs {
+    #[arg(long, env = "PUNCHLIST_SERVER_URL")]
+    pub server_url: String,
+    /// The agent token the run acts with.
+    #[arg(long, env = "PUNCHLIST_TOKEN", hide_env_values = true)]
+    pub token: String,
+    /// The issue the tools act on.
+    #[arg(long, env = "PUNCHLIST_ISSUE")]
+    pub issue: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -94,8 +119,17 @@ pub enum IssueCommand {
     Show { id: String },
     /// List the workspace's issues.
     List,
-    /// Move an issue to another status, such as `todo` or `in_progress`.
+    /// Request a transition to another status, such as `todo` or `agent_review`. A refusal
+    /// names the rule or gate.
+    #[command(visible_alias = "transition")]
     Move { id: String, status: String },
+    /// Comment on an issue.
+    Comment {
+        id: String,
+        /// Markdown.
+        #[arg(long)]
+        body: String,
+    },
 }
 
 /// `~/.config/punchlist/config.toml`.
@@ -138,6 +172,11 @@ impl Config {
 }
 
 pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
+    // The MCP server takes its server and token from the run, not from a config file.
+    if let Command::Mcp(args) = cli.command {
+        let client = Client::new(&args.server_url, &args.token)?;
+        return punchlist_mcp::serve_stdio(client, args.issue).await;
+    }
     let path = match cli.config {
         Some(path) => path,
         None => Config::default_path()?,
@@ -162,6 +201,11 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             write!(out, "{}", render_unlinked(&pull_requests))?;
             Ok(())
         }
+        Command::Workflow(WorkflowCommand::Show) => {
+            write!(out, "{}", render_workflow(&client.workflow().await?))?;
+            Ok(())
+        }
+        Command::Mcp(_) => unreachable!("handled above"),
         Command::Run(RunCommand::Log { run_id }) => {
             let log = client.run_log(&run_id).await?;
             for line in &log.lines {
@@ -246,6 +290,7 @@ pub fn runner_config(
             .unwrap_or_else(|| vec!["claude-code".to_string()]),
         worktree_root: expand_home(&worktree_root, home),
         claude_command: expand_home(&claude_command, home),
+        mcp_command: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pl")),
         model: flags.model.or_else(|| table.model.clone()),
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
@@ -362,7 +407,7 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             write!(out, "{}", render_list(&list.issues))?;
         }
         IssueCommand::Move { id, status } => {
-            let moved = client.move_issue(&id, &status).await?;
+            let moved = client.move_issue(&id, &status).await.map_err(with_gates)?;
             let EventDetail::Transition { from_name, .. } = &moved.event.detail else {
                 anyhow::bail!("the server answered a move with an event that is not a transition");
             };
@@ -372,8 +417,41 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 moved.issue.id, from_name, moved.issue.status_name
             )?;
         }
+        IssueCommand::Comment { id, body } => {
+            client.comment(&id, &body).await?;
+            writeln!(out, "Commented on {id}.")?;
+        }
     }
     Ok(())
+}
+
+/// A refused move whose gates ran lists every gate's result under the message.
+fn with_gates(error: ClientError) -> anyhow::Error {
+    let ClientError::Refused(body) = &error else {
+        return error.into();
+    };
+    if body.gates.is_empty() {
+        return error.into();
+    }
+    let gates: Vec<String> = body
+        .gates
+        .iter()
+        .map(|g| {
+            let result = if g.passed { "pass" } else { "fail" };
+            format!("  {}: {result} ({})", g.gate, g.reason)
+        })
+        .collect();
+    anyhow::anyhow!("{error}\n{}", gates.join("\n"))
+}
+
+/// `pl workflow show`.
+fn render_workflow(workflow: &WorkflowInfo) -> String {
+    format!(
+        "Version   {}\nCommit    {}\nStatuses  {}\n",
+        workflow.version,
+        workflow.commit_sha.as_deref().unwrap_or("built-in"),
+        workflow.statuses.join(", ")
+    )
 }
 
 /// The issue and its timeline from two requests. A move landing between them would show an
@@ -643,6 +721,19 @@ mod tests {
              \x20   Closed without merging.\n\
              \n\
              \x20   See #12.\n"
+        );
+    }
+
+    #[test]
+    fn renders_the_workflow() {
+        let info = WorkflowInfo {
+            version: "sha256:ab".into(),
+            commit_sha: None,
+            statuses: vec!["backlog".into(), "todo".into()],
+        };
+        assert_eq!(
+            render_workflow(&info),
+            "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n"
         );
     }
 

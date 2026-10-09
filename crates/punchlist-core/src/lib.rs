@@ -12,6 +12,6 @@ pub use agent::{FenceError, agent_display_name, branch_name, fence};
 pub use gate::{Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState};
 pub use link::linked_issue_id;
 pub use workflow::{
-    Dispatch, LoadError, Refusal, Role, Status, Transition, Workflow, default_workflow,
-    display_name,
+    Dispatch, LoadError, Problem, Refusal, Role, SYSTEM_PROMPT, Status, Transition, Workflow,
+    default_workflow, display_name, workflow_schema,
 };

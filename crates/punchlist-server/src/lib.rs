@@ -4,11 +4,13 @@ mod auth;
 mod bootstrap;
 mod error;
 mod github;
+mod github_api;
 mod issues;
 mod jobs;
 mod pull_requests;
 mod runners;
 mod runs;
+mod workflow;
 
 use auth::BearerAuth;
 use axum::{Json, Router, routing::get};
@@ -19,8 +21,10 @@ use utoipa_axum::router::OpenApiRouter;
 pub use auth::hash_token;
 pub use bootstrap::{Bootstrap, Bootstrapped, bootstrap};
 pub use error::ApiError;
+pub use github_api::GithubClient;
 pub use jobs::{run_jobs_until_idle, run_next_job, work_jobs};
 pub use runs::expire_leases;
+pub use workflow::queue_workflow_load;
 
 /// The migrations in `migrations/`, run when the server starts.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
@@ -37,6 +41,8 @@ pub struct AppState {
     pub github_webhook_secret: Option<std::sync::Arc<str>>,
     /// Notified after a job is enqueued, to wake the job worker.
     pub job_wake: std::sync::Arc<tokio::sync::Notify>,
+    /// Reads `.punchlist/` from the repository. Without it a workflow load fails.
+    pub github: Option<GithubClient>,
 }
 
 impl AppState {
@@ -47,7 +53,13 @@ impl AppState {
             starts: tokio::sync::broadcast::channel(256).0,
             github_webhook_secret: None,
             job_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            github: None,
         }
+    }
+
+    pub fn with_github(mut self, github: GithubClient) -> AppState {
+        self.github = Some(github);
+        self
     }
 
     pub fn with_github_webhook_secret(
@@ -80,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())
+        .merge(workflow::routes())
         .with_state(state)
         .split_for_parts();
     router.route("/api/openapi.json", get(move || async move { Json(api) }))

@@ -16,6 +16,20 @@ pub struct Actor {
     pub workspace_id: Uuid,
     pub name: String,
     pub role: Role,
+    /// For an agent: the issue of the run it acts for, the only issue it may change.
+    pub issue_id: Option<String>,
+}
+
+impl Actor {
+    /// Refuses an agent acting on an issue other than its run's.
+    pub fn check_issue(&self, issue_id: &str) -> Result<(), ApiError> {
+        match &self.issue_id {
+            Some(own) if self.role == Role::Agent && own != issue_id => Err(ApiError::Forbidden(
+                format!("an agent acts only on its run's issue, {own}"),
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl From<&Actor> for punchlist_api::Actor {
@@ -59,17 +73,26 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
         let row = sqlx::query!(
-            "SELECT id, workspace_id, name, role FROM actor WHERE token_hash = $1",
+            r#"SELECT a.id, a.workspace_id, a.name, a.role,
+                      r.issue_id AS "issue_id?", r.outcome AS "outcome?"
+               FROM actor a LEFT JOIN run r ON r.id = a.run_id
+               WHERE a.token_hash = $1"#,
             hash_token(token)
         )
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::Unauthorized)?;
+        let role = parse_role(&row.role)?;
+        // An agent's token works only while its run is running.
+        if role == Role::Agent && row.outcome.as_deref() != Some("running") {
+            return Err(ApiError::Unauthorized);
+        }
         Ok(Actor {
             id: row.id,
             workspace_id: row.workspace_id,
-            role: parse_role(&row.role)?,
+            role,
             name: row.name,
+            issue_id: row.issue_id,
         })
     }
 }

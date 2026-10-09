@@ -2,9 +2,9 @@
 //! server.
 
 use punchlist_api::{
-    AppendLog, Claim, ClaimRequest, CreateIssue, ErrorBody, Event, FinishRun, Heartbeat, Issue,
-    IssueList, MoveIssue, Moved, PullRequest, RegisterRunner, RegisteredRunner, Run, RunLog,
-    Runner, RunnerList,
+    AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
+    Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, RegisterRunner, RegisteredRunner,
+    Run, RunLog, Runner, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -12,9 +12,10 @@ use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    /// The server refused a transition. The message names the rule.
-    #[error("refused: {message}")]
-    Refused { code: String, message: String },
+    /// The server refused: a transition, a claim or a stale attempt. The message names the
+    /// rule; a failed gate also carries the gate, its reason and every gate's result.
+    #[error("refused: {}", .0.message)]
+    Refused(Box<ErrorBody>),
     /// Any other error response.
     #[error("{message} ({status})")]
     Api {
@@ -67,6 +68,20 @@ impl Client {
         let request = MoveIssue { to: to.to_string() };
         self.send(Method::POST, &["issues", id, "transitions"], Some(&request))
             .await
+    }
+
+    /// Comments on an issue. An agent's comment ends with `(agent)`.
+    pub async fn comment(&self, id: &str, body: &str) -> Result<Event, ClientError> {
+        let request = CreateComment {
+            body: body.to_string(),
+        };
+        self.send(Method::POST, &["issues", id, "comments"], Some(&request))
+            .await
+    }
+
+    /// The workspace's active workflow.
+    pub async fn workflow(&self) -> Result<WorkflowInfo, ClientError> {
+        self.send::<(), _>(Method::GET, &["workflow"], None).await
     }
 
     pub async fn issue_events(&self, id: &str) -> Result<Vec<Event>, ClientError> {
@@ -194,19 +209,18 @@ impl Client {
             return Ok(response);
         }
         let text = response.text().await?;
-        let error = serde_json::from_str::<ErrorBody>(&text).unwrap_or(ErrorBody {
-            code: "unknown".into(),
-            message: if text.is_empty() {
-                status.to_string()
-            } else {
-                text
-            },
+        let error = serde_json::from_str::<ErrorBody>(&text).unwrap_or_else(|_| {
+            ErrorBody::new(
+                "unknown",
+                if text.is_empty() {
+                    status.to_string()
+                } else {
+                    text
+                },
+            )
         });
         Err(if status == StatusCode::CONFLICT {
-            ClientError::Refused {
-                code: error.code,
-                message: error.message,
-            }
+            ClientError::Refused(Box::new(error))
         } else {
             ClientError::Api {
                 status,

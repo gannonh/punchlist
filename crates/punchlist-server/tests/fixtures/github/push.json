@@ -1,0 +1,25 @@
+{
+  "ref": "refs/heads/main",
+  "before": "1111111111111111111111111111111111111111",
+  "after": "2222222222222222222222222222222222222222",
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "commits": [
+    {
+      "id": "2222222222222222222222222222222222222222",
+      "message": "Add the workflow",
+      "added": [".punchlist/workflow.toml", ".punchlist/prompts/system.md"],
+      "removed": [],
+      "modified": []
+    }
+  ],
+  "repository": {
+    "id": 870000001,
+    "name": "punchlist",
+    "full_name": "gannonh/punchlist",
+    "default_branch": "main",
+    "owner": { "login": "gannonh", "name": "gannonh" }
+  },
+  "sender": { "login": "gannonh" }
+}

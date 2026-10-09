@@ -12,12 +12,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+aws-lc-rs.workspace = true
 axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 hmac.workspace = true
 punchlist-api.workspace = true
 punchlist-core.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true

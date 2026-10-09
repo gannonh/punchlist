@@ -5,14 +5,19 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
+    CreateComment, CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
 };
-use punchlist_core::{default_workflow, display_name};
+use punchlist_core::{
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, Workflow,
+    display_name,
+};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
+use crate::error::GateFailure;
+use crate::workflow::active_workflow;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -21,6 +26,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_issue))
         .routes(routes!(move_issue))
         .routes(routes!(issue_events))
+        .routes(routes!(add_comment))
 }
 
 struct IssueRow {
@@ -116,6 +122,7 @@ async fn create_issue(
         return Err(ApiError::Invalid("an issue needs a title".into()));
     }
     let mut tx = state.pool.begin().await?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let next = sqlx::query!(
         r#"UPDATE workspace SET next_issue_number = next_issue_number + 1 WHERE id = $1
            RETURNING issue_prefix, next_issue_number - 1 AS "number!""#,
@@ -133,7 +140,7 @@ async fn create_issue(
         next.number,
         title,
         request.body,
-        default_workflow().initial_status().as_str(),
+        workflow.initial_status().as_str(),
         actor.id,
     )
     .fetch_one(&mut *tx)
@@ -207,8 +214,9 @@ async fn get_issue(
     Ok(Json(row.into()))
 }
 
-/// Move an issue to another status. The workflow's rules are checked, and the status,
-/// the transition and its event are written, in one transaction.
+/// Move an issue to another status. The workflow's lock, role and gate rules are checked,
+/// and the status, the transition, its gate results and its event are written, in one
+/// transaction.
 #[utoipa::path(
     post,
     path = "/api/issues/{id}/transitions",
@@ -227,7 +235,6 @@ async fn move_issue(
     Path(id): Path<String>,
     Json(request): Json<MoveIssue>,
 ) -> Result<Json<Moved>, ApiError> {
-    let workflow = default_workflow();
     let mut tx = state.pool.begin().await?;
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
@@ -237,8 +244,20 @@ async fn move_issue(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    workflow.check_transition(&from, &request.to, actor.role)?;
-    let moved = record_transition(&mut tx, &actor, &id, from, &request.to, None).await?;
+    actor.check_issue(&id)?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
+    let moved = record_transition(
+        &mut tx,
+        &actor,
+        &id,
+        from,
+        &request.to,
+        None,
+        workflow.version(),
+        &gates,
+    )
+    .await?;
     tx.commit().await?;
     if request.to == "start" {
         // Wake runners that are long-polling for work. No receivers is fine.
@@ -247,9 +266,79 @@ async fn move_issue(
     Ok(Json(moved))
 }
 
+/// Checks a requested move against the workflow: the lock, the role, then each gate over
+/// the issue's recorded evidence. Returns the gate results, all passed. The caller holds
+/// the issue row's lock, so the evidence and the move are read and written together.
+pub(crate) async fn check_move(
+    tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
+    actor: &Actor,
+    id: &str,
+    from: &str,
+    to: &str,
+) -> Result<Vec<GateResult>, ApiError> {
+    let transition = workflow.check_transition(from, to, actor.role)?;
+    if transition.gates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let evidence = evidence(tx, id).await?;
+    let gates: Vec<GateResult> = transition
+        .gates
+        .iter()
+        .map(|gate| gate.evaluate(&evidence))
+        .collect();
+    if let Some(failed) = gates.iter().find(|result| !result.passed) {
+        let refusal = Refusal::GateFailed {
+            from: from.to_string(),
+            to: to.to_string(),
+            gate: failed.gate.clone(),
+            reason: failed.reason.clone(),
+        };
+        tracing::info!(issue = id, actor = %actor.name, "refused: {refusal}");
+        return Err(ApiError::GateFailed(Box::new(GateFailure {
+            refusal,
+            evidence,
+            gates,
+        })));
+    }
+    Ok(gates)
+}
+
+/// What the gates read: the pull requests linked to the issue.
+async fn evidence(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Evidence> {
+    let rows = sqlx::query!(
+        "SELECT number, title, branch, state, draft FROM pull_request
+         WHERE issue_id = $1 ORDER BY number DESC",
+        id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let pull_requests = rows
+        .into_iter()
+        .map(|row| {
+            let state = PullRequestState::parse(&row.state).ok_or_else(|| {
+                sqlx::Error::Decode(format!("unknown pull request state `{}`", row.state).into())
+            })?;
+            Ok(PullRequestEvidence {
+                number: row.number,
+                title: row.title,
+                branch: row.branch,
+                state,
+                draft: row.draft,
+            })
+        })
+        .collect::<sqlx::Result<_>>()?;
+    Ok(Evidence {
+        issue_id: id.to_string(),
+        pull_requests,
+    })
+}
+
 /// Writes a transition that the caller has already checked and whose issue row it has
-/// locked: the new status, the transition and its event. Shared by `move_issue`, claims
-/// and GitHub events, which pass the webhook delivery that caused the move.
+/// locked: the new status, the transition with the workflow version and gate results, and
+/// its event. Shared by `move_issue`, claims and GitHub events, which pass the webhook
+/// delivery that caused the move.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_transition(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
@@ -257,13 +346,25 @@ pub(crate) async fn record_transition(
     from: String,
     to: &str,
     delivery_id: Option<&str>,
+    workflow_version: &str,
+    gates: &[GateResult],
 ) -> Result<Moved, ApiError> {
-    write_transition(tx, actor, id, from, to, delivery_id)
-        .await
-        .map(|(moved, _)| moved)
+    write_transition(
+        tx,
+        actor,
+        id,
+        from,
+        to,
+        delivery_id,
+        workflow_version,
+        gates,
+    )
+    .await
+    .map(|(moved, _)| moved)
 }
 
 /// `record_transition`, also returning the new transition's id.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_transition(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
@@ -271,8 +372,9 @@ pub(crate) async fn write_transition(
     from: String,
     to: &str,
     delivery_id: Option<&str>,
+    workflow_version: &str,
+    gates: &[GateResult],
 ) -> Result<(Moved, Uuid), ApiError> {
-    let workflow = default_workflow();
     let issue = sqlx::query_as!(
         IssueRow,
         "UPDATE issue SET status = $2, updated_at = now() WHERE id = $1
@@ -290,11 +392,24 @@ pub(crate) async fn write_transition(
         from,
         to,
         actor.id,
-        workflow.version(),
+        workflow_version,
         delivery_id,
     )
     .fetch_one(&mut *tx)
     .await?;
+    for (position, result) in gates.iter().enumerate() {
+        sqlx::query!(
+            "INSERT INTO transition_gate (transition_id, position, gate, result, reason)
+             VALUES ($1, $2, $3, $4, $5)",
+            transition_id,
+            position as i32,
+            result.gate,
+            if result.passed { "pass" } else { "fail" },
+            result.reason,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     let seq = sqlx::query_scalar!(
         "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
          RETURNING last_event_seq",
@@ -313,7 +428,7 @@ pub(crate) async fn write_transition(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let mut detail = EventDetail::transition(from, to.to_string(), workflow.version().to_string());
+    let mut detail = EventDetail::transition(from, to.to_string(), workflow_version.to_string());
     if let EventDetail::Transition {
         delivery_id: detail_delivery,
         ..
@@ -384,4 +499,126 @@ async fn issue_events(
         .map(Event::try_from)
         .collect::<Result<_, _>>()?;
     Ok(Json(events))
+}
+
+/// Writes a comment and its event.
+pub(crate) async fn record_comment(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    body: &str,
+    transition_id: Option<Uuid>,
+) -> sqlx::Result<Event> {
+    let comment_id = sqlx::query_scalar!(
+        "INSERT INTO comment (issue_id, actor_id, body, transition_id)
+         VALUES ($1, $2, $3, $4) RETURNING id",
+        id,
+        actor.id,
+        body,
+        transition_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let seq = sqlx::query_scalar!(
+        "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
+         RETURNING last_event_seq",
+        actor.workspace_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id)
+         VALUES ($1, $2, $3, 'comment', $4, $5) RETURNING created_at",
+        actor.workspace_id,
+        seq,
+        id,
+        actor.id,
+        comment_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(Event {
+        seq,
+        issue_id: id.to_string(),
+        actor: actor.into(),
+        created_at,
+        detail: EventDetail::Comment {
+            body: body.to_string(),
+        },
+    })
+}
+
+/// An agent's comment ends with `(agent)` on its own line. Punchlist adds it when missing.
+fn signed_by_agent(body: &str) -> String {
+    let body = body.trim_end();
+    if body.lines().last().map(str::trim) == Some("(agent)") {
+        body.to_string()
+    } else {
+        format!("{body}\n\n(agent)")
+    }
+}
+
+/// Comment on an issue. An agent's comment ends with `(agent)` on its own line. Nobody
+/// in a role the issue's status locks may comment.
+#[utoipa::path(
+    post,
+    path = "/api/issues/{id}/comments",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    request_body = CreateComment,
+    responses(
+        (status = 201, body = Event),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "An agent commented on another issue than its run's."),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
+        (status = 422, body = ErrorBody, description = "The body is empty."),
+    )
+)]
+async fn add_comment(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+    Json(request): Json<CreateComment>,
+) -> Result<(StatusCode, Json<Event>), ApiError> {
+    if request.body.trim().is_empty() {
+        return Err(ApiError::Invalid("a comment needs a body".into()));
+    }
+    let mut tx = state.pool.begin().await?;
+    let status = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    actor.check_issue(&id)?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    workflow.check_unlocked(&status, actor.role)?;
+    let body = if actor.role == Role::Agent {
+        signed_by_agent(&request.body)
+    } else {
+        request.body.trim_end().to_string()
+    };
+    let event = record_comment(&mut tx, &actor, &id, &body, None).await?;
+    tx.commit().await?;
+    Ok((StatusCode::CREATED, Json(event)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_comments_end_with_the_agent_line() {
+        assert_eq!(signed_by_agent("Opened #12.\n"), "Opened #12.\n\n(agent)");
+        assert_eq!(
+            signed_by_agent("Opened #12.\n\n(agent)\n"),
+            "Opened #12.\n\n(agent)"
+        );
+        assert_eq!(
+            signed_by_agent("Not (agent) here"),
+            "Not (agent) here\n\n(agent)"
+        );
+    }
 }
