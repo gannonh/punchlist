@@ -4,6 +4,7 @@ mod auth;
 mod bootstrap;
 mod error;
 mod issues;
+mod pull_requests;
 mod runners;
 mod runs;
 
@@ -57,6 +58,7 @@ struct ApiDoc;
 pub fn router(state: AppState) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(issues::routes())
+        .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())
         .with_state(state)

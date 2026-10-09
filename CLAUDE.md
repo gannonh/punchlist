@@ -43,6 +43,7 @@ Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-
 - `punchlist-server bootstrap --person <name>` creates a workspace, its repository and one person, and prints a `pl` config with the person's token.
 - `pl` reads `server_url` and `token` from `~/.config/punchlist/config.toml`, or from the file in `PUNCHLIST_CONFIG`.
 - `pl runner start` registers a runner with that person's token and gets the runner's own token back, held in memory only. It needs `git`, `gh` logged in with push access to the workspace's repository, and `claude` on `PATH`. Clones and worktrees go under `--worktree-root` (default `~/.local/share/punchlist/worktrees`).
+- GitHub events arrive at `POST /api/github/webhook`, verified with the GitHub App's webhook secret in `GITHUB_WEBHOOK_SECRET` (or `punchlist-server --github-webhook-secret`; it is a secret, so start the server under `with-env`). `pl issue show` lists an issue's pull requests; `pl pr unlinked` lists the ones that name no issue.
 - Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
 - `.claude/skills/verify-punchlist/` says how to run a live check.
 - CodeRabbit does not review pull requests in this repository on its own. When a pull request is ready for review, comment `@coderabbitai review` on it to start one, and comment again after later pushes that need a fresh review.

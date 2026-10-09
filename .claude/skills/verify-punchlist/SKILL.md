@@ -5,7 +5,7 @@ description: Launch and drive Punchlist (the punchlist-server API on Postgres, t
 
 # Verify Punchlist
 
-Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them. A user drives it by running `pl` commands against a running server. There is no web app or GitHub integration yet; extend this skill when a slice adds one.
+Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them. A user drives it by running `pl` commands against a running server. The server also takes GitHub App webhook deliveries at `POST /api/github/webhook`; [features/github.md](features/github.md) shows how to send signed fixture payloads and what to read afterwards. There is no web app yet; extend this skill when a slice adds one.
 
 Everything here runs from the repository root on sartre.
 
@@ -13,7 +13,7 @@ Everything here runs from the repository root on sartre.
 
 - **Sandbox repository:** `gannonh/punchlist-sandbox` (private, default branch `main`). Live checks that open branches or pull requests use this repository, never `gannonh/punchlist` or any other real repository.
 - **Live-check model:** agent runs in live checks use Claude Code with `--model haiku`, the cheapest Claude model. Make a live model call only inside a named live check.
-- **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Slice 1 needs no secrets.
+- **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Fixture webhook deliveries need no secret from 1Password: `up` generates a random webhook secret per run. Real GitHub deliveries need the GitHub App's secret, so start the run under `with-env $C up`.
 
 ## Launch
 
@@ -29,7 +29,7 @@ It:
 1. Starts the dev Postgres container with `docker compose up -d --wait db` (`127.0.0.1:5433`, shared by every run).
 2. Creates a fresh database `punchlist_verify_<RUN_ID>` in it, so runs never share data.
 3. Builds `punchlist-server` and `pl` with `SQLX_OFFLINE=true`.
-4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database and `PUNCHLIST_BIND` on a free port, in its own process group. The server runs migrations at start.
+4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) and `PUNCHLIST_BIND` on a free port, in its own process group. The server runs migrations at start.
 5. Waits for `listening on http://127.0.0.1:<port>` in the server log (up to 60 s).
 6. Runs `punchlist-server bootstrap --person "Verify Person" --repository gannonh/punchlist-sandbox`, which creates workspace `Punchlist` (prefix `PL`), the sandbox repository and one person actor, and writes the `pl` config with that person's token.
 
@@ -84,13 +84,15 @@ $C runner-stop "$RUN" r1         # SIGINT; running attempts finish failed, "runn
 
 The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its clones and worktrees are under `/tmp/punchlist-verify/<RUN_ID>/worktrees/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
 
+A GitHub delivery, signed with the run's webhook secret: `$C webhook "$RUN" pull_request payload.json [DELIVERY_ID]` prints the HTTP status and records it in the transcript. Recipes are in [features/github.md](features/github.md).
+
 Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
 The feature map in `features/` has a recipe per feature. Read `features/README.md` first.
 
 ## Evidence
 
-Every `$C pl` and `$C sql` call appends the command, stdout, stderr and exit code to `verify-artifacts/<RUN_ID>/transcript.txt` in the repository root. `down` copies the server log there as `server.log`. `verify-artifacts/` is gitignored; quote from the transcript in the PR body, or commit chosen files to the `assets/<issue-id>` branch.
+Every `$C pl`, `$C sql` and `$C webhook` call appends the command, stdout, stderr and exit code to `verify-artifacts/<RUN_ID>/transcript.txt` in the repository root. `down` copies the server log there as `server.log`. `verify-artifacts/` is gitignored; quote from the transcript in the PR body, or commit chosen files to the `assets/<issue-id>` branch.
 
 Proof standards:
 

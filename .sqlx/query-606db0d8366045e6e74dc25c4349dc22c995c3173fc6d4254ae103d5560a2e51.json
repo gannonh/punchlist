@@ -1,0 +1,184 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.number, p.title, p.branch, p.url, p.author_login, p.state, p.draft,\n                p.merge_state, p.checks, p.checks_total, p.checks_passed, p.open_threads,\n                p.issue_id, p.updated_at\n         FROM pull_request p\n         JOIN repository r ON r.id = p.repository_id\n         WHERE r.workspace_id = $1 AND p.issue_id IS NULL\n         ORDER BY p.number DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "number",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "author_login",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "author_login"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "draft",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "draft"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "merge_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "merge_state"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "checks",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "checks_total",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks_total"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "checks_passed",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks_passed"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "open_threads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "open_threads"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "issue_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "606db0d8366045e6e74dc25c4349dc22c995c3173fc6d4254ae103d5560a2e51"
+}

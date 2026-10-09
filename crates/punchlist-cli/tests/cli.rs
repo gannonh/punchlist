@@ -99,6 +99,9 @@ async fn create_show_move_and_refuse(pool: PgPool) {
 
     Body
 
+    Pull requests
+      None linked.
+
     Timeline
       No transitions yet.
 
@@ -124,6 +127,9 @@ async fn create_show_move_and_refuse(pool: PgPool) {
         Status: Start
 
         Body
+
+        Pull requests
+          None linked.
 
         Timeline
           [time]  Gannon (person)  Backlog → Todo
@@ -245,6 +251,9 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         PL-1  Do it
         Status: In Progress
 
+        Pull requests
+          None linked.
+
         Timeline
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
@@ -278,6 +287,9 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         PL-1  Do it
         Status: In Progress
 
+        Pull requests
+          None linked.
+
         Timeline
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
@@ -304,6 +316,184 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
     assert_eq!(unknown.code, 1);
     assert!(unknown.stderr.starts_with("error: "), "{}", unknown.stderr);
     assert!(unknown.stderr.contains("404"), "{}", unknown.stderr);
+}
+
+/// Inserts a pull request on the bootstrapped repository, the row webhook processing
+/// writes. The rows here stand in for that processing, which the server's tests cover; these
+/// tests cover how `pl` reads and prints them.
+#[allow(clippy::too_many_arguments)]
+async fn insert_pull_request(
+    pool: &PgPool,
+    number: i64,
+    title: &str,
+    branch: &str,
+    draft: bool,
+    checks: (&str, i32, i32),
+    open_threads: i32,
+    issue_id: Option<&str>,
+) {
+    sqlx::query(
+        "INSERT INTO pull_request (repository_id, number, github_id, title, branch, head_sha,
+                                   url, author_login, state, draft, merge_state, checks,
+                                   checks_total, checks_passed, open_threads, issue_id,
+                                   github_updated_at)
+         SELECT id, $1, $1, $2, $3, 'abc123', $4, 'gannonh', 'open', $5, 'clean', $6, $7, $8,
+                $9, $10, now()
+         FROM repository",
+    )
+    .bind(number)
+    .bind(title)
+    .bind(branch)
+    .bind(format!(
+        "https://github.com/gannonh/punchlist/pull/{number}"
+    ))
+    .bind(draft)
+    .bind(checks.0)
+    .bind(checks.1)
+    .bind(checks.2)
+    .bind(open_threads)
+    .bind(issue_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn a_linked_pull_request_shows_on_the_issue(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Fix"]).await;
+    insert_pull_request(
+        &pool,
+        7,
+        "PL-1: fix",
+        "feature/pl-1-fix",
+        true,
+        ("passing", 2, 2),
+        0,
+        Some("PL-1"),
+    )
+    .await;
+    insert_pull_request(
+        &pool,
+        6,
+        "PL-1: first try",
+        "feature/pl-1-try",
+        false,
+        ("none", 0, 0),
+        1,
+        Some("PL-1"),
+    )
+    .await;
+
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert_eq!(show.code, 0, "{}", show.stderr);
+    assert!(show.stdout.contains("#7 draft"), "{}", show.stdout);
+    insta::assert_snapshot!(show.stdout, @r"
+    PL-1  Fix
+    Status: Backlog
+
+    Pull requests
+      #7 draft  feature/pl-1-fix  checks passing 2/2  0 open threads
+        https://github.com/gannonh/punchlist/pull/7
+      #6 open  feature/pl-1-try  no checks  1 open thread
+        https://github.com/gannonh/punchlist/pull/6
+
+    Timeline
+      No transitions yet.
+
+    Runs
+      No runs yet.
+    ");
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn unlinked_pull_requests_list_newest_first(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let none = pl.run(&["pr", "unlinked"]).await;
+    assert_eq!(
+        (none.code, none.stdout.as_str()),
+        (0, "No unlinked pull requests.\n")
+    );
+
+    pl.run(&["issue", "create", "--title", "Fix"]).await;
+    insert_pull_request(&pool, 3, "Stray", "stray", false, ("none", 0, 0), 0, None).await;
+    insert_pull_request(
+        &pool,
+        4,
+        "Also stray",
+        "feature/other",
+        true,
+        ("none", 0, 0),
+        0,
+        None,
+    )
+    .await;
+    insert_pull_request(
+        &pool,
+        5,
+        "PL-1: fix",
+        "feature/pl-1-fix",
+        false,
+        ("none", 0, 0),
+        0,
+        Some("PL-1"),
+    )
+    .await;
+
+    let unlinked = pl.run(&["pr", "unlinked"]).await;
+    assert_eq!(
+        (unlinked.code, unlinked.stdout.as_str()),
+        (
+            0,
+            "#4  draft  feature/other  Also stray\n#3  open  stray  Stray\n"
+        )
+    );
+}
+
+// Needs the server's `issue_events` to return comment events, which the webhook slice adds;
+// run it with `--ignored` once that is merged and drop the attribute.
+#[ignore = "waits for issue_events to return comment events"]
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Fix"]).await;
+    // Rows that webhook processing writes for a pull request closed without merging.
+    sqlx::query(
+        "WITH gh AS (
+             INSERT INTO actor (workspace_id, name, role, github_login)
+             SELECT id, 'octocat', 'github', 'octocat' FROM workspace RETURNING id, workspace_id
+         ), c AS (
+             INSERT INTO comment (issue_id, actor_id, body)
+             SELECT 'PL-1', id, E'Closed without merging.\\nSee #7.' FROM gh RETURNING id, actor_id
+         ), s AS (
+             UPDATE workspace SET last_event_seq = 1 RETURNING id
+         )
+         INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id)
+         SELECT s.id, 1, 'PL-1', 'comment', c.actor_id, c.id FROM s, c",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert_eq!(show.code, 0, "{}", show.stderr);
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(show.stdout, @r"
+        PL-1  Fix
+        Status: Backlog
+
+        Pull requests
+          None linked.
+
+        Timeline
+          [time]  octocat (github)  commented:
+            Closed without merging.
+            See #7.
+
+        Runs
+          No runs yet.
+        ");
+    });
 }
 
 #[test]

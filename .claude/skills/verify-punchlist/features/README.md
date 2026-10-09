@@ -9,6 +9,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | Refused moves | [issue-refusals.md](issue-refusals.md) | `pl issue move`, `POST /api/issues/{id}/transitions` |
 | List issues | [issue-list.md](issue-list.md) | `pl issue list`, `GET /api/issues` |
 | Runners, claims and runs | [runner.md](runner.md) | `pl runner start`, `pl runner list`, `pl issue show` (runs), `pl run log`, `/api/runners`, `/api/runs/*` |
+| GitHub webhook, pull requests and checks | [github.md](github.md) | `$C webhook`, `POST /api/github/webhook`, `pl issue show` (pull requests, comments), `pl pr unlinked`, `/api/issues/{id}/pull-requests`, `/api/pull-requests/unlinked` |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 
 ## Baseline preconditions
