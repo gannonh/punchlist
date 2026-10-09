@@ -6,6 +6,7 @@
 #   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
 #   control-punchlist sql RUN_ID QUERY    run a query on the run's database; record it
 #   control-punchlist curl RUN_ID ARGS... curl with the run's token (e.g. "$SERVER_URL/api/issues")
+#   control-punchlist webhook RUN_ID EVENT PAYLOAD_FILE [DELIVERY_ID]  post a signed GitHub webhook delivery
 #   control-punchlist runner RUN_ID NAME [ARGS...]  start `pl runner start --name NAME`; wait until it registers
 #   control-punchlist runner-stop RUN_ID NAME       stop that runner
 #   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
@@ -54,7 +55,14 @@ cmd_up() {
   (umask 077 && mkdir -p "$dir")
   mkdir -p "$EVIDENCE_ROOT/$run_id"
   local db="punchlist_verify_${run_id//[^a-zA-Z0-9]/_}"
-  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  # PUNCHLIST_VERIFY_PORT pins the port: 7879 is the one the Tailscale Funnel forwards
+  # GitHub's deliveries to (features/github.md). Otherwise any free port.
+  local port="${PUNCHLIST_VERIFY_PORT:-}"
+  if [ -n "$port" ]; then
+    ss -ltn "sport = :$port" | grep -q LISTEN && die "port $port is in use; is another run holding it?"
+  else
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  fi
   local url="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/$db"
 
   # Written first, so a failure anywhere below can be cleaned up by `down`.
@@ -76,8 +84,14 @@ ENV
   psql "$ADMIN_URL" -qc "CREATE DATABASE $db" >/dev/null
   (cd "$REPO" && SQLX_OFFLINE=true cargo build -q -p punchlist-server -p punchlist-cli)
 
+  # The webhook secret: the environment's (`with-env $C up` brings the GitHub App's, so real
+  # deliveries verify), else a random one for this run. It lives in a 0600 file, never in
+  # run.env and never printed.
+  (umask 077 && printf '%s' "${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" >"$dir/webhook-secret")
+
   # pnpm dev in its own process group so `down` stops exactly this tree.
   (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="127.0.0.1:$port" \
+     GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \
      exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
   local pgid=$!
   echo "$pgid" >"$dir/server.pgid"
@@ -128,6 +142,26 @@ cmd_sql() {
 cmd_curl() {
   load "${1:-}"; shift
   curl_auth -s "$@"
+}
+
+cmd_webhook() {
+  load "${1:-}"
+  local event="${2:-}" file="${3:-}" delivery="${4:-}"
+  [ -n "$event" ] && [ -f "$file" ] || die "usage: webhook RUN_ID EVENT PAYLOAD_FILE [DELIVERY_ID]"
+  [ -n "$delivery" ] || delivery="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  # GitHub signs the raw body with HMAC-SHA256 under the webhook secret.
+  local signature
+  # The secret is read from its file inside the process, so it never shows in a process listing.
+  signature="sha256=$(python3 -c '
+import hashlib, hmac, sys
+secret = open(sys.argv[1], "rb").read()
+print(hmac.new(secret, open(sys.argv[2], "rb").read(), hashlib.sha256).hexdigest())' "$RUN_DIR/webhook-secret" "$file")"
+  # The signature goes to curl on stdin, like the token in curl_auth, so it stays out of
+  # process listings.
+  record "$EVIDENCE/transcript.txt" "webhook $event $file delivery $delivery" \
+    bash -c 'printf "X-Hub-Signature-256: %s\n" "$1" | curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+      -H @- -H "Content-Type: application/json" -H "X-GitHub-Event: $2" -H "X-GitHub-Delivery: $3" \
+      --data-binary "@$4" "$5/api/github/webhook"' _ "$signature" "$event" "$delivery" "$file" "$SERVER_URL"
 }
 
 cmd_runner() {
@@ -199,6 +233,7 @@ case "${1:-}" in
   pl) shift; cmd_pl "$@" ;;
   curl) shift; cmd_curl "$@" ;;
   sql) shift; cmd_sql "$@" ;;
+  webhook) shift; cmd_webhook "$@" ;;
   runner) shift; cmd_runner "$@" ;;
   runner-stop) shift; cmd_runner_stop "$@" ;;
   down) shift; cmd_down "$@" ;;

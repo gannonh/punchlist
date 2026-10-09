@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 const DEFAULT_WORKFLOW_TOML: &str = include_str!("default_workflow.toml");
 
+/// The events a transition's `on` may name; the server makes each from a GitHub delivery.
+const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
+/// What a transition's `require` may ask a move to carry.
+const REQUIREMENTS: [&str; 1] = ["comment"];
+
 static DEFAULT_WORKFLOW: LazyLock<Workflow> = LazyLock::new(|| {
     Workflow::from_toml(DEFAULT_WORKFLOW_TOML).expect("the built-in workflow is valid")
 });
@@ -29,16 +34,20 @@ pub enum Role {
     Person,
     Agent,
     Runner,
+    /// GitHub, through a webhook event. Makes only the transitions whose `on` names a
+    /// GitHub event; its actors are named after the GitHub user who caused the event.
+    Github,
 }
 
 impl Role {
-    pub const ALL: [Role; 3] = [Role::Person, Role::Agent, Role::Runner];
+    pub const ALL: [Role; 4] = [Role::Person, Role::Agent, Role::Runner, Role::Github];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Person => "person",
             Role::Agent => "agent",
             Role::Runner => "runner",
+            Role::Github => "github",
         }
     }
 
@@ -51,6 +60,7 @@ impl Role {
             Role::Person => "a person",
             Role::Agent => "an agent",
             Role::Runner => "a runner",
+            Role::Github => "GitHub",
         }
     }
 }
@@ -107,6 +117,8 @@ pub struct Transition {
     pub on: Option<String>,
     /// Gates that must pass on recorded evidence before the move.
     pub gates: Vec<String>,
+    /// What the move must carry, such as `comment`.
+    pub require: Vec<String>,
 }
 
 /// Which agent a runner starts when an issue enters a status.
@@ -141,6 +153,10 @@ pub enum LoadError {
     UnknownStatus(String),
     #[error("transition to `{0}` has neither `by` nor `on`")]
     NoActor(String),
+    #[error("transition to `{to}` is on event `{event}`, which Punchlist does not emit")]
+    UnknownEvent { to: String, event: String },
+    #[error("transition to `{to}` requires `{requirement}`, which Punchlist does not know")]
+    UnknownRequirement { to: String, requirement: String },
     #[error("dispatch rule for `{0}` names no agent")]
     NoAgent(String),
 }
@@ -227,12 +243,29 @@ impl Workflow {
             if t.by.is_empty() && t.on.is_none() {
                 return Err(LoadError::NoActor(to.0));
             }
+            if let Some(event) = t.on.as_deref().filter(|e| !EVENTS.contains(e)) {
+                return Err(LoadError::UnknownEvent {
+                    to: to.0,
+                    event: event.to_string(),
+                });
+            }
+            if let Some(requirement) = t
+                .require
+                .iter()
+                .find(|r| !REQUIREMENTS.contains(&r.as_str()))
+            {
+                return Err(LoadError::UnknownRequirement {
+                    to: to.0,
+                    requirement: requirement.clone(),
+                });
+            }
             transitions.push(Transition {
                 from,
                 to,
                 by: t.by,
                 on: t.on,
                 gates: t.gates,
+                require: t.require,
             });
         }
         let mut dispatch = Vec::with_capacity(raw.dispatch.status.len());
@@ -329,6 +362,15 @@ impl Workflow {
             }),
         }
     }
+
+    /// The transition an event makes from `from`, such as `merging → done` on `pr_merged`.
+    /// `None` when the workflow has no transition on that event from that status: the event
+    /// is recorded as evidence and the issue stays where it is.
+    pub fn transition_on(&self, from: &str, event: &str) -> Option<&Transition> {
+        self.transitions
+            .iter()
+            .find(|t| t.on.as_deref() == Some(event) && t.from.iter().any(|f| f.0 == from))
+    }
 }
 
 fn content_hash(text: &str) -> String {
@@ -367,6 +409,8 @@ struct RawTransition {
     on: Option<String>,
     #[serde(default)]
     gates: Vec<String>,
+    #[serde(default)]
+    require: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -564,6 +608,28 @@ mod tests {
     }
 
     #[test]
+    fn events_move_only_from_their_from_statuses() {
+        let workflow = default_workflow();
+        let to = |from, event| {
+            workflow
+                .transition_on(from, event)
+                .map(|t| (t.to.as_str().to_string(), t.require.clone()))
+        };
+        assert_eq!(to("merging", "pr_merged"), Some(("done".into(), vec![])));
+        assert_eq!(to("human_review", "pr_merged"), None);
+        assert_eq!(
+            to("in_progress", "pr_closed_unmerged"),
+            Some(("todo".into(), vec!["comment".into()]))
+        );
+        assert_eq!(
+            to("agent_review", "pr_closed_unmerged"),
+            Some(("todo".into(), vec!["comment".into()]))
+        );
+        assert_eq!(to("merging", "pr_closed_unmerged"), None);
+        assert_eq!(to("todo", "pr_closed_unmerged"), None);
+    }
+
+    #[test]
     fn display_names() {
         assert_eq!(display_name("backlog"), "Backlog");
         assert_eq!(display_name("in_progress"), "In Progress");
@@ -594,5 +660,25 @@ mod tests {
             .unwrap_err(),
             LoadError::NoActor("b".into())
         );
+        let transition = |extra: &str| {
+            Workflow::from_toml(&format!(
+                "statuses = [\"a\", \"b\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\n{extra}"
+            ))
+        };
+        assert_eq!(
+            transition("on = \"pr_merge\"").unwrap_err(),
+            LoadError::UnknownEvent {
+                to: "b".into(),
+                event: "pr_merge".into()
+            }
+        );
+        assert_eq!(
+            transition("by = [\"person\"]\nrequire = [\"evidence\"]").unwrap_err(),
+            LoadError::UnknownRequirement {
+                to: "b".into(),
+                requirement: "evidence".into()
+            }
+        );
+        assert!(transition("on = \"pr_merged\"\nrequire = [\"comment\"]").is_ok());
     }
 }

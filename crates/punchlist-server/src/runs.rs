@@ -106,7 +106,7 @@ async fn try_claim(
         }
     };
     workflow.check_transition("start", "in_progress", actor.role)?;
-    let moved = record_transition(&mut tx, actor, &id, "start".into(), "in_progress").await?;
+    let moved = record_transition(&mut tx, actor, &id, "start".into(), "in_progress", None).await?;
     let branch = branch_name(&id, &moved.issue.title);
     let run_id = sqlx::query_scalar!(
         "INSERT INTO run (workspace_id, issue_id, status, agent, branch)

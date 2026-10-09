@@ -1,6 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use punchlist_server::{AppState, Bootstrap, MIGRATOR, bootstrap, expire_leases, router};
+use punchlist_server::{
+    AppState, Bootstrap, MIGRATOR, bootstrap, expire_leases, router, work_jobs,
+};
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -23,6 +25,10 @@ enum Command {
         /// Address to listen on.
         #[arg(long, env = "PUNCHLIST_BIND", default_value = "127.0.0.1:7878")]
         bind: String,
+        /// The secret GitHub signs webhook deliveries with. Without it, or if it is empty, the
+        /// webhook route answers 503.
+        #[arg(long, env = "GITHUB_WEBHOOK_SECRET", hide_env_values = true)]
+        github_webhook_secret: Option<String>,
     },
     /// Create a workspace, its repository and one person, and print the person's token.
     Bootstrap {
@@ -64,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
     MIGRATOR.run(&pool).await.context("run migrations")?;
 
     match cli.command {
-        Command::Serve { bind } => {
+        Command::Serve {
+            bind,
+            github_webhook_secret,
+        } => {
             let expiry_pool = pool.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -77,7 +86,14 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             });
-            let app = router(AppState::new(pool)).layer(TraceLayer::new_for_http());
+            let mut state = AppState::new(pool);
+            // An empty secret is no secret: anyone could sign with it.
+            match github_webhook_secret.filter(|secret| !secret.is_empty()) {
+                Some(secret) => state = state.with_github_webhook_secret(secret),
+                None => tracing::warn!("no GitHub webhook secret; the webhook route answers 503"),
+            }
+            tokio::spawn(work_jobs(state.clone()));
+            let app = router(state).layer(TraceLayer::new_for_http());
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("listen on {bind}"))?;

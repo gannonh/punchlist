@@ -53,15 +53,34 @@ struct EventRow {
     actor_id: Uuid,
     actor_name: String,
     actor_role: String,
-    from_status: String,
-    to_status: String,
-    workflow_version: String,
+    kind: String,
+    from_status: Option<String>,
+    to_status: Option<String>,
+    workflow_version: Option<String>,
+    delivery_id: Option<String>,
+    comment_body: Option<String>,
 }
 
 impl TryFrom<EventRow> for Event {
     type Error = sqlx::Error;
 
     fn try_from(row: EventRow) -> Result<Event, sqlx::Error> {
+        let corrupt = |what: &str| sqlx::Error::Decode(format!("{what} event row").into());
+        let detail = match (row.kind.as_str(), row.comment_body) {
+            ("comment", Some(body)) => EventDetail::Comment { body },
+            ("transition", None) => match (row.from_status, row.to_status, row.workflow_version) {
+                (Some(from), Some(to), Some(version)) => EventDetail::Transition {
+                    from_name: display_name(&from),
+                    to_name: display_name(&to),
+                    from,
+                    to,
+                    workflow_version: version,
+                    delivery_id: row.delivery_id,
+                },
+                _ => return Err(corrupt("incomplete transition")),
+            },
+            _ => return Err(corrupt("unknown")),
+        };
         Ok(Event {
             seq: row.seq,
             issue_id: row.issue_id,
@@ -71,7 +90,7 @@ impl TryFrom<EventRow> for Event {
                 name: row.actor_name,
                 role: parse_role(&row.actor_role)?,
             },
-            detail: EventDetail::transition(row.from_status, row.to_status, row.workflow_version),
+            detail,
         })
     }
 }
@@ -219,7 +238,7 @@ async fn move_issue(
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     workflow.check_transition(&from, &request.to, actor.role)?;
-    let moved = record_transition(&mut tx, &actor, &id, from, &request.to).await?;
+    let moved = record_transition(&mut tx, &actor, &id, from, &request.to, None).await?;
     tx.commit().await?;
     if request.to == "start" {
         // Wake runners that are long-polling for work. No receivers is fine.
@@ -229,14 +248,30 @@ async fn move_issue(
 }
 
 /// Writes a transition that the caller has already checked and whose issue row it has
-/// locked: the new status, the transition and its event. Shared by `move_issue` and claims.
+/// locked: the new status, the transition and its event. Shared by `move_issue`, claims
+/// and GitHub events, which pass the webhook delivery that caused the move.
 pub(crate) async fn record_transition(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
     id: &str,
     from: String,
     to: &str,
+    delivery_id: Option<&str>,
 ) -> Result<Moved, ApiError> {
+    write_transition(tx, actor, id, from, to, delivery_id)
+        .await
+        .map(|(moved, _)| moved)
+}
+
+/// `record_transition`, also returning the new transition's id.
+pub(crate) async fn write_transition(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: String,
+    to: &str,
+    delivery_id: Option<&str>,
+) -> Result<(Moved, Uuid), ApiError> {
     let workflow = default_workflow();
     let issue = sqlx::query_as!(
         IssueRow,
@@ -248,13 +283,15 @@ pub(crate) async fn record_transition(
     .fetch_one(&mut *tx)
     .await?;
     let transition_id = sqlx::query_scalar!(
-        "INSERT INTO transition (issue_id, from_status, to_status, actor_id, workflow_version)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO transition
+             (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         id,
         from,
         to,
         actor.id,
         workflow.version(),
+        delivery_id,
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -276,16 +313,25 @@ pub(crate) async fn record_transition(
     )
     .fetch_one(&mut *tx)
     .await?;
-    Ok(Moved {
+    let mut detail = EventDetail::transition(from, to.to_string(), workflow.version().to_string());
+    if let EventDetail::Transition {
+        delivery_id: detail_delivery,
+        ..
+    } = &mut detail
+    {
+        *detail_delivery = delivery_id.map(str::to_string);
+    }
+    let moved = Moved {
         issue: issue.into(),
         event: Event {
             seq,
             issue_id: id.to_string(),
             actor: actor.into(),
             created_at,
-            detail: EventDetail::transition(from, to.to_string(), workflow.version().to_string()),
+            detail,
         },
-    })
+    };
+    Ok((moved, transition_id))
 }
 
 /// An issue's timeline, oldest first.
@@ -317,14 +363,17 @@ async fn issue_events(
     }
     let rows = sqlx::query_as!(
         EventRow,
-        "SELECT e.seq, e.issue_id, e.created_at,
+        r#"SELECT e.seq, e.issue_id, e.created_at,
                 a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,
-                t.from_status, t.to_status, t.workflow_version
+                e.kind, t.from_status AS "from_status?", t.to_status AS "to_status?",
+                t.workflow_version AS "workflow_version?", t.delivery_id AS "delivery_id?",
+                c.body AS "comment_body?"
          FROM event e
          JOIN actor a ON a.id = e.actor_id
-         JOIN transition t ON t.id = e.transition_id
+         LEFT JOIN transition t ON t.id = e.transition_id
+         LEFT JOIN comment c ON c.id = e.comment_id
          WHERE e.workspace_id = $1 AND e.issue_id = $2
-         ORDER BY e.seq",
+         ORDER BY e.seq"#,
         actor.workspace_id,
         id,
     )

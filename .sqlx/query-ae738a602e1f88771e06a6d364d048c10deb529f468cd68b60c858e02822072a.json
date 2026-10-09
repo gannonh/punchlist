@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                t.from_status, t.to_status, t.workflow_version\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         JOIN transition t ON t.id = e.transition_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
+  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                e.kind, t.from_status AS \"from_status?\", t.to_status AS \"to_status?\",\n                t.workflow_version AS \"workflow_version?\", t.delivery_id AS \"delivery_id?\",\n                c.body AS \"comment_body?\"\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
   "describe": {
     "columns": [
       {
@@ -71,7 +71,18 @@
       },
       {
         "ordinal": 6,
-        "name": "from_status",
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "from_status?",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -81,8 +92,8 @@
         }
       },
       {
-        "ordinal": 7,
-        "name": "to_status",
+        "ordinal": 8,
+        "name": "to_status?",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -92,13 +103,35 @@
         }
       },
       {
-        "ordinal": 8,
-        "name": "workflow_version",
+        "ordinal": 9,
+        "name": "workflow_version?",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "transition",
             "name": "workflow_version"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "delivery_id?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "delivery_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "comment_body?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "comment",
+            "name": "body"
           }
         }
       }
@@ -118,8 +151,11 @@
       false,
       false,
       false,
+      false,
+      false,
+      true,
       false
     ]
   },
-  "hash": "4e8e1ae534158956f8d0c7d84d24b00bf78067ed03d1243f4d602c4938099617"
+  "hash": "ae738a602e1f88771e06a6d364d048c10deb529f468cd68b60c858e02822072a"
 }

@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
-use punchlist_api::{CreateIssue, Event, EventDetail, Issue, Run, RunOutcome, Runner};
+use punchlist_api::{
+    ChecksState, CreateIssue, Event, EventDetail, Issue, PullRequest, Run, RunOutcome, Runner,
+};
 use punchlist_client::Client;
 use serde::Deserialize;
 
@@ -33,6 +35,15 @@ pub enum Command {
     /// Work with runs.
     #[command(subcommand)]
     Run(RunCommand),
+    /// Work with pull requests.
+    #[command(name = "pr", subcommand)]
+    PullRequest(PullRequestCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PullRequestCommand {
+    /// List pull requests whose branch and title name no issue.
+    Unlinked,
 }
 
 #[derive(Debug, Subcommand)]
@@ -145,6 +156,11 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             let home = std::env::var("HOME").ok();
             let runner = runner_config(&config, flags, home.as_deref(), &hostname());
             punchlist_runner::run(runner, shutdown_signal()).await
+        }
+        Command::PullRequest(PullRequestCommand::Unlinked) => {
+            let pull_requests = client.unlinked_pull_requests().await?;
+            write!(out, "{}", render_unlinked(&pull_requests))?;
+            Ok(())
         }
         Command::Run(RunCommand::Log { run_id }) => {
             let log = client.run_log(&run_id).await?;
@@ -332,11 +348,12 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         }
         IssueCommand::Show { id } => {
             let (issue, events) = issue_with_timeline(client, &id).await?;
+            let pull_requests = client.issue_pull_requests(&id).await?;
             let runs = client.issue_runs(&id).await?;
             write!(
                 out,
                 "{}{}",
-                render_show(&issue, &events),
+                render_show(&issue, &pull_requests, &events),
                 render_runs(&runs)
             )?;
         }
@@ -346,7 +363,9 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         }
         IssueCommand::Move { id, status } => {
             let moved = client.move_issue(&id, &status).await?;
-            let EventDetail::Transition { from_name, .. } = &moved.event.detail;
+            let EventDetail::Transition { from_name, .. } = &moved.event.detail else {
+                anyhow::bail!("the server answered a move with an event that is not a transition");
+            };
             writeln!(
                 out,
                 "{}  {} → {}",
@@ -365,10 +384,12 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
     loop {
         let issue = client.get_issue(id).await?;
         let events = client.issue_events(id).await?;
-        let consistent = events.last().is_none_or(|event| {
-            let EventDetail::Transition { to, .. } = &event.detail;
-            *to == issue.status
+        // Comments do not change the status, so compare with the last transition.
+        let last_move = events.iter().rev().find_map(|event| match &event.detail {
+            EventDetail::Transition { to, .. } => Some(to),
+            EventDetail::Comment { .. } => None,
         });
+        let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
         if consistent || attempts == 3 {
             return Ok((issue, events));
@@ -376,7 +397,7 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
     }
 }
 
-fn render_show(issue: &Issue, events: &[Event]) -> String {
+fn render_show(issue: &Issue, pull_requests: &[PullRequest], events: &[Event]) -> String {
     let mut text = format!(
         "{}  {}\nStatus: {}\n",
         issue.id, issue.title, issue.status_name
@@ -386,24 +407,98 @@ fn render_show(issue: &Issue, events: &[Event]) -> String {
         text.push_str(issue.body.trim_end());
         text.push('\n');
     }
+    text.push_str(&render_pull_requests(pull_requests));
     text.push_str("\nTimeline\n");
     if events.is_empty() {
         text.push_str("  No transitions yet.\n");
     }
     for event in events {
-        let EventDetail::Transition {
-            from_name, to_name, ..
-        } = &event.detail;
-        text.push_str(&format!(
-            "  {}  {} ({})  {} → {}\n",
+        let who = format!(
+            "  {}  {} ({})  ",
             event.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
             event.actor.name,
             event.actor.role,
-            from_name,
-            to_name,
+        );
+        match &event.detail {
+            EventDetail::Transition {
+                from_name,
+                to_name,
+                delivery_id,
+                ..
+            } => {
+                text.push_str(&format!("{who}{from_name} → {to_name}"));
+                if let Some(delivery_id) = delivery_id {
+                    text.push_str(&format!("  [delivery {delivery_id}]"));
+                }
+                text.push('\n');
+            }
+            EventDetail::Comment { body } => {
+                text.push_str(&format!("{who}commented:\n"));
+                for line in body.trim_end().lines() {
+                    if line.is_empty() {
+                        text.push('\n');
+                    } else {
+                        text.push_str(&format!("    {line}\n"));
+                    }
+                }
+            }
+        }
+    }
+    text
+}
+
+/// The `Pull requests` section of `pl issue show`.
+fn render_pull_requests(pull_requests: &[PullRequest]) -> String {
+    let mut text = String::from("\nPull requests\n");
+    if pull_requests.is_empty() {
+        text.push_str("  None linked.\n");
+    }
+    for pr in pull_requests {
+        let checks = if pr.checks == ChecksState::None {
+            "no checks".to_string()
+        } else {
+            format!(
+                "checks {} {}/{}",
+                pr.checks.as_str(),
+                pr.checks_passed,
+                pr.checks_total
+            )
+        };
+        let threads = if pr.open_threads == 1 {
+            "1 open thread".to_string()
+        } else {
+            format!("{} open threads", pr.open_threads)
+        };
+        text.push_str(&format!(
+            "  #{} {}  {}  {}  {}\n    {}\n",
+            pr.number,
+            pr.state_word(),
+            pr.branch,
+            checks,
+            threads,
+            pr.url,
         ));
     }
     text
+}
+
+/// `pl pr unlinked`.
+fn render_unlinked(pull_requests: &[PullRequest]) -> String {
+    if pull_requests.is_empty() {
+        return "No unlinked pull requests.\n".to_string();
+    }
+    pull_requests
+        .iter()
+        .map(|pr| {
+            format!(
+                "#{}  {}  {}  {}\n",
+                pr.number,
+                pr.state_word(),
+                pr.branch,
+                pr.title
+            )
+        })
+        .collect()
 }
 
 fn render_list(issues: &[Issue]) -> String {
@@ -433,6 +528,122 @@ mod tests {
 
     fn config(text: &str) -> Result<Config, toml::de::Error> {
         toml::from_str(&format!("server_url = \"http://x\"\ntoken = \"t\"\n{text}"))
+    }
+
+    fn pull_request(number: i64) -> PullRequest {
+        PullRequest {
+            number,
+            title: "Fix it".into(),
+            branch: "feature/pl-7-fix".into(),
+            url: format!("https://github.com/gannonh/punchlist-sandbox/pull/{number}"),
+            author_login: "gannonh".into(),
+            state: punchlist_api::PullRequestState::Open,
+            draft: true,
+            merge_state: "clean".into(),
+            checks: ChecksState::Passing,
+            checks_total: 2,
+            checks_passed: 2,
+            open_threads: 0,
+            issue_id: Some("PL-7".into()),
+            updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+        }
+    }
+
+    fn event(role: punchlist_api::Role, name: &str, detail: EventDetail) -> Event {
+        Event {
+            seq: 1,
+            issue_id: "PL-7".into(),
+            actor: punchlist_api::Actor {
+                id: "00000000-0000-0000-0000-000000000000".parse().unwrap(),
+                name: name.into(),
+                role,
+            },
+            created_at: "2026-10-10T12:30:45Z".parse().unwrap(),
+            detail,
+        }
+    }
+
+    #[test]
+    fn renders_pull_requests_on_an_issue() {
+        assert_eq!(
+            render_pull_requests(&[]),
+            "\nPull requests\n  None linked.\n"
+        );
+
+        let mut failing = pull_request(11);
+        failing.state = punchlist_api::PullRequestState::Merged;
+        failing.checks = ChecksState::Failing;
+        failing.checks_passed = 1;
+        failing.open_threads = 1;
+        let mut bare = pull_request(10);
+        bare.draft = false;
+        bare.checks = ChecksState::None;
+        bare.checks_total = 0;
+        bare.checks_passed = 0;
+        bare.open_threads = 3;
+        assert_eq!(
+            render_pull_requests(&[pull_request(12), failing, bare]),
+            "\nPull requests\n\
+             \x20 #12 draft  feature/pl-7-fix  checks passing 2/2  0 open threads\n\
+             \x20   https://github.com/gannonh/punchlist-sandbox/pull/12\n\
+             \x20 #11 merged  feature/pl-7-fix  checks failing 1/2  1 open thread\n\
+             \x20   https://github.com/gannonh/punchlist-sandbox/pull/11\n\
+             \x20 #10 open  feature/pl-7-fix  no checks  3 open threads\n\
+             \x20   https://github.com/gannonh/punchlist-sandbox/pull/10\n"
+        );
+    }
+
+    #[test]
+    fn renders_unlinked_pull_requests() {
+        assert_eq!(render_unlinked(&[]), "No unlinked pull requests.\n");
+        let mut closed = pull_request(8);
+        closed.state = punchlist_api::PullRequestState::Closed;
+        assert_eq!(
+            render_unlinked(&[pull_request(9), closed]),
+            "#9  draft  feature/pl-7-fix  Fix it\n#8  closed  feature/pl-7-fix  Fix it\n"
+        );
+    }
+
+    #[test]
+    fn timeline_shows_comments_and_deliveries() {
+        let issue = Issue {
+            id: "PL-7".into(),
+            title: "Fix".into(),
+            body: String::new(),
+            status: "agent_review".into(),
+            status_name: "Agent Review".into(),
+            created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+        };
+        let mut moved = EventDetail::transition(
+            "in_progress".into(),
+            "agent_review".into(),
+            "sha256:ab".into(),
+        );
+        if let EventDetail::Transition { delivery_id, .. } = &mut moved {
+            *delivery_id = Some("d-1".into());
+        }
+        let events = [
+            event(punchlist_api::Role::Github, "gannonh", moved),
+            event(
+                punchlist_api::Role::Github,
+                "gannonh",
+                EventDetail::Comment {
+                    body: "Closed without merging.\n\nSee #12.\n".into(),
+                },
+            ),
+        ];
+        assert_eq!(
+            render_show(&issue, &[], &events),
+            "PL-7  Fix\nStatus: Agent Review\n\
+             \nPull requests\n  None linked.\n\
+             \nTimeline\n\
+             \x20 2026-10-10 12:30:45 UTC  gannonh (github)  In Progress → Agent Review  [delivery d-1]\n\
+             \x20 2026-10-10 12:30:45 UTC  gannonh (github)  commented:\n\
+             \x20   Closed without merging.\n\
+             \n\
+             \x20   See #12.\n"
+        );
     }
 
     #[test]

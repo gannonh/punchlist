@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attempt SET state = 'failed', finished_at = now(), failure_reason = $2\n         WHERE issue_id = $1 AND state = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5bc715814841aa3c40a2affb745d6957737c48db54b38969bbc614b55e2453f"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE run SET outcome = 'failed', finished_at = now()\n         WHERE issue_id = $1 AND outcome = 'running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c9768b2494212f7b8de23fdfbbc71240bca9a5df3b211ff788319af4308b80d1"
+}

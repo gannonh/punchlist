@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job (kind, idempotency_key, payload) VALUES ('github_event', $1, $2)\n         ON CONFLICT (idempotency_key) DO UPDATE SET state = 'queued', attempts = 0,\n             run_after = now(), last_error = NULL, finished_at = NULL\n             -- Only a job that gave up: GitHub's redelivery reuses the delivery id, and is\n             -- the retry. A queued, running or done job already has the delivery.\n             WHERE job.state = 'failed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aa60b05bc221be9081fae9f501242c4b5429aecc1577922ddae892a2add27062"
+}
