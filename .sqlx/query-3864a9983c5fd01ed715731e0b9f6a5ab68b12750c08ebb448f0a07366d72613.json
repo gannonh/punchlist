@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $2)\n         WHERE runner_id = $1 AND state = 'running' AND lease_expires_at > now()\n             AND (run_id, attempt) IN (SELECT * FROM UNNEST($3::uuid[], $4::int[]))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8",
+        "UuidArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3864a9983c5fd01ed715731e0b9f6a5ab68b12750c08ebb448f0a07366d72613"
+}

@@ -35,6 +35,11 @@ pub fn parse_role(value: &str) -> Result<Role, sqlx::Error> {
         .ok_or_else(|| sqlx::Error::Decode(format!("unknown actor role `{value}`").into()))
 }
 
+/// A fresh bearer token. Only its hash is stored.
+pub fn new_token() -> String {
+    format!("plt_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
 /// SHA-256 of a bearer token, in hex. Only the hash is stored.
 pub fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes())

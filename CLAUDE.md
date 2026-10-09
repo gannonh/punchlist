@@ -34,7 +34,7 @@ web/                       React app; src/api/ is generated
 docker-compose.yml         Postgres for development; the self-host stack
 ```
 
-Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client` and `punchlist-cli`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
+Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client`, `punchlist-runner` and `punchlist-cli`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
 
 - Rust comes from rustup, which reads `rust-toolchain.toml`. Both machines get it from devops' `bin/machine-setup`.
 - `pnpm dev`: Postgres in Docker on `127.0.0.1:5433`, then the server on `127.0.0.1:7878`. Local defaults for `DATABASE_URL` and `PUNCHLIST_BIND` are in `scripts/env.sh`; they are not secrets.
@@ -42,6 +42,7 @@ Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-
 - `pnpm db:prepare`: after changing a query or a migration, migrate the dev database and regenerate `.sqlx/`. Needs `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features postgres,rustls`).
 - `punchlist-server bootstrap --person <name>` creates a workspace, its repository and one person, and prints a `pl` config with the person's token.
 - `pl` reads `server_url` and `token` from `~/.config/punchlist/config.toml`, or from the file in `PUNCHLIST_CONFIG`.
+- `pl runner start` registers a runner with that person's token and gets the runner's own token back, held in memory only. It needs `git`, `gh` logged in with push access to the workspace's repository, and `claude` on `PATH`. Clones and worktrees go under `--worktree-root` (default `~/.local/share/punchlist/worktrees`).
 - Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
 - `.claude/skills/verify-punchlist/` says how to run a live check.
 - CodeRabbit does not review pull requests in this repository on its own. When a pull request is ready for review, comment `@coderabbitai review` on it to start one, and comment again after later pushes that need a fresh review.

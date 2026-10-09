@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)\n         VALUES ($1, $2, $3, 1, now() + make_interval(secs => $4))\n         RETURNING lease_expires_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "lease_expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "lease_expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c7b73f8131a89131c7b05cb600aa3e99b360b245f7aca326a6d238b41c8d31a"
+}

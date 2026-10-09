@@ -1,0 +1,31 @@
+[package]
+name = "punchlist-runner"
+description = "The Punchlist runner: claims issues, prepares worktrees and runs agents (ADR 0005)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+punchlist-api.workspace = true
+punchlist-client.workspace = true
+punchlist-core.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+punchlist-server.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

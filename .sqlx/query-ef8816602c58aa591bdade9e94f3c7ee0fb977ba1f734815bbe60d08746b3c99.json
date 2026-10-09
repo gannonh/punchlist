@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_log_seq FROM run WHERE issue_id = 'PL-1'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_log_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "last_log_seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ef8816602c58aa591bdade9e94f3c7ee0fb977ba1f734815bbe60d08746b3c99"
+}

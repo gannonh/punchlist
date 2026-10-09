@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE runner SET last_heartbeat = now() WHERE id = $1\n         RETURNING id, name, agents, registered_at, last_heartbeat",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agents",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "agents"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "registered_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "registered_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_heartbeat",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "last_heartbeat"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1adca99fb8267f66086c87392ee0e467f4d9b7527e5226484d6f6635177b22a7"
+}

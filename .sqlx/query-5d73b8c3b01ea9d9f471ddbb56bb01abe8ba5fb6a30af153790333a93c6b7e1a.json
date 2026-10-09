@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT owner, name, default_branch FROM repository WHERE workspace_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "owner",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "owner"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "default_branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "default_branch"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5d73b8c3b01ea9d9f471ddbb56bb01abe8ba5fb6a30af153790333a93c6b7e1a"
+}

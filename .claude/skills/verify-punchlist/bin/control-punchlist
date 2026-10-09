@@ -6,7 +6,9 @@
 #   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
 #   control-punchlist sql RUN_ID QUERY    run a query on the run's database; record it
 #   control-punchlist curl RUN_ID ARGS... curl with the run's token (e.g. "$SERVER_URL/api/issues")
-#   control-punchlist down RUN_ID         stop the server and drop the database; keep evidence
+#   control-punchlist runner RUN_ID NAME [ARGS...]  start `pl runner start --name NAME`; wait until it registers
+#   control-punchlist runner-stop RUN_ID NAME       stop that runner
+#   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
@@ -14,6 +16,8 @@ STATE_ROOT="${TMPDIR:-/tmp}/punchlist-verify"
 EVIDENCE_ROOT="$REPO/verify-artifacts"
 DB_PORT="${PUNCHLIST_DB_PORT:-5433}"
 ADMIN_URL="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/punchlist"
+# Live checks open branches and pull requests only here, never in a real repository.
+SANDBOX_REPOSITORY="gannonh/punchlist-sandbox"
 
 die() { echo "control-punchlist: $*" >&2; exit 1; }
 state() { echo "$STATE_ROOT/$1"; }
@@ -85,7 +89,7 @@ ENV
   grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
 
   (umask 077 && "$REPO/target/debug/punchlist-server" --database-url "$url" bootstrap \
-     --person "Verify Person" --server-url "http://127.0.0.1:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
+     --person "Verify Person" --repository "$SANDBOX_REPOSITORY" --server-url "http://127.0.0.1:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
     { cat "$dir/bootstrap.err" >&2; die "bootstrap failed"; }
   trap - EXIT
   echo "$run_id"
@@ -126,8 +130,57 @@ cmd_curl() {
   curl_auth -s "$@"
 }
 
+cmd_runner() {
+  load "${1:-}"; local name="${2:-}"; shift 2 || die "usage: runner RUN_ID NAME [ARGS...]"
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || die "runner name must match [a-z0-9-]+"
+  local pidfile="$RUN_DIR/runner-$name.pgid" log="$EVIDENCE/runner-$name.log"
+  [ -e "$pidfile" ] && die "runner $name is already started in run $RUN_ID"
+  # Its own clones and worktrees, so two runners in one run never share a checkout.
+  local root="$RUN_DIR/worktrees/$name"
+  mkdir -p "$root"
+  (cd "$REPO" && PUNCHLIST_CONFIG="$CONFIG" exec setsid "$REPO/target/debug/pl" runner start \
+     --name "$name" --worktree-root "$root" --model haiku "$@" </dev/null >"$log" 2>&1) &
+  local pgid=$!
+  echo "$pgid" >"$pidfile"
+  for _ in $(seq 1 60); do
+    grep -qi "registered" "$log" 2>/dev/null && break
+    kill -0 -- "-$pgid" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -qi "registered" "$log" || {
+    tail -20 "$log" >&2
+    stop_group "$pgid"
+    rm -f "$pidfile"
+    die "runner $name did not register"
+  }
+  echo "runner $name started (pgid $pgid); log $log; worktrees $root" >&2
+}
+
+stop_group() { # stop_group PGID
+  local pgid="$1"
+  [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || return 0
+  kill -INT -- "-$pgid" 2>/dev/null || true
+  # After SIGINT the runner may take up to 2 x FINAL_REPORT_TIMEOUT (log flush, then outcome).
+  for _ in $(seq 1 120); do kill -0 -- "-$pgid" 2>/dev/null || return 0; sleep 0.25; done
+  kill -9 -- "-$pgid" 2>/dev/null || true
+}
+
+cmd_runner_stop() {
+  load "${1:-}"; local name="${2:-}"
+  [ -n "$name" ] || die "usage: runner-stop RUN_ID NAME"
+  local pidfile="$RUN_DIR/runner-$name.pgid"
+  [ -f "$pidfile" ] || die "no runner $name in run $RUN_ID"
+  stop_group "$(cat "$pidfile")"
+  rm -f "$pidfile"
+  echo "stopped runner $name" >&2
+}
+
 cmd_down() {
   load "${1:-}"
+  local file
+  for file in "$RUN_DIR"/runner-*.pgid; do
+    [ -f "$file" ] && stop_group "$(cat "$file")"
+  done
   local pgid; pgid="$(cat "$RUN_DIR/server.pgid" 2>/dev/null || true)"
   if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
     kill -- "-$pgid" 2>/dev/null || true
@@ -146,6 +199,8 @@ case "${1:-}" in
   pl) shift; cmd_pl "$@" ;;
   curl) shift; cmd_curl "$@" ;;
   sql) shift; cmd_sql "$@" ;;
+  runner) shift; cmd_runner "$@" ;;
+  runner-stop) shift; cmd_runner_stop "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

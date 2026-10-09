@@ -219,13 +219,31 @@ async fn move_issue(
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     workflow.check_transition(&from, &request.to, actor.role)?;
+    let moved = record_transition(&mut tx, &actor, &id, from, &request.to).await?;
+    tx.commit().await?;
+    if request.to == "start" {
+        // Wake runners that are long-polling for work. No receivers is fine.
+        let _ = state.starts.send((actor.workspace_id, id));
+    }
+    Ok(Json(moved))
+}
 
+/// Writes a transition that the caller has already checked and whose issue row it has
+/// locked: the new status, the transition and its event. Shared by `move_issue` and claims.
+pub(crate) async fn record_transition(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: String,
+    to: &str,
+) -> Result<Moved, ApiError> {
+    let workflow = default_workflow();
     let issue = sqlx::query_as!(
         IssueRow,
         "UPDATE issue SET status = $2, updated_at = now() WHERE id = $1
          RETURNING id, title, body, status, created_at, updated_at",
         id,
-        request.to,
+        to,
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -234,7 +252,7 @@ async fn move_issue(
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
         id,
         from,
-        request.to,
+        to,
         actor.id,
         workflow.version(),
     )
@@ -258,17 +276,16 @@ async fn move_issue(
     )
     .fetch_one(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(Json(Moved {
+    Ok(Moved {
         issue: issue.into(),
         event: Event {
             seq,
-            issue_id: id,
-            actor: (&actor).into(),
+            issue_id: id.to_string(),
+            actor: actor.into(),
             created_at,
-            detail: EventDetail::transition(from, request.to, workflow.version().to_string()),
+            detail: EventDetail::transition(from, to.to_string(), workflow.version().to_string()),
         },
-    }))
+    })
 }
 
 /// An issue's timeline, oldest first.

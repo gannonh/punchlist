@@ -1,7 +1,8 @@
 //! The workflow: statuses, transitions and who may make each one.
 //!
-//! Only the parts Slice 1 enforces are typed here. Gates are read but not yet evaluated, so
-//! a gated transition is always refused. Locks and dispatch rules are read by later slices.
+//! Only the parts the server enforces are typed here. Gates are read but not yet evaluated,
+//! so a gated transition is always refused. Dispatch rules name the agent a runner starts
+//! for a status. Locks are read by later slices.
 
 use std::fmt;
 use std::sync::LazyLock;
@@ -108,12 +109,23 @@ pub struct Transition {
     pub gates: Vec<String>,
 }
 
+/// Which agent a runner starts when an issue enters a status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dispatch {
+    pub status: Status,
+    /// An agent key, such as `claude-code`.
+    pub agent: String,
+    /// A path under `.punchlist/`. Read once the workflow file is loaded (Slice 4).
+    pub prompt: Option<String>,
+}
+
 /// A parsed and validated workflow.
 #[derive(Debug, Clone)]
 pub struct Workflow {
     version: String,
     statuses: Vec<Status>,
     transitions: Vec<Transition>,
+    dispatch: Vec<Dispatch>,
 }
 
 /// Why a workflow file did not load.
@@ -129,6 +141,8 @@ pub enum LoadError {
     UnknownStatus(String),
     #[error("transition to `{0}` has neither `by` nor `on`")]
     NoActor(String),
+    #[error("dispatch rule for `{0}` names no agent")]
+    NoAgent(String),
 }
 
 /// Why a transition was refused. The message names the rule that refused it.
@@ -221,10 +235,23 @@ impl Workflow {
                 gates: t.gates,
             });
         }
+        let mut dispatch = Vec::with_capacity(raw.dispatch.status.len());
+        for (name, rule) in raw.dispatch.status {
+            let status = known(name)?;
+            if rule.agent.trim().is_empty() {
+                return Err(LoadError::NoAgent(status.0));
+            }
+            dispatch.push(Dispatch {
+                status,
+                agent: rule.agent,
+                prompt: rule.prompt,
+            });
+        }
         Ok(Workflow {
             version: content_hash(text),
             statuses,
             transitions,
+            dispatch,
         })
     }
 
@@ -239,6 +266,11 @@ impl Workflow {
 
     pub fn transitions(&self) -> &[Transition] {
         &self.transitions
+    }
+
+    /// The dispatch rule for a status, if a runner starts an agent there.
+    pub fn dispatch_for(&self, status: &str) -> Option<&Dispatch> {
+        self.dispatch.iter().find(|d| d.status.0 == status)
     }
 
     /// The status a new issue starts in: the first one listed.
@@ -310,6 +342,20 @@ struct RawWorkflow {
     statuses: Vec<String>,
     #[serde(default, rename = "transition")]
     transitions: Vec<RawTransition>,
+    #[serde(default)]
+    dispatch: RawDispatch,
+}
+
+#[derive(Default, Deserialize)]
+struct RawDispatch {
+    #[serde(default)]
+    status: std::collections::BTreeMap<String, RawDispatchRule>,
+}
+
+#[derive(Deserialize)]
+struct RawDispatchRule {
+    agent: String,
+    prompt: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -488,6 +534,33 @@ mod tests {
         assert_eq!(workflow.transitions().len(), 8);
         assert!(workflow.version().starts_with("sha256:"));
         assert_eq!(workflow.version().len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn default_dispatch_names_claude_code_for_in_progress() {
+        let workflow = default_workflow();
+        let rule = workflow.dispatch_for("in_progress").unwrap();
+        assert_eq!(rule.agent, "claude-code");
+        assert_eq!(rule.prompt.as_deref(), Some("prompts/in_progress.md"));
+        assert_eq!(
+            workflow.dispatch_for("agent_review").unwrap().agent,
+            "codex"
+        );
+        assert_eq!(workflow.dispatch_for("start"), None);
+    }
+
+    #[test]
+    fn dispatch_errors() {
+        assert_eq!(
+            Workflow::from_toml("statuses = [\"a\"]\n[dispatch.status.z]\nagent = \"codex\"")
+                .unwrap_err(),
+            LoadError::UnknownStatus("z".into())
+        );
+        assert_eq!(
+            Workflow::from_toml("statuses = [\"a\"]\n[dispatch.status.a]\nagent = \"\"")
+                .unwrap_err(),
+            LoadError::NoAgent("a".into())
+        );
     }
 
     #[test]

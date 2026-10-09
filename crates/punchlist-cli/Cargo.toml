@@ -12,12 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 punchlist-api.workspace = true
 punchlist-client.workspace = true
+punchlist-runner.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

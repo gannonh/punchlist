@@ -1409,16 +1409,19 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "axum",
+ "chrono",
  "clap",
  "insta",
  "punchlist-api",
  "punchlist-client",
+ "punchlist-runner",
  "punchlist-server",
  "serde",
  "sqlx",
  "tempfile",
  "tokio",
  "toml",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1441,6 +1444,29 @@ dependencies = [
  "thiserror",
  "toml",
  "utoipa",
+]
+
+[[package]]
+name = "punchlist-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "punchlist-api",
+ "punchlist-client",
+ "punchlist-core",
+ "punchlist-server",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -1,0 +1,186 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,\n                  a.attempt AS \"attempt!\", a.runner_id AS \"runner_id!\",\n                  n.name AS \"runner_name!\", a.failure_reason, a.duration_ms,\n                  a.input_tokens, a.output_tokens\n           FROM run r\n           JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id\n                         ORDER BY attempt DESC LIMIT 1) a ON true\n           JOIN runner n ON n.id = a.runner_id\n           WHERE r.workspace_id = $1\n             AND ($2::text IS NULL OR r.issue_id = $2)\n             AND ($3::uuid IS NULL OR r.id = $3)\n           ORDER BY r.started_at DESC, r.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "issue_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "outcome",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "attempt!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "attempt"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "runner_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "runner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "runner_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "runner",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "failure_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "failure_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "duration_ms",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "input_tokens",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "output_tokens",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "output_tokens"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "5d3bc5a8be6fc950cd4308dd00e2c05bd8d0c29b863cc0b31dad6bdd16fc013c"
+}

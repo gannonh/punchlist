@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM attempt\n           WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now())\n           AS \"held!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "held!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0ea8a0d866888c58777bb3226e9ff5fda462341e0b2760846700777232139c8b"
+}

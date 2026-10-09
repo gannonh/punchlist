@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT attempt FROM attempt\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now()\n         FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "attempt"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cf1c3eccc70f9482429d2c76f77a81db97a0b9eb9fe7d008cc0dea30ff8dec19"
+}

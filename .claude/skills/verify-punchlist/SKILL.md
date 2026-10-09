@@ -1,11 +1,11 @@
 ---
 name: verify-punchlist
-description: Launch and drive Punchlist (the punchlist-server API on Postgres and the `pl` CLI) to prove a change works for live checks. Use before a Punchlist PR leaves draft, when rerunning another agent's live checks, or whenever you need evidence that `pl issue create/show/list/move` or the server's transition rules behave as the Linear issue says. Names the sandbox repository and the model for live checks.
+description: Launch and drive Punchlist (the punchlist-server API on Postgres, the `pl` CLI and the runner) to prove a change works for live checks. Use before a Punchlist PR leaves draft, when rerunning another agent's live checks, or whenever you need evidence that `pl issue create/show/list/move`, `pl runner start/list`, `pl run log` or the server's transition and claim rules behave as the Linear issue says. Names the sandbox repository and the model for live checks.
 ---
 
 # Verify Punchlist
 
-Punchlist today is a server (`punchlist-server`, axum on Postgres) and a terminal client (`pl`). A user drives it by running `pl` commands against a running server. There is no web app, runner or GitHub integration yet; extend this skill when a slice adds one.
+Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them. A user drives it by running `pl` commands against a running server. There is no web app or GitHub integration yet; extend this skill when a slice adds one.
 
 Everything here runs from the repository root on sartre.
 
@@ -31,11 +31,13 @@ It:
 3. Builds `punchlist-server` and `pl` with `SQLX_OFFLINE=true`.
 4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database and `PUNCHLIST_BIND` on a free port, in its own process group. The server runs migrations at start.
 5. Waits for `listening on http://127.0.0.1:<port>` in the server log (up to 60 s).
-6. Runs `punchlist-server bootstrap --person "Verify Person"`, which creates workspace `Punchlist` (prefix `PL`), repository `gannonh/punchlist` and one person actor, and writes the `pl` config with that person's token.
+6. Runs `punchlist-server bootstrap --person "Verify Person" --repository gannonh/punchlist-sandbox`, which creates workspace `Punchlist` (prefix `PL`), the sandbox repository and one person actor, and writes the `pl` config with that person's token.
 
 Instance state lives in `/tmp/punchlist-verify/<RUN_ID>/` (`run.env`, `config.toml`, `server.log`, `server.pgid`). `source /tmp/punchlist-verify/$RUN/run.env` gives `SERVER_URL`, `DATABASE_URL`, `CONFIG` and `EVIDENCE`.
 
 A live check that says "start with `pnpm dev`" is satisfied by `up`: it launches through `pnpm dev`, with only the database and port overridden for isolation. If a check needs the default dev instance itself (`127.0.0.1:7878`, database `punchlist`), first make sure nobody else is using it: `ss -ltnp | grep 7878` must show nothing.
+
+Another worktree's Postgres container may already hold `127.0.0.1:5433`, and then `up` fails at `docker compose up` with a port-in-use error. Check with `docker ps --format '{{.Names}} {{.Ports}}' | grep 5433`. Don't stop another worktree's container; give this worktree its own port instead: `export PUNCHLIST_DB_PORT=5434` (any free port) before `up`, `down` and `pnpm check`.
 
 ## Doctor
 
@@ -69,6 +71,19 @@ $C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"
 $C sql "$RUN" "SELECT id, name, role FROM actor"
 ```
 
+## Runners
+
+A runner makes live model calls once it claims an issue, so start one only inside a named live check:
+
+```sh
+$C runner "$RUN" r1              # pl runner start --name r1 --model haiku, its own worktree root
+$C pl "$RUN" runner list
+$C pl "$RUN" run log <run-id>
+$C runner-stop "$RUN" r1         # SIGINT; running attempts finish failed, "runner stopped"
+```
+
+The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its clones and worktrees are under `/tmp/punchlist-verify/<RUN_ID>/worktrees/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
+
 Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
 The feature map in `features/` has a recipe per feature. Read `features/README.md` first.
@@ -92,7 +107,7 @@ Proof standards:
 $C down "$RUN"
 ```
 
-It stops the run's own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `/tmp/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running; stop it with `docker compose down` only if you started it and nothing else uses it. Run `down` after a failed run too, so no server or database is left behind.
+It stops the run's runners and its own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `/tmp/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running; stop it with `docker compose down` only if you started it and nothing else uses it. Run `down` after a failed run too, so no server or database is left behind.
 
 ## Main versus branch
 
