@@ -44,6 +44,7 @@ Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-
 - `pl` reads `server_url` and `token` from `~/.config/punchlist/config.toml`, or from the file in `PUNCHLIST_CONFIG`.
 - Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
 - `.claude/skills/verify-punchlist/` says how to run a live check.
+- CodeRabbit does not review pull requests in this repository on its own. When a pull request is ready for review, comment `@coderabbitai review` on it to start one, and comment again after later pushes that need a fresh review.
 
 Keep setup, scripts and layout documented here as slices land.
 
