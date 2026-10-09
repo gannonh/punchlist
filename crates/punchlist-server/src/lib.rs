@@ -6,6 +6,7 @@ mod error;
 mod github;
 mod issues;
 mod jobs;
+mod pull_requests;
 mod runners;
 mod runs;
 
@@ -76,6 +77,7 @@ pub fn router(state: AppState) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(github::routes())
         .merge(issues::routes())
+        .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())
         .with_state(state)

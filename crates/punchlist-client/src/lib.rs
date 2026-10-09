@@ -3,7 +3,8 @@
 
 use punchlist_api::{
     AppendLog, Claim, ClaimRequest, CreateIssue, ErrorBody, Event, FinishRun, Heartbeat, Issue,
-    IssueList, MoveIssue, Moved, RegisterRunner, RegisteredRunner, Run, RunLog, Runner, RunnerList,
+    IssueList, MoveIssue, Moved, PullRequest, RegisterRunner, RegisteredRunner, Run, RunLog,
+    Runner, RunnerList,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -76,6 +77,18 @@ impl Client {
     /// Runs for an issue, newest first, each with its last 20 log lines.
     pub async fn issue_runs(&self, id: &str) -> Result<Vec<Run>, ClientError> {
         self.send::<(), _>(Method::GET, &["issues", id, "runs"], None)
+            .await
+    }
+
+    /// An issue's pull requests, newest number first.
+    pub async fn issue_pull_requests(&self, id: &str) -> Result<Vec<PullRequest>, ClientError> {
+        self.send::<(), _>(Method::GET, &["issues", id, "pull-requests"], None)
+            .await
+    }
+
+    /// The pull requests that name no issue, newest number first.
+    pub async fn unlinked_pull_requests(&self) -> Result<Vec<PullRequest>, ClientError> {
+        self.send::<(), _>(Method::GET, &["pull-requests", "unlinked"], None)
             .await
     }
 
