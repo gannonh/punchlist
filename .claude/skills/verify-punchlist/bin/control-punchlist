@@ -55,7 +55,14 @@ cmd_up() {
   (umask 077 && mkdir -p "$dir")
   mkdir -p "$EVIDENCE_ROOT/$run_id"
   local db="punchlist_verify_${run_id//[^a-zA-Z0-9]/_}"
-  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  # PUNCHLIST_VERIFY_PORT pins the port: 7879 is the one the Tailscale Funnel forwards
+  # GitHub's deliveries to (features/github.md). Otherwise any free port.
+  local port="${PUNCHLIST_VERIFY_PORT:-}"
+  if [ -n "$port" ]; then
+    ss -ltn "sport = :$port" | grep -q LISTEN && die "port $port is in use; is another run holding it?"
+  else
+    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  fi
   local url="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/$db"
 
   # Written first, so a failure anywhere below can be cleaned up by `down`.

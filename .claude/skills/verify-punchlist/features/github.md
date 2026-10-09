@@ -45,7 +45,8 @@ Preconditions:
 Fixture deliveries prove the server's handling. Real events need more, and a check that depends on them is skipped, with the command tried, when any of this is missing:
 
 - The Punchlist GitHub App is installed on `gannonh/punchlist-sandbox` (never on another repository).
-- The App's webhook URL reaches this run's server at `/api/github/webhook`. TBD: see KAT-3736 for how the URL is exposed.
+- The App's webhook URL is `https://sartre.tail984796.ts.net:8443/api/github/webhook`. A Tailscale Funnel on sartre forwards that one path, and nothing else, to `http://127.0.0.1:7879/api/github/webhook`. Check it with `tailscale funnel status` (it lists `:8443 (Funnel on)`); turn it on again with `tailscale funnel --bg --https=8443 --set-path=/api/github/webhook http://127.0.0.1:7879/api/github/webhook`. With no server on 7879 the public URL answers 502.
+- Only one run can receive real deliveries at a time: start it on the Funnel's port with `PUNCHLIST_VERIFY_PORT=7879 with-env $C up`. `up` refuses if 7879 is taken.
 - The run was started under `with-env` (`with-env $C up`) so the server's webhook secret is the App's. Without it GitHub's signatures fail with `401`.
 
 Then open a branch named `feature/pl-1-...` and a pull request in the sandbox repository and read the same rows as above. Do not paste the secret or the delivery payloads' tokens into evidence.
