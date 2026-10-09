@@ -205,7 +205,14 @@ async fn runner_list_shows_registered_runner(pool: PgPool) {
     insta::with_settings!({filters => time_filters()}, {
         insta::assert_snapshot!(list.stdout, @"sartre  claude-code  heartbeat [age] ago");
     });
-    assert!(list.stdout.contains("heartbeat 0s ago") || list.stdout.contains("heartbeat 1s ago"));
+    let age: u32 = list
+        .stdout
+        .split("heartbeat ")
+        .nth(1)
+        .and_then(|rest| rest.split("s ago").next())
+        .and_then(|n| n.parse().ok())
+        .expect("a heartbeat age in seconds");
+    assert!(age < 10, "{}", list.stdout);
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]

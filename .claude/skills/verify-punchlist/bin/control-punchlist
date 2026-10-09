@@ -147,7 +147,12 @@ cmd_runner() {
     kill -0 -- "-$pgid" 2>/dev/null || break
     sleep 0.5
   done
-  grep -qi "registered" "$log" || { tail -20 "$log" >&2; die "runner $name did not register"; }
+  grep -qi "registered" "$log" || {
+    tail -20 "$log" >&2
+    stop_group "$pgid"
+    rm -f "$pidfile"
+    die "runner $name did not register"
+  }
   echo "runner $name started (pgid $pgid); log $log; worktrees $root" >&2
 }
 
@@ -155,7 +160,8 @@ stop_group() { # stop_group PGID
   local pgid="$1"
   [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null || return 0
   kill -INT -- "-$pgid" 2>/dev/null || true
-  for _ in $(seq 1 40); do kill -0 -- "-$pgid" 2>/dev/null || return 0; sleep 0.25; done
+  # After SIGINT the runner may take up to 2 x FINAL_REPORT_TIMEOUT (log flush, then outcome).
+  for _ in $(seq 1 120); do kill -0 -- "-$pgid" 2>/dev/null || return 0; sleep 0.25; done
   kill -9 -- "-$pgid" 2>/dev/null || true
 }
 

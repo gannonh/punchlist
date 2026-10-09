@@ -224,6 +224,8 @@ pub async fn run_claude(
     let spawned = Command::new(claude_command)
         .args(claude_args(model))
         .current_dir(worktree)
+        // The agent reads untrusted issue text; keep the person's config path out of its reach.
+        .env_remove("PUNCHLIST_CONFIG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
