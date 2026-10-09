@@ -538,3 +538,47 @@ async fn a_thread_event_does_not_overwrite_a_merged_pull_request(pool: PgPool) {
             .unwrap();
     assert_eq!((row.0.as_str(), row.1), ("merged", 0));
 }
+
+#[sqlx::test]
+async fn a_late_created_check_run_does_not_undo_its_completion(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "d1", OPENED).await;
+    deliver(&s, "check_run", "d2", CHECK_RUN).await;
+    let created = edited(CHECK_RUN, |v| {
+        v["action"] = json!("created");
+        v["check_run"]["status"] = json!("queued");
+        v["check_run"]["conclusion"] = Value::Null;
+    });
+    deliver(&s, "check_run", "d3", &created).await;
+    let run: (String, Option<String>) = sqlx::query_as("SELECT status, conclusion FROM check_run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (run.0.as_str(), run.1.as_deref()),
+        ("completed", Some("success"))
+    );
+    let checks: String = sqlx::query_scalar("SELECT checks FROM pull_request WHERE number = 12")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checks, "passing");
+}
+
+#[sqlx::test]
+async fn a_merged_pull_request_stays_merged(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "d1", MERGED).await;
+    // An open payload with the same or a later `updated_at` arriving after the merge.
+    let open = edited(OPENED, |v| {
+        v["pull_request"]["updated_at"] = json!("2026-10-09T18:30:00Z");
+    });
+    deliver(&s, "pull_request", "d2", &open).await;
+    let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "merged");
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion)\n                 VALUES ($1, $2, $3, $4, $5, $6)\n                 ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,\n                     name = EXCLUDED.name, status = EXCLUDED.status,\n                     conclusion = EXCLUDED.conclusion, updated_at = now()\n                 -- A completed run is final (a rerun gets a new id), so a `created` delivery\n                 -- arriving after `completed` does not make it pending again.\n                 WHERE check_run.status <> 'completed' OR EXCLUDED.status = 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a7f8e0472fc2b49bbb6af26e5283cdb9a4f31dfaea2afeccbd95ed2fa95ffa81"
+}

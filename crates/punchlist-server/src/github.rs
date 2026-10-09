@@ -308,7 +308,10 @@ pub(crate) async fn process(
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
                      name = EXCLUDED.name, status = EXCLUDED.status,
-                     conclusion = EXCLUDED.conclusion, updated_at = now()",
+                     conclusion = EXCLUDED.conclusion, updated_at = now()
+                 -- A completed run is final (a rerun gets a new id), so a `created` delivery
+                 -- arriving after `completed` does not make it pending again.
+                 WHERE check_run.status <> 'completed' OR EXCLUDED.status = 'completed'",
                 run.id,
                 job.repository_id,
                 run.head_sha,
@@ -410,6 +413,7 @@ async fn upsert_pull_request(
              issue_id = EXCLUDED.issue_id, github_updated_at = EXCLUDED.github_updated_at,
              updated_at = now()
          WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at
+           AND pull_request.state <> 'merged'
          RETURNING id",
         job.repository_id,
         pr.number,
@@ -428,7 +432,9 @@ async fn upsert_pull_request(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(id) = applied else {
-        // A payload older than the stored state changes nothing.
+        // A payload older than the stored state changes nothing, and nothing changes a merged
+        // pull request: it cannot reopen. GitHub's `updated_at` is in whole seconds, so two
+        // actions in one second still apply in delivery order.
         let id = sqlx::query_scalar!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
             job.repository_id,
