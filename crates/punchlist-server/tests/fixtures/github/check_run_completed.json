@@ -1,0 +1,73 @@
+{
+  "action": "completed",
+  "check_run": {
+    "id": 4021877310,
+    "node_id": "CR_kwDOA1b2c84",
+    "name": "check",
+    "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+    "external_id": "",
+    "url": "https://api.github.com/repos/gannonh/punchlist/check-runs/4021877310",
+    "html_url": "https://github.com/gannonh/punchlist/runs/4021877310",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-10-09T18:01:00Z",
+    "completed_at": "2026-10-09T18:04:00Z",
+    "output": {
+      "title": null,
+      "summary": null,
+      "text": null
+    },
+    "check_suite": {
+      "id": 3112233445
+    },
+    "app": {
+      "id": 15368,
+      "slug": "github-actions",
+      "name": "GitHub Actions"
+    },
+    "pull_requests": [
+      {
+        "url": "https://api.github.com/repos/gannonh/punchlist/pulls/12",
+        "id": 1934102875,
+        "number": 12,
+        "head": {
+          "ref": "feature/pl-1-fix-the-thing",
+          "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+          "repo": {
+            "id": 1296269,
+            "name": "punchlist"
+          }
+        },
+        "base": {
+          "ref": "main",
+          "sha": "a10867b14bb761a232cd80139fbd4c0d33264240",
+          "repo": {
+            "id": 1296269,
+            "name": "punchlist"
+          }
+        }
+      }
+    ]
+  },
+  "repository": {
+    "id": 1296269,
+    "node_id": "R_kgDOA1b2cw",
+    "name": "punchlist",
+    "full_name": "gannonh/punchlist",
+    "private": false,
+    "owner": {
+      "login": "gannonh",
+      "id": 583231,
+      "type": "User"
+    },
+    "html_url": "https://github.com/gannonh/punchlist",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "github-actions[bot]",
+    "id": 41898282,
+    "node_id": "MDQ6VXNlcjE=",
+    "type": "User",
+    "site_admin": false
+  }
+}

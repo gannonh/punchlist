@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO transition (issue_id, from_status, to_status, actor_id, workflow_version)\n         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+  "query": "INSERT INTO actor (workspace_id, name, role, github_login)\n         VALUES ($1, $2, 'github', $2)\n         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL\n         DO UPDATE SET name = EXCLUDED.name\n         RETURNING id",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "transition",
+            "table": "actor",
             "name": "id"
           }
         }
@@ -17,9 +17,6 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text",
-        "Text",
         "Uuid",
         "Text"
       ]
@@ -28,5 +25,5 @@
       false
     ]
   },
-  "hash": "1a85140b841c4790129a16bc45606c65dafb107ef71d1e3f1b609f7cae108f64"
+  "hash": "1a9478627a264824dfc1ac4ff413b2ab0d2a3156a835e5553aefd2bf62eee96e"
 }

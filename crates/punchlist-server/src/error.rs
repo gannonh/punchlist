@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub enum ApiError {
     #[error("missing or unknown bearer token")]
     Unauthorized,
+    #[error("the GitHub webhook secret is not configured")]
+    GithubNotConfigured,
     #[error("issue {0} not found")]
     IssueNotFound(String),
     #[error("{0}")]
@@ -34,6 +36,7 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::GithubNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -48,6 +51,7 @@ impl ApiError {
     fn code(&self) -> &'static str {
         match self {
             ApiError::Unauthorized => "unauthorized",
+            ApiError::GithubNotConfigured => "github_not_configured",
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 "not_found"
             }

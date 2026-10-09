@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job SET state = 'running', attempts = attempts + 1,\n                lease_expires_at = now() + make_interval(secs => $2)\n         WHERE id = $1 RETURNING attempts",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempts",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "job",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d09c341bcc1f9869ab7bd70623933d65be57c4dfdc681124ceaa3bd3080a777b"
+}

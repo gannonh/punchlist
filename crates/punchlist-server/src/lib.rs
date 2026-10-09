@@ -3,7 +3,9 @@
 mod auth;
 mod bootstrap;
 mod error;
+mod github;
 mod issues;
+mod jobs;
 mod runners;
 mod runs;
 
@@ -16,6 +18,7 @@ use utoipa_axum::router::OpenApiRouter;
 pub use auth::hash_token;
 pub use bootstrap::{Bootstrap, Bootstrapped, bootstrap};
 pub use error::ApiError;
+pub use jobs::{run_jobs_until_idle, run_next_job, work_jobs};
 pub use runs::expire_leases;
 
 /// The migrations in `migrations/`, run when the server starts.
@@ -28,6 +31,11 @@ pub struct AppState {
     pub lease: std::time::Duration,
     /// Sent after an issue is committed into Start, to wake runners that are long-polling.
     pub starts: tokio::sync::broadcast::Sender<(uuid::Uuid, String)>,
+    /// The secret GitHub signs webhook deliveries with. Without it the webhook route
+    /// answers 503.
+    pub github_webhook_secret: Option<std::sync::Arc<str>>,
+    /// Notified after a job is enqueued, to wake the job worker.
+    pub job_wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -36,7 +44,17 @@ impl AppState {
             pool,
             lease: std::time::Duration::from_secs(30),
             starts: tokio::sync::broadcast::channel(256).0,
+            github_webhook_secret: None,
+            job_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
         }
+    }
+
+    pub fn with_github_webhook_secret(
+        mut self,
+        secret: impl Into<std::sync::Arc<str>>,
+    ) -> AppState {
+        self.github_webhook_secret = Some(secret.into());
+        self
     }
 
     pub fn with_lease(mut self, lease: std::time::Duration) -> AppState {
@@ -56,6 +74,7 @@ struct ApiDoc;
 /// The API router and the OpenAPI document built from the same routes (ADR 0008).
 pub fn router(state: AppState) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .merge(github::routes())
         .merge(issues::routes())
         .merge(runners::routes())
         .merge(runs::routes())

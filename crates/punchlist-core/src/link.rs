@@ -29,9 +29,7 @@ fn title_issue_number(prefix: &str, title: &str) -> Option<u64> {
     let mut rest = title;
     while let Some(open) = rest.find('(') {
         rest = &rest[open + 1..];
-        let Some(close) = rest.find(')') else {
-            return None;
-        };
+        let close = rest.find(')')?;
         let inside = &rest[..close];
         if let Some(number) = strip_prefix_ignore_case(inside, prefix)
             .and_then(|r| r.strip_prefix('-'))

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job (kind, idempotency_key, payload) VALUES ('github_event', $1, $2)\n         ON CONFLICT (idempotency_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "84e8d9d44a98a7607906a25e108c54bbb55232a0b2f461768e1d998bc9ba498a"
+}

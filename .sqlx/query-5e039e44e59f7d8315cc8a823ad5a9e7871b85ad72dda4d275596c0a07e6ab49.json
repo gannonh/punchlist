@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pull_request p SET\n             checks = CASE WHEN c.total = 0 THEN 'none'\n                           WHEN c.failed > 0 THEN 'failing'\n                           WHEN c.pending > 0 THEN 'pending'\n                           ELSE 'passing' END,\n             checks_total = c.total, checks_passed = c.passed\n         FROM (SELECT count(*)::int AS total,\n                      (count(*) FILTER (WHERE status = 'completed'\n                           AND conclusion IN ('success', 'neutral', 'skipped')))::int AS passed,\n                      (count(*) FILTER (WHERE status = 'completed'\n                           AND coalesce(conclusion, '') NOT IN ('success', 'neutral', 'skipped')))::int AS failed,\n                      (count(*) FILTER (WHERE status <> 'completed'))::int AS pending\n               FROM check_run WHERE repository_id = $1 AND head_sha = $2) c\n         WHERE p.repository_id = $1 AND p.head_sha = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e039e44e59f7d8315cc8a823ad5a9e7871b85ad72dda4d275596c0a07e6ab49"
+}

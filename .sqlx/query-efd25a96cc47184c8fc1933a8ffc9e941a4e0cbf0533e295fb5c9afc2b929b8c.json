@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion)\n                 VALUES ($1, $2, $3, $4, $5, $6)\n                 ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,\n                     name = EXCLUDED.name, status = EXCLUDED.status,\n                     conclusion = EXCLUDED.conclusion, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "efd25a96cc47184c8fc1933a8ffc9e941a4e0cbf0533e295fb5c9afc2b929b8c"
+}

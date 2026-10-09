@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO pull_request\n             (repository_id, number, github_id, title, branch, head_sha, url, author_login,\n              state, draft, merge_state, issue_id, github_updated_at)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)\n         ON CONFLICT (repository_id, number) DO UPDATE SET\n             github_id = EXCLUDED.github_id, title = EXCLUDED.title, branch = EXCLUDED.branch,\n             head_sha = EXCLUDED.head_sha, url = EXCLUDED.url,\n             author_login = EXCLUDED.author_login, state = EXCLUDED.state,\n             draft = EXCLUDED.draft, merge_state = EXCLUDED.merge_state,\n             issue_id = EXCLUDED.issue_id, github_updated_at = EXCLUDED.github_updated_at,\n             updated_at = now()\n         WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "26d72d5e068ace357b33b4ae7d966a0fba9afb4959067936b257723b761dbb67"
+}

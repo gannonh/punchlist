@@ -15,6 +15,7 @@ anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
+hmac.workspace = true
 punchlist-api.workspace = true
 punchlist-core.workspace = true
 sha2.workspace = true
@@ -25,11 +26,14 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 utoipa.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 utoipa-axum.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+hmac.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
