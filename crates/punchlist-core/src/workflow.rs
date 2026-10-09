@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 const DEFAULT_WORKFLOW_TOML: &str = include_str!("default_workflow.toml");
 
+/// The events a transition's `on` may name; the server makes each from a GitHub delivery.
+const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
+/// What a transition's `require` may ask a move to carry.
+const REQUIREMENTS: [&str; 1] = ["comment"];
+
 static DEFAULT_WORKFLOW: LazyLock<Workflow> = LazyLock::new(|| {
     Workflow::from_toml(DEFAULT_WORKFLOW_TOML).expect("the built-in workflow is valid")
 });
@@ -148,6 +153,10 @@ pub enum LoadError {
     UnknownStatus(String),
     #[error("transition to `{0}` has neither `by` nor `on`")]
     NoActor(String),
+    #[error("transition to `{to}` is on event `{event}`, which Punchlist does not emit")]
+    UnknownEvent { to: String, event: String },
+    #[error("transition to `{to}` requires `{requirement}`, which Punchlist does not know")]
+    UnknownRequirement { to: String, requirement: String },
     #[error("dispatch rule for `{0}` names no agent")]
     NoAgent(String),
 }
@@ -233,6 +242,22 @@ impl Workflow {
             let to = known(t.to)?;
             if t.by.is_empty() && t.on.is_none() {
                 return Err(LoadError::NoActor(to.0));
+            }
+            if let Some(event) = t.on.as_deref().filter(|e| !EVENTS.contains(e)) {
+                return Err(LoadError::UnknownEvent {
+                    to: to.0,
+                    event: event.to_string(),
+                });
+            }
+            if let Some(requirement) = t
+                .require
+                .iter()
+                .find(|r| !REQUIREMENTS.contains(&r.as_str()))
+            {
+                return Err(LoadError::UnknownRequirement {
+                    to: to.0,
+                    requirement: requirement.clone(),
+                });
             }
             transitions.push(Transition {
                 from,
@@ -635,5 +660,25 @@ mod tests {
             .unwrap_err(),
             LoadError::NoActor("b".into())
         );
+        let transition = |extra: &str| {
+            Workflow::from_toml(&format!(
+                "statuses = [\"a\", \"b\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\n{extra}"
+            ))
+        };
+        assert_eq!(
+            transition("on = \"pr_merge\"").unwrap_err(),
+            LoadError::UnknownEvent {
+                to: "b".into(),
+                event: "pr_merge".into()
+            }
+        );
+        assert_eq!(
+            transition("by = [\"person\"]\nrequire = [\"evidence\"]").unwrap_err(),
+            LoadError::UnknownRequirement {
+                to: "b".into(),
+                requirement: "evidence".into()
+            }
+        );
+        assert!(transition("on = \"pr_merged\"\nrequire = [\"comment\"]").is_ok());
     }
 }

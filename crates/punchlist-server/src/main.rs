@@ -25,8 +25,8 @@ enum Command {
         /// Address to listen on.
         #[arg(long, env = "PUNCHLIST_BIND", default_value = "127.0.0.1:7878")]
         bind: String,
-        /// The secret GitHub signs webhook deliveries with. Without it, the webhook route
-        /// answers 503.
+        /// The secret GitHub signs webhook deliveries with. Without it, or if it is empty, the
+        /// webhook route answers 503.
         #[arg(long, env = "GITHUB_WEBHOOK_SECRET", hide_env_values = true)]
         github_webhook_secret: Option<String>,
     },
@@ -87,8 +87,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
             let mut state = AppState::new(pool);
-            if let Some(secret) = github_webhook_secret {
-                state = state.with_github_webhook_secret(secret);
+            // An empty secret is no secret: anyone could sign with it.
+            match github_webhook_secret.filter(|secret| !secret.is_empty()) {
+                Some(secret) => state = state.with_github_webhook_secret(secret),
+                None => tracing::warn!("no GitHub webhook secret; the webhook route answers 503"),
             }
             tokio::spawn(work_jobs(state.clone()));
             let app = router(state).layer(TraceLayer::new_for_http());

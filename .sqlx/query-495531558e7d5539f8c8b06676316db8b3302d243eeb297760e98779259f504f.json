@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion)\n                 VALUES ($1, $2, $3, $4, $5, $6)\n                 ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,\n                     name = EXCLUDED.name, status = EXCLUDED.status,\n                     conclusion = EXCLUDED.conclusion, updated_at = now()\n                 -- A run only moves forward (queued, in_progress, completed), so a delivery\n                 -- arriving late does not undo a newer one. A rerun gets a new id.\n                 WHERE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1\n                        ELSE 0 END)\n                    <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1\n                        ELSE 0 END)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "495531558e7d5539f8c8b06676316db8b3302d243eeb297760e98779259f504f"
+}

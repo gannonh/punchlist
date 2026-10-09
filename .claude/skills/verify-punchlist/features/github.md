@@ -66,7 +66,7 @@ A redelivery keeps its `guid`, so `SELECT count(*) FROM job WHERE idempotency_ke
 ## Gotchas
 
 - `502 failed to connect to host` in the delivery log means GitHub could not reach the Funnel. Right after the Funnel is first turned on, public DNS for it can take some minutes; redeliver once `https://sartre.tail984796.ts.net:8443/api/github/webhook` answers from outside the tailnet.
-- CI's `check_run` and `check_suite` deliveries can land after the `pull_request` event that a check is counting; read `job` rows by `idempotency_key` rather than comparing totals.
+- CI's `check_run` deliveries can land after the `pull_request` event that a check is counting; read `job` rows by `idempotency_key` rather than comparing totals.
 
 - `up` without `with-env` uses a random secret, so only `$C webhook` deliveries verify; a real GitHub delivery gets `401`.
 - The worker is asynchronous: the `webhook` command's `2xx` means queued, not processed. Poll the `job` row until `done` before reading other tables.

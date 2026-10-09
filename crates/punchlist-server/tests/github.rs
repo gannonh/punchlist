@@ -171,6 +171,18 @@ async fn no_configured_secret_is_503(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn an_empty_secret_is_no_secret(pool: PgPool) {
+    setup(&pool).await;
+    let app = router(AppState::new(pool.clone()).with_github_webhook_secret(""));
+    // Signed with the empty key, which anyone could do.
+    assert_eq!(
+        send(&app, "", "pull_request", "d1", CLOSED).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(count(&pool, "job").await, 0);
+}
+
+#[sqlx::test]
 async fn pings_other_actions_and_unknown_repositories_are_accepted_without_a_job(pool: PgPool) {
     let s = setup(&pool).await;
     let ping = r#"{"zen":"Keep it logically awesome."}"#;
@@ -581,4 +593,152 @@ async fn a_merged_pull_request_stays_merged(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(state, "merged");
+}
+
+#[sqlx::test]
+async fn a_rerun_that_passes_replaces_the_failure_it_reran(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "d1", OPENED).await;
+    let failed = edited(CHECK_RUN, |v| {
+        v["check_run"]["conclusion"] = json!("failure")
+    });
+    deliver(&s, "check_run", "d2", &failed).await;
+    let summary = || async {
+        sqlx::query_as::<_, (String, i32, i32)>(
+            "SELECT checks, checks_total, checks_passed FROM pull_request WHERE number = 12",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(summary().await, ("failing".into(), 1, 0));
+
+    // GitHub gives the rerun a new id, with the same name on the same commit.
+    let rerun = edited(CHECK_RUN, |v| v["check_run"]["id"] = json!(4021878000_i64));
+    deliver(&s, "check_run", "d3", &rerun).await;
+    assert_eq!(summary().await, ("passing".into(), 1, 1));
+}
+
+#[sqlx::test]
+async fn a_late_queued_check_run_does_not_undo_in_progress(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "d1", OPENED).await;
+    let with_status = |action: &str, status: &str| {
+        edited(CHECK_RUN, |v| {
+            v["action"] = json!(action);
+            v["check_run"]["status"] = json!(status);
+            v["check_run"]["conclusion"] = Value::Null;
+        })
+    };
+    deliver(
+        &s,
+        "check_run",
+        "d2",
+        &with_status("created", "in_progress"),
+    )
+    .await;
+    deliver(&s, "check_run", "d3", &with_status("created", "queued")).await;
+    let status: String = sqlx::query_scalar("SELECT status FROM check_run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "in_progress");
+}
+
+#[sqlx::test]
+async fn a_thread_event_first_records_a_merged_pull_request_as_merged(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    let merged = edited(THREAD, |v| {
+        v["pull_request"]["state"] = json!("closed");
+        v["pull_request"]["merged_at"] = json!("2026-10-09T18:30:00Z");
+    });
+    deliver(&s, "pull_request_review_thread", "d1", &merged).await;
+    let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "merged");
+}
+
+#[sqlx::test]
+async fn redelivering_a_delivery_whose_job_failed_runs_it_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    deliver(&s, "pull_request", "flaky", OPENED).await;
+    // The job gave up, and its effects are gone.
+    sqlx::query(
+        "UPDATE job SET state = 'failed', attempts = 10, last_error = 'database down',
+                finished_at = now()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM pull_request")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    deliver(&s, "pull_request", "flaky", OPENED).await;
+    let job: (String, i32, Option<String>) = sqlx::query_as(
+        "SELECT state, attempts, last_error FROM job WHERE idempotency_key = 'flaky'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(job, ("done".into(), 1, None));
+    assert_eq!(count(&pool, "job").await, 1);
+    assert_eq!(count(&pool, "pull_request").await, 1);
+}
+
+#[sqlx::test]
+async fn closing_unmerged_ends_the_running_run_so_the_issue_can_be_claimed_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    force_status(&pool, &issue, "in_progress").await;
+    sqlx::query(
+        "WITH a AS (INSERT INTO actor (workspace_id, name, role, token_hash)
+                    SELECT workspace_id, 'r1', 'runner', 'runner-token' FROM actor LIMIT 1
+                    RETURNING id, workspace_id),
+              r AS (INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)
+                    SELECT workspace_id, id, 'r1', '{claude-code}', id FROM a
+                    RETURNING id, workspace_id),
+              u AS (INSERT INTO run (workspace_id, issue_id, status, agent, branch)
+                    SELECT workspace_id, $1, 'in_progress', 'claude-code', 'b' FROM r
+                    RETURNING id)
+         INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
+         SELECT u.id, $1, r.id, 1, now() + interval '1 hour' FROM u, r",
+    )
+    .bind(&issue)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    deliver(&s, "pull_request", "closed", CLOSED).await;
+
+    let run: (String, bool) =
+        sqlx::query_as("SELECT outcome, finished_at IS NOT NULL FROM run WHERE issue_id = $1")
+            .bind(&issue)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(run, ("failed".into(), true));
+    let attempt: (String, Option<String>) =
+        sqlx::query_as("SELECT state, failure_reason FROM attempt WHERE issue_id = $1")
+            .bind(&issue)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        attempt,
+        (
+            "failed".into(),
+            Some(
+                "the issue moved to todo because pull request #12 was closed without merging"
+                    .into()
+            )
+        )
+    );
 }

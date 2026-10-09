@@ -34,7 +34,6 @@ const PULL_REQUEST_ACTIONS: [&str; 7] = [
 ];
 /// `check_run` actions: every one carries the run's current status.
 const CHECK_RUN_ACTIONS: [&str; 4] = ["created", "completed", "rerequested", "requested_action"];
-const CHECK_SUITE_ACTIONS: [&str; 2] = ["completed", "requested"];
 const REVIEW_THREAD_ACTIONS: [&str; 2] = ["resolved", "unresolved"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,10 +68,20 @@ pub(crate) struct PullRequestData {
     pub draft: bool,
     #[serde(default)]
     pub merged: bool,
+    /// Set once merged. Present in every event that carries a pull request, unlike `merged`,
+    /// which the short pull request in a review thread event lacks.
+    #[serde(default)]
+    pub merged_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub mergeable_state: Option<String>,
     pub head: Head,
     pub updated_at: DateTime<Utc>,
+}
+
+impl PullRequestData {
+    fn is_merged(&self) -> bool {
+        self.merged || self.merged_at.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,18 +110,6 @@ pub(crate) struct CheckRunEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct CheckSuiteData {
-    pub head_sha: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct CheckSuiteEvent {
-    pub action: String,
-    pub check_suite: CheckSuiteData,
-    pub repository: Repository,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ThreadData {
     pub node_id: String,
 }
@@ -131,7 +128,6 @@ pub(crate) struct ReviewThreadEvent {
 pub(crate) enum GithubEvent {
     PullRequest(PullRequestEvent),
     CheckRun(CheckRunEvent),
-    CheckSuite(CheckSuiteEvent),
     PullRequestReviewThread(ReviewThreadEvent),
 }
 
@@ -140,7 +136,6 @@ impl GithubEvent {
         match self {
             GithubEvent::PullRequest(e) => &e.repository,
             GithubEvent::CheckRun(e) => &e.repository,
-            GithubEvent::CheckSuite(e) => &e.repository,
             GithubEvent::PullRequestReviewThread(e) => &e.repository,
         }
     }
@@ -171,7 +166,6 @@ fn parse_event(event: &str, body: &[u8]) -> Result<Option<GithubEvent>, ApiError
     let handled: &[&str] = match event {
         "pull_request" => &PULL_REQUEST_ACTIONS,
         "check_run" => &CHECK_RUN_ACTIONS,
-        "check_suite" => &CHECK_SUITE_ACTIONS,
         "pull_request_review_thread" => &REVIEW_THREAD_ACTIONS,
         _ => return Ok(None),
     };
@@ -182,7 +176,6 @@ fn parse_event(event: &str, body: &[u8]) -> Result<Option<GithubEvent>, ApiError
     Ok(Some(match event {
         "pull_request" => GithubEvent::PullRequest(typed(body)?),
         "check_run" => GithubEvent::CheckRun(typed(body)?),
-        "check_suite" => GithubEvent::CheckSuite(typed(body)?),
         _ => GithubEvent::PullRequestReviewThread(typed(body)?),
     }))
 }
@@ -243,6 +236,7 @@ async fn webhook(
     let secret = state
         .github_webhook_secret
         .as_deref()
+        .filter(|secret| !secret.is_empty())
         .ok_or(ApiError::GithubNotConfigured)?;
     verify_signature(secret, &headers, &body)?;
     let event_name = header(&headers, "x-github-event")?;
@@ -278,7 +272,11 @@ async fn webhook(
         .map_err(|error| ApiError::Invalid(format!("unserializable payload: {error}")))?;
     sqlx::query!(
         "INSERT INTO job (kind, idempotency_key, payload) VALUES ('github_event', $1, $2)
-         ON CONFLICT (idempotency_key) DO NOTHING",
+         ON CONFLICT (idempotency_key) DO UPDATE SET state = 'queued', attempts = 0,
+             run_after = now(), last_error = NULL, finished_at = NULL
+             -- Only a job that gave up: GitHub's redelivery reuses the delivery id, and is
+             -- the retry. A queued, running or done job already has the delivery.
+             WHERE job.state = 'failed'",
         delivery_id,
         payload,
     )
@@ -309,9 +307,12 @@ pub(crate) async fn process(
                  ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
                      name = EXCLUDED.name, status = EXCLUDED.status,
                      conclusion = EXCLUDED.conclusion, updated_at = now()
-                 -- A completed run is final (a rerun gets a new id), so a `created` delivery
-                 -- arriving after `completed` does not make it pending again.
-                 WHERE check_run.status <> 'completed' OR EXCLUDED.status = 'completed'",
+                 -- A run only moves forward (queued, in_progress, completed), so a delivery
+                 -- arriving late does not undo a newer one. A rerun gets a new id.
+                 WHERE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
+                        ELSE 0 END)
+                    <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
+                        ELSE 0 END)",
                 run.id,
                 job.repository_id,
                 run.head_sha,
@@ -323,13 +324,11 @@ pub(crate) async fn process(
             .await?;
             recompute_checks(tx, job.repository_id, &run.head_sha).await?;
         }
-        GithubEvent::CheckSuite(event) => {
-            recompute_checks(tx, job.repository_id, &event.check_suite.head_sha).await?;
-        }
         GithubEvent::PullRequestReviewThread(event) => {
             // This event carries GitHub's short pull request, without `merged` or
             // `mergeable_state`, so it records the pull request only if no `pull_request`
-            // event has yet; otherwise it would turn a merged one back into closed.
+            // event has yet; otherwise it would turn a merged one back into closed. `merged_at`
+            // still tells it whether the pull request was merged.
             let known = sqlx::query_scalar!(
                 "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
                 job.repository_id,
@@ -392,7 +391,7 @@ async fn upsert_pull_request(
         }
         None => None,
     };
-    let state = if pr.merged {
+    let state = if pr.is_merged() {
         "merged"
     } else if pr.state == "closed" {
         "closed"
@@ -448,7 +447,8 @@ async fn upsert_pull_request(
     Ok((id, true, linked))
 }
 
-/// Summarizes the check runs on a commit onto every pull request whose head it is.
+/// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun
+/// is a new run with the same name, so only the newest run of each name counts.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -467,7 +467,9 @@ async fn recompute_checks(
                       (count(*) FILTER (WHERE status = 'completed'
                            AND coalesce(conclusion, '') NOT IN ('success', 'neutral', 'skipped')))::int AS failed,
                       (count(*) FILTER (WHERE status <> 'completed'))::int AS pending
-               FROM check_run WHERE repository_id = $1 AND head_sha = $2) c
+               FROM (SELECT DISTINCT ON (name) status, conclusion FROM check_run
+                     WHERE repository_id = $1 AND head_sha = $2
+                     ORDER BY name, id DESC) latest) c
          WHERE p.repository_id = $1 AND p.head_sha = $2",
         repository_id,
         head_sha,
@@ -493,7 +495,7 @@ async fn close_issue_on_pull_request(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let name = if pr.merged {
+    let name = if pr.is_merged() {
         "pr_merged"
     } else {
         "pr_closed_unmerged"
@@ -534,6 +536,34 @@ async fn close_issue_on_pull_request(
         transition.to.as_str(),
         Some(&job.delivery_id),
     )
+    .await?;
+    // The agent working this issue has nothing left to do: its pull request is gone, and the
+    // issue is no longer in the status that started the run. Ending the run frees the issue
+    // to be claimed again.
+    let reason = format!(
+        "the issue moved to {} because pull request #{} was {}",
+        transition.to,
+        pr.number,
+        if pr.is_merged() {
+            "merged"
+        } else {
+            "closed without merging"
+        }
+    );
+    sqlx::query!(
+        "UPDATE attempt SET state = 'failed', finished_at = now(), failure_reason = $2
+         WHERE issue_id = $1 AND state = 'running'",
+        issue_id,
+        reason,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE run SET outcome = 'failed', finished_at = now()
+         WHERE issue_id = $1 AND outcome = 'running'",
+        issue_id,
+    )
+    .execute(&mut *tx)
     .await?;
     if transition.require.iter().any(|r| r == "comment") {
         let body = format!(
@@ -646,17 +676,6 @@ mod tests {
         };
         assert_eq!(e.check_run.conclusion.as_deref(), Some("success"));
         assert_eq!(e.check_run.status, "completed");
-    }
-
-    #[test]
-    fn check_suite_completed_parses() {
-        let GithubEvent::CheckSuite(e) = fixture(
-            "check_suite",
-            include_str!("../tests/fixtures/github/check_suite_completed.json"),
-        ) else {
-            panic!("not a check_suite event");
-        };
-        assert_eq!(e.check_suite.head_sha.len(), 40);
     }
 
     #[test]
