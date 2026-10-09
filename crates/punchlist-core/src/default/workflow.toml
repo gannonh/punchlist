@@ -1,4 +1,5 @@
-# The built-in workflow a new workspace starts with (PRD, "The workflow file").
+# The built-in workflow a new workspace starts with (PRD, "The workflow file"), until its
+# repository has a valid `.punchlist/workflow.toml` on the default branch (ADR 0010).
 version = 1
 statuses = ["backlog", "todo", "start", "in_progress", "agent_review",
             "human_review", "merging", "done", "canceled"]

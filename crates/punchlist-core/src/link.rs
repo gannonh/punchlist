@@ -6,9 +6,21 @@
 /// `branch_name` lowercases the id. When the branch and the title name different issues,
 /// the branch wins: an agent's branch is cut from its issue, and a title is easy to edit.
 pub fn linked_issue_id(prefix: &str, branch: &str, title: &str) -> Option<String> {
-    branch_issue_number(prefix, branch)
-        .or_else(|| title_issue_number(prefix, title))
-        .map(|number| format!("{}-{number}", prefix.to_ascii_uppercase()))
+    branch_issue_id(prefix, branch).or_else(|| title_issue_id(prefix, title))
+}
+
+/// The issue id the branch `feature/<id>-…` names, uppercase.
+pub(crate) fn branch_issue_id(prefix: &str, branch: &str) -> Option<String> {
+    branch_issue_number(prefix, branch).map(|number| issue_id(prefix, number))
+}
+
+/// The issue id `(<id>)` in the title names, uppercase.
+pub(crate) fn title_issue_id(prefix: &str, title: &str) -> Option<String> {
+    title_issue_number(prefix, title).map(|number| issue_id(prefix, number))
+}
+
+fn issue_id(prefix: &str, number: u64) -> String {
+    format!("{}-{number}", prefix.to_ascii_uppercase())
 }
 
 fn branch_issue_number(prefix: &str, branch: &str) -> Option<u64> {

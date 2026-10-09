@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DEFAULT_WORKFLOW_TOML: &str = include_str!("default_workflow.toml");
+const DEFAULT_WORKFLOW_TOML: &str = include_str!("default/workflow.toml");
 
 /// The events a transition's `on` may name; the server makes each from a GitHub delivery.
 const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
