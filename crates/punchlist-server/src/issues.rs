@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::github::refresh_pull_requests;
-use crate::workflow::active_workflow;
+use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -123,6 +123,7 @@ async fn create_issue(
         return Err(ApiError::Invalid("an issue needs a title".into()));
     }
     let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let next = sqlx::query!(
         r#"UPDATE workspace SET next_issue_number = next_issue_number + 1 WHERE id = $1
@@ -238,6 +239,7 @@ async fn move_issue(
 ) -> Result<Json<Moved>, ApiError> {
     refresh_evidence(&state, &actor, &id, &request.to).await?;
     let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
@@ -619,6 +621,8 @@ async fn add_comment(
         return Err(ApiError::Invalid("a comment needs a body".into()));
     }
     let mut tx = state.pool.begin().await?;
+    // Workspace before issue, as everywhere; the comment event updates the workspace row.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let status = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
