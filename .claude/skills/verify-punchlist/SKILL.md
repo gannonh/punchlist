@@ -5,15 +5,15 @@ description: Launch and drive Punchlist (the punchlist-server API on Postgres, t
 
 # Verify Punchlist
 
-Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them. A user drives it by running `pl` commands against a running server. The server also takes GitHub App webhook deliveries at `POST /api/github/webhook`; [features/github.md](features/github.md) shows how to send signed fixture payloads and what to read afterwards. There is no web app yet; extend this skill when a slice adds one.
+Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them. A user drives it by running `pl` commands against a running server. The server also takes GitHub App webhook deliveries at `POST /api/github/webhook`; [features/github.md](features/github.md) shows how to send signed fixture payloads and what to read afterwards. The server also loads `.punchlist/workflow.toml` from the sandbox's default branch, and agents request transitions through `pl mcp`; [features/workflow-and-gates.md](features/workflow-and-gates.md) covers both. There is no web app yet; extend this skill when a slice adds one.
 
 Everything here runs from the repository root on sartre.
 
 ## Fixed facts for live checks
 
 - **Sandbox repository:** `gannonh/punchlist-sandbox` (private, default branch `main`). Live checks that open branches or pull requests use this repository, never `gannonh/punchlist` or any other real repository.
-- **Live-check model:** agent runs in live checks use Claude Code with `--model haiku`, the cheapest Claude model. Make a live model call only inside a named live check.
-- **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Fixture webhook deliveries need no secret from 1Password: `up` generates a random webhook secret per run. Real GitHub deliveries need the GitHub App's secret, so start the run under `with-env $C up`.
+- **Live-check models:** Claude Code runs in live checks use the `haiku` alias (`--model haiku`), which tracks the newest Haiku and is Haiku 5.5 (`claude-haiku-5-5`) on the Anthropic API; on Bedrock, Vertex, Foundry and Claude Platform on AWS it is still Haiku 4.5, and it needs Claude Code 2.1.293 or later. A run's log shows the model it resolved to (`"model":"claude-haiku-5-5"`); a live check on a Haiku older than 5.5 does not count. Codex runs use GPT-6 Luna, `gpt-6-luna` (`-m gpt-6-luna`), which OpenAI documents without an alias, so it is the model's own slug; not the older `gpt-5.6-luna`. Use no other model for a live check. Make a live model call only inside a named live check. The runner has no Codex adapter yet (it comes with R9); pass `gpt-6-luna` from `control-punchlist` when it lands.
+- **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Fixture webhook deliveries need no secret from 1Password: `up` generates a random webhook secret per run. Real GitHub deliveries need the GitHub App's secret, and loading `.punchlist/` from the sandbox needs its private key, so start those runs under `with-env $C up`.
 
 ## Launch
 

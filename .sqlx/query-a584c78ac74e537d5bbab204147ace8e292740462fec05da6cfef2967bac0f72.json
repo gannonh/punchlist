@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO actor (workspace_id, name, role, token_hash, run_id)\n         VALUES ($1, $2, 'agent', $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a584c78ac74e537d5bbab204147ace8e292740462fec05da6cfef2967bac0f72"
+}

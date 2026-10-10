@@ -6,9 +6,38 @@
 /// `branch_name` lowercases the id. When the branch and the title name different issues,
 /// the branch wins: an agent's branch is cut from its issue, and a title is easy to edit.
 pub fn linked_issue_id(prefix: &str, branch: &str, title: &str) -> Option<String> {
-    branch_issue_number(prefix, branch)
-        .or_else(|| title_issue_number(prefix, title))
-        .map(|number| format!("{}-{number}", prefix.to_ascii_uppercase()))
+    branch_issue_id(prefix, branch).or_else(|| title_issue_id(prefix, title))
+}
+
+/// The issue id the branch `feature/<id>-…` names, uppercase.
+pub(crate) fn branch_issue_id(prefix: &str, branch: &str) -> Option<String> {
+    branch_issue_number(prefix, branch).map(|number| issue_id(prefix, number))
+}
+
+/// The issue id `(<id>)` in the title names, uppercase: the first, when it names several.
+pub(crate) fn title_issue_id(prefix: &str, title: &str) -> Option<String> {
+    title_issue_ids(prefix, title).next()
+}
+
+/// Every issue id `(<id>)` in the title, uppercase, in order.
+pub(crate) fn title_issue_ids<'a>(
+    prefix: &'a str,
+    title: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    title
+        .split('(')
+        .skip(1)
+        .filter_map(move |rest| {
+            let inside = &rest[..rest.find(')')?];
+            strip_prefix_ignore_case(inside, prefix)?
+                .strip_prefix('-')
+                .and_then(parse_number)
+        })
+        .map(move |number| issue_id(prefix, number))
+}
+
+fn issue_id(prefix: &str, number: u64) -> String {
+    format!("{}-{number}", prefix.to_ascii_uppercase())
 }
 
 fn branch_issue_number(prefix: &str, branch: &str) -> Option<u64> {
@@ -23,22 +52,6 @@ fn branch_issue_number(prefix: &str, branch: &str) -> Option<u64> {
         return None;
     }
     parse_number(digits)
-}
-
-fn title_issue_number(prefix: &str, title: &str) -> Option<u64> {
-    let mut rest = title;
-    while let Some(open) = rest.find('(') {
-        rest = &rest[open + 1..];
-        let close = rest.find(')')?;
-        let inside = &rest[..close];
-        if let Some(number) = strip_prefix_ignore_case(inside, prefix)
-            .and_then(|r| r.strip_prefix('-'))
-            .and_then(parse_number)
-        {
-            return Some(number);
-        }
-    }
-    None
 }
 
 /// Digits only, no leading zero, so `PL-07` names no issue rather than PL-7.

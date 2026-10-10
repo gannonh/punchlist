@@ -1,0 +1,24 @@
+[package]
+name = "punchlist-mcp"
+description = "Punchlist's MCP server over stdio: an agent reads its issue, comments and requests transitions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+punchlist-api.workspace = true
+punchlist-client.workspace = true
+punchlist-core.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+
+[lints]
+workspace = true

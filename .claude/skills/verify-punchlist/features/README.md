@@ -10,6 +10,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | List issues | [issue-list.md](issue-list.md) | `pl issue list`, `GET /api/issues` |
 | Runners, claims and runs | [runner.md](runner.md) | `pl runner start`, `pl runner list`, `pl issue show` (runs), `pl run log`, `/api/runners`, `/api/runs/*` |
 | GitHub webhook, pull requests and checks | [github.md](github.md) | `$C webhook`, `POST /api/github/webhook`, `pl issue show` (pull requests, comments), `pl pr unlinked`, `/api/issues/{id}/pull-requests`, `/api/pull-requests/unlinked` |
+| Workflow file, gated transitions and the agent's MCP tools | [workflow-and-gates.md](workflow-and-gates.md) | `pl workflow show`, `pl issue transition`, `pl issue comment`, `pl mcp`, `/api/workflow`, `/api/workflow/schema.json`, `POST /api/issues/{id}/comments` |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 
 ## Baseline preconditions
@@ -23,7 +24,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 - Run `pl` only through `$C pl "$RUN" ...` so the transcript records it.
 - Run SQL only through `$C sql "$RUN" "..."`. Reads only; never write rows to set up a state a user could reach with `pl`.
 - Treat every command as literal. Status arguments are workflow keys such as `in_progress`, not display names.
-- The person actor can make only `backlog → todo`, `todo → start` and `human_review → merging`. `start → in_progress` is made by a runner started with `$C runner` (see [runner.md](runner.md)). Later statuses need an agent actor, which arrives in a later slice. Do not insert actors by hand to get there.
+- The person actor can make only `backlog → todo`, `todo → start` and `human_review → merging`. `start → in_progress` is made by a runner started with `$C runner` (see [runner.md](runner.md)). Later statuses need an agent actor: each claim creates one for its run, and only that run's `pl mcp` holds its token (see [workflow-and-gates.md](workflow-and-gates.md)). Do not insert actors by hand to get there.
 
 ## Proof and skip reporting
 

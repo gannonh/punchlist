@@ -89,6 +89,10 @@ ENV
   # run.env and never printed.
   (umask 077 && printf '%s' "${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" >"$dir/webhook-secret")
 
+  # With the App's private key (`with-env $C up`), the server reads `.punchlist/` from the
+  # sandbox's default branch as the Punchlist App.
+  if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then export GITHUB_APP_ID="${GITHUB_APP_ID:-5254938}"; fi
+
   # pnpm dev in its own process group so `down` stops exactly this tree.
   (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="127.0.0.1:$port" \
      GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \

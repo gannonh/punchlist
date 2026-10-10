@@ -1,5 +1,6 @@
 //! `POST /api/github/webhook`: GitHub's deliveries, verified, parsed and queued as jobs,
-//! and the job that records each one as evidence on pull requests and issues.
+//! and the job that records each one as evidence on pull requests and issues, or queues a
+//! workflow load for a push that changes `.punchlist/` on the default branch.
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -7,15 +8,17 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::ErrorBody;
-use punchlist_core::{Role, default_workflow, linked_issue_id};
+use punchlist_core::{Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
+use crate::GithubClient;
 use crate::auth::Actor;
-use crate::issues::write_transition;
+use crate::issues::{record_comment, write_transition};
+use crate::workflow::{active_workflow, queue_workflow_load};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -40,6 +43,9 @@ const REVIEW_THREAD_ACTIONS: [&str; 2] = ["resolved", "unresolved"];
 pub(crate) struct Repository {
     pub name: String,
     pub owner: Account,
+    /// In `push` events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +128,49 @@ pub(crate) struct ReviewThreadEvent {
     pub repository: Repository,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PushCommit {
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub modified: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PushEvent {
+    /// Such as `refs/heads/main`.
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub forced: bool,
+    #[serde(default)]
+    pub commits: Vec<PushCommit>,
+    pub repository: Repository,
+}
+
+impl PushEvent {
+    /// A push to the default branch that changes `.punchlist/`. A forced push may drop
+    /// commits that did, so it counts too.
+    fn changes_workflow(&self) -> bool {
+        let Some(branch) = &self.repository.default_branch else {
+            return false;
+        };
+        !self.deleted
+            && self.git_ref == format!("refs/heads/{branch}")
+            && (self.forced
+                || self.commits.iter().any(|c| {
+                    [&c.added, &c.removed, &c.modified]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| path.starts_with(".punchlist/"))
+                }))
+    }
+}
+
 /// A delivery that passed validation, as queued.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
@@ -129,6 +178,7 @@ pub(crate) enum GithubEvent {
     PullRequest(PullRequestEvent),
     CheckRun(CheckRunEvent),
     PullRequestReviewThread(ReviewThreadEvent),
+    Push(PushEvent),
 }
 
 impl GithubEvent {
@@ -137,6 +187,7 @@ impl GithubEvent {
             GithubEvent::PullRequest(e) => &e.repository,
             GithubEvent::CheckRun(e) => &e.repository,
             GithubEvent::PullRequestReviewThread(e) => &e.repository,
+            GithubEvent::Push(e) => &e.repository,
         }
     }
 }
@@ -162,6 +213,9 @@ fn parse_event(event: &str, body: &[u8]) -> Result<Option<GithubEvent>, ApiError
     fn typed<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
         serde_json::from_slice(body)
             .map_err(|error| ApiError::Invalid(format!("malformed payload: {error}")))
+    }
+    if event == "push" {
+        return Ok(Some(GithubEvent::Push(typed(body)?)));
     }
     let handled: &[&str] = match event {
         "pull_request" => &PULL_REQUEST_ACTIONS,
@@ -294,7 +348,9 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
-            let (_, applied, linked) = upsert_pull_request(tx, &job, &event.pull_request).await?;
+            let (_, applied, linked) =
+                upsert_pull_request(tx, job.workspace_id, job.repository_id, &event.pull_request)
+                    .await?;
             if let (true, true, Some(issue_id)) = (applied, event.action == "closed", linked) {
                 close_issue_on_pull_request(tx, &job, event, &issue_id).await?;
             }
@@ -324,6 +380,12 @@ pub(crate) async fn process(
             .await?;
             recompute_checks(tx, job.repository_id, &run.head_sha).await?;
         }
+        GithubEvent::Push(event) => {
+            if event.changes_workflow() {
+                let key = format!("workflow_load:{}", job.delivery_id);
+                queue_workflow_load(tx, job.workspace_id, &key).await?;
+            }
+        }
         GithubEvent::PullRequestReviewThread(event) => {
             // This event carries GitHub's short pull request, without `merged` or
             // `mergeable_state`, so it records the pull request only if no `pull_request`
@@ -338,7 +400,16 @@ pub(crate) async fn process(
             .await?;
             let pull_request_id = match known {
                 Some(id) => id,
-                None => upsert_pull_request(tx, &job, &event.pull_request).await?.0,
+                None => {
+                    upsert_pull_request(
+                        tx,
+                        job.workspace_id,
+                        job.repository_id,
+                        &event.pull_request,
+                    )
+                    .await?
+                    .0
+                }
             };
             sqlx::query!(
                 "INSERT INTO review_thread (node_id, pull_request_id, resolved)
@@ -369,12 +440,13 @@ pub(crate) async fn process(
 /// Returns its row id, whether this payload was applied, and the issue it is linked to.
 async fn upsert_pull_request(
     tx: &mut sqlx::PgConnection,
-    job: &GithubJob,
+    workspace_id: Uuid,
+    repository_id: Uuid,
     pr: &PullRequestData,
-) -> anyhow::Result<(Uuid, bool, Option<String>)> {
+) -> sqlx::Result<(Uuid, bool, Option<String>)> {
     let prefix = sqlx::query_scalar!(
         "SELECT issue_prefix FROM workspace WHERE id = $1",
-        job.workspace_id
+        workspace_id
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -384,7 +456,7 @@ async fn upsert_pull_request(
             sqlx::query_scalar!(
                 "SELECT id FROM issue WHERE id = $1 AND workspace_id = $2",
                 id,
-                job.workspace_id
+                workspace_id
             )
             .fetch_optional(&mut *tx)
             .await?
@@ -414,7 +486,7 @@ async fn upsert_pull_request(
          WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at
            AND pull_request.state <> 'merged'
          RETURNING id",
-        job.repository_id,
+        repository_id,
         pr.number,
         pr.id,
         pr.title,
@@ -436,15 +508,74 @@ async fn upsert_pull_request(
         // actions in one second still apply in delivery order.
         let id = sqlx::query_scalar!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
-            job.repository_id,
+            repository_id,
             pr.number
         )
         .fetch_one(&mut *tx)
         .await?;
         return Ok((id, false, linked));
     };
-    recompute_checks(tx, job.repository_id, &pr.head.sha).await?;
+    recompute_checks(tx, repository_id, &pr.head.sha).await?;
     Ok((id, true, linked))
+}
+
+/// Brings the pull requests an issue's gates read up to date with GitHub. A webhook reaches
+/// the server seconds after GitHub, and an agent asks for its transition right after it
+/// opens or readies a pull request; a gate must not read the state from before. When GitHub
+/// cannot be reached the recorded pull requests stand, so an outage does not stop moves.
+///
+/// Runs in its own transaction, before the caller locks the issue: a webhook job holds the
+/// pull request's row and waits for the issue's, so taking the issue's lock first deadlocks.
+// ponytail: a pull request that GitHub now reports closed or merged is left to its webhook,
+// which also moves the issue; recording it here would stop that webhook from applying.
+pub(crate) async fn refresh_pull_requests(
+    github: &GithubClient,
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+    issue_id: &str,
+) -> sqlx::Result<()> {
+    let Some(repository) = sqlx::query!(
+        "SELECT r.id, r.owner, r.name, w.issue_prefix FROM repository r
+         JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
+        workspace_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(());
+    };
+    let known = sqlx::query_scalar!(
+        "SELECT number FROM pull_request WHERE repository_id = $1 AND issue_id = $2",
+        repository.id,
+        issue_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let names_issue = |pr: &PullRequestData| {
+        linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
+            == Some(issue_id)
+    };
+    let fresh = match github
+        .pull_requests(&repository.owner, &repository.name, &known, names_issue)
+        .await
+    {
+        Ok(fresh) => fresh,
+        Err(error) => {
+            tracing::warn!(
+                issue_id,
+                "cannot read pull requests from GitHub, the gates read the recorded ones: {error:#}"
+            );
+            return Ok(());
+        }
+    };
+    let mut tx = pool.begin().await?;
+    for pr in fresh
+        .iter()
+        .filter(|pr| pr.state == "open" && !pr.is_merged())
+    {
+        upsert_pull_request(&mut tx, workspace_id, repository.id, pr).await?;
+    }
+    tx.commit().await
 }
 
 /// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun
@@ -500,7 +631,7 @@ async fn close_issue_on_pull_request(
     } else {
         "pr_closed_unmerged"
     };
-    let workflow = default_workflow();
+    let (workflow, _) = active_workflow(tx, job.workspace_id).await?;
     let Some(transition) = workflow.transition_on(&status, name) else {
         tracing::info!(
             issue_id,
@@ -535,6 +666,8 @@ async fn close_issue_on_pull_request(
         status,
         transition.to.as_str(),
         Some(&job.delivery_id),
+        workflow.version(),
+        &[],
     )
     .await?;
     // The agent working this issue has nothing left to do: its pull request is gone, and the
@@ -570,34 +703,7 @@ async fn close_issue_on_pull_request(
             "Pull request #{} was closed without merging by @{login}.\n\n{}",
             pr.number, pr.html_url
         );
-        let comment_id = sqlx::query_scalar!(
-            "INSERT INTO comment (issue_id, actor_id, body, transition_id)
-             VALUES ($1, $2, $3, $4) RETURNING id",
-            issue_id,
-            actor_id,
-            body,
-            transition_id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        let seq = sqlx::query_scalar!(
-            "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
-             RETURNING last_event_seq",
-            job.workspace_id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query!(
-            "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id)
-             VALUES ($1, $2, $3, 'comment', $4, $5)",
-            job.workspace_id,
-            seq,
-            issue_id,
-            actor_id,
-            comment_id,
-        )
-        .execute(&mut *tx)
-        .await?;
+        record_comment(tx, &actor, issue_id, &body, Some(transition_id)).await?;
     }
     Ok(())
 }

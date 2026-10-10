@@ -2,7 +2,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use punchlist_api::ErrorBody;
-use punchlist_core::Refusal;
+use punchlist_core::{Evidence, GateResult, Refusal};
 use uuid::Uuid;
 
 /// An error the API returns, with its status and a stable code.
@@ -28,8 +28,18 @@ pub enum ApiError {
     Invalid(String),
     #[error(transparent)]
     Refused(#[from] Refusal),
+    /// A gate failed: the refusal names the first one, with every result and the evidence.
+    #[error("{}", .0.refusal)]
+    GateFailed(Box<GateFailure>),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+}
+
+#[derive(Debug)]
+pub struct GateFailure {
+    pub refusal: Refusal,
+    pub evidence: Evidence,
+    pub gates: Vec<GateResult>,
 }
 
 impl ApiError {
@@ -43,7 +53,7 @@ impl ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) => StatusCode::CONFLICT,
             ApiError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            ApiError::Refused(_) => StatusCode::CONFLICT,
+            ApiError::Refused(_) | ApiError::GateFailed(_) => StatusCode::CONFLICT,
             ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -60,6 +70,7 @@ impl ApiError {
             ApiError::StaleAttempt(_) => "stale_attempt",
             ApiError::Invalid(_) => "invalid",
             ApiError::Refused(refusal) => refusal.code(),
+            ApiError::GateFailed(failure) => failure.refusal.code(),
             ApiError::Database(_) => "internal",
         }
     }
@@ -67,6 +78,7 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let status = self.status();
         let message = match &self {
             ApiError::Database(error) => {
                 tracing::error!(%error, "database error");
@@ -74,10 +86,20 @@ impl IntoResponse for ApiError {
             }
             other => other.to_string(),
         };
-        let body = ErrorBody {
-            code: self.code().to_string(),
-            message,
-        };
-        (self.status(), Json(body)).into_response()
+        let mut body = ErrorBody::new(self.code(), message);
+        if let ApiError::GateFailed(failure) = self {
+            let GateFailure {
+                refusal,
+                evidence,
+                gates,
+            } = *failure;
+            if let Refusal::GateFailed { gate, reason, .. } = refusal {
+                body.gate = Some(gate);
+                body.reason = Some(reason);
+            }
+            body.evidence = Some(evidence);
+            body.gates = gates;
+        }
+        (status, Json(body)).into_response()
     }
 }

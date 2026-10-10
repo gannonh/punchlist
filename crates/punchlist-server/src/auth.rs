@@ -59,16 +59,37 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
         let row = sqlx::query!(
-            "SELECT id, workspace_id, name, role FROM actor WHERE token_hash = $1",
+            r#"SELECT a.id, a.workspace_id, a.name, a.role,
+                      r.issue_id AS "issue_id?", r.outcome AS "outcome?"
+               FROM actor a LEFT JOIN run r ON r.id = a.run_id
+               WHERE a.token_hash = $1"#,
             hash_token(token)
         )
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::Unauthorized)?;
+        let role = parse_role(&row.role)?;
+        // An agent's token works only while its run is running.
+        if role == Role::Agent && row.outcome.as_deref() != Some("running") {
+            return Err(ApiError::Unauthorized);
+        }
+        // An agent's token reaches only its run's issue: `/api/issues/<id>` and below. Every
+        // other endpoint, such as creating issues or reading the rest of the workspace, is
+        // for people and runners.
+        if role == Role::Agent {
+            let own = row.issue_id.as_deref();
+            let path = parts.uri.path().strip_prefix("/api/issues/");
+            if own.is_none() || path.and_then(|rest| rest.split('/').next()) != own {
+                return Err(ApiError::Forbidden(format!(
+                    "an agent acts only on its run's issue, {}",
+                    own.unwrap_or("none")
+                )));
+            }
+        }
         Ok(Actor {
             id: row.id,
             workspace_id: row.workspace_id,
-            role: parse_role(&row.role)?,
+            role,
             name: row.name,
         })
     }

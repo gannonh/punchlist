@@ -15,7 +15,9 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::RunnerConfig;
-use crate::agent::{AgentExit, AgentResult, build_prompt, run_claude};
+use crate::agent::{
+    AgentExit, AgentResult, build_prompt, claude_args, run_claude, write_mcp_config,
+};
 use crate::worktree::Worktrees;
 
 pub const FAILURE_RETRY_BASE_MS: i64 = 10_000;
@@ -62,7 +64,7 @@ fn is_permanent(error: &ClientError) -> bool {
 }
 
 fn is_code(error: &ClientError, wanted: &str) -> bool {
-    matches!(error, ClientError::Refused { code, .. } if code == wanted)
+    matches!(error, ClientError::Refused(body) if body.code == wanted)
 }
 
 /// The attempts this runner is working on; the heartbeat renews exactly these leases.
@@ -205,8 +207,8 @@ pub(crate) async fn run_with_worktrees(
             Ok(None) => failures = 0,
             Err(e) if is_code(&e, "claim_taken") => {
                 failures = 0;
-                if let ClientError::Refused { message, .. } = &e {
-                    tracing::info!("claim taken: {message}");
+                if let ClientError::Refused(body) = &e {
+                    tracing::info!("claim taken: {}", body.message);
                 }
             }
             Err(e) => {
@@ -397,16 +399,36 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
                         claim.branch
                     ))
                     .await;
-                let prompt = build_prompt(&claim.issue, &claim.repository, &claim.branch);
-                run_claude(
-                    &ctx.config.claude_command,
-                    ctx.config.model.as_deref(),
-                    &path,
-                    &prompt,
-                    lines_tx.clone(),
-                    stop_rx,
-                )
-                .await
+                let prompt = build_prompt(
+                    &claim.issue,
+                    &claim.repository,
+                    &claim.branch,
+                    &claim.prompt,
+                );
+                // Outside the worktree, so the agent cannot commit its token.
+                let mcp_dir = ctx.config.worktree_root.join("mcp");
+                match write_mcp_config(&mcp_dir, &run_id, &ctx.config, &claim) {
+                    Ok(mcp_config) => {
+                        let args = claude_args(ctx.config.model.as_deref(), Some(&mcp_config));
+                        let exit = run_claude(
+                            &ctx.config.claude_command,
+                            &args,
+                            &path,
+                            &prompt,
+                            lines_tx.clone(),
+                            stop_rx,
+                        )
+                        .await;
+                        let _ = std::fs::remove_file(&mcp_config);
+                        exit
+                    }
+                    Err(e) => AgentExit::Finished(AgentResult {
+                        outcome: RunOutcome::Failed,
+                        reason: Some(format!("cannot write the MCP config: {e}")),
+                        input_tokens: None,
+                        output_tokens: None,
+                    }),
+                }
             }
             Err(reason) => {
                 let _ = lines_tx
@@ -641,10 +663,9 @@ mod tests {
         };
         assert!(is_permanent(&api(422)));
         assert!(!is_permanent(&api(500)));
-        assert!(!is_permanent(&ClientError::Refused {
-            code: "stale_attempt".into(),
-            message: "x".into(),
-        }));
+        assert!(!is_permanent(&ClientError::Refused(Box::new(
+            punchlist_api::ErrorBody::new("stale_attempt", "x")
+        ))));
     }
 
     /// The flusher against a real server: an oversized line is stored clipped, and the

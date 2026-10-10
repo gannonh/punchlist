@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job (kind, idempotency_key, payload) VALUES ('workflow_load', $1, $2)\n         ON CONFLICT (idempotency_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9fbf8c911e816c4cc0792e9e3ce11701bd8c53101d12acf8e1b06000a3b1139"
+}

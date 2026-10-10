@@ -25,7 +25,7 @@ Preconditions:
 
 - Baseline run `$RUN`. `up` bootstraps the workspace with repository `gannonh/punchlist-sandbox`, so runners clone and push only there.
 - `gh auth status` shows a logged-in account that can push to the sandbox, and `git ls-remote https://github.com/gannonh/punchlist-sandbox.git HEAD` answers.
-- An agent run makes a live model call. Start a runner that will claim an issue only inside a named live check. `$C runner` passes `--model haiku`.
+- An agent run makes a live model call. Start a runner that will claim an issue only inside a named live check. `$C runner` passes `--model haiku`, the alias for the newest Haiku (Haiku 5.5 on the Anthropic API). Codex runs use GPT-6 Luna (`gpt-6-luna`), once the runner has a Codex adapter.
 
 - **Start a runner.** `$C runner "$RUN" r1`. It waits until the log at `$EVIDENCE/runner-r1.log` says the runner registered.
 - **List.** `$C pl "$RUN" runner list`. One line naming `r1`, `claude-code` and a heartbeat a few seconds old. `$C sql "$RUN" "SELECT id, name, last_heartbeat FROM runner"` has one row.

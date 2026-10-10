@@ -20,6 +20,8 @@ pub struct RunnerConfig {
     pub worktree_root: PathBuf,
     /// The `claude` executable.
     pub claude_command: PathBuf,
+    /// The `pl` executable, which serves Punchlist's MCP tools to each run as `pl mcp`.
+    pub mcp_command: PathBuf,
     /// Passed to `claude --model` when set, such as `haiku`.
     pub model: Option<String>,
     /// Issues this runner works on at once.

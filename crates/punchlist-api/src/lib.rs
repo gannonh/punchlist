@@ -5,8 +5,8 @@
 //! with their schemas from `punchlist-core`'s `openapi` feature.
 
 use chrono::{DateTime, Utc};
-pub use punchlist_core::Role;
 use punchlist_core::display_name;
+pub use punchlist_core::{Evidence, GateResult, PullRequestEvidence, PullRequestState, Role};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -181,6 +181,11 @@ pub struct Claim {
     /// The branch to work on, `feature/<id>-<slug>`.
     pub branch: String,
     pub lease_expires_at: DateTime<Utc>,
+    /// The workflow's prompt for the status: `prompts/system.md`, then the status's own.
+    pub prompt: String,
+    /// The bearer token of the agent actor this run acts as, for the MCP server. Valid
+    /// while the run is running.
+    pub agent_token: String,
 }
 
 /// An attempt a runner is working on.
@@ -298,35 +303,6 @@ pub struct RunLog {
     pub lines: Vec<LogLine>,
 }
 
-/// A pull request's state on GitHub.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PullRequestState {
-    Open,
-    Closed,
-    Merged,
-}
-
-impl PullRequestState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PullRequestState::Open => "open",
-            PullRequestState::Closed => "closed",
-            PullRequestState::Merged => "merged",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<PullRequestState> {
-        [
-            PullRequestState::Open,
-            PullRequestState::Closed,
-            PullRequestState::Merged,
-        ]
-        .into_iter()
-        .find(|state| state.as_str() == s)
-    }
-}
-
 /// The check runs on a pull request's head commit, taken together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -398,13 +374,66 @@ impl PullRequest {
     }
 }
 
+/// `POST /api/issues/{id}/comments`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateComment {
+    /// Markdown.
+    pub body: String,
+}
+
+/// `GET /api/workflow`: the workspace's active workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkflowInfo {
+    /// The content hash recorded on every transition.
+    pub version: String,
+    /// The default branch commit it was loaded from; `None` for the built-in workflow.
+    pub commit_sha: Option<String>,
+    pub statuses: Vec<String>,
+}
+
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ErrorBody {
-    /// A stable code, such as `role_not_allowed` or `not_found`.
+    /// A stable code, such as `role_not_allowed`, `gate_failed` or `not_found`.
     pub code: String,
     /// What went wrong. For a refused transition, the rule that refused it.
     pub message: String,
+    /// For `gate_failed`: the first gate that failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<String>,
+    /// For `gate_failed`: why that gate failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `gate_failed`: what the gates read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
+    /// For `gate_failed`: every gate's result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gates: Vec<GateResult>,
+}
+
+impl ErrorBody {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> ErrorBody {
+        ErrorBody {
+            code: code.into(),
+            message: message.into(),
+            gate: None,
+            reason: None,
+            evidence: None,
+            gates: Vec::new(),
+        }
+    }
+
+    /// One indented line per gate result, as `pl` and the MCP server print them.
+    pub fn gate_lines(&self) -> Vec<String> {
+        self.gates
+            .iter()
+            .map(|g| {
+                let result = if g.passed { "pass" } else { "fail" };
+                format!("  {}: {result} ({})", g.gate, g.reason)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
