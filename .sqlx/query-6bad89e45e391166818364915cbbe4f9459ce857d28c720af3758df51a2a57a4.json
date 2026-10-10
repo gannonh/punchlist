@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (workspace_id, hash) DO UPDATE SET hash = EXCLUDED.hash\n         RETURNING id",
+  "query": "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (workspace_id, hash) DO UPDATE SET commit_sha = EXCLUDED.commit_sha\n         RETURNING id",
   "describe": {
     "columns": [
       {
@@ -28,5 +28,5 @@
       false
     ]
   },
-  "hash": "52a6d29ecbef9ca3962fb7d1ebe69689186347409d9001266f8c45c1d4326d1a"
+  "hash": "6bad89e45e391166818364915cbbe4f9459ce857d28c720af3758df51a2a57a4"
 }

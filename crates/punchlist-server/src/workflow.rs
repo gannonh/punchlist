@@ -133,7 +133,7 @@ pub(crate) async fn load(
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (workspace_id, hash) DO UPDATE SET hash = EXCLUDED.hash
+         ON CONFLICT (workspace_id, hash) DO UPDATE SET commit_sha = EXCLUDED.commit_sha
          RETURNING id",
         workspace_id,
         workflow.version(),

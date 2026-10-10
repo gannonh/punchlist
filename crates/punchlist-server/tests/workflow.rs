@@ -605,3 +605,90 @@ async fn the_schema_needs_no_token(pool: PgPool) {
     assert_eq!(schema["title"], "Punchlist workflow");
     assert!(schema.to_string().contains("pr_names_issue"));
 }
+
+#[sqlx::test]
+async fn an_agent_token_reaches_only_its_runs_issue(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = claimed_issue(&s).await;
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Another"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    for uri in [
+        "/api/issues/PL-1",
+        "/api/issues/PL-1/events",
+        "/api/issues/PL-1/pull-requests",
+    ] {
+        let (status, body) = call(&s.app, &agent, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
+    for (method, uri, body) in [
+        ("POST", "/api/issues", Some(json!({"title": "Mine now"}))),
+        ("GET", "/api/issues", None),
+        ("GET", "/api/issues/PL-2", None),
+        ("GET", "/api/issues/PL-2/events", None),
+        ("GET", "/api/issues/PL-10", None),
+        ("GET", "/api/pull-requests/unlinked", None),
+        ("GET", "/api/workflow", None),
+    ] {
+        let (status, error) = call(&s.app, &agent, method, uri, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {error}");
+        assert_eq!(
+            error["message"],
+            "an agent acts only on its run's issue, PL-1"
+        );
+    }
+    let issues = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM issue"#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(issues, 2);
+}
+
+#[sqlx::test]
+async fn a_reverted_workflow_reports_the_commit_it_was_loaded_from(pool: PgPool) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    {
+        let mut repo = s.github.lock().unwrap();
+        for (path, text) in [
+            ("prompts/system.md", "System.\n"),
+            ("prompts/in_progress.md", "Build it.\n"),
+            ("prompts/agent_review.md", "Review it.\n"),
+        ] {
+            repo.files.insert(path.into(), text.into());
+        }
+    }
+    let changed = PRD_WORKFLOW.replace("max_concurrent = 5", "max_concurrent = 4");
+    let mut loaded = Vec::new();
+    for (n, (sha, file)) in [
+        ("a", PRD_WORKFLOW),
+        ("b", changed.as_str()),
+        ("c", PRD_WORKFLOW),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        {
+            let mut repo = s.github.lock().unwrap();
+            repo.sha = sha.repeat(40);
+            repo.files.insert("workflow.toml".into(), file.into());
+        }
+        deliver(&s, "push", &format!("push-{n}"), PUSH).await;
+        let (_, now) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+        loaded.push((now["version"].clone(), now["commit_sha"].clone()));
+    }
+    assert_eq!(loaded[0].0, loaded[2].0);
+    assert_ne!(loaded[0].0, loaded[1].0);
+    assert_eq!(
+        loaded.iter().map(|l| l.1.clone()).collect::<Vec<_>>(),
+        ["a".repeat(40), "b".repeat(40), "c".repeat(40)]
+    );
+    assert_eq!(workflow_versions(&pool).await, 2);
+}

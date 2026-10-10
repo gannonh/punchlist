@@ -11,7 +11,7 @@ The server loads `.punchlist/workflow.toml` and the prompts it names from the re
 - `gate-refused`: `request_transition` (or `pl issue transition`) to `agent_review` while the pull request is a draft answers `Refused (gate_failed): in_progress → agent_review needs gate pr_ready: pull request #<n> is a draft`, then each gate's result. No `transition` row is written.
 - `gate-passed`: after `gh pr ready`, the same request moves the issue to Agent Review as `Claude Code (agent)`, and `transition_gate` holds `pr_open`, `pr_ready`, `pr_names_issue`, all `pass`.
 - `agent-comment`: a comment through MCP ends with `(agent)` on its own line in `pl issue show`.
-- `agent-scope`: an agent token works only while its run is running, only on its run's issue, and not on an issue in a status the workflow locks to agents (`human_review`).
+- `agent-scope`: an agent token works only while its run is running, only on `/api/issues/<its run's issue>` and below (any other endpoint answers 403 `an agent acts only on its run's issue, PL-<n>`), and not on an issue in a status the workflow locks to agents (`human_review`).
 
 ## How to get to it (user POV)
 

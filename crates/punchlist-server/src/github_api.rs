@@ -233,10 +233,12 @@ pub struct Files {
 impl Files {
     /// The text of `.punchlist/<path>`, or `None` when the commit has no such file.
     pub async fn punchlist_file(&self, path: &str) -> anyhow::Result<Option<String>> {
-        let url = format!(
-            "{}/repos/{}/contents/.punchlist/{path}?ref={}",
-            self.client.base_url, self.repository, self.head.sha
-        );
+        let url = contents_url(
+            &self.client.base_url,
+            &self.repository,
+            path,
+            &self.head.sha,
+        )?;
         let response = self
             .client
             .http
@@ -253,6 +255,26 @@ impl Files {
             status => anyhow::bail!("GitHub .punchlist/{path} answered {status}"),
         }
     }
+}
+
+/// The URL of `.punchlist/<path>` at `sha`. Each path segment and the query are escaped, so
+/// a prompt named `a?b.md` is that file, not a query that swallows `ref`.
+fn contents_url(
+    base_url: &str,
+    repository: &str,
+    path: &str,
+    sha: &str,
+) -> anyhow::Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base_url)?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("{base_url} cannot be a base URL"))?
+        .pop_if_empty()
+        .extend(["repos"])
+        .extend(repository.split('/'))
+        .extend(["contents", ".punchlist"])
+        .extend(path.split('/'));
+    url.query_pairs_mut().append_pair("ref", sha);
+    Ok(url)
 }
 
 /// A JWT that authenticates as the App for ten minutes, backdated a minute for clock drift.
@@ -299,6 +321,16 @@ fn decode_pem(pem: &str) -> anyhow::Result<(String, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_path_cannot_leave_its_place_in_the_url() {
+        assert_eq!(
+            contents_url("http://x", "o/n", "prompts/a?b#c d%.md", "abc")
+                .unwrap()
+                .as_str(),
+            "http://x/repos/o/n/contents/.punchlist/prompts/a%3Fb%23c%20d%25.md?ref=abc"
+        );
+    }
 
     #[test]
     fn pem_on_one_line_decodes() {
