@@ -7,7 +7,7 @@ The server refuses a move the workflow does not allow and says which rule refuse
 - `refuse-role` names the roles that may make the move: `only a runner makes start → in_progress, not a person` (code `role_not_allowed`).
 - `refuse-missing` refuses a move with no transition: `no transition backlog → done exists in the workflow` (code `no_transition`).
 - `refuse-event-only` refuses a move that only a GitHub event makes: `merging → done happens only on the `pr_merged` event, not on request` (code `event_only`).
-- `refuse-gated` refuses a gated move even for an allowed role, until gates are evaluated (Slice 4): `in_progress → agent_review needs gates pr_open, pr_ready, pr_names_issue, which Punchlist does not evaluate yet` (code `gates_not_evaluated`).
+- `refuse-gated` refuses a move whose gate fails, naming the first failed gate and its reason: `in_progress → agent_review needs gate pr_ready: pull request #<n> is a draft` (code `gate_failed`). The 409 body also carries `gate`, `reason`, `evidence` and every gate's result. Only an agent can make a gated move; see [workflow-and-gates.md](workflow-and-gates.md).
 - `refuse-unknown` refuses a status not in the workflow: ``status `shipped` is not in the workflow`` (code `unknown_status`).
 - `refuse-no-write` leaves the status, `transition` and `event` tables unchanged.
 
@@ -30,7 +30,7 @@ Preconditions:
 
 ## Gotchas
 
-- `refuse-gated` needs an agent actor and an issue in In Progress, which no user path creates in Slice 1. It is covered by `punchlist-core` unit tests; report it as skipped in live checks.
+- `refuse-gated` needs an agent's token, which only a run's `pl mcp` holds. Drive it with the runner recipe in [workflow-and-gates.md](workflow-and-gates.md); a person asking for the same move gets `refuse-role` or `refuse-missing` before any gate runs.
 
-- `refuse-event-only` cannot be reached by a person in Slice 1: the issue would have to be in Merging, and only a person in Human Review can get it there, which needs an agent first. It is covered by `punchlist-core` unit tests; report it as skipped in live checks.
+- `refuse-event-only` cannot be reached yet: the issue would have to be in Merging, which follows Human Review, and `agent_review → human_review` needs gates Punchlist does not evaluate yet (`ci_green`, `mergeable`, `no_open_threads`), so it fails closed. It is covered by `punchlist-core` unit tests; report it as skipped in live checks.
 - `$C pl` passes the exit code through; check it right after the command, before another command overwrites `$?`.

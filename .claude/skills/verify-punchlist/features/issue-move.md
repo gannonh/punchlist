@@ -11,7 +11,7 @@ A person moves an issue along the workflow with `pl issue move`. The server chec
 
 ## How to get to it (user POV)
 
-- `pl issue move <id> <status>`, then `pl issue show <id>`.
+- `pl issue move <id> <status>` (alias `pl issue transition`), then `pl issue show <id>`.
 - `POST /api/issues/{id}/transitions` with `{"to": "<status>"}`; `GET /api/issues/{id}/events`.
 
 ## Driving it with control-punchlist
@@ -23,8 +23,8 @@ Preconditions:
 - **To Todo.** Run `$C pl "$RUN" issue move PL-1 todo`. Exit `0`, stdout `PL-1  Backlog → Todo`.
 - **To Start.** Run `$C pl "$RUN" issue move PL-1 start`. Exit `0`, stdout `PL-1  Todo → Start`.
 - **Timeline.** Run `$C pl "$RUN" issue show PL-1`. Stdout has `Status: Start` and exactly two timeline lines, each matching `^  \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC  Verify Person \(person\)  ` followed by `Backlog → Todo` on the first and `Todo → Start` on the second.
-- **Rows.** Run `$C sql "$RUN" "SELECT from_status, to_status, actor_id FROM transition ORDER BY created_at"` and `$C sql "$RUN" "SELECT id, name, role FROM actor"`. Two rows, `backlog | todo` and `todo | start`, both with the actor id of `Verify Person`.
-- **Events.** Run `$C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"`. Rows `1 | PL-1 | transition` and `2 | PL-1 | transition`, same actor id.
+- **Rows.** Run `$C sql "$RUN" "SELECT from_status, to_status, actor_id FROM transition ORDER BY created_at"` and `$C sql "$RUN" "SELECT id, name, role FROM actor"`. Two rows, `backlog | todo | <uuid>` and `todo | start | <uuid>`; the uuid is the `id` of the actor row `Verify Person | person`.
+- **Events.** Run `$C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"`. Rows `1 | PL-1 | transition | <uuid>` and `2 | PL-1 | transition | <uuid>`, the same actor id.
 - **Version.** Run `$C sql "$RUN" "SELECT DISTINCT workflow_version FROM transition"`. One row starting `sha256:`.
 
 ## Gotchas

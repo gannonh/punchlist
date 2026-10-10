@@ -120,5 +120,3 @@ git worktree add /tmp/punchlist-main origin/main
 (cd /tmp/punchlist-main && <the same command>)
 git worktree remove /tmp/punchlist-main
 ```
-
-On `main` before Slice 1 merges there are no crates, so cargo commands there fail; quote that failure as the `main` half.
