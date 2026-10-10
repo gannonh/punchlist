@@ -519,17 +519,18 @@ async fn upsert_pull_request(
     Ok((id, true, linked))
 }
 
-/// Brings the pull requests an issue's gates read up to date with GitHub, inside the
-/// caller's transaction, so the gates and the move see the same state. A webhook reaches
+/// Brings the pull requests an issue's gates read up to date with GitHub. A webhook reaches
 /// the server seconds after GitHub, and an agent asks for its transition right after it
 /// opens or readies a pull request; a gate must not read the state from before. When GitHub
 /// cannot be reached the recorded pull requests stand, so an outage does not stop moves.
-// ponytail: the caller holds the issue's row lock for the GitHub round trips. A pull
-// request that GitHub now reports closed or merged is left to its webhook, which also moves
-// the issue; recording it here would stop that webhook from applying.
+///
+/// Runs in its own transaction, before the caller locks the issue: a webhook job holds the
+/// pull request's row and waits for the issue's, so taking the issue's lock first deadlocks.
+// ponytail: a pull request that GitHub now reports closed or merged is left to its webhook,
+// which also moves the issue; recording it here would stop that webhook from applying.
 pub(crate) async fn refresh_pull_requests(
     github: &GithubClient,
-    tx: &mut sqlx::PgConnection,
+    pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
 ) -> sqlx::Result<()> {
@@ -538,7 +539,7 @@ pub(crate) async fn refresh_pull_requests(
          JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
         workspace_id,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(pool)
     .await?
     else {
         return Ok(());
@@ -548,7 +549,7 @@ pub(crate) async fn refresh_pull_requests(
         repository.id,
         issue_id,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await?;
     let names_issue = |pr: &PullRequestData| {
         linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
@@ -567,13 +568,14 @@ pub(crate) async fn refresh_pull_requests(
             return Ok(());
         }
     };
+    let mut tx = pool.begin().await?;
     for pr in fresh
         .iter()
         .filter(|pr| pr.state == "open" && !pr.is_merged())
     {
-        upsert_pull_request(tx, workspace_id, repository.id, pr).await?;
+        upsert_pull_request(&mut tx, workspace_id, repository.id, pr).await?;
     }
-    Ok(())
+    tx.commit().await
 }
 
 /// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun

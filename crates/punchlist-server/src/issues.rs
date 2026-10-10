@@ -236,6 +236,7 @@ async fn move_issue(
     Path(id): Path<String>,
     Json(request): Json<MoveIssue>,
 ) -> Result<Json<Moved>, ApiError> {
+    refresh_evidence(&state, &actor, &id, &request.to).await?;
     let mut tx = state.pool.begin().await?;
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
@@ -247,13 +248,6 @@ async fn move_issue(
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     actor.check_issue(&id)?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
-    if let Some(github) = &state.github
-        && workflow
-            .check_transition(&from, &request.to, actor.role)
-            .is_ok_and(|transition| !transition.gates.is_empty())
-    {
-        refresh_pull_requests(github, &mut tx, actor.workspace_id, &id).await?;
-    }
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
     let moved = record_transition(
         &mut tx,
@@ -272,6 +266,43 @@ async fn move_issue(
         let _ = state.starts.send((actor.workspace_id, id));
     }
     Ok(Json(moved))
+}
+
+/// Before the issue is locked: if the move has gates, reads the issue's pull requests from
+/// GitHub so they decide, not the webhooks still on their way. An issue the actor cannot
+/// move, or that does not exist, is left for `move_issue` to refuse.
+async fn refresh_evidence(
+    state: &AppState,
+    actor: &Actor,
+    id: &str,
+    to: &str,
+) -> Result<(), ApiError> {
+    let Some(github) = &state.github else {
+        return Ok(());
+    };
+    let Some(from) = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&state.pool)
+    .await?
+    else {
+        return Ok(());
+    };
+    if actor.check_issue(id).is_err() {
+        return Ok(());
+    }
+    let mut conn = state.pool.acquire().await?;
+    let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+    drop(conn);
+    if workflow
+        .check_transition(&from, to, actor.role)
+        .is_ok_and(|transition| !transition.gates.is_empty())
+    {
+        refresh_pull_requests(github, &state.pool, actor.workspace_id, id).await?;
+    }
+    Ok(())
 }
 
 /// Checks a requested move against the workflow: the lock, the role, then each gate over
