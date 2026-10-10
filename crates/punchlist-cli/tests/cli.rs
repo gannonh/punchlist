@@ -548,3 +548,80 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
         show.stdout
     );
 }
+
+/// `pl mcp` over real pipes, as Claude Code runs it: the handshake, then a refused
+/// `request_transition` and a `comment`, with the agent token a claim returns.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) {
+    use std::io::{BufRead, BufReader, Write};
+
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let claim = register(&pl, "r1").await.claim(0).await.unwrap().unwrap();
+
+    let url = pl.url.clone();
+    let lines = tokio::task::spawn_blocking(move || {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("pl"))
+            .arg("mcp")
+            .env("PUNCHLIST_SERVER_URL", url)
+            .env("PUNCHLIST_TOKEN", claim.agent_token)
+            .env("PUNCHLIST_ISSUE", "PL-1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut exchange = |message: &str, reply: bool| {
+            writeln!(stdin, "{message}").unwrap();
+            let mut line = String::new();
+            if reply {
+                stdout.read_line(&mut line).unwrap();
+            }
+            line
+        };
+        exchange(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+            true,
+        );
+        exchange(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, false);
+        let refused = exchange(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_transition","arguments":{"to":"agent_review"}}}"#,
+            true,
+        );
+        let commented = exchange(
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"comment","arguments":{"body":"Started."}}}"#,
+            true,
+        );
+        drop(stdin);
+        assert!(child.wait().unwrap().success());
+        [refused, commented]
+    })
+    .await
+    .unwrap();
+
+    let result = |line: &str| -> (bool, String) {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        let result = &value["result"];
+        (
+            result["isError"].as_bool().unwrap_or(false),
+            result["content"][0]["text"].as_str().unwrap().to_string(),
+        )
+    };
+    let (is_error, text) = result(&lines[0]);
+    assert!(is_error);
+    assert_eq!(
+        text.lines().next().unwrap(),
+        "Refused (gate_failed): in_progress → agent_review needs gate pr_open: no open pull request is linked to PL-1"
+    );
+    assert_eq!(result(&lines[1]), (false, "Commented on PL-1.".to_string()));
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout
+            .contains("Claude Code (agent)  commented:\n    Started.\n\n    (agent)\n"),
+        "{}",
+        show.stdout
+    );
+}

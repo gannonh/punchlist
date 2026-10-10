@@ -34,7 +34,7 @@ web/                       React app; src/api/ is generated
 docker-compose.yml         Postgres for development; the self-host stack
 ```
 
-Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client`, `punchlist-runner` and `punchlist-cli`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
+Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-client`, `punchlist-runner`, `punchlist-mcp`, `punchlist-cli` and `.punchlist/`. There is no `web/` yet, so `pnpm dev` has no Vite and `pnpm gen:api`, `pnpm build` and `pnpm e2e` do not exist yet.
 
 - Rust comes from rustup, which reads `rust-toolchain.toml`. Both machines get it from devops' `bin/machine-setup`.
 - `pnpm dev`: Postgres in Docker on `127.0.0.1:5433`, then the server on `127.0.0.1:7878`. Local defaults for `DATABASE_URL` and `PUNCHLIST_BIND` are in `scripts/env.sh`; they are not secrets.
@@ -44,6 +44,8 @@ Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-
 - `pl` reads `server_url` and `token` from `~/.config/punchlist/config.toml`, or from the file in `PUNCHLIST_CONFIG`.
 - `pl runner start` registers a runner with that person's token and gets the runner's own token back, held in memory only. It needs `git`, `gh` logged in with push access to the workspace's repository, and `claude` on `PATH`. Clones and worktrees go under `--worktree-root` (default `~/.local/share/punchlist/worktrees`).
 - GitHub events arrive at `POST /api/github/webhook`, verified with the GitHub App's webhook secret in `GITHUB_WEBHOOK_SECRET` (or `punchlist-server --github-webhook-secret`; it is a secret, so start the server under `with-env`). `pl issue show` lists an issue's pull requests; `pl pr unlinked` lists the ones that name no issue.
+- The server reads `.punchlist/` from the workspace repository's default branch as the GitHub App, with `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` (a secret; one-line PEM is fine). The App needs Contents read and the Push event. `bootstrap` queues the first load; a push that changes `.punchlist/` queues the next. `pl workflow show` prints the active version; `GET /api/workflow/schema.json` is the JSON Schema.
+- `pl issue transition <id> <status>` requests a transition and prints any failed gate; `pl issue comment <id> --body` comments. Each claim creates an agent actor whose token works only while its run runs; the runner gives it to `pl mcp`, which Claude Code gets as the `punchlist` MCP server (`get_issue`, `comment`, `request_transition`).
 - Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
 - `.claude/skills/verify-punchlist/` says how to run a live check.
 - CodeRabbit does not review pull requests in this repository on its own. When a pull request is ready for review, comment `@coderabbitai review` on it to start one, and comment again after later pushes that need a fresh review.

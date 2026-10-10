@@ -174,6 +174,8 @@ impl Config {
 pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
     // The MCP server takes its server and token from the run, not from a config file.
     if let Command::Mcp(args) = cli.command {
+        // stderr only: stdout carries the protocol.
+        init_logging();
         let client = Client::new(&args.server_url, &args.token)?;
         return punchlist_mcp::serve_stdio(client, args.issue).await;
     }

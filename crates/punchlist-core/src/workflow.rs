@@ -1241,6 +1241,32 @@ mod tests {
     }
 
     #[test]
+    fn punchlists_own_workflow_loads() {
+        let prompts = [
+            (
+                "prompts/system.md",
+                include_str!("../../../.punchlist/prompts/system.md"),
+            ),
+            (
+                "prompts/in_progress.md",
+                include_str!("../../../.punchlist/prompts/in_progress.md"),
+            ),
+            (
+                "prompts/agent_review.md",
+                include_str!("../../../.punchlist/prompts/agent_review.md"),
+            ),
+        ]
+        .map(|(path, text)| (path.to_string(), text.to_string()));
+        let workflow = Workflow::from_files(
+            include_str!("../../../.punchlist/workflow.toml"),
+            prompts.into_iter().collect(),
+        )
+        .unwrap();
+        assert_eq!(workflow.statuses().len(), 9);
+        assert_eq!(workflow.prompts().len(), 3);
+    }
+
+    #[test]
     fn the_schema_lists_the_gates() {
         let schema = serde_json::to_value(workflow_schema()).unwrap();
         let text = schema.to_string();
