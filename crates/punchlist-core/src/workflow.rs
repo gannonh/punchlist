@@ -296,12 +296,18 @@ struct Errors<'a> {
 
 impl Errors<'_> {
     fn at(&self, span: Range<usize>, key: impl Into<String>, problem: Problem) -> LoadError {
-        let start = span.start.min(self.text.len());
         LoadError {
-            line: Some(self.text[..start].matches('\n').count() + 1),
+            line: Some(self.line(span.start)),
             key: key.into(),
             problem,
         }
+    }
+
+    fn line(&self, offset: usize) -> usize {
+        self.text[..offset.min(self.text.len())]
+            .matches('\n')
+            .count()
+            + 1
     }
 }
 
@@ -352,9 +358,7 @@ impl Workflow {
     fn parse(text: &str) -> Result<Workflow, LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
-            line: e
-                .span()
-                .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1),
+            line: e.span().map(|span| errors.line(span.start)),
             key: String::new(),
             problem: Problem::Toml(e.message().to_string()),
         })?;
@@ -489,10 +493,7 @@ impl Workflow {
             dispatch.push(Dispatch {
                 status,
                 agent: rule.agent.into_inner(),
-                prompt_line: rule
-                    .prompt
-                    .as_ref()
-                    .map(|p| text[..p.span().start].matches('\n').count() + 1),
+                prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
                 prompt: rule.prompt.map(Spanned::into_inner),
             });
         }

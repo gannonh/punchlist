@@ -52,13 +52,12 @@ impl Tools {
     #[tool(description = "Read your issue: its status, pull requests, title, body and comments.")]
     async fn get_issue(&self) -> Result<CallToolResult, ErrorData> {
         let id = &self.issue_id;
-        let read = async {
-            let issue = self.client.get_issue(id).await?;
-            let pull_requests = self.client.issue_pull_requests(id).await?;
-            let events = self.client.issue_events(id).await?;
-            Ok::<_, ClientError>((issue, pull_requests, events))
-        };
-        text(match read.await {
+        let read = tokio::try_join!(
+            self.client.get_issue(id),
+            self.client.issue_pull_requests(id),
+            self.client.issue_events(id),
+        );
+        text(match read {
             Ok((issue, pull_requests, events)) => Ok(render_issue(&issue, &pull_requests, &events)),
             Err(error) => Err(error.to_string()),
         })
@@ -120,11 +119,8 @@ fn render_error(error: &ClientError) -> String {
     };
     let mut text = format!("Refused ({}): {}", body.code, body.message);
     if !body.gates.is_empty() {
-        text.push_str("\nGates:");
-        for gate in &body.gates {
-            let result = if gate.passed { "pass" } else { "fail" };
-            text.push_str(&format!("\n  {}: {result} ({})", gate.gate, gate.reason));
-        }
+        text.push_str("\nGates:\n");
+        text.push_str(&body.gate_lines().join("\n"));
     }
     text
 }

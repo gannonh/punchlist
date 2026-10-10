@@ -93,6 +93,8 @@ impl GithubClient {
     }
 
     /// A token for calls on one repository.
+    // ponytail: a new installation token per call, two requests each. When the App's rate
+    // limit matters, cache the token until shortly before its `expires_at`.
     async fn token(&self, owner: &str, name: &str) -> anyhow::Result<String> {
         let (app_id, key) = match &self.auth {
             Auth::Token(token) => return Ok(token.clone()),

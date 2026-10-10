@@ -658,7 +658,6 @@ async fn close_issue_on_pull_request(
         workspace_id: job.workspace_id,
         name: login.clone(),
         role: Role::Github,
-        issue_id: None,
     };
     let (_, transition_id) = write_transition(
         tx,

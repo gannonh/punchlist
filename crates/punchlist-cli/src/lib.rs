@@ -435,15 +435,7 @@ fn with_gates(error: ClientError) -> anyhow::Error {
     if body.gates.is_empty() {
         return error.into();
     }
-    let gates: Vec<String> = body
-        .gates
-        .iter()
-        .map(|g| {
-            let result = if g.passed { "pass" } else { "fail" };
-            format!("  {}: {result} ({})", g.gate, g.reason)
-        })
-        .collect();
-    anyhow::anyhow!("{error}\n{}", gates.join("\n"))
+    anyhow::anyhow!("{error}\n{}", body.gate_lines().join("\n"))
 }
 
 /// `pl workflow show`.

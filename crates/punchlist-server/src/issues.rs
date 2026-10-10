@@ -246,7 +246,6 @@ async fn move_issue(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    actor.check_issue(&id)?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
     let moved = record_transition(
@@ -290,9 +289,6 @@ async fn refresh_evidence(
     else {
         return Ok(());
     };
-    if actor.check_issue(id).is_err() {
-        return Ok(());
-    }
     let mut conn = state.pool.acquire().await?;
     let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
     drop(conn);
@@ -631,7 +627,6 @@ async fn add_comment(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    actor.check_issue(&id)?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     workflow.check_unlocked(&status, actor.role)?;
     let body = if actor.role == Role::Agent {

@@ -423,6 +423,17 @@ impl ErrorBody {
             gates: Vec::new(),
         }
     }
+
+    /// One indented line per gate result, as `pl` and the MCP server print them.
+    pub fn gate_lines(&self) -> Vec<String> {
+        self.gates
+            .iter()
+            .map(|g| {
+                let result = if g.passed { "pass" } else { "fail" };
+                format!("  {}: {result} ({})", g.gate, g.reason)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

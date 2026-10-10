@@ -16,20 +16,6 @@ pub struct Actor {
     pub workspace_id: Uuid,
     pub name: String,
     pub role: Role,
-    /// For an agent: the issue of the run it acts for, the only issue it may change.
-    pub issue_id: Option<String>,
-}
-
-impl Actor {
-    /// Refuses an agent acting on an issue other than its run's.
-    pub fn check_issue(&self, issue_id: &str) -> Result<(), ApiError> {
-        match &self.issue_id {
-            Some(own) if self.role == Role::Agent && own != issue_id => Err(ApiError::Forbidden(
-                format!("an agent acts only on its run's issue, {own}"),
-            )),
-            _ => Ok(()),
-        }
-    }
 }
 
 impl From<&Actor> for punchlist_api::Actor {
@@ -105,7 +91,6 @@ impl FromRequestParts<AppState> for Actor {
             workspace_id: row.workspace_id,
             role,
             name: row.name,
-            issue_id: row.issue_id,
         })
     }
 }
