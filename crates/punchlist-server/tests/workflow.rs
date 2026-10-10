@@ -692,3 +692,47 @@ async fn a_reverted_workflow_reports_the_commit_it_was_loaded_from(pool: PgPool)
     );
     assert_eq!(workflow_versions(&pool).await, 2);
 }
+
+#[sqlx::test]
+async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+    let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "todo"}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert(
+            "workflow.toml".into(),
+            PRD_WORKFLOW.replace("todo", "ready"),
+        );
+        repo.files
+            .insert("prompts/system.md".into(), "System.\n".into());
+        repo.files
+            .insert("prompts/in_progress.md".into(), "Build it.\n".into());
+        repo.files
+            .insert("prompts/agent_review.md".into(), "Review it.\n".into());
+    }
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 0);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], Value::Null);
+
+    // The issue can still move; with it out of Todo the same file loads.
+    let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "start"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    deliver(&s, "push", "push-2", &PUSH.replace("push", "push2")).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], "a".repeat(40));
+}

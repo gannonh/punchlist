@@ -23,29 +23,32 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 
 /// The workspace's active workflow and the commit it came from (`None` for the built-in
-/// one).
+/// one). Holds a row lock on the workspace row until the transaction ends, so `load`
+/// cannot switch versions while a move decided against the old one is in flight.
 pub(crate) async fn active_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> sqlx::Result<(Workflow, Option<String>)> {
     let row = sqlx::query!(
-        "SELECT v.workflow_toml, v.prompts, v.commit_sha
-         FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id
-         WHERE w.id = $1",
+        r#"SELECT v.workflow_toml AS "workflow_toml?", v.prompts AS "prompts?",
+                  v.commit_sha AS "commit_sha?"
+         FROM workspace w LEFT JOIN workflow_version v ON v.id = w.workflow_version_id
+         WHERE w.id = $1 FOR NO KEY UPDATE OF w"#,
         workspace_id,
     )
     .fetch_optional(&mut *conn)
     .await?;
-    let Some(row) = row else {
+    let Some((toml, prompts, commit_sha)) =
+        row.and_then(|r| Some((r.workflow_toml?, r.prompts?, r.commit_sha?)))
+    else {
         return Ok((default_workflow().clone(), None));
     };
     // Only versions that loaded are stored, so one that no longer does is corrupt data.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
-        serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;
-    let workflow =
-        Workflow::from_files(&row.workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
-    Ok((workflow, Some(row.commit_sha)))
+        serde_json::from_value(prompts).map_err(|e| corrupt(e.to_string()))?;
+    let workflow = Workflow::from_files(&toml, prompts).map_err(|e| corrupt(e.to_string()))?;
+    Ok((workflow, Some(commit_sha)))
 }
 
 /// The payload of a `workflow_load` job.
@@ -130,6 +133,38 @@ pub(crate) async fn load(
         Ok(workflow) => workflow,
         Err(error) => return refused(error),
     };
+    // Waits for moves in flight (they lock this row, see
+    // `active_workflow`) and holds off new ones until commit, so no issue can enter a
+    // dropped status between this check and the switch.
+    sqlx::query!(
+        "SELECT id FROM workspace WHERE id = $1 FOR NO KEY UPDATE",
+        workspace_id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let dropped = sqlx::query!(
+        r#"SELECT status, count(*) AS "issues!" FROM issue
+           WHERE workspace_id = $1 AND status <> ALL($2) GROUP BY status ORDER BY status"#,
+        workspace_id,
+        &workflow
+            .statuses()
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !dropped.is_empty() {
+        let in_use: Vec<_> = dropped
+            .iter()
+            .map(|d| format!("`{}` by {} issue(s)", d.status, d.issues))
+            .collect();
+        tracing::warn!(
+            "refused .punchlist/workflow.toml on {place}: status in use is not in the workflow: {}",
+            in_use.join(", ")
+        );
+        return Ok(());
+    }
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
          VALUES ($1, $2, $3, $4, $5)
