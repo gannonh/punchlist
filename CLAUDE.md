@@ -48,6 +48,7 @@ Exists today: `punchlist-core`, `punchlist-api`, `punchlist-server`, `punchlist-
 - `pl issue transition <id> <status>` requests a transition and prints any failed gate; `pl issue comment <id> --body` comments. Each claim creates an agent actor whose token works only while its run runs; the runner gives it to `pl mcp`, which Claude Code gets as the `punchlist` MCP server (`get_issue`, `comment`, `request_transition`).
 - Secrets never go in a `.env` file. Commands that need one run under `with-env` (the Punchlist 1Password Environment).
 - `.claude/skills/verify-punchlist/` says how to run a live check.
+- Live LLM tests use one model per agent and nothing else: Claude Code runs use the `haiku` alias (`--model haiku`), the newest Haiku: Haiku 5.5 on the Anthropic API, though Haiku 4.5 on Bedrock, Vertex and Foundry. Codex runs use GPT-6 Luna, `gpt-6-luna` (`codex exec -m gpt-6-luna`); OpenAI documents no alias for it, and `gpt-5.6-luna` is the older Luna, do not use it. Make a live call only inside a named live check.
 - CodeRabbit does not review pull requests in this repository on its own. When a pull request is ready for review, comment `@coderabbitai review` on it to start one, and comment again after later pushes that need a fresh review.
 
 Keep setup, scripts and layout documented here as slices land.
