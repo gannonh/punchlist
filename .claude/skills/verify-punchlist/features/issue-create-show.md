@@ -1,6 +1,6 @@
 # Create and show an issue
 
-A person creates an issue with a title and a Markdown body; it gets the next id in the workspace (`PL-1`, `PL-2`, ...) and starts in the workflow's first status, Backlog. `pl issue show` prints the id, title, status, body and timeline.
+A person creates an issue with a title and a Markdown body; it gets the next id in the workspace (`PL-1`, `PL-2`, ...) and starts in the workflow's first status, Backlog. `pl issue show` prints the id, title, status, body, pull requests, timeline and runs.
 
 ## Sub-features
 
@@ -8,7 +8,7 @@ A person creates an issue with a title and a Markdown body; it gets the next id 
 - `create-backlog` stores the issue in status `backlog`.
 - `create-body` keeps the body verbatim.
 - `create-empty-title` refuses a blank title.
-- `show` prints id and title, `Status: <name>`, the body, and the timeline.
+- `show` prints id and title, `Status: <name>`, the body, then the `Pull requests`, `Timeline` and `Runs` sections.
 
 ## How to get to it (user POV)
 
@@ -31,8 +31,14 @@ Preconditions:
 
   Body
 
+  Pull requests
+    None linked.
+
   Timeline
     No transitions yet.
+
+  Runs
+    No runs yet.
   ```
 
 - **Stored row.** Run `$C sql "$RUN" "SELECT id, status, title, body FROM issue"`. One row: `PL-1 | backlog | First | Body`.
@@ -40,7 +46,7 @@ Preconditions:
 
 ## Gotchas
 
-- Creating an issue writes no `event` row in Slice 1; the timeline holds transitions only, so a new issue shows `No transitions yet.`
-- Ids are numbered per workspace and never reused, including after a failed create.
+- Creating an issue writes no `event` row; the timeline holds transitions and comments, so a new issue shows `No transitions yet.`
+- Ids are numbered per workspace. A refused create uses no number: after the blank title above, the next issue is `PL-2`.
 - The title is trimmed before it is stored; the body is stored as given.
 - An empty `--body` prints no body section in `show`.

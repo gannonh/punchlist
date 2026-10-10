@@ -1,13 +1,13 @@
 # GitHub webhook, pull requests and checks
 
-The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, checks the `X-Hub-Signature-256` HMAC against its webhook secret, and queues each delivery as a `job` keyed by its `X-GitHub-Delivery` id. A background worker records the pull request, check run and review thread events as evidence, links a pull request to the issue its branch or title names, and moves that issue when the workflow's `on` rules say so. `pl issue show` prints the issue's pull requests and any comments; `pl pr unlinked` lists pull requests that name no issue.
+The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, checks the `X-Hub-Signature-256` HMAC against its webhook secret, and queues each delivery it handles as a `job` keyed by its `X-GitHub-Delivery` id. An event or action it does not handle, such as `ping`, answers `202` and queues nothing. A background worker records the pull request, check run and review thread events as evidence, links a pull request to the issue its branch or title names, and moves that issue when the workflow's `on` rules say so. `pl issue show` prints the issue's pull requests and any comments; `pl pr unlinked` lists pull requests that name no issue.
 
 ## Sub-features
 
 - `webhook-signature` answers `401` to a missing or wrong signature and queues nothing.
-- `webhook-queue` answers `2xx` to a valid delivery and inserts one `job` row with `kind = github_event`.
+- `webhook-queue` answers `202` to a valid delivery and inserts one `job` row with `kind = github_event`.
 - `pull-request-link` records a `pull_request` row whose `issue_id` is the issue named by the branch (`feature/pl-7-...`) or `(PL-7)` in the title; the branch wins when both name an issue.
-- `pull-request-show` prints `#<n> <draft|open|closed|merged>  <branch>  checks <state> <passed>/<total>  <k> open threads` under `Pull requests` in `pl issue show`, then the URL.
+- `pull-request-show` prints `#<n> <draft|open|closed|merged>  <branch>  checks <state> <passed>/<total>  <k> open threads` (`1 open thread` for one) under `Pull requests` in `pl issue show`, then the URL.
 - `checks` records `check_run` rows and sets `pull_request.checks` and the counts from the runs on the head commit.
 - `threads` records `review_thread` rows and sets `pull_request.open_threads` to the unresolved count.
 - `github-move` moves the issue as actor role `github` and records the delivery id on the `transition`; the timeline line ends `[delivery <id>]`.
@@ -27,17 +27,17 @@ The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, ch
 Preconditions:
 
 - Baseline run `$RUN` from `$C up` (it gave the server a webhook secret). `PL-1` exists (`$C pl "$RUN" issue create --title "Fix"`), and a runner has moved it to In Progress or the check says otherwise.
-- Fixture payloads are JSON files shaped like GitHub's events, for the repository `gannonh/punchlist-sandbox`. Start from the server's test fixtures in `crates/punchlist-server/tests/fixtures/github/` and change `repository.owner.login`, `repository.name`, the branch and the number. Write them under `verify-artifacts/$RUN/` so they stay with the evidence.
+- Fixture payloads are JSON files shaped like GitHub's events, for the repository `gannonh/punchlist-sandbox`. Start from the server's test fixtures in `crates/punchlist-server/tests/fixtures/github/` and change `repository.owner.login`, `repository.name`, the branch and the number. A payload for a repository no workspace uses answers `202` and queues nothing. `pl issue show` prints the payload's `html_url` as it is. Write them under `verify-artifacts/$RUN/` so they stay with the evidence.
 
-- **Bad signature.** Run `curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-GitHub-Event: ping' -H 'X-GitHub-Delivery: bad-1' -H 'X-Hub-Signature-256: sha256=00' -d '{}' "$SERVER_URL/api/github/webhook"`. Prints `401`. `$C sql "$RUN" "SELECT count(*) FROM job"` shows `0`.
-- **Deliver a pull request.** Save a `pull_request` event with `"action":"opened"`, `number` 7, `head.ref` `feature/pl-1-fix`, `draft` true to `$EVIDENCE/pr-opened.json`, then run `$C webhook "$RUN" pull_request "$EVIDENCE/pr-opened.json" delivery-1`. Prints `HTTP 2xx`.
-- **Job.** Run `$C sql "$RUN" "SELECT kind, idempotency_key, state FROM job"`. One row `github_event | delivery-1 | done` once the worker has run (poll for a few seconds; `queued` or `running` first is fine).
+- **Bad signature.** Run `curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-GitHub-Event: ping' -H 'X-GitHub-Delivery: bad-1' -H 'X-Hub-Signature-256: sha256=00' -d '{}' "$SERVER_URL/api/github/webhook"`. Prints `401`. `$C sql "$RUN" "SELECT count(*) FROM job WHERE kind = 'github_event'"` shows `0`.
+- **Deliver a pull request.** Save a `pull_request` event with `"action":"opened"`, `number` 7, `head.ref` `feature/pl-1-fix`, `draft` true to `$EVIDENCE/pr-opened.json`, then run `$C webhook "$RUN" pull_request "$EVIDENCE/pr-opened.json" delivery-1`. Prints `HTTP 202`.
+- **Job.** Run `$C sql "$RUN" "SELECT kind, idempotency_key, state FROM job WHERE kind = 'github_event'"`. One row `github_event | delivery-1 | done` once the worker has run (poll for a few seconds; `queued` or `running` first is fine).
 - **Rows.** Run `$C sql "$RUN" "SELECT number, branch, state, draft, issue_id, checks, open_threads FROM pull_request"`. One row `7 | feature/pl-1-fix | open | t | PL-1 | none | 0`.
 - **Show.** Run `$C pl "$RUN" issue show PL-1`. Stdout contains `#7 draft  feature/pl-1-fix  no checks  0 open threads`, and the next line is the pull request URL indented four spaces.
 - **Checks.** Deliver a `check_run` event (`completed`, `success`) for the pull request's `head_sha`, then `$C sql "$RUN" "SELECT name, status, conclusion FROM check_run"` has the run and `pl issue show PL-1` prints `checks passing 1/1`.
 - **Threads.** Deliver a `pull_request_review_thread` event with action `unresolved`, then `$C sql "$RUN" "SELECT node_id, resolved FROM review_thread"` has one unresolved row and `pl issue show PL-1` prints `1 open thread`. Deliver `resolved` for the same `thread.node_id` and it prints `0 open threads`. GitHub sends this event only on resolve and unresolve, so a thread nobody has resolved yet is not counted.
-- **Move and comment.** Deliver the events the workflow's `on` rules use, such as `closed` with `merged: true`. Then `$C sql "$RUN" "SELECT t.from_status, t.to_status, t.delivery_id, a.role FROM transition t JOIN actor a ON a.id = t.actor_id ORDER BY t.created_at DESC LIMIT 1"` shows role `github` and the delivery id, `pl issue show PL-1` ends the timeline line with `[delivery <id>]`, and `SELECT body FROM comment` shows any comment the rule required.
-- **Unlinked.** Deliver a `pull_request` `opened` event for number 8 on branch `stray` with a title naming no issue. `$C pl "$RUN" pr unlinked` prints `#8  open  stray  <title>`, and `pl issue show PL-1` still lists only `#7`. With none, it prints `No unlinked pull requests.`
+- **Move and comment.** Deliver an event the workflow has an `on` rule for from the issue's current status; any other close is recorded and moves nothing. `closed` with `merged: true` moves only an issue in Merging (to Done). `closed` with `merged: false` moves an issue in In Progress or Agent Review to Todo and comments `Pull request #<n> was closed without merging by @<login>.` with the URL. Then `$C sql "$RUN" "SELECT t.from_status, t.to_status, t.delivery_id, a.role FROM transition t JOIN actor a ON a.id = t.actor_id ORDER BY t.created_at DESC LIMIT 1"` shows role `github` and the delivery id, `pl issue show PL-1` ends the timeline line with `[delivery <id>]`, and `SELECT body FROM comment` shows any comment the rule required.
+- **Unlinked.** Deliver a `pull_request` `opened` event for number 8 on branch `stray` with a title naming no issue. `$C pl "$RUN" pr unlinked` prints `#8  open  stray  <title>` (`draft` in place of `open` when the payload's `draft` is true), and `pl issue show PL-1` still lists only `#7`. With none, it prints `No unlinked pull requests.`
 - **Redelivery.** Run the first `$C webhook` command again with the same delivery id `delivery-1`. Then `$C sql "$RUN" "SELECT count(*) FROM job WHERE idempotency_key = 'delivery-1'"` shows `1`, and the `pull_request`, `transition` and `comment` row counts are what they were before.
 
 ## Real GitHub deliveries
@@ -70,7 +70,7 @@ A redelivery keeps its `guid`, so `SELECT count(*) FROM job WHERE idempotency_ke
 
 - `up` without `with-env` uses a random secret, so only `$C webhook` deliveries verify; a real GitHub delivery gets `401`.
 - The worker is asynchronous: the `webhook` command's `2xx` means queued, not processed. Poll the `job` row until `done` before reading other tables.
-- Replaying a delivery with a new id is a new delivery. Only the same `X-GitHub-Delivery` is a no-op.
+- Replaying a delivery with a new id is a new delivery. Only the same `X-GitHub-Delivery` is a no-op, unless its job failed: then the same id queues it again.
 - Delivery ids are free text in fixtures, but real ones are UUIDs; `$C webhook` makes a UUID when none is given.
 - `$C sql` is read-only by convention: do not insert `pull_request` rows by hand. The CLI integration tests do, and they say so.
 - `pl issue show` always prints the `Pull requests` section; with none it reads `None linked.`
