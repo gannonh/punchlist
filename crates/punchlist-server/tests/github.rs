@@ -664,6 +664,45 @@ async fn a_thread_event_first_records_a_merged_pull_request_as_merged(pool: PgPo
 }
 
 #[sqlx::test]
+async fn a_thread_event_first_to_record_a_close_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    force_status(&pool, &issue, "in_progress").await;
+    let closed = edited(THREAD, |v| v["pull_request"]["state"] = json!("closed"));
+
+    // The thread event does not say who closed it; the `closed` delivery then adds nothing.
+    deliver(&s, "pull_request_review_thread", "d-thread", &closed).await;
+    deliver(&s, "pull_request", "d-closed", CLOSED).await;
+
+    let transitions: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT t.from_status, t.to_status, a.name, t.delivery_id
+         FROM transition t JOIN actor a ON a.id = t.actor_id WHERE t.issue_id = $1",
+    )
+    .bind(&issue)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        transitions,
+        [(
+            "in_progress".into(),
+            "todo".into(),
+            "GitHub".into(),
+            Some("d-thread".into())
+        )]
+    );
+    let comments: Vec<String> = sqlx::query_scalar("SELECT body FROM comment")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        comments,
+        ["Pull request #12 was closed without merging.\n\n\
+          https://github.com/gannonh/punchlist/pull/12"]
+    );
+}
+
+#[sqlx::test]
 async fn redelivering_a_delivery_whose_job_failed_runs_it_again(pool: PgPool) {
     let s = setup(&pool).await;
     create_issue(&s, "Fix the thing").await;

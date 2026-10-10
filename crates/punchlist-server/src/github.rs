@@ -79,6 +79,8 @@ pub(crate) struct PullRequestData {
     #[serde(default)]
     pub merged_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    pub merged_by: Option<Account>,
+    #[serde(default)]
     pub mergeable_state: Option<String>,
     pub head: Head,
     pub updated_at: DateTime<Utc>,
@@ -348,12 +350,18 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
-            let (_, applied, linked) =
-                upsert_pull_request(tx, job.workspace_id, job.repository_id, &event.pull_request)
-                    .await?;
-            if let (true, true, Some(issue_id)) = (applied, event.action == "closed", linked) {
-                close_issue_on_pull_request(tx, &job, event, &issue_id).await?;
-            }
+            // Only a `closed` event's sender closed it; another event may still be the first
+            // to carry the closed state.
+            let closed_by = (event.action == "closed").then_some(event.sender.login.as_str());
+            record_pull_request(
+                tx,
+                job.workspace_id,
+                job.repository_id,
+                &event.pull_request,
+                closed_by,
+                Some(&job.delivery_id),
+            )
+            .await?;
         }
         GithubEvent::CheckRun(event) => {
             let run = &event.check_run;
@@ -401,14 +409,15 @@ pub(crate) async fn process(
             let pull_request_id = match known {
                 Some(id) => id,
                 None => {
-                    upsert_pull_request(
+                    record_pull_request(
                         tx,
                         job.workspace_id,
                         job.repository_id,
                         &event.pull_request,
+                        None,
+                        Some(&job.delivery_id),
                     )
                     .await?
-                    .0
                 }
             };
             sqlx::query!(
@@ -436,14 +445,22 @@ pub(crate) async fn process(
     Ok(())
 }
 
-/// Records a pull request from a payload, unless a newer payload was already applied.
-/// Returns its row id, whether this payload was applied, and the issue it is linked to.
-async fn upsert_pull_request(
+/// Records a pull request from a payload, unless a newer payload was already applied, and
+/// returns its row id. `closed_by` is the GitHub login that closed it, when the payload says;
+/// `delivery_id` is the webhook delivery, when one brought it.
+///
+/// A payload closes a pull request when it records it closed or merged and the row was open,
+/// or absent, before. That happens once per close, whichever of a webhook delivery and a read
+/// from GitHub comes first and however often either repeats, so `close_issue_on_pull_request`
+/// runs on it, here, for every caller.
+async fn record_pull_request(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     repository_id: Uuid,
     pr: &PullRequestData,
-) -> sqlx::Result<(Uuid, bool, Option<String>)> {
+    closed_by: Option<&str>,
+    delivery_id: Option<&str>,
+) -> Result<Uuid, ApiError> {
     let prefix = sqlx::query_scalar!(
         "SELECT issue_prefix FROM workspace WHERE id = $1",
         workspace_id
@@ -471,6 +488,18 @@ async fn upsert_pull_request(
         "open"
     };
     let merge_state = pr.mergeable_state.as_deref().unwrap_or("unknown");
+    // Locks the row: a second payload closing it waits here, then reads the closed state.
+    // ponytail: two deliveries that are both the first to record a pull request, closed and
+    // unmerged, in jobs running at once, both read no row and both count as closing it; the
+    // issue having left the status the event moves it from is then the only guard. Lock the
+    // repository row if that bites.
+    let was = sqlx::query_scalar!(
+        "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
+        repository_id,
+        pr.number
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
     let applied = sqlx::query_scalar!(
         "INSERT INTO pull_request
              (repository_id, number, github_id, title, branch, head_sha, url, author_login,
@@ -513,10 +542,15 @@ async fn upsert_pull_request(
         )
         .fetch_one(&mut *tx)
         .await?;
-        return Ok((id, false, linked));
+        return Ok(id);
     };
     recompute_checks(tx, repository_id, &pr.head.sha).await?;
-    Ok((id, true, linked))
+    let closed = state != "open" && was.is_none_or(|was| was == "open");
+    if let (true, Some(issue_id)) = (closed, linked) {
+        close_issue_on_pull_request(tx, workspace_id, pr, closed_by, delivery_id, &issue_id)
+            .await?;
+    }
+    Ok(id)
 }
 
 /// Brings the pull requests an issue's gates read up to date with GitHub. A webhook reaches
@@ -524,16 +558,26 @@ async fn upsert_pull_request(
 /// opens or readies a pull request; a gate must not read the state from before. When GitHub
 /// cannot be reached the recorded pull requests stand, so an outage does not stop moves.
 ///
-/// Runs in its own transaction, before the caller locks the issue: a webhook job holds the
-/// pull request's row and waits for the issue's, so taking the issue's lock first deadlocks.
-// ponytail: a pull request that GitHub now reports closed or merged is left to its webhook,
-// which also moves the issue; recording it here would stop that webhook from applying.
+/// A recorded pull request that GitHub now reports closed or merged is recorded so, and
+/// moves the issue as its webhook would have: recording a merge stops that webhook from
+/// applying. No delivery caused such a move, so its transition carries none.
+///
+/// Each pull request is recorded in its own transaction, as its webhook's job would, and
+/// before the caller locks the issue: a job holds the pull request's row and waits for the
+/// issue's, so taking the issue's lock first deadlocks.
+///
+/// A failure to record one fails the request, unlike a failure to read GitHub. What GitHub
+/// said is then known and could not be stored, so letting the gates read the older rows
+/// could pass a request on a pull request known to be merged or closed. The requester asks
+/// again; the pull requests already recorded stay recorded.
+// ponytail: GitHub's pull request names who merged it but not who closed it, so a close read
+// here credits nobody; read the issue's `closed_by` if the name matters.
 pub(crate) async fn refresh_pull_requests(
     github: &GithubClient,
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
-) -> sqlx::Result<()> {
+) -> Result<(), ApiError> {
     let Some(repository) = sqlx::query!(
         "SELECT r.id, r.owner, r.name, w.issue_prefix FROM repository r
          JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
@@ -568,14 +612,19 @@ pub(crate) async fn refresh_pull_requests(
             return Ok(());
         }
     };
-    let mut tx = pool.begin().await?;
-    for pr in fresh
-        .iter()
-        .filter(|pr| pr.state == "open" && !pr.is_merged())
-    {
-        upsert_pull_request(&mut tx, workspace_id, repository.id, pr).await?;
+    for pr in &fresh {
+        // A closed or merged pull request that was never recorded for this issue is history,
+        // such as one closed while the server was down. It is not what the agent is working
+        // on now, so it is left to its webhook and moves nothing here.
+        if pr.state != "open" && !known.contains(&pr.number) {
+            continue;
+        }
+        let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
+        let mut tx = pool.begin().await?;
+        record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        tx.commit().await?;
     }
-    tx.commit().await
+    Ok(())
 }
 
 /// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun
@@ -611,15 +660,16 @@ async fn recompute_checks(
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
-/// event from the issue's status. Otherwise the event is only evidence. Redelivery finds
-/// the issue already moved and changes nothing.
+/// event from the issue's status. Otherwise the event is only evidence. Runs once per close:
+/// see `record_pull_request`. `closed_by` is the GitHub login that closed it, when known.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
-    job: &GithubJob,
-    event: &PullRequestEvent,
+    workspace_id: Uuid,
+    pr: &PullRequestData,
+    closed_by: Option<&str>,
+    delivery_id: Option<&str>,
     issue_id: &str,
-) -> anyhow::Result<()> {
-    let pr = &event.pull_request;
+) -> Result<(), ApiError> {
     let status = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 FOR UPDATE",
         issue_id
@@ -631,7 +681,7 @@ async fn close_issue_on_pull_request(
     } else {
         "pr_closed_unmerged"
     };
-    let (workflow, _) = active_workflow(tx, job.workspace_id).await?;
+    let (workflow, _) = active_workflow(tx, workspace_id).await?;
     let Some(transition) = workflow.transition_on(&status, name) else {
         tracing::info!(
             issue_id,
@@ -641,22 +691,25 @@ async fn close_issue_on_pull_request(
         );
         return Ok(());
     };
-    let login = &event.sender.login;
+    // With nobody to credit the actor is GitHub itself. No GitHub login is empty, so that
+    // actor is never a user's.
+    let (name, login) = closed_by.map_or(("GitHub", ""), |login| (login, login));
     let actor_id = sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
-         VALUES ($1, $2, 'github', $2)
+         VALUES ($1, $2, 'github', $3)
          ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL
          DO UPDATE SET name = EXCLUDED.name
          RETURNING id",
-        job.workspace_id,
+        workspace_id,
+        name,
         login,
     )
     .fetch_one(&mut *tx)
     .await?;
     let actor = Actor {
         id: actor_id,
-        workspace_id: job.workspace_id,
-        name: login.clone(),
+        workspace_id,
+        name: name.to_string(),
         role: Role::Github,
     };
     let (_, transition_id) = write_transition(
@@ -665,7 +718,7 @@ async fn close_issue_on_pull_request(
         issue_id,
         status,
         transition.to.as_str(),
-        Some(&job.delivery_id),
+        delivery_id,
         workflow.version(),
         &[],
     )
@@ -699,8 +752,9 @@ async fn close_issue_on_pull_request(
     .execute(&mut *tx)
     .await?;
     if transition.require.iter().any(|r| r == "comment") {
+        let by = closed_by.map_or_else(String::new, |login| format!(" by @{login}"));
         let body = format!(
-            "Pull request #{} was closed without merging by @{login}.\n\n{}",
+            "Pull request #{} was closed without merging{by}.\n\n{}",
             pr.number, pr.html_url
         );
         record_comment(tx, &actor, issue_id, &body, Some(transition_id)).await?;

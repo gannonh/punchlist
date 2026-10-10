@@ -154,10 +154,21 @@ fn one_open(evidence: &Evidence) -> Result<&PullRequestEvidence, String> {
         .filter(|pr| pr.state == PullRequestState::Open)
         .collect();
     match open.as_slice() {
-        [] => Err(format!(
-            "no open pull request is linked to {}",
-            evidence.issue_id
-        )),
+        [] => {
+            // Name the ones that are gone: a request made on a pull request that was merged
+            // or closed should say so.
+            let gone: Vec<String> = evidence
+                .pull_requests
+                .iter()
+                .map(|pr| format!("pull request #{} is {}", pr.number, pr.state.as_str()))
+                .collect();
+            let none = format!("no open pull request is linked to {}", evidence.issue_id);
+            Err(if gone.is_empty() {
+                none
+            } else {
+                format!("{none}: {}", gone.join(", "))
+            })
+        }
         [pr] => Ok(pr),
         many => Err(format!(
             "{} has {} open pull requests ({}); an issue has one",
@@ -239,18 +250,30 @@ mod tests {
     const OPEN: PullRequestState = PullRequestState::Open;
 
     #[test]
-    fn no_pull_request_fails_all_three() {
-        let none = evidence(vec![pr(
-            3,
-            "feature/pl-7-x",
-            "X",
-            PullRequestState::Closed,
-            false,
-        )]);
+    fn no_open_pull_request_fails_all_three_and_names_the_ones_that_are_gone() {
+        let gone = evidence(vec![
+            pr(
+                12,
+                "feature/pl-7-fix",
+                "Fix",
+                PullRequestState::Merged,
+                false,
+            ),
+            pr(3, "feature/pl-7-x", "X", PullRequestState::Closed, false),
+        ]);
         for gate in [Gate::PrOpen, Gate::PrReady, Gate::PrNamesIssue] {
             assert_eq!(
-                check(gate, &none),
+                check(gate, &evidence(vec![])),
                 (false, "no open pull request is linked to PL-7".into())
+            );
+            assert_eq!(
+                check(gate, &gone),
+                (
+                    false,
+                    "no open pull request is linked to PL-7: pull request #12 is merged, \
+                     pull request #3 is closed"
+                        .into()
+                )
             );
         }
     }
