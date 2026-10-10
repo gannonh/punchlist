@@ -23,6 +23,8 @@ use tower::ServiceExt;
 const SECRET: &str = "test-webhook-secret";
 const OPENED: &str = include_str!("fixtures/github/pull_request_opened.json");
 const READY: &str = include_str!("fixtures/github/pull_request_ready_for_review.json");
+const MERGED: &str = include_str!("fixtures/github/pull_request_closed_merged.json");
+const CLOSED: &str = include_str!("fixtures/github/pull_request_closed_unmerged.json");
 const PUSH: &str = include_str!("fixtures/github/push.json");
 const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workflow.toml");
 
@@ -334,6 +336,171 @@ async fn a_pull_request_made_ready_passes_before_its_webhook_arrives(pool: PgPoo
 
     // The late delivery changes nothing.
     deliver(&s, "pull_request", "d-ready", READY).await;
+}
+
+/// Every transition PL-1 made on a GitHub event: where from and to, who, and the delivery.
+async fn event_transitions(pool: &PgPool) -> Vec<(String, String, String, Option<String>)> {
+    sqlx::query!(
+        "SELECT t.from_status, t.to_status, a.name, t.delivery_id FROM transition t
+         JOIN actor a ON a.id = t.actor_id
+         WHERE t.issue_id = 'PL-1' AND a.role = 'github' ORDER BY t.created_at"
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.from_status, r.to_status, r.name, r.delivery_id))
+    .collect()
+}
+
+async fn issue_status(pool: &PgPool) -> String {
+    sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// PL-1 in In Progress with pull request #12 recorded open and ready.
+async fn issue_with_a_ready_pull_request(s: &Setup) -> String {
+    let agent = claimed_issue(s).await;
+    deliver(s, "pull_request", "d-opened", OPENED).await;
+    deliver(s, "pull_request", "d-ready", READY).await;
+    agent
+}
+
+const MERGED_REASON: &str = "no open pull request is linked to PL-1: pull request #12 is merged";
+
+#[sqlx::test]
+async fn a_pull_request_merged_on_github_fails_pr_open_before_its_webhook_arrives(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    s.github.lock().unwrap().pulls = vec![pull_request_now(MERGED)];
+
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "pr_open");
+    assert_eq!(body["reason"], MERGED_REASON);
+    assert_eq!(body["evidence"]["pull_requests"][0]["state"], "merged");
+
+    // The PRD's workflow moves no issue on a merge from In Progress, read or delivered.
+    deliver(&s, "pull_request", "d-merged", MERGED).await;
+    let (_, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(body["reason"], MERGED_REASON);
+    assert_eq!(issue_status(&pool).await, "in_progress");
+    assert_eq!(event_transitions(&pool).await, []);
+}
+
+/// Loads the PRD's workflow with `in_progress → done` on `pr_merged` as well.
+async fn load_a_workflow_that_finishes_on_merge(s: &Setup) {
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        let workflow = PRD_WORKFLOW.replace(
+            "from = \"merging\"\nto = \"done\"",
+            "from = [\"in_progress\", \"merging\"]\nto = \"done\"",
+        );
+        assert_ne!(workflow, PRD_WORKFLOW);
+        repo.files.insert("workflow.toml".into(), workflow);
+        for (path, text) in [
+            ("prompts/system.md", "Call request_transition.\n"),
+            ("prompts/in_progress.md", "Build it.\n"),
+            ("prompts/agent_review.md", "Review it.\n"),
+        ] {
+            repo.files.insert(path.into(), text.into());
+        }
+    }
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&s.state.pool).await, 1);
+}
+
+#[sqlx::test]
+async fn a_merge_read_from_github_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_that_finishes_on_merge(&s).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    let mut merged = pull_request_now(MERGED);
+    merged["merged_by"] = json!({"login": "octocat"});
+    s.github.lock().unwrap().pulls = vec![merged];
+
+    // The request is refused on the merged pull request, and the merge moves the issue.
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "pr_open");
+    assert_eq!(body["reason"], MERGED_REASON);
+    let once = [(
+        "in_progress".to_string(),
+        "done".to_string(),
+        "octocat".to_string(),
+        None,
+    )];
+    assert_eq!(event_transitions(&pool).await, once);
+
+    // Its webhook then arrives, and is redelivered.
+    deliver(&s, "pull_request", "d-merged", MERGED).await;
+    deliver(&s, "pull_request", "d-merged-again", MERGED).await;
+    assert_eq!(event_transitions(&pool).await, once);
+    assert_eq!(issue_status(&pool).await, "done");
+}
+
+#[sqlx::test]
+async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_that_finishes_on_merge(&s).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    s.github.lock().unwrap().pulls = vec![pull_request_now(MERGED)];
+
+    deliver(&s, "pull_request", "d-merged", MERGED).await;
+    let once = [(
+        "in_progress".to_string(),
+        "done".to_string(),
+        "octocat".to_string(),
+        Some("d-merged".to_string()),
+    )];
+    assert_eq!(event_transitions(&pool).await, once);
+
+    // The move ended the agent's run, so its request no longer authenticates; a redelivery
+    // changes nothing either.
+    let (status, _) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    deliver(&s, "pull_request", "d-merged-again", MERGED).await;
+    assert_eq!(event_transitions(&pool).await, once);
+    assert_eq!(issue_status(&pool).await, "done");
+}
+
+#[sqlx::test]
+async fn a_pull_request_closed_on_github_fails_pr_open_and_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    s.github.lock().unwrap().pulls = vec![pull_request_now(CLOSED)];
+
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "pr_open");
+    assert_eq!(
+        body["reason"],
+        "no open pull request is linked to PL-1: pull request #12 is closed"
+    );
+
+    // GitHub's pull request does not say who closed it.
+    let once = [(
+        "in_progress".to_string(),
+        "todo".to_string(),
+        "github".to_string(),
+        None,
+    )];
+    assert_eq!(event_transitions(&pool).await, once);
+    deliver(&s, "pull_request", "d-closed", CLOSED).await;
+    assert_eq!(event_transitions(&pool).await, once);
+    assert_eq!(issue_status(&pool).await, "todo");
+    let comments = sqlx::query_scalar!("SELECT body FROM comment WHERE issue_id = 'PL-1'")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        comments,
+        ["Pull request #12 was closed without merging.\n\n\
+          https://github.com/gannonh/punchlist/pull/12"]
+    );
 }
 
 #[sqlx::test]
