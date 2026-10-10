@@ -163,9 +163,10 @@ fn one_open(evidence: &Evidence) -> Result<&PullRequestEvidence, String> {
                 .map(|pr| format!("pull request #{} is {}", pr.number, pr.state.as_str()))
                 .collect();
             let none = format!("no open pull request is linked to {}", evidence.issue_id);
-            Err(match gone.as_slice() {
-                [] => none,
-                gone => format!("{none}: {}", gone.join(", ")),
+            Err(if gone.is_empty() {
+                none
+            } else {
+                format!("{none}: {}", gone.join(", "))
             })
         }
         [pr] => Ok(pr),

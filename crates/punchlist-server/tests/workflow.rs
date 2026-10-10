@@ -353,6 +353,28 @@ async fn event_transitions(pool: &PgPool) -> Vec<(String, String, String, Option
     .collect()
 }
 
+fn moved(
+    from: &str,
+    to: &str,
+    by: &str,
+    delivery: Option<&str>,
+) -> (String, String, String, Option<String>) {
+    (
+        from.into(),
+        to.into(),
+        by.into(),
+        delivery.map(str::to_string),
+    )
+}
+
+/// A webhook fixture as pull request `number`.
+fn numbered(webhook: &str, number: i64) -> String {
+    let mut event: Value = serde_json::from_str(webhook).unwrap();
+    event["number"] = json!(number);
+    event["pull_request"]["number"] = json!(number);
+    event.to_string()
+}
+
 async fn issue_status(pool: &PgPool) -> String {
     sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
         .fetch_one(pool)
@@ -422,17 +444,18 @@ async fn a_merge_read_from_github_moves_the_issue_once(pool: PgPool) {
     merged["merged_by"] = json!({"login": "octocat"});
     s.github.lock().unwrap().pulls = vec![merged];
 
-    // The request is refused on the merged pull request, and the merge moves the issue.
+    // The merge moves the issue first, as its webhook would have, so the request is made of
+    // an issue that is Done.
     let (status, body) = request_agent_review(&s, &agent).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["gate"], "pr_open");
-    assert_eq!(body["reason"], MERGED_REASON);
-    let once = [(
-        "in_progress".to_string(),
-        "done".to_string(),
-        "octocat".to_string(),
-        None,
-    )];
+    assert_eq!(
+        body,
+        json!({
+            "code": "no_transition",
+            "message": "no transition done → agent_review exists in the workflow"
+        })
+    );
+    let once = [moved("in_progress", "done", "octocat", None)];
     assert_eq!(event_transitions(&pool).await, once);
 
     // Its webhook then arrives, and is redelivered.
@@ -450,12 +473,7 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     s.github.lock().unwrap().pulls = vec![pull_request_now(MERGED)];
 
     deliver(&s, "pull_request", "d-merged", MERGED).await;
-    let once = [(
-        "in_progress".to_string(),
-        "done".to_string(),
-        "octocat".to_string(),
-        Some("d-merged".to_string()),
-    )];
+    let once = [moved("in_progress", "done", "octocat", Some("d-merged"))];
     assert_eq!(event_transitions(&pool).await, once);
 
     // The move ended the agent's run, so its request no longer authenticates; a redelivery
@@ -468,26 +486,23 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_pull_request_closed_on_github_fails_pr_open_and_moves_the_issue_once(pool: PgPool) {
+async fn a_pull_request_closed_on_github_moves_the_issue_once_before_the_request(pool: PgPool) {
     let s = setup(&pool).await;
     let agent = issue_with_a_ready_pull_request(&s).await;
     s.github.lock().unwrap().pulls = vec![pull_request_now(CLOSED)];
 
     let (status, body) = request_agent_review(&s, &agent).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["gate"], "pr_open");
     assert_eq!(
-        body["reason"],
-        "no open pull request is linked to PL-1: pull request #12 is closed"
+        body,
+        json!({
+            "code": "no_transition",
+            "message": "no transition todo → agent_review exists in the workflow"
+        })
     );
 
-    // GitHub's pull request does not say who closed it.
-    let once = [(
-        "in_progress".to_string(),
-        "todo".to_string(),
-        "github".to_string(),
-        None,
-    )];
+    // GitHub's pull request does not say who closed it, so nobody is credited.
+    let once = [moved("in_progress", "todo", "GitHub", None)];
     assert_eq!(event_transitions(&pool).await, once);
     deliver(&s, "pull_request", "d-closed", CLOSED).await;
     assert_eq!(event_transitions(&pool).await, once);
@@ -501,6 +516,55 @@ async fn a_pull_request_closed_on_github_fails_pr_open_and_moves_the_issue_once(
         ["Pull request #12 was closed without merging.\n\n\
           https://github.com/gannonh/punchlist/pull/12"]
     );
+}
+
+#[sqlx::test]
+async fn one_of_two_pull_requests_closed_on_github_answers_with_the_status_it_left(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    deliver(&s, "pull_request", "d-ready-11", &numbered(READY, 11)).await;
+    s.github.lock().unwrap().pulls = vec![
+        pull_request_now(&numbered(CLOSED, 11)),
+        pull_request_now(READY),
+    ];
+
+    // #12 alone would pass the gates, but closing #11 sent the issue back to Todo first.
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "code": "no_transition",
+            "message": "no transition todo → agent_review exists in the workflow"
+        })
+    );
+    assert_eq!(issue_status(&pool).await, "todo");
+    assert_eq!(
+        event_transitions(&pool).await,
+        [moved("in_progress", "todo", "GitHub", None)]
+    );
+}
+
+#[sqlx::test]
+async fn a_pull_request_closed_before_it_was_ever_recorded_moves_nothing(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    // #9 named PL-1 and was closed while no webhook reached the server.
+    s.github.lock().unwrap().pulls = vec![
+        pull_request_now(&numbered(CLOSED, 9)),
+        pull_request_now(READY),
+    ];
+
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "agent_review");
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    assert_eq!(event_transitions(&pool).await, []);
+    let numbers = sqlx::query_scalar!("SELECT number FROM pull_request ORDER BY number")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(numbers, [12]);
 }
 
 #[sqlx::test]
