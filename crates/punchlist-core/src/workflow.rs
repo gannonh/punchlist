@@ -331,7 +331,7 @@ impl Workflow {
     pub fn from_toml(text: &str) -> Result<Workflow, LoadError> {
         Workflow::from_files(text, BTreeMap::new()).or_else(|error| match error.problem {
             // A prompt is checked once the files are read.
-            Problem::MissingPrompt(_) => Workflow::parse(text),
+            Problem::MissingPrompt(_) => Workflow::parse(text, true),
             _ => Err(error),
         })
     }
@@ -340,11 +340,23 @@ impl Workflow {
     /// by their path under `.punchlist/`. Every prompt the workflow names must be there;
     /// `prompts/system.md` is kept when present. The version is a content hash over the
     /// workflow file and the prompts kept (ADR 0001).
-    pub fn from_files(
+    pub fn from_files(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
+        Workflow::load_files(text, files, true)
+    }
+
+    /// Reads a version the server stored: `from_files` without the check that a runner can
+    /// claim from it, which applies only to a file being loaded. A version stored before a
+    /// rule existed stays readable.
+    pub fn from_stored(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
+        Workflow::load_files(text, files, false)
+    }
+
+    fn load_files(
         text: &str,
         mut files: BTreeMap<String, String>,
+        claimable: bool,
     ) -> Result<Workflow, LoadError> {
-        let mut workflow = Workflow::parse(text)?;
+        let mut workflow = Workflow::parse(text, claimable)?;
         let mut prompts = BTreeMap::new();
         for rule in &workflow.dispatch {
             let Some(path) = &rule.prompt else { continue };
@@ -370,7 +382,7 @@ impl Workflow {
         Ok(workflow)
     }
 
-    fn parse(text: &str) -> Result<Workflow, LoadError> {
+    fn parse(text: &str, claimable: bool) -> Result<Workflow, LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
             line: e.span().map(|span| errors.line(span.start)),
@@ -536,7 +548,9 @@ impl Workflow {
             dispatch,
             prompts: BTreeMap::new(),
         };
-        workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
+        if claimable {
+            workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
+        }
         Ok(workflow)
     }
 
