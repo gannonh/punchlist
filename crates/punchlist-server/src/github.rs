@@ -611,8 +611,10 @@ async fn recompute_checks(
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
-/// event from the issue's status and that transition's gates pass. Otherwise the event is
-/// only evidence. Redelivery finds the issue already moved and changes nothing.
+/// event from the issue's status and that transition's gates pass. With no such transition
+/// the pull request's new state is all that is recorded. With a failed gate the refusal is
+/// logged and nothing is written to the issue: no status, transition, comment or actor.
+/// Redelivery finds the issue already moved and changes nothing.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
     job: &GithubJob,
@@ -644,7 +646,7 @@ async fn close_issue_on_pull_request(
     let login = &event.sender.login;
     let gates = match check_gates(tx, transition, login, issue_id, &status, Some(pr.number)).await {
         Ok(gates) => gates,
-        // The issue stays where it is. `check_gates` logged the gate and its reason.
+        // `check_gates` logged the gate and its reason. Nothing is written to the issue.
         Err(ApiError::GateFailed(_)) => return Ok(()),
         Err(error) => return Err(error.into()),
     };

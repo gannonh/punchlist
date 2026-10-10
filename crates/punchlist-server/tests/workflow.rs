@@ -24,6 +24,7 @@ const SECRET: &str = "test-webhook-secret";
 const OPENED: &str = include_str!("fixtures/github/pull_request_opened.json");
 const READY: &str = include_str!("fixtures/github/pull_request_ready_for_review.json");
 const MERGED: &str = include_str!("fixtures/github/pull_request_closed_merged.json");
+const CLOSED: &str = include_str!("fixtures/github/pull_request_closed_unmerged.json");
 const PUSH: &str = include_str!("fixtures/github/push.json");
 const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workflow.toml");
 
@@ -579,19 +580,18 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
     assert_eq!(jobs, 2);
 }
 
-/// Loads the PRD workflow with `gate` on `merging → done`, puts PL-1 in Merging and merges
-/// its pull request. Returns PL-1's status.
-async fn merge_with_gate_on_done(s: &Setup, gate: &str) -> String {
+/// Loads the PRD workflow with `gate` on its `on = "<event>"` transition, puts PL-1 in
+/// `from` and delivers `closed`, the pull request event that closes its pull request.
+/// Returns PL-1's status.
+async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed: &str) -> String {
+    let on = format!("on = \"{event}\"");
+    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
+    // The template still has the line this replaces, so the gate is in the file.
+    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
     {
         let mut repo = s.github.lock().unwrap();
         repo.sha = "a".repeat(40);
-        repo.files.insert(
-            "workflow.toml".into(),
-            PRD_WORKFLOW.replace(
-                "on = \"pr_merged\"",
-                &format!("on = \"pr_merged\"\ngates = [\"{gate}\"]"),
-            ),
-        );
+        repo.files.insert("workflow.toml".into(), gated);
         for prompt in ["system", "in_progress", "agent_review"] {
             repo.files
                 .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
@@ -608,33 +608,76 @@ async fn merge_with_gate_on_done(s: &Setup, gate: &str) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    // A person has no short path to Merging, so the test puts the issue there.
-    sqlx::query("UPDATE issue SET status = 'merging' WHERE id = 'PL-1'")
+    // A person has no short path to these statuses, so the test puts the issue there.
+    sqlx::query("UPDATE issue SET status = $1 WHERE id = 'PL-1'")
+        .bind(from)
         .execute(&s.state.pool)
         .await
         .unwrap();
-    deliver(s, "pull_request", "merged-1", MERGED).await;
-    // Redelivery, and the same merge under another delivery id, change nothing.
-    deliver(s, "pull_request", "merged-1", MERGED).await;
-    deliver(s, "pull_request", "merged-2", MERGED).await;
+    deliver(s, "pull_request", "closed-1", closed).await;
+    // Redelivery, and the same event under another delivery id, change nothing.
+    deliver(s, "pull_request", "closed-1", closed).await;
+    deliver(s, "pull_request", "closed-2", closed).await;
     sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
         .fetch_one(&s.state.pool)
         .await
         .unwrap()
 }
 
+/// How many transitions, comments and GitHub actors there are. A person made none of them
+/// in these tests.
+async fn rows_from_github(pool: &PgPool) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM transition), (SELECT count(*) FROM comment),
+                (SELECT count(*) FROM actor WHERE role = 'github')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(
+            &s,
+            "pr_closed_unmerged",
+            "proof_attached",
+            "in_progress",
+            CLOSED
+        )
+        .await,
+        "in_progress"
+    );
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+}
+
+#[sqlx::test]
+async fn a_passing_gate_on_pr_closed_unmerged_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(
+            &s,
+            "pr_closed_unmerged",
+            "pr_names_issue",
+            "in_progress",
+            CLOSED
+        )
+        .await,
+        "todo"
+    );
+    assert_eq!(rows_from_github(&pool).await, (1, 1, 1));
+}
+
 #[sqlx::test]
 async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     let s = setup(&pool).await;
     assert_eq!(
-        merge_with_gate_on_done(&s, "proof_attached").await,
+        close_with_gate(&s, "pr_merged", "proof_attached", "merging", MERGED).await,
         "merging"
     );
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM transition")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(rows, 0);
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
     let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
         .fetch_one(&pool)
         .await
@@ -645,7 +688,10 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
 #[sqlx::test]
 async fn a_passing_gate_on_pr_merged_is_recorded_on_the_move(pool: PgPool) {
     let s = setup(&pool).await;
-    assert_eq!(merge_with_gate_on_done(&s, "pr_names_issue").await, "done");
+    assert_eq!(
+        close_with_gate(&s, "pr_merged", "pr_names_issue", "merging", MERGED).await,
+        "done"
+    );
     let gates: Vec<(String, String, String, String, String)> = sqlx::query_as(
         "SELECT t.from_status, t.to_status, g.gate, g.result, g.reason
          FROM transition t LEFT JOIN transition_gate g ON g.transition_id = t.id",

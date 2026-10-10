@@ -330,8 +330,7 @@ pub(crate) async fn check_gates(
     if transition.gates.is_empty() {
         return Ok(Vec::new());
     }
-    let mut evidence = evidence(tx, id).await?;
-    evidence.closed_pull_request = closed_pull_request;
+    let evidence = evidence(tx, id, closed_pull_request).await?;
     let gates: Vec<GateResult> = transition
         .gates
         .iter()
@@ -354,8 +353,13 @@ pub(crate) async fn check_gates(
     Ok(gates)
 }
 
-/// What the gates read: the pull requests linked to the issue.
-async fn evidence(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Evidence> {
+/// What the gates read: the pull requests linked to the issue, and the one a GitHub event
+/// merged or closed when that event is causing the move.
+async fn evidence(
+    tx: &mut sqlx::PgConnection,
+    id: &str,
+    closed_pull_request: Option<i64>,
+) -> sqlx::Result<Evidence> {
     let rows = sqlx::query!(
         "SELECT number, title, branch, state, draft FROM pull_request
          WHERE issue_id = $1 ORDER BY number DESC",
@@ -381,7 +385,7 @@ async fn evidence(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Evidenc
     Ok(Evidence {
         issue_id: id.to_string(),
         pull_requests,
-        closed_pull_request: None,
+        closed_pull_request,
     })
 }
 

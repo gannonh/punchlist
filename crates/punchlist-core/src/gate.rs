@@ -63,18 +63,7 @@ impl Gate {
                     Ok(format!("pull request #{} is ready for review", pr.number))
                 }
             }),
-            Gate::PrNamesIssue => match evidence.closed_pull_request {
-                Some(number) => (evidence.pull_requests.iter())
-                    .find(|pr| pr.number == number)
-                    .ok_or_else(|| {
-                        format!(
-                            "pull request #{number} is not linked to {}",
-                            evidence.issue_id
-                        )
-                    }),
-                None => one_open(evidence),
-            }
-            .and_then(|pr| names_issue(evidence, pr)),
+            Gate::PrNamesIssue => named(evidence).and_then(|pr| names_issue(evidence, pr)),
             // Evaluated from Slice 5. Until then a transition that names one fails closed.
             Gate::CiGreen | Gate::Mergeable | Gate::NoOpenThreads | Gate::ProofAttached => {
                 Err(format!("Punchlist does not evaluate the {self} gate yet"))
@@ -147,8 +136,8 @@ pub struct Evidence {
     pub issue_id: String,
     /// The pull requests linked to the issue, open or not.
     pub pull_requests: Vec<PullRequestEvidence>,
-    /// The pull request whose merge or close on GitHub is causing the move. Absent on a
-    /// requested move.
+    /// The pull request that a GitHub event merged or closed without merging, when that event
+    /// is causing the move; absent on a requested move, and read only by `pr_names_issue`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_pull_request: Option<i64>,
 }
@@ -185,6 +174,22 @@ fn one_open(evidence: &Evidence) -> Result<&PullRequestEvidence, String> {
                 .join(", ")
         )),
     }
+}
+
+/// The pull request `pr_names_issue` checks: the one a GitHub event merged or closed, or on
+/// a requested move the issue's one open pull request.
+fn named(evidence: &Evidence) -> Result<&PullRequestEvidence, String> {
+    let Some(number) = evidence.closed_pull_request else {
+        return one_open(evidence);
+    };
+    (evidence.pull_requests.iter())
+        .find(|pr| pr.number == number)
+        .ok_or_else(|| {
+            format!(
+                "pull request #{number} is not linked to {}",
+                evidence.issue_id
+            )
+        })
 }
 
 fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, String> {
@@ -316,6 +321,15 @@ mod tests {
         assert_eq!(
             check(Gate::PrOpen, &other),
             (false, "no open pull request is linked to PL-7".into())
+        );
+        // An open pull request does not stand in for the one the event closed.
+        let unlinked = Evidence {
+            closed_pull_request: Some(12),
+            ..evidence(vec![pr(13, "feature/pl-7-next", "Next", OPEN, false)])
+        };
+        assert_eq!(
+            check(Gate::PrNamesIssue, &unlinked),
+            (false, "pull request #12 is not linked to PL-7".into())
         );
     }
 
