@@ -444,16 +444,13 @@ async fn a_merge_read_from_github_moves_the_issue_once(pool: PgPool) {
     merged["merged_by"] = json!({"login": "octocat"});
     s.github.lock().unwrap().pulls = vec![merged];
 
-    // The merge moves the issue first, as its webhook would have, so the request is made of
-    // an issue that is Done.
+    // The merge moves the issue first and ends the agent's run, as its webhook would have,
+    // so the request is answered as it would be after that webhook.
     let (status, body) = request_agent_review(&s, &agent).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
         body,
-        json!({
-            "code": "no_transition",
-            "message": "no transition done → agent_review exists in the workflow"
-        })
+        json!({"code": "unauthorized", "message": "missing or unknown bearer token"})
     );
     let once = [moved("in_progress", "done", "octocat", None)];
     assert_eq!(event_transitions(&pool).await, once);
@@ -492,13 +489,10 @@ async fn a_pull_request_closed_on_github_moves_the_issue_once_before_the_request
     s.github.lock().unwrap().pulls = vec![pull_request_now(CLOSED)];
 
     let (status, body) = request_agent_review(&s, &agent).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
         body,
-        json!({
-            "code": "no_transition",
-            "message": "no transition todo → agent_review exists in the workflow"
-        })
+        json!({"code": "unauthorized", "message": "missing or unknown bearer token"})
     );
 
     // GitHub's pull request does not say who closed it, so nobody is credited.
@@ -528,15 +522,13 @@ async fn one_of_two_pull_requests_closed_on_github_answers_with_the_status_it_le
         pull_request_now(READY),
     ];
 
-    // #12 alone would pass the gates, but closing #11 sent the issue back to Todo first.
+    // #12 alone would pass the gates, but closing #11 sent the issue back to Todo first and
+    // ended the run whose token made the request.
     let (status, body) = request_agent_review(&s, &agent).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
         body,
-        json!({
-            "code": "no_transition",
-            "message": "no transition todo → agent_review exists in the workflow"
-        })
+        json!({"code": "unauthorized", "message": "missing or unknown bearer token"})
     );
     assert_eq!(issue_status(&pool).await, "todo");
     assert_eq!(

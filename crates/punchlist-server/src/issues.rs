@@ -246,6 +246,21 @@ async fn move_issue(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    // The token was checked before the refresh, which ends the agent's run when it closes
+    // the issue's pull request, as a webhook job may have meanwhile. Either holds the issue's
+    // lock to do it, so under that lock the run is known to be running or not.
+    if actor.role == Role::Agent {
+        let running = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM actor a JOIN run r ON r.id = a.run_id
+                              WHERE a.id = $1 AND r.outcome = 'running') AS "running!""#,
+            actor.id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !running {
+            return Err(ApiError::Unauthorized);
+        }
+    }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
     let moved = record_transition(
@@ -269,9 +284,9 @@ async fn move_issue(
 
 /// Before the issue is locked: if the move has gates, reads the issue's pull requests from
 /// GitHub so they decide, not the webhooks still on their way. A pull request that GitHub
-/// closed moves the issue here, as its webhook would have, so `move_issue` then judges the
-/// request against the status the issue is really in. An issue the actor cannot move, or
-/// that does not exist, is left for `move_issue` to refuse.
+/// closed moves the issue here and ends its run, as its webhook would have, so `move_issue`
+/// then answers as it would after that webhook. An issue the actor cannot move, or that does
+/// not exist, is left for `move_issue` to refuse.
 async fn refresh_evidence(
     state: &AppState,
     actor: &Actor,

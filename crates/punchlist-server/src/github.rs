@@ -565,6 +565,11 @@ async fn record_pull_request(
 /// Each pull request is recorded in its own transaction, as its webhook's job would, and
 /// before the caller locks the issue: a job holds the pull request's row and waits for the
 /// issue's, so taking the issue's lock first deadlocks.
+///
+/// A failure to record one fails the request, unlike a failure to read GitHub. What GitHub
+/// said is then known and could not be stored, so letting the gates read the older rows
+/// could pass a request on a pull request known to be merged or closed. The requester asks
+/// again; the pull requests already recorded stay recorded.
 // ponytail: GitHub's pull request names who merged it but not who closed it, so a close read
 // here credits nobody; read the issue's `closed_by` if the name matters.
 pub(crate) async fn refresh_pull_requests(
