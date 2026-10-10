@@ -230,10 +230,16 @@ pub enum Problem {
     NoAgent,
     #[error("`max_concurrent` must be at least 1")]
     BadMaxConcurrent,
-    #[error(
-        "the runtime needs {0}; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
-    )]
-    MissingReserved(String),
+    #[error("the runtime needs the status `{0}`")]
+    MissingStatus(&'static str),
+    #[error("the runtime needs a transition from `start` to `in_progress`")]
+    NoClaimTransition,
+    #[error("the runtime needs `runner` in `by` on the transition from `start` to `in_progress`")]
+    ClaimNotByRunner,
+    #[error("the runtime needs a runner to act on `start`, but this lock forbids it")]
+    ClaimLocked,
+    #[error("the runtime needs a dispatch rule for `in_progress`")]
+    NoClaimDispatch,
     #[error("prompt path `{0}` must be relative to .punchlist/, such as prompts/in_progress.md")]
     BadPromptPath(String),
     #[error("prompt file `.punchlist/{0}` does not exist")]
@@ -392,9 +398,6 @@ impl Workflow {
             }
             statuses.push(Status(name.into_inner()));
         }
-        let reserved = |key: &str, what: String| {
-            errors.at(statuses_span.clone(), key, Problem::MissingReserved(what))
-        };
         let known = |name: &str, span: Range<usize>, key: String| -> Result<Status, LoadError> {
             match statuses.iter().find(|s| s.0 == name) {
                 Some(status) => Ok(status.clone()),
@@ -418,6 +421,7 @@ impl Workflow {
         };
 
         let mut transitions: Vec<Transition> = Vec::new();
+        let mut claim_by = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -437,6 +441,7 @@ impl Workflow {
                 .map(|name| known(name, from_span.clone(), key("from")))
                 .collect::<Result<Vec<_>, _>>()?;
             let to = known(t.to.get_ref(), t.to.span(), key("to"))?;
+            let by_span = t.by.first().map(Spanned::span);
             let by = roles(t.by, &key("by"))?;
             if by.is_empty() && t.on.is_none() {
                 return Err(errors.at(t.to.span(), format!("transition[{i}]"), Problem::NoActor));
@@ -471,6 +476,13 @@ impl Workflow {
                     return Err(errors.at(t.to.span(), format!("transition[{i}]"), problem));
                 }
             }
+            if claim_by.is_none() && to.0 == IN_PROGRESS && from.iter().any(|f| f.0 == START) {
+                // The first match is the one the claim finds.
+                claim_by = Some(match by_span {
+                    Some(span) => (span, key("by")),
+                    None => (t.to.span(), format!("transition[{i}]")),
+                });
+            }
             transitions.push(Transition {
                 from,
                 to,
@@ -482,8 +494,12 @@ impl Workflow {
         }
 
         let mut locks = Vec::new();
+        let mut start_lock = None;
         for (name, locked) in raw.lock {
             let key = format!("lock.{name}");
+            if name == START {
+                start_lock = Some(locked.span());
+            }
             let status = known(&name, locked.span(), key.clone())?;
             locks.push((status, roles(locked.into_inner(), &key)?));
         }
@@ -511,30 +527,7 @@ impl Workflow {
             });
         }
 
-        for name in [START, IN_PROGRESS] {
-            if !statuses.iter().any(|s| s.0 == name) {
-                return Err(reserved(
-                    "statuses",
-                    format!("status `{name}` in `statuses`"),
-                ));
-            }
-        }
-
-        if !transitions.iter().any(|t| {
-            t.to.0 == IN_PROGRESS
-                && t.from.iter().any(|f| f.0 == START)
-                && t.by.contains(&Role::Runner)
-        }) {
-            let what = "a `[[transition]]` from `start` to `in_progress` with `by = [\"runner\"]`";
-            return Err(reserved("transition", what.into()));
-        }
-
-        if !dispatch.iter().any(|d| d.status.0 == IN_PROGRESS) {
-            let what = "a `[dispatch.status.in_progress]` rule".into();
-            return Err(reserved("dispatch.status.in_progress", what));
-        }
-
-        Ok(Workflow {
+        let workflow = Workflow {
             version: content_hash(text, &BTreeMap::new()),
             source: text.to_string(),
             statuses,
@@ -542,7 +535,46 @@ impl Workflow {
             locks,
             dispatch,
             prompts: BTreeMap::new(),
-        })
+        };
+        workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
+        Ok(workflow)
+    }
+
+    /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
+    /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
+    /// of `check_transition`, as the claim does) and a dispatch rule for `in_progress`. Each
+    /// error points at the nearest place that exists in the file.
+    fn check_claimable(
+        &self,
+        errors: &Errors,
+        statuses_span: Range<usize>,
+        claim_by: Option<(Range<usize>, String)>,
+        start_lock: Option<Range<usize>>,
+    ) -> Result<(), LoadError> {
+        let at_statuses = |problem| errors.at(statuses_span.clone(), "statuses", problem);
+        for name in [START, IN_PROGRESS] {
+            if self.status(name).is_none() {
+                return Err(at_statuses(Problem::MissingStatus(name)));
+            }
+        }
+        match self.check_transition(START, IN_PROGRESS, Role::Runner) {
+            Ok(_) => {}
+            Err(Refusal::Locked { .. }) => {
+                let span = start_lock.unwrap_or(statuses_span.clone());
+                return Err(errors.at(span, format!("lock.{START}"), Problem::ClaimLocked));
+            }
+            Err(Refusal::NoTransition { .. }) => {
+                return Err(at_statuses(Problem::NoClaimTransition));
+            }
+            Err(_) => {
+                let (span, key) = claim_by.unwrap_or((statuses_span.clone(), "statuses".into()));
+                return Err(errors.at(span, key, Problem::ClaimNotByRunner));
+            }
+        }
+        if self.dispatch_for(IN_PROGRESS).is_none() {
+            return Err(at_statuses(Problem::NoClaimDispatch));
+        }
+        Ok(())
     }
 
     /// A content hash over the workflow file and its prompts, recorded on every transition.
@@ -952,8 +984,8 @@ mod tests {
 
     #[test]
     fn several_allowed_roles_are_listed() {
-        let workflow = Workflow::from_toml(&format!(
-            "statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\", \"agent\"]\n{RESERVED}"
+        let workflow = Workflow::from_toml(&runnable(
+            "[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\", \"agent\"]",
         ))
         .unwrap();
         assert_eq!(
@@ -1023,9 +1055,13 @@ mod tests {
         (e.line, e.key, e.problem)
     }
 
-    /// What a claim needs, for fixtures that must load: add `start` and `in_progress` to
-    /// `statuses` and append this.
-    const RESERVED: &str = "[[transition]]\nfrom = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\n[dispatch.status.in_progress]\nagent = \"claude-code\"\n";
+    /// A small workflow a runner can claim from: statuses `a` and `b`, `body`, and the
+    /// reserved statuses, runner transition and dispatch rule.
+    fn runnable(body: &str) -> String {
+        format!(
+            "statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n{body}\n[[transition]]\nfrom = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\n[dispatch.status.in_progress]\nagent = \"claude-code\"\n"
+        )
+    }
 
     const PRD_TEMPLATE: &str = include_str!("default/workflow.toml");
 
@@ -1183,7 +1219,7 @@ mod tests {
             transition("by = [\"github\"]").2,
             Problem::UnknownRole("github".into())
         );
-        assert!(Workflow::from_toml(&format!("statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]\n{RESERVED}"))
+        assert!(Workflow::from_toml(&runnable("[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]"))
         .is_ok());
         assert_eq!(
             error(
@@ -1226,33 +1262,40 @@ mod tests {
         );
     }
 
+    /// `PRD_TEMPLATE` with `from` replaced by `to`; fails if the template no longer has `from`.
+    fn edited(from: &str, to: &str) -> String {
+        assert!(PRD_TEMPLATE.contains(from), "the template has {from:?}");
+        PRD_TEMPLATE.replacen(from, to, 1)
+    }
+
     #[test]
     fn a_workflow_the_runtime_cannot_run_names_its_line_and_key() {
-        let renamed = PRD_TEMPLATE.replace("\"start\"", "\"begin\"");
+        let refused = |text: &str| Workflow::from_toml(text).unwrap_err().to_string();
         assert_eq!(
-            Workflow::from_toml(&renamed).unwrap_err().to_string(),
-            "line 4, `statuses`: the runtime needs status `start` in `statuses`; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
-        );
-        let missing_status = PRD_TEMPLATE.replace("\"start\", ", "");
-        let want = "line 14, `transition[1].to`: status `start` is not in `statuses`";
-        assert_eq!(
-            Workflow::from_toml(&missing_status)
-                .unwrap_err()
-                .to_string(),
-            want
-        );
-        let no_rule = PRD_TEMPLATE.replace(
-            "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
-            "",
+            refused(&PRD_TEMPLATE.replace("\"start\"", "\"begin\"")),
+            "line 4, `statuses`: the runtime needs the status `start`"
         );
         assert_eq!(
-            Workflow::from_toml(&no_rule).unwrap_err().to_string(),
-            "line 4, `dispatch.status.in_progress`: the runtime needs a `[dispatch.status.in_progress]` rule; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+            refused(&edited(
+                "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+                ""
+            )),
+            "line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`"
         );
-        let no_runner = PRD_TEMPLATE.replace("by = [\"runner\"]", "by = [\"person\"]");
         assert_eq!(
-            Workflow::from_toml(&no_runner).unwrap_err().to_string(),
-            "line 4, `transition`: the runtime needs a `[[transition]]` from `start` to `in_progress` with `by = [\"runner\"]`; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+            refused(&edited(
+                "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]",
+                "from = \"start\"\nto = \"agent_review\"\nby = [\"runner\"]"
+            )),
+            "line 4, `statuses`: the runtime needs a transition from `start` to `in_progress`"
+        );
+        assert_eq!(
+            refused(&edited("by = [\"runner\"]", "by = [\"person\"]")),
+            "line 20, `transition[2].by`: the runtime needs `runner` in `by` on the transition from `start` to `in_progress`"
+        );
+        assert_eq!(
+            refused(&edited("[lock]\n", "[lock]\nstart = [\"runner\"]\n")),
+            "line 51, `lock.start`: the runtime needs a runner to act on `start`, but this lock forbids it"
         );
     }
 
@@ -1268,9 +1311,8 @@ mod tests {
 
     #[test]
     fn prompts_load_hash_and_join() {
-        let text = &format!(
-            "statuses = [\"a\", \"start\", \"in_progress\"]\n[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"\n{RESERVED}"
-        );
+        let text =
+            &runnable("[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"");
         let files = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
             pairs
                 .iter()

@@ -39,7 +39,8 @@ pub(crate) async fn active_workflow(
     let Some(row) = row else {
         return Ok((default_workflow().clone(), None));
     };
-    // Only versions that loaded are stored, so one that no longer does is corrupt data.
+    // Only versions that loaded are stored, so one that no longer does is corrupt data. That includes a version stored before
+    // the runtime-reserved names were required (KAT-3750), until a valid push loads.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
         serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;

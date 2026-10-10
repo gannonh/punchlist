@@ -72,9 +72,10 @@ async fn try_claim(
     let id = match target {
         Target::Any => {
             let id = sqlx::query_scalar!(
-                "SELECT id FROM issue WHERE workspace_id = $1 AND status = 'start'
+                "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2
                  ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
                 actor.workspace_id,
+                START,
             )
             .fetch_optional(&mut *tx)
             .await?;
