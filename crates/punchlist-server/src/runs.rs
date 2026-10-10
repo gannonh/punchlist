@@ -11,7 +11,7 @@ use punchlist_api::{
     AppendLog, Claim, ClaimRequest, ErrorBody, FinishRun, LogLine, Repository, Run, RunLog,
     RunOutcome, RunnerRef,
 };
-use punchlist_core::{agent_display_name, branch_name};
+use punchlist_core::{IN_PROGRESS, START, agent_display_name, branch_name};
 use sqlx::PgPool;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
@@ -63,7 +63,7 @@ async fn try_claim(
 ) -> Result<Option<Claim>, ApiError> {
     let mut tx = state.pool.begin().await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
-    let Some(dispatch) = workflow.dispatch_for("in_progress") else {
+    let Some(dispatch) = workflow.dispatch_for(IN_PROGRESS) else {
         return Ok(None);
     };
     if !runner.agents.contains(&dispatch.agent) {
@@ -72,9 +72,10 @@ async fn try_claim(
     let id = match target {
         Target::Any => {
             let id = sqlx::query_scalar!(
-                "SELECT id FROM issue WHERE workspace_id = $1 AND status = 'start'
+                "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2
                  ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
                 actor.workspace_id,
+                START,
             )
             .fetch_optional(&mut *tx)
             .await?;
@@ -89,7 +90,7 @@ async fn try_claim(
             )
             .fetch_optional(&mut *tx)
             .await?;
-            if status.as_deref() != Some("start") {
+            if status.as_deref() != Some(START) {
                 tx.rollback().await?;
                 let holder = sqlx::query_scalar!(
                     "SELECT r.name FROM attempt a JOIN runner r ON r.id = a.runner_id
@@ -107,13 +108,13 @@ async fn try_claim(
             id.clone()
         }
     };
-    let gates = check_move(&mut tx, &workflow, actor, &id, "start", "in_progress").await?;
+    let gates = check_move(&mut tx, &workflow, actor, &id, START, IN_PROGRESS).await?;
     let moved = record_transition(
         &mut tx,
         actor,
         &id,
-        "start".into(),
-        "in_progress",
+        START.into(),
+        IN_PROGRESS,
         None,
         workflow.version(),
         &gates,
@@ -175,7 +176,7 @@ async fn try_claim(
         repository,
         branch,
         lease_expires_at,
-        prompt: workflow.prompt_for("in_progress"),
+        prompt: workflow.prompt_for(IN_PROGRESS),
         agent_token,
     }))
 }

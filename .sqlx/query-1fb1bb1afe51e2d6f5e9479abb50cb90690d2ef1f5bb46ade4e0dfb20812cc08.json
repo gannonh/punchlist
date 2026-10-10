@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH v AS (\n             INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)\n             SELECT id, 'sha256:old', $1, $2, '{\"prompts/agent_review.md\": \"Review it.\"}'::jsonb\n             FROM workspace RETURNING id)\n         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fb1bb1afe51e2d6f5e9479abb50cb90690d2ef1f5bb46ade4e0dfb20812cc08"
+}

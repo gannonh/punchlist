@@ -579,6 +579,62 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(pool: PgPool) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    // A version stored before the runtime required a dispatch rule for `in_progress`.
+    let old = PRD_WORKFLOW.replace(
+        "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+        "",
+    );
+    assert_ne!(old, PRD_WORKFLOW);
+    sqlx::query!(
+        "WITH v AS (
+             INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+             SELECT id, 'sha256:old', $1, $2, '{\"prompts/agent_review.md\": \"Review it.\"}'::jsonb
+             FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+        "c".repeat(40),
+        old,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["commit_sha"], "c".repeat(40));
+    let (status, _) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Pushing that same file is refused.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "d".repeat(40);
+        repo.files.insert("workflow.toml".into(), old);
+    }
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (_, after) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(after["commit_sha"], "c".repeat(40));
+}
+
+#[sqlx::test]
 async fn a_missing_prompt_is_refused(pool: PgPool) {
     let s = setup(&pool).await;
     {

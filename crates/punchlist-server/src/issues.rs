@@ -8,7 +8,7 @@ use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, Workflow,
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, START, Workflow,
     display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
@@ -260,7 +260,7 @@ async fn move_issue(
     )
     .await?;
     tx.commit().await?;
-    if request.to == "start" {
+    if request.to == START {
         // Wake runners that are long-polling for work. No receivers is fine.
         let _ = state.starts.send((actor.workspace_id, id));
     }
