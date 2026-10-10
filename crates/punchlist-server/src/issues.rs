@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
+use crate::github::refresh_pull_requests;
 use crate::workflow::active_workflow;
 use crate::{ApiError, AppState};
 
@@ -246,6 +247,13 @@ async fn move_issue(
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     actor.check_issue(&id)?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    if let Some(github) = &state.github
+        && workflow
+            .check_transition(&from, &request.to, actor.role)
+            .is_ok_and(|transition| !transition.gates.is_empty())
+    {
+        refresh_pull_requests(github, &mut tx, actor.workspace_id, &id).await?;
+    }
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
     let moved = record_transition(
         &mut tx,

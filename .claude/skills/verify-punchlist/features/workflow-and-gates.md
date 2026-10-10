@@ -37,4 +37,5 @@ Preconditions:
 - The load reads the default branch's head when the job runs, not the commit the push named, so two quick pushes both load the newest file.
 - `deny_unknown_fields` is on: a misspelt key, such as `gate` for `gates`, is refused rather than loaded without its gates.
 - A refused file leaves no row anywhere; the server log is its only record.
+- A gated request reads the issue's pull requests from GitHub first, as the App, because webhooks reach the server seconds after GitHub. A request made right after `gh pr create` or `gh pr ready` therefore sees the new state. If GitHub cannot be read, the server log says `cannot read pull requests from GitHub, the gates read the recorded ones` and the recorded pull requests decide. A pull request GitHub reports closed or merged is left to its webhook.
 - The agent token ends with its run. To re-request after the run finished, start a new run; a person's token cannot make `in_progress → agent_review`.

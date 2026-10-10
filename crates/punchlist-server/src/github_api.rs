@@ -1,6 +1,7 @@
 //! Reads files from a repository's default branch through GitHub's REST API, as the
 //! GitHub App. The server uses it to load `.punchlist/` (ADR 0010).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -10,6 +11,8 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
+
+use crate::github::PullRequestData;
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -170,6 +173,47 @@ impl GithubClient {
                 sha: commit.sha,
             },
         })
+    }
+
+    /// The current state of pull requests, read from GitHub now rather than from webhooks:
+    /// every number in `known`, and every one of the repository's 30 most recently updated
+    /// pull requests that `wanted` picks. The list omits `mergeable_state`, so each pull
+    /// request is then read in full.
+    // ponytail: a pull request that is not among the 30 most recently updated and not in
+    // `known` is missed; page the list, or search by branch, if that bites.
+    pub(crate) async fn pull_requests(
+        &self,
+        owner: &str,
+        name: &str,
+        known: &[i64],
+        wanted: impl Fn(&PullRequestData) -> bool,
+    ) -> anyhow::Result<Vec<PullRequestData>> {
+        let token = self.token(owner, name).await?;
+        let path = format!("/repos/{owner}/{name}/pulls");
+        let recent: Vec<PullRequestData> = self
+            .call(
+                &token,
+                reqwest::Method::GET,
+                &format!("{path}?state=all&sort=updated&direction=desc&per_page=30"),
+            )
+            .await?
+            .json()
+            .await?;
+        let numbers: BTreeSet<i64> = known
+            .iter()
+            .copied()
+            .chain(recent.iter().filter(|pr| wanted(pr)).map(|pr| pr.number))
+            .collect();
+        let mut pull_requests = Vec::new();
+        for number in numbers {
+            pull_requests.push(
+                self.call(&token, reqwest::Method::GET, &format!("{path}/{number}"))
+                    .await?
+                    .json()
+                    .await?,
+            );
+        }
+        Ok(pull_requests)
     }
 }
 

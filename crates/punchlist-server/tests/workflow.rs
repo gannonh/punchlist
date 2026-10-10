@@ -26,16 +26,20 @@ const READY: &str = include_str!("fixtures/github/pull_request_ready_for_review.
 const PUSH: &str = include_str!("fixtures/github/push.json");
 const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workflow.toml");
 
-/// The default branch's head commit and the files under `.punchlist/` there.
+/// The default branch's head commit, the files under `.punchlist/` there, and the pull
+/// requests GitHub currently reports. `down` makes the pull request endpoints fail.
 #[derive(Default)]
 struct Repo {
     sha: String,
     files: HashMap<String, String>,
+    pulls: Vec<Value>,
+    down: bool,
 }
 
 type FakeGithub = Arc<Mutex<Repo>>;
 
-/// A fake of the three GitHub endpoints the workflow load calls, on a free port.
+/// A fake of the GitHub endpoints the workflow load and the pull request refresh call, on a
+/// free port.
 async fn fake_github() -> (FakeGithub, String) {
     let repo: FakeGithub = Arc::default();
     let app = Router::new()
@@ -48,6 +52,29 @@ async fn fake_github() -> (FakeGithub, String) {
             get(|State(repo): State<FakeGithub>| async move {
                 axum::Json(json!({"sha": repo.lock().unwrap().sha}))
             }),
+        )
+        .route(
+            "/repos/{owner}/{name}/pulls",
+            get(|State(repo): State<FakeGithub>| async move {
+                let repo = repo.lock().unwrap();
+                match repo.down {
+                    true => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!([]))),
+                    false => (StatusCode::OK, axum::Json(Value::Array(repo.pulls.clone()))),
+                }
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/pulls/{number}",
+            get(
+                |State(repo): State<FakeGithub>,
+                 Path((_, _, number)): Path<(String, String, i64)>| async move {
+                    let repo = repo.lock().unwrap();
+                    match repo.pulls.iter().find(|pr| pr["number"] == number) {
+                        Some(pr) if !repo.down => (StatusCode::OK, axum::Json(pr.clone())),
+                        _ => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                    }
+                },
+            ),
         )
         .route(
             "/repos/{owner}/{name}/contents/.punchlist/{*path}",
@@ -262,6 +289,63 @@ async fn a_failing_gate_refuses_and_writes_no_transition(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status, "in_progress");
+}
+
+/// What GitHub's API returns for a pull request: the object a webhook carries.
+fn pull_request_now(webhook: &str) -> Value {
+    serde_json::from_str::<Value>(webhook).unwrap()["pull_request"].clone()
+}
+
+#[sqlx::test]
+async fn a_pull_request_whose_webhook_has_not_arrived_is_read_from_github(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = claimed_issue(&s).await;
+    s.github.lock().unwrap().pulls = vec![pull_request_now(OPENED)];
+
+    // No delivery yet: without the refresh this is pr_open, "no open pull request".
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["gate"], "pr_ready");
+    assert_eq!(body["reason"], "pull request #12 is a draft");
+}
+
+#[sqlx::test]
+async fn a_pull_request_made_ready_passes_before_its_webhook_arrives(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], "pull request #12 is a draft");
+
+    // GitHub says ready; the ready_for_review delivery has not come.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(READY)];
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "agent_review");
+    let results = sqlx::query_scalar!(
+        "SELECT g.result FROM transition_gate g JOIN transition t ON t.id = g.transition_id
+         WHERE t.to_status = 'agent_review' ORDER BY g.position"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(results, ["pass", "pass", "pass"]);
+
+    // The late delivery changes nothing.
+    deliver(&s, "pull_request", "d-ready", READY).await;
+}
+
+#[sqlx::test]
+async fn recorded_pull_requests_stand_when_github_is_down(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    deliver(&s, "pull_request", "d-ready", READY).await;
+    s.github.lock().unwrap().down = true;
+
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 #[sqlx::test]

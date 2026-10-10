@@ -15,6 +15,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
+use crate::GithubClient;
 use crate::auth::Actor;
 use crate::issues::{record_comment, write_transition};
 use crate::workflow::{active_workflow, queue_workflow_load};
@@ -347,7 +348,9 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
-            let (_, applied, linked) = upsert_pull_request(tx, &job, &event.pull_request).await?;
+            let (_, applied, linked) =
+                upsert_pull_request(tx, job.workspace_id, job.repository_id, &event.pull_request)
+                    .await?;
             if let (true, true, Some(issue_id)) = (applied, event.action == "closed", linked) {
                 close_issue_on_pull_request(tx, &job, event, &issue_id).await?;
             }
@@ -397,7 +400,16 @@ pub(crate) async fn process(
             .await?;
             let pull_request_id = match known {
                 Some(id) => id,
-                None => upsert_pull_request(tx, &job, &event.pull_request).await?.0,
+                None => {
+                    upsert_pull_request(
+                        tx,
+                        job.workspace_id,
+                        job.repository_id,
+                        &event.pull_request,
+                    )
+                    .await?
+                    .0
+                }
             };
             sqlx::query!(
                 "INSERT INTO review_thread (node_id, pull_request_id, resolved)
@@ -428,12 +440,13 @@ pub(crate) async fn process(
 /// Returns its row id, whether this payload was applied, and the issue it is linked to.
 async fn upsert_pull_request(
     tx: &mut sqlx::PgConnection,
-    job: &GithubJob,
+    workspace_id: Uuid,
+    repository_id: Uuid,
     pr: &PullRequestData,
-) -> anyhow::Result<(Uuid, bool, Option<String>)> {
+) -> sqlx::Result<(Uuid, bool, Option<String>)> {
     let prefix = sqlx::query_scalar!(
         "SELECT issue_prefix FROM workspace WHERE id = $1",
-        job.workspace_id
+        workspace_id
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -443,7 +456,7 @@ async fn upsert_pull_request(
             sqlx::query_scalar!(
                 "SELECT id FROM issue WHERE id = $1 AND workspace_id = $2",
                 id,
-                job.workspace_id
+                workspace_id
             )
             .fetch_optional(&mut *tx)
             .await?
@@ -473,7 +486,7 @@ async fn upsert_pull_request(
          WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at
            AND pull_request.state <> 'merged'
          RETURNING id",
-        job.repository_id,
+        repository_id,
         pr.number,
         pr.id,
         pr.title,
@@ -495,15 +508,72 @@ async fn upsert_pull_request(
         // actions in one second still apply in delivery order.
         let id = sqlx::query_scalar!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
-            job.repository_id,
+            repository_id,
             pr.number
         )
         .fetch_one(&mut *tx)
         .await?;
         return Ok((id, false, linked));
     };
-    recompute_checks(tx, job.repository_id, &pr.head.sha).await?;
+    recompute_checks(tx, repository_id, &pr.head.sha).await?;
     Ok((id, true, linked))
+}
+
+/// Brings the pull requests an issue's gates read up to date with GitHub, inside the
+/// caller's transaction, so the gates and the move see the same state. A webhook reaches
+/// the server seconds after GitHub, and an agent asks for its transition right after it
+/// opens or readies a pull request; a gate must not read the state from before. When GitHub
+/// cannot be reached the recorded pull requests stand, so an outage does not stop moves.
+// ponytail: the caller holds the issue's row lock for the GitHub round trips. A pull
+// request that GitHub now reports closed or merged is left to its webhook, which also moves
+// the issue; recording it here would stop that webhook from applying.
+pub(crate) async fn refresh_pull_requests(
+    github: &GithubClient,
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    issue_id: &str,
+) -> sqlx::Result<()> {
+    let Some(repository) = sqlx::query!(
+        "SELECT r.id, r.owner, r.name, w.issue_prefix FROM repository r
+         JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
+        workspace_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(());
+    };
+    let known = sqlx::query_scalar!(
+        "SELECT number FROM pull_request WHERE repository_id = $1 AND issue_id = $2",
+        repository.id,
+        issue_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let names_issue = |pr: &PullRequestData| {
+        linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
+            == Some(issue_id)
+    };
+    let fresh = match github
+        .pull_requests(&repository.owner, &repository.name, &known, names_issue)
+        .await
+    {
+        Ok(fresh) => fresh,
+        Err(error) => {
+            tracing::warn!(
+                issue_id,
+                "cannot read pull requests from GitHub, the gates read the recorded ones: {error:#}"
+            );
+            return Ok(());
+        }
+    };
+    for pr in fresh
+        .iter()
+        .filter(|pr| pr.state == "open" && !pr.is_merged())
+    {
+        upsert_pull_request(tx, workspace_id, repository.id, pr).await?;
+    }
+    Ok(())
 }
 
 /// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun

@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id, r.owner, r.name, w.issue_prefix FROM repository r\n         JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "owner",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "owner"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "repository",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "issue_prefix",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "issue_prefix"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e27948763043494b5962311618ffdf21c3bd0b122bdcbca61e892563e7a65ddf"
+}
