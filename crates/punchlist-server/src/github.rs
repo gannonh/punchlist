@@ -348,10 +348,23 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
+            // A pull request closes once. The same close under another delivery id applies
+            // again, and must not check the transition's gates a second time: a failed gate
+            // is final for its event.
+            let was_open = sqlx::query_scalar!(
+                "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2
+                 FOR UPDATE",
+                job.repository_id,
+                event.pull_request.number,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none_or(|state| state == "open");
             let (_, applied, linked) =
                 upsert_pull_request(tx, job.workspace_id, job.repository_id, &event.pull_request)
                     .await?;
-            if let (true, true, Some(issue_id)) = (applied, event.action == "closed", linked) {
+            let closed = applied && was_open && event.action == "closed";
+            if let (true, Some(issue_id)) = (closed, linked) {
                 close_issue_on_pull_request(tx, &job, event, &issue_id).await?;
             }
         }

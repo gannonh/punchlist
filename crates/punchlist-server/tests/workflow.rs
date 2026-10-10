@@ -654,6 +654,28 @@ async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_failed_gate_is_final_when_the_close_arrives_again_and_would_now_pass(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(&s, "pr_closed_unmerged", "pr_open", "in_progress", CLOSED).await,
+        "in_progress"
+    );
+    // Another pull request opens for the issue, so `pr_open` would pass now.
+    let mut opened: Value = serde_json::from_str(OPENED).unwrap();
+    opened["number"] = json!(13);
+    opened["pull_request"]["number"] = json!(13);
+    opened["pull_request"]["id"] = json!(1934102999_i64);
+    deliver(&s, "pull_request", "opened-13", &opened.to_string()).await;
+    deliver(&s, "pull_request", "closed-3", CLOSED).await;
+    let status = sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "in_progress");
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+}
+
+#[sqlx::test]
 async fn a_passing_gate_on_pr_closed_unmerged_moves_the_issue_once(pool: PgPool) {
     let s = setup(&pool).await;
     assert_eq!(
