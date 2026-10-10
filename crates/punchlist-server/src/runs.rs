@@ -62,6 +62,8 @@ async fn try_claim(
     target: &Target,
 ) -> Result<Option<Claim>, ApiError> {
     let mut tx = state.pool.begin().await?;
+    // Before the workflow is read, so a claim waiting behind a load uses the new one.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let Some(dispatch) = workflow.dispatch_for("in_progress") else {
         return Ok(None);
@@ -69,7 +71,6 @@ async fn try_claim(
     if !runner.agents.contains(&dispatch.agent) {
         return Ok(None);
     }
-    lock_workspace(&mut tx, actor.workspace_id).await?;
     let id = match target {
         Target::Any => {
             let id = sqlx::query_scalar!(
