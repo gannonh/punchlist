@@ -181,6 +181,8 @@ agent = "codex"
 prompt = "prompts/agent_review.md"
 ```
 
+The runtime reserves a few names: the statuses `start` and `in_progress`, the runner transition from `start` to `in_progress`, and the `dispatch.status.in_progress` rule. A claim moves an issue between those two statuses and starts the agent that rule names, so a workflow file must keep all four. The server refuses a file that lacks one, at load, with the line and key, and keeps the previous version active. Everything else in the file is free to change.
+
 A status with a `dispatch.status` entry starts an agent with that prompt. A status without one waits for a person or a GitHub event, which is how a human gate is expressed.
 
 v1 ships a fixed set of gates implemented in code. Each gate is a pure function over recorded evidence, such as check runs, review threads and proof records, so an agent cannot waive one by claiming it passed. Custom gates that run a command or call a webhook come later.

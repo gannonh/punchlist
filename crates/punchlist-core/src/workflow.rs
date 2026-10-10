@@ -29,6 +29,11 @@ const DEFAULT_PROMPTS: [(&str, &str); 3] = [
 /// The preamble shared by every run, under `.punchlist/`. Optional (ADR 0001).
 pub const SYSTEM_PROMPT: &str = "prompts/system.md";
 
+/// Statuses the runtime hard-codes: a claim moves an issue from `START` to `IN_PROGRESS`
+/// and dispatches by the rule for `IN_PROGRESS`. A workflow must keep them.
+pub const START: &str = "start";
+pub const IN_PROGRESS: &str = "in_progress";
+
 /// The events a transition's `on` may name; the server makes each from a GitHub delivery.
 const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
 /// What a transition's `require` may ask a move to carry.
@@ -225,6 +230,10 @@ pub enum Problem {
     NoAgent,
     #[error("`max_concurrent` must be at least 1")]
     BadMaxConcurrent,
+    #[error(
+        "the runtime needs {0}; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+    )]
+    MissingReserved(String),
     #[error("prompt path `{0}` must be relative to .punchlist/, such as prompts/in_progress.md")]
     BadPromptPath(String),
     #[error("prompt file `.punchlist/{0}` does not exist")]
@@ -374,6 +383,7 @@ impl Workflow {
         if raw.statuses.get_ref().is_empty() {
             return Err(errors.at(raw.statuses.span(), "statuses", Problem::NoStatuses));
         }
+        let statuses_span = raw.statuses.span();
         let mut statuses: Vec<Status> = Vec::new();
         for (i, name) in raw.statuses.into_inner().into_iter().enumerate() {
             if statuses.iter().any(|s| s.0 == *name.get_ref()) {
@@ -382,6 +392,9 @@ impl Workflow {
             }
             statuses.push(Status(name.into_inner()));
         }
+        let reserved = |key: &str, what: String| {
+            errors.at(statuses_span.clone(), key, Problem::MissingReserved(what))
+        };
         let known = |name: &str, span: Range<usize>, key: String| -> Result<Status, LoadError> {
             match statuses.iter().find(|s| s.0 == name) {
                 Some(status) => Ok(status.clone()),
@@ -496,6 +509,29 @@ impl Workflow {
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
                 prompt: rule.prompt.map(Spanned::into_inner),
             });
+        }
+
+        for name in [START, IN_PROGRESS] {
+            if !statuses.iter().any(|s| s.0 == name) {
+                return Err(reserved(
+                    "statuses",
+                    format!("status `{name}` in `statuses`"),
+                ));
+            }
+        }
+
+        if !transitions.iter().any(|t| {
+            t.to.0 == IN_PROGRESS
+                && t.from.iter().any(|f| f.0 == START)
+                && t.by.contains(&Role::Runner)
+        }) {
+            let what = "a `[[transition]]` from `start` to `in_progress` with `by = [\"runner\"]`";
+            return Err(reserved("transition", what.into()));
+        }
+
+        if !dispatch.iter().any(|d| d.status.0 == IN_PROGRESS) {
+            let what = "a `[dispatch.status.in_progress]` rule".into();
+            return Err(reserved("dispatch.status.in_progress", what));
         }
 
         Ok(Workflow {
@@ -683,7 +719,8 @@ struct RawWorkflow {
     #[serde(default)]
     #[schemars(with = "Option<u32>")]
     version: Option<Spanned<i64>>,
-    /// Every status, in order. A new issue starts in the first.
+    /// Every status, in order. A new issue starts in the first. `start` and `in_progress`
+    /// are required.
     #[schemars(with = "Vec<String>")]
     statuses: Spanned<Vec<Spanned<String>>>,
     /// The allowed moves.
@@ -915,15 +952,9 @@ mod tests {
 
     #[test]
     fn several_allowed_roles_are_listed() {
-        let workflow = Workflow::from_toml(
-            r#"
-            statuses = ["a", "b"]
-            [[transition]]
-            from = "a"
-            to = "b"
-            by = ["person", "agent"]
-            "#,
-        )
+        let workflow = Workflow::from_toml(&format!(
+            "statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\", \"agent\"]\n{RESERVED}"
+        ))
         .unwrap();
         assert_eq!(
             workflow
@@ -991,6 +1022,10 @@ mod tests {
         let e = Workflow::from_toml(text).unwrap_err();
         (e.line, e.key, e.problem)
     }
+
+    /// What a claim needs, for fixtures that must load: add `start` and `in_progress` to
+    /// `statuses` and append this.
+    const RESERVED: &str = "[[transition]]\nfrom = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\n[dispatch.status.in_progress]\nagent = \"claude-code\"\n";
 
     const PRD_TEMPLATE: &str = include_str!("default/workflow.toml");
 
@@ -1148,7 +1183,7 @@ mod tests {
             transition("by = [\"github\"]").2,
             Problem::UnknownRole("github".into())
         );
-        assert!(Workflow::from_toml("statuses = [\"a\", \"b\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]")
+        assert!(Workflow::from_toml(&format!("statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]\n{RESERVED}"))
         .is_ok());
         assert_eq!(
             error(
@@ -1192,6 +1227,36 @@ mod tests {
     }
 
     #[test]
+    fn a_workflow_the_runtime_cannot_run_names_its_line_and_key() {
+        let renamed = PRD_TEMPLATE.replace("\"start\"", "\"begin\"");
+        assert_eq!(
+            Workflow::from_toml(&renamed).unwrap_err().to_string(),
+            "line 4, `statuses`: the runtime needs status `start` in `statuses`; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+        );
+        let missing_status = PRD_TEMPLATE.replace("\"start\", ", "");
+        let want = "line 14, `transition[1].to`: status `start` is not in `statuses`";
+        assert_eq!(
+            Workflow::from_toml(&missing_status)
+                .unwrap_err()
+                .to_string(),
+            want
+        );
+        let no_rule = PRD_TEMPLATE.replace(
+            "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+            "",
+        );
+        assert_eq!(
+            Workflow::from_toml(&no_rule).unwrap_err().to_string(),
+            "line 4, `dispatch.status.in_progress`: the runtime needs a `[dispatch.status.in_progress]` rule; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+        );
+        let no_runner = PRD_TEMPLATE.replace("by = [\"runner\"]", "by = [\"person\"]");
+        assert_eq!(
+            Workflow::from_toml(&no_runner).unwrap_err().to_string(),
+            "line 4, `transition`: the runtime needs a `[[transition]]` from `start` to `in_progress` with `by = [\"runner\"]`; `start`, `in_progress`, the runner transition between them and the `in_progress` dispatch rule are reserved"
+        );
+    }
+
+    #[test]
     fn an_unknown_key_is_refused() {
         // A misspelt `gates` must not load as a transition with no gates.
         let (line, key, problem) = error(
@@ -1203,7 +1268,9 @@ mod tests {
 
     #[test]
     fn prompts_load_hash_and_join() {
-        let text = "statuses = [\"a\"]\n[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"\n";
+        let text = &format!(
+            "statuses = [\"a\", \"start\", \"in_progress\"]\n[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"\n{RESERVED}"
+        );
         let files = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
             pairs
                 .iter()
