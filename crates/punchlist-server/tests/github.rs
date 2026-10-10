@@ -334,6 +334,8 @@ async fn a_merged_pull_request_moves_a_merging_issue_to_done(pool: PgPool) {
             Some("delivery-merged".into())
         )
     );
+    // The PRD's `merging → done` has no gates.
+    assert_eq!(count(&pool, "transition_gate").await, 0);
     let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
         .fetch_one(&pool)
         .await

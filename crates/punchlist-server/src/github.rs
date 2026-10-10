@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::issues::{record_comment, write_transition};
+use crate::issues::{check_gates, record_comment, write_transition};
 use crate::workflow::{active_workflow, queue_workflow_load};
 use crate::{ApiError, AppState};
 
@@ -348,10 +348,23 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
+            // A pull request closes once. The same close under another delivery id applies
+            // again, and must not check the transition's gates a second time: a failed gate
+            // is final for its event.
+            let was_open = sqlx::query_scalar!(
+                "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2
+                 FOR UPDATE",
+                job.repository_id,
+                event.pull_request.number,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none_or(|state| state == "open");
             let (_, applied, linked) =
                 upsert_pull_request(tx, job.workspace_id, job.repository_id, &event.pull_request)
                     .await?;
-            if let (true, true, Some(issue_id)) = (applied, event.action == "closed", linked) {
+            let closed = applied && was_open && event.action == "closed";
+            if let (true, Some(issue_id)) = (closed, linked) {
                 close_issue_on_pull_request(tx, &job, event, &issue_id).await?;
             }
         }
@@ -611,8 +624,10 @@ async fn recompute_checks(
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
-/// event from the issue's status. Otherwise the event is only evidence. Redelivery finds
-/// the issue already moved and changes nothing.
+/// event from the issue's status and that transition's gates pass. With no such transition
+/// the pull request's new state is all that is recorded. With a failed gate the refusal is
+/// logged and nothing is written to the issue: no status, transition, comment or actor.
+/// Redelivery finds the issue already moved and changes nothing.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
     job: &GithubJob,
@@ -642,6 +657,12 @@ async fn close_issue_on_pull_request(
         return Ok(());
     };
     let login = &event.sender.login;
+    let gates = match check_gates(tx, transition, login, issue_id, &status, Some(pr.number)).await {
+        Ok(gates) => gates,
+        // `check_gates` logged the gate and its reason. Nothing is written to the issue.
+        Err(ApiError::GateFailed(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let actor_id = sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $2)
@@ -667,7 +688,7 @@ async fn close_issue_on_pull_request(
         transition.to.as_str(),
         Some(&job.delivery_id),
         workflow.version(),
-        &[],
+        &gates,
     )
     .await?;
     // The agent working this issue has nothing left to do: its pull request is gone, and the
