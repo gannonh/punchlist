@@ -185,6 +185,10 @@ A status with a `dispatch.status` entry starts an agent with that prompt. A stat
 
 v1 ships a fixed set of gates implemented in code. Each gate is a pure function over recorded evidence, such as check runs, review threads and proof records, so an agent cannot waive one by claiming it passed. Custom gates that run a command or call a webhook come later.
 
+A gate in the file is always checked. A transition with `on` evaluates its gates when the event arrives, as a requested transition does. If they all pass, the move is recorded with each gate's result. If one fails, the issue stays where it is and the server log names the gate and the reason; the event is not tried again, so a person moves the issue once the cause is fixed, if the workflow gives them a transition. A transition with both `by` and `on` checks the same gates on either path.
+
+On `pr_merged` and `pr_closed_unmerged` the pull request is no longer open, so `pr_open` and `pr_ready` fail there. `pr_names_issue` is the gate that can pass: on these events it checks the pull request that was merged or closed, and on a requested transition it still checks the issue's one open pull request.
+
 The server publishes a JSON Schema for `workflow.toml`, so editors with a TOML language server can complete and check it.
 
 ### Data model

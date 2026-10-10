@@ -14,7 +14,8 @@ pub enum Gate {
     PrOpen,
     /// That pull request is not a draft.
     PrReady,
-    /// Its branch or title names the issue, and neither names another issue.
+    /// Its branch or title names the issue, and neither names another issue. On a move that
+    /// a merged or closed pull request causes, "it" is that pull request.
     PrNamesIssue,
     CiGreen,
     Mergeable,
@@ -62,7 +63,18 @@ impl Gate {
                     Ok(format!("pull request #{} is ready for review", pr.number))
                 }
             }),
-            Gate::PrNamesIssue => one_open(evidence).and_then(|pr| names_issue(evidence, pr)),
+            Gate::PrNamesIssue => match evidence.closed_pull_request {
+                Some(number) => (evidence.pull_requests.iter())
+                    .find(|pr| pr.number == number)
+                    .ok_or_else(|| {
+                        format!(
+                            "pull request #{number} is not linked to {}",
+                            evidence.issue_id
+                        )
+                    }),
+                None => one_open(evidence),
+            }
+            .and_then(|pr| names_issue(evidence, pr)),
             // Evaluated from Slice 5. Until then a transition that names one fails closed.
             Gate::CiGreen | Gate::Mergeable | Gate::NoOpenThreads | Gate::ProofAttached => {
                 Err(format!("Punchlist does not evaluate the {self} gate yet"))
@@ -135,6 +147,10 @@ pub struct Evidence {
     pub issue_id: String,
     /// The pull requests linked to the issue, open or not.
     pub pull_requests: Vec<PullRequestEvidence>,
+    /// The pull request whose merge or close on GitHub is causing the move. Absent on a
+    /// requested move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_pull_request: Option<i64>,
 }
 
 /// One gate's result. `reason` says why it passed or failed.
@@ -227,6 +243,7 @@ mod tests {
         Evidence {
             issue_id: "PL-7".into(),
             pull_requests,
+            closed_pull_request: None,
         }
     }
 
@@ -253,6 +270,53 @@ mod tests {
                 (false, "no open pull request is linked to PL-7".into())
             );
         }
+    }
+
+    #[test]
+    fn the_pull_request_an_event_closed_can_name_the_issue() {
+        let merged = Evidence {
+            closed_pull_request: Some(12),
+            ..evidence(vec![
+                pr(13, "feature/pl-7-next", "Next", OPEN, false),
+                pr(
+                    12,
+                    "feature/pl-7-fix",
+                    "Fix",
+                    PullRequestState::Merged,
+                    false,
+                ),
+            ])
+        };
+        assert_eq!(
+            check(Gate::PrNamesIssue, &merged),
+            (true, "pull request #12's branch names PL-7".into())
+        );
+        // The gates about an open pull request still read the open one.
+        assert_eq!(
+            check(Gate::PrOpen, &merged),
+            (true, "pull request #13 is open".into())
+        );
+        let other = Evidence {
+            closed_pull_request: Some(12),
+            ..evidence(vec![pr(
+                12,
+                "feature/pl-7-fix",
+                "Fix (PL-9)",
+                PullRequestState::Merged,
+                false,
+            )])
+        };
+        assert_eq!(
+            check(Gate::PrNamesIssue, &other),
+            (
+                false,
+                "pull request #12's title names PL-9, not PL-7".into()
+            )
+        );
+        assert_eq!(
+            check(Gate::PrOpen, &other),
+            (false, "no open pull request is linked to PL-7".into())
+        );
     }
 
     #[test]

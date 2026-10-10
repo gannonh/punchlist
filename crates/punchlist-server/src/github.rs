@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::issues::{record_comment, write_transition};
+use crate::issues::{check_gates, record_comment, write_transition};
 use crate::workflow::{active_workflow, queue_workflow_load};
 use crate::{ApiError, AppState};
 
@@ -611,8 +611,8 @@ async fn recompute_checks(
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
-/// event from the issue's status. Otherwise the event is only evidence. Redelivery finds
-/// the issue already moved and changes nothing.
+/// event from the issue's status and that transition's gates pass. Otherwise the event is
+/// only evidence. Redelivery finds the issue already moved and changes nothing.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
     job: &GithubJob,
@@ -642,6 +642,12 @@ async fn close_issue_on_pull_request(
         return Ok(());
     };
     let login = &event.sender.login;
+    let gates = match check_gates(tx, transition, login, issue_id, &status, Some(pr.number)).await {
+        Ok(gates) => gates,
+        // The issue stays where it is. `check_gates` logged the gate and its reason.
+        Err(ApiError::GateFailed(_)) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let actor_id = sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $2)
@@ -667,7 +673,7 @@ async fn close_issue_on_pull_request(
         transition.to.as_str(),
         Some(&job.delivery_id),
         workflow.version(),
-        &[],
+        &gates,
     )
     .await?;
     // The agent working this issue has nothing left to do: its pull request is gone, and the

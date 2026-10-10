@@ -23,6 +23,7 @@ use tower::ServiceExt;
 const SECRET: &str = "test-webhook-secret";
 const OPENED: &str = include_str!("fixtures/github/pull_request_opened.json");
 const READY: &str = include_str!("fixtures/github/pull_request_ready_for_review.json");
+const MERGED: &str = include_str!("fixtures/github/pull_request_closed_merged.json");
 const PUSH: &str = include_str!("fixtures/github/push.json");
 const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workflow.toml");
 
@@ -576,6 +577,92 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(jobs, 2);
+}
+
+/// Loads the PRD workflow with `gate` on `merging → done`, puts PL-1 in Merging and merges
+/// its pull request. Returns PL-1's status.
+async fn merge_with_gate_on_done(s: &Setup, gate: &str) -> String {
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert(
+            "workflow.toml".into(),
+            PRD_WORKFLOW.replace(
+                "on = \"pr_merged\"",
+                &format!("on = \"pr_merged\"\ngates = [\"{gate}\"]"),
+            ),
+        );
+        for prompt in ["system", "in_progress", "agent_review"] {
+            repo.files
+                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
+        }
+    }
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&s.state.pool).await, 1);
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // A person has no short path to Merging, so the test puts the issue there.
+    sqlx::query("UPDATE issue SET status = 'merging' WHERE id = 'PL-1'")
+        .execute(&s.state.pool)
+        .await
+        .unwrap();
+    deliver(s, "pull_request", "merged-1", MERGED).await;
+    // Redelivery, and the same merge under another delivery id, change nothing.
+    deliver(s, "pull_request", "merged-1", MERGED).await;
+    deliver(s, "pull_request", "merged-2", MERGED).await;
+    sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&s.state.pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        merge_with_gate_on_done(&s, "proof_attached").await,
+        "merging"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM transition")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "merged");
+}
+
+#[sqlx::test]
+async fn a_passing_gate_on_pr_merged_is_recorded_on_the_move(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(merge_with_gate_on_done(&s, "pr_names_issue").await, "done");
+    let gates: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT t.from_status, t.to_status, g.gate, g.result, g.reason
+         FROM transition t LEFT JOIN transition_gate g ON g.transition_id = t.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        gates,
+        vec![(
+            "merging".into(),
+            "done".into(),
+            "pr_names_issue".into(),
+            "pass".into(),
+            "pull request #12's branch names PL-1".into()
+        )]
+    );
 }
 
 #[sqlx::test]
