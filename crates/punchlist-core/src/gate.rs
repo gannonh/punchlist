@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::link::{branch_issue_id, title_issue_id};
+use crate::link::{branch_issue_id, title_issue_id, title_issue_ids};
 
 /// The gates v1 knows (PRD R4). A workflow that names another gate does not load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -176,8 +176,10 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
     let prefix = issue.rsplit_once('-').map_or(issue, |(prefix, _)| prefix);
     let branch = branch_issue_id(prefix, &pr.branch);
     let title = title_issue_id(prefix, &pr.title);
-    for (part, named) in [("branch", &branch), ("title", &title)] {
-        if let Some(other) = named.as_deref().filter(|named| *named != issue) {
+    let named = (branch.iter().cloned().map(|id| ("branch", id)))
+        .chain(title_issue_ids(prefix, &pr.title).map(|id| ("title", id)));
+    for (part, other) in named {
+        if other != issue {
             return Err(format!(
                 "pull request #{}'s {part} names {other}, not {issue}",
                 pr.number
@@ -303,6 +305,23 @@ mod tests {
             )
         );
         assert!(check(Gate::PrOpen, &other).0);
+        // The second id in a title counts too, with or without a branch that names the issue.
+        for branch in ["feature/pl-7-fix", "fix"] {
+            let second = evidence(vec![pr(
+                12,
+                branch,
+                "Fix (PL-7), follow-up to (PL-9)",
+                OPEN,
+                false,
+            )]);
+            assert_eq!(
+                check(Gate::PrNamesIssue, &second),
+                (
+                    false,
+                    "pull request #12's title names PL-9, not PL-7".into()
+                )
+            );
+        }
     }
 
     #[test]
