@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE issue SET status = 'todo' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "febe72621a7a4f80db7e18c8c15ab61fe5f609653d776faa0b8ac765c8b87994"
+}

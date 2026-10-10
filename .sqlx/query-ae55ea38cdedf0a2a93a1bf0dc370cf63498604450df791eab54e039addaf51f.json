@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.workflow_toml AS \"workflow_toml?\", v.prompts AS \"prompts?\",\n                  v.commit_sha AS \"commit_sha?\"\n         FROM workspace w LEFT JOIN workflow_version v ON v.id = w.workflow_version_id\n         WHERE w.id = $1 FOR NO KEY UPDATE OF w",
+  "query": "SELECT v.workflow_toml, v.prompts, v.commit_sha\n         FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id\n         WHERE w.id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "workflow_toml?",
+        "name": "workflow_toml",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "prompts?",
+        "name": "prompts",
         "type_info": "Jsonb",
         "origin": {
           "Table": {
@@ -27,7 +27,7 @@
       },
       {
         "ordinal": 2,
-        "name": "commit_sha?",
+        "name": "commit_sha",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "93e489e6cec327266aee0b43e77c2c359a60bdd198580f2804258c438ddd8003"
+  "hash": "ae55ea38cdedf0a2a93a1bf0dc370cf63498604450df791eab54e039addaf51f"
 }

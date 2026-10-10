@@ -23,32 +23,46 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 
 /// The workspace's active workflow and the commit it came from (`None` for the built-in
-/// one). Holds a row lock on the workspace row until the transaction ends, so `load`
-/// cannot switch versions while a move decided against the old one is in flight.
+/// one).
 pub(crate) async fn active_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> sqlx::Result<(Workflow, Option<String>)> {
     let row = sqlx::query!(
-        r#"SELECT v.workflow_toml AS "workflow_toml?", v.prompts AS "prompts?",
-                  v.commit_sha AS "commit_sha?"
-         FROM workspace w LEFT JOIN workflow_version v ON v.id = w.workflow_version_id
-         WHERE w.id = $1 FOR NO KEY UPDATE OF w"#,
+        "SELECT v.workflow_toml, v.prompts, v.commit_sha
+         FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id
+         WHERE w.id = $1",
         workspace_id,
     )
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((toml, prompts, commit_sha)) =
-        row.and_then(|r| Some((r.workflow_toml?, r.prompts?, r.commit_sha?)))
-    else {
+    let Some(row) = row else {
         return Ok((default_workflow().clone(), None));
     };
     // Only versions that loaded are stored, so one that no longer does is corrupt data.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
-        serde_json::from_value(prompts).map_err(|e| corrupt(e.to_string()))?;
-    let workflow = Workflow::from_files(&toml, prompts).map_err(|e| corrupt(e.to_string()))?;
-    Ok((workflow, Some(commit_sha)))
+        serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;
+    let workflow =
+        Workflow::from_files(&row.workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
+    Ok((workflow, Some(row.commit_sha)))
+}
+
+/// Locks the workspace row until the transaction ends. Every transaction that changes an
+/// issue's status or creates an issue takes it first, before any issue row lock, so `load`
+/// cannot switch workflows while a move decided against the old one is in flight, and
+/// two paths never take the two locks in opposite orders.
+pub(crate) async fn lock_workspace(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "SELECT id FROM workspace WHERE id = $1 FOR NO KEY UPDATE",
+        workspace_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// The payload of a `workflow_load` job.
@@ -75,6 +89,17 @@ pub async fn queue_workflow_load(
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// Why a workflow that drops statuses issues are in is refused.
+fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
+    let in_use: Vec<_> = in_use
+        .map(|(status, issues)| format!("`{status}` by {issues} issue(s)"))
+        .collect();
+    format!(
+        "status in use is not in the workflow: {}",
+        in_use.join(", ")
+    )
 }
 
 /// Reads `.punchlist/workflow.toml` and its prompts at the head of the default branch and
@@ -115,13 +140,13 @@ pub(crate) async fn load(
         tracing::info!("no .punchlist/workflow.toml on {place}; the workflow stays as it is");
         return Ok(());
     };
-    let refused = |error: punchlist_core::LoadError| {
-        tracing::warn!("refused .punchlist/workflow.toml on {place}: {error}");
+    let refused = |reason: &dyn std::fmt::Display| {
+        tracing::warn!("refused .punchlist/workflow.toml on {place}: {reason}");
         Ok(())
     };
     let parsed = match Workflow::from_toml(&text) {
         Ok(parsed) => parsed,
-        Err(error) => return refused(error),
+        Err(error) => return refused(&error),
     };
     let mut prompts = BTreeMap::new();
     for path in parsed.prompt_paths() {
@@ -131,17 +156,11 @@ pub(crate) async fn load(
     }
     let workflow = match Workflow::from_files(&text, prompts) {
         Ok(workflow) => workflow,
-        Err(error) => return refused(error),
+        Err(error) => return refused(&error),
     };
-    // Waits for moves in flight (they lock this row, see
-    // `active_workflow`) and holds off new ones until commit, so no issue can enter a
-    // dropped status between this check and the switch.
-    sqlx::query!(
-        "SELECT id FROM workspace WHERE id = $1 FOR NO KEY UPDATE",
-        workspace_id
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    // Waits for moves in flight and holds off new ones until commit (`lock_workspace`), so
+    // no issue can enter a dropped status between this check and the switch.
+    lock_workspace(&mut *tx, workspace_id).await?;
     let dropped = sqlx::query!(
         r#"SELECT status, count(*) AS "issues!" FROM issue
            WHERE workspace_id = $1 AND status <> ALL($2) GROUP BY status ORDER BY status"#,
@@ -155,15 +174,9 @@ pub(crate) async fn load(
     .fetch_all(&mut *tx)
     .await?;
     if !dropped.is_empty() {
-        let in_use: Vec<_> = dropped
-            .iter()
-            .map(|d| format!("`{}` by {} issue(s)", d.status, d.issues))
-            .collect();
-        tracing::warn!(
-            "refused .punchlist/workflow.toml on {place}: status in use is not in the workflow: {}",
-            in_use.join(", ")
-        );
-        return Ok(());
+        return refused(&dropped_message(
+            dropped.iter().map(|d| (d.status.as_str(), d.issues)),
+        ));
     }
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
@@ -221,4 +234,17 @@ async fn show_workflow(
 )]
 async fn schema() -> Json<schemars::Schema> {
     Json(workflow_schema())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_refusal_names_each_status_and_its_issue_count() {
+        assert_eq!(
+            dropped_message([("done", 2), ("todo", 1)].into_iter()),
+            "status in use is not in the workflow: `done` by 2 issue(s), `todo` by 1 issue(s)"
+        );
+    }
 }

@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, hash_token, new_token};
 use crate::issues::{check_move, record_transition};
 use crate::runners::{RunnerRow, runner_of};
-use crate::workflow::active_workflow;
+use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 const MAX_WAIT_SECONDS: u32 = 30;
@@ -69,6 +69,7 @@ async fn try_claim(
     if !runner.agents.contains(&dispatch.agent) {
         return Ok(None);
     }
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let id = match target {
         Target::Any => {
             let id = sqlx::query_scalar!(

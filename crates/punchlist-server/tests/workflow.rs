@@ -731,8 +731,129 @@ async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
     // The issue can still move; with it out of Todo the same file loads.
     let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "start"}))).await;
     assert_eq!(status, StatusCode::OK);
-    deliver(&s, "push", "push-2", &PUSH.replace("push", "push2")).await;
+    deliver(&s, "push", "push-2", PUSH).await;
     assert_eq!(workflow_versions(&pool).await, 1);
     let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
     assert_eq!(shown["commit_sha"], "a".repeat(40));
+}
+
+/// Waits until some backend waits on a lock, so a test needs no sleep as synchronization.
+async fn wait_for_lock_waiter(pool: &PgPool) {
+    for _ in 0..500 {
+        let waiting = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "n!" FROM pg_stat_activity
+               WHERE wait_event_type = 'Lock' AND datname = current_database()"#
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("nothing waited on a lock");
+}
+
+fn put_workflow(s: &Setup, sha: &str, toml: String) {
+    let mut repo = s.github.lock().unwrap();
+    repo.sha = sha.repeat(40);
+    repo.files.insert("workflow.toml".into(), toml);
+    for (path, text) in [
+        ("prompts/system.md", "System.\n"),
+        ("prompts/in_progress.md", "Build it.\n"),
+        ("prompts/agent_review.md", "Review it.\n"),
+    ] {
+        repo.files.insert(path.into(), text.into());
+    }
+}
+
+#[sqlx::test]
+async fn a_load_waits_for_a_move_in_flight_and_then_refuses(pool: PgPool) {
+    let s = Arc::new(setup(&pool).await);
+    let token = s.person.token.clone();
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let id = issue["id"].as_str().unwrap().to_string();
+    put_workflow(&s, "a", PRD_WORKFLOW.replace("todo", "ready"));
+
+    // A move in flight: it holds the workspace lock and has put the issue in Todo.
+    let mut mover = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *mover)
+        .await
+        .unwrap();
+    sqlx::query!("UPDATE issue SET status = 'todo' WHERE id = $1", id)
+        .execute(&mut *mover)
+        .await
+        .unwrap();
+    let load = tokio::spawn({
+        let s = s.clone();
+        async move { deliver(&s, "push", "push-1", PUSH).await }
+    });
+    wait_for_lock_waiter(&pool).await;
+    assert!(!load.is_finished());
+    mover.commit().await.unwrap();
+    load.await.unwrap();
+    assert_eq!(workflow_versions(&pool).await, 0);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], Value::Null);
+}
+
+#[sqlx::test]
+async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPool) {
+    let s = Arc::new(setup(&pool).await);
+    let token = s.person.token.clone();
+    put_workflow(&s, "a", PRD_WORKFLOW.into());
+    deliver(&s, "push", "push-1", PUSH).await;
+    let (_, first) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+
+    // A load in flight: it holds the workspace lock and has switched to a version with `ready`.
+    let mut load = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *load)
+        .await
+        .unwrap();
+    let ready = sqlx::query_scalar!(
+        "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+         SELECT workspace_id, 'sha256:ready', $1, replace(workflow_toml, 'todo', 'ready'), prompts
+         FROM workflow_version RETURNING id",
+        "b".repeat(40),
+    )
+    .fetch_one(&mut *load)
+    .await
+    .unwrap();
+    sqlx::query!("UPDATE workspace SET workflow_version_id = $1", ready)
+        .execute(&mut *load)
+        .await
+        .unwrap();
+    let mover = tokio::spawn({
+        let s = s.clone();
+        async move { call(&s.app, &token, "POST", &path, Some(json!({"to": "ready"}))).await }
+    });
+    wait_for_lock_waiter(&pool).await;
+    assert!(!mover.is_finished());
+    load.commit().await.unwrap();
+    let (status, moved) = mover.await.unwrap();
+    // The built-in workflow would answer 409 unknown_status for `ready`.
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        moved["event"]["detail"]["workflow_version"],
+        first["version"]
+    );
 }
