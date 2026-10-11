@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO actor (workspace_id, name, role, github_login)\n         VALUES ($1, $2, 'github', $2)\n         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL\n         DO UPDATE SET name = EXCLUDED.name\n         RETURNING id",
+  "query": "INSERT INTO actor (workspace_id, name, role, github_login)\n         VALUES ($1, $2, 'github', $3)\n         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL\n         DO UPDATE SET name = EXCLUDED.name\n         RETURNING id",
   "describe": {
     "columns": [
       {
@@ -18,6 +18,7 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Text",
         "Text"
       ]
     },
@@ -25,5 +26,5 @@
       false
     ]
   },
-  "hash": "1a9478627a264824dfc1ac4ff413b2ab0d2a3156a835e5553aefd2bf62eee96e"
+  "hash": "b68d5478890fa098b9b60fa77687cd3aaf78cd68663f01c95e01f22df4c7af09"
 }

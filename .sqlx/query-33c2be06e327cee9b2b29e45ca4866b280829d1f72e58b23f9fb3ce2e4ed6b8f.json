@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM actor a JOIN run r ON r.id = a.run_id\n                              WHERE a.id = $1 AND r.outcome = 'running') AS \"running!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "running!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "33c2be06e327cee9b2b29e45ca4866b280829d1f72e58b23f9fb3ce2e4ed6b8f"
+}

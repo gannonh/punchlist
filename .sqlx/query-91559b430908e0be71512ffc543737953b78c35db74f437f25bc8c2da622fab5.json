@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2\n                 FOR UPDATE",
+  "query": "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "3de1540f008d36756da9eb2770f7b1c73b41fe0ff5489f1b2e44328d70abc667"
+  "hash": "91559b430908e0be71512ffc543737953b78c35db74f437f25bc8c2da622fab5"
 }
