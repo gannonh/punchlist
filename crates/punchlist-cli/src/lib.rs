@@ -418,6 +418,13 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 "{}  {} → {}",
                 moved.issue.id, from_name, moved.issue.status_name
             )?;
+            if let Some(problem) = &moved.warning {
+                writeln!(
+                    out,
+                    "warning: no runner can claim {} under the active workflow: {problem}",
+                    moved.issue.id
+                )?;
+            }
         }
         IssueCommand::Comment { id, body } => {
             client.comment(&id, &body).await?;
