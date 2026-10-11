@@ -201,8 +201,9 @@ pub struct Claim {
     /// The branch to work on, `feature/<id>-<slug>`, or `feature/<id>-<slug>-<n>` from the
     /// issue's second lifecycle on.
     pub branch: String,
-    /// The issue's earlier branches, each with a merged pull request and no open one. The
-    /// runner replaces a worktree it still has on one of them. Empty for a first lifecycle.
+    /// The issue's branches with a merged pull request and no open one, sorted. The runner
+    /// replaces a worktree it still has on one of them. Empty when no earlier branch of the
+    /// issue has merged.
     #[serde(default)]
     pub merged_branches: Vec<String>,
     pub lease_expires_at: DateTime<Utc>,

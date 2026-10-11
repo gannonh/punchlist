@@ -252,19 +252,27 @@ fn prepare_blocking(
         if head == branch {
             return Ok(worktree);
         }
-        if !merged_branches.contains(&head) {
+        if merged_branches.contains(&head) {
+            // The worktree is left from a lifecycle whose pull request merged, and makes way
+            // for one on `branch`. Its commits stay on the local branch in the clone. Without
+            // `--force`, git refuses to remove a worktree with uncommitted or untracked files.
+            git.run(
+                Some(&clone_dir),
+                &["worktree", "remove", &worktree.to_string_lossy()],
+                "git worktree remove",
+            )
+            .map_err(|e| {
+                format!(
+                    "worktree {} has uncommitted work on the merged branch `{head}`: {e}",
+                    worktree.display()
+                )
+            })?;
+        } else {
             return Err(format!(
                 "worktree {} is on `{head}`, not `{branch}`",
                 worktree.display()
             ));
         }
-        // The worktree is left from a lifecycle whose pull request merged. The merged branch
-        // stays in the clone; the worktree makes way for one on `branch`.
-        git.run(
-            Some(&clone_dir),
-            &["worktree", "remove", "--force", &worktree.to_string_lossy()],
-            "git worktree remove",
-        )?;
     }
     std::fs::create_dir_all(worktree.parent().expect("worktree has a parent"))
         .map_err(|e| e.to_string())?;
@@ -482,7 +490,24 @@ mod tests {
         commit(&seed, "squash.txt");
         let main_sha = commit(&seed, "later.txt");
         run(&seed, &["push", "origin", "HEAD:main"]);
-        let main_tree = run(&seed, &["rev-parse", "HEAD^{tree}"]);
+
+        // Uncommitted work in the worktree on the merged branch is never deleted.
+        std::fs::write(path.join("draft.txt"), "kept").unwrap();
+        let err = first
+            .prepare(&repository(), next, &merged, "PL-1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("has uncommitted work on the merged branch `feature/pl-1-first-issue`"),
+            "{err}"
+        );
+        assert!(err.contains("worktrees/acme/widgets/PL-1"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(path.join("draft.txt")).unwrap(),
+            "kept"
+        );
+        assert_eq!(run(&path, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+        std::fs::remove_file(path.join("draft.txt")).unwrap();
 
         let again = first
             .prepare(&repository(), next, &merged, "PL-1")
@@ -491,7 +516,6 @@ mod tests {
         assert_eq!(again, path);
         assert_eq!(run(&again, &["rev-parse", "--abbrev-ref", "HEAD"]), next);
         assert_eq!(run(&again, &["rev-parse", "HEAD"]), main_sha);
-        assert_eq!(run(&again, &["rev-parse", "HEAD^{tree}"]), main_tree);
         assert_eq!(
             run(&again, &["ls-files"]),
             "README.md\nlater.txt\none.txt\nsquash.txt"
@@ -504,7 +528,6 @@ mod tests {
             .unwrap();
         assert_eq!(run(&fresh, &["rev-parse", "--abbrev-ref", "HEAD"]), next);
         assert_eq!(run(&fresh, &["rev-parse", "HEAD"]), main_sha);
-        assert_eq!(run(&fresh, &["rev-parse", "HEAD^{tree}"]), main_tree);
 
         // A retry of the second lifecycle lands on its branch and keeps its commits.
         let next_sha = commit(&again, "two.txt");

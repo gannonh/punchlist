@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT branch FROM pull_request WHERE issue_id = $1\n         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')",
+  "query": "SELECT branch FROM pull_request WHERE issue_id = $1\n         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')\n         ORDER BY branch",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "6f9595e640416f555c30bff19a0c268b590490bb0788016bc23ee46a8e2db8b0"
+  "hash": "dc72fff834b5877334e8f41896d662ddd031a2ae14e7f066fd358e8615cec068"
 }

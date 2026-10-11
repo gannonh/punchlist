@@ -742,4 +742,17 @@ async fn a_claim_after_the_branchs_pull_request_merged_names_the_next_branch(poo
         third["merged_branches"],
         json!(["feature/pl-1-merged", "feature/pl-1-merged-2"])
     );
+
+    // After a title edit the branch is cut from the new title, and the claim still lists the
+    // merged branches under the old one, so a runner can replace its worktree on them.
+    sqlx::query("UPDATE issue SET title = 'New title' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let renamed = reclaim(&third).await;
+    assert_eq!(renamed["branch"], "feature/pl-1-new-title");
+    assert_eq!(
+        renamed["merged_branches"],
+        json!(["feature/pl-1-merged", "feature/pl-1-merged-2"])
+    );
 }
