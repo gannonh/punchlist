@@ -1089,8 +1089,8 @@ async fn a_stored_version_without_the_dispatch_rule_stays_in_force_until_a_valid
         .map(|t| (&*t.from_status, &*t.to_status, &*t.workflow_version))
         .collect();
     assert_eq!(moves, [("backlog", "todo", hash)]);
-    // A move to Start still succeeds, and says that no runner can claim the issue.
     assert_eq!(body.get("warning"), None);
+    // A move to Start still succeeds, and says that no runner can claim the issue.
     let (status, body) = call(
         &s.app,
         &token,
@@ -1135,7 +1135,7 @@ async fn a_stored_version_without_the_dispatch_rule_stays_in_force_until_a_valid
     assert_eq!(valid["invalid"], Value::Null);
     assert_eq!(warn_invalid_workflows(&pool).await.unwrap(), 0);
     // Under the valid version a move to Start carries no warning.
-    call(
+    let (status, _) = call(
         &s.app,
         &token,
         "POST",
@@ -1143,6 +1143,7 @@ async fn a_stored_version_without_the_dispatch_rule_stays_in_force_until_a_valid
         Some(json!({"title": "Y"})),
     )
     .await;
+    assert_eq!(status, StatusCode::CREATED);
     for to in ["todo", "start"] {
         let (status, body) = call(
             &s.app,
