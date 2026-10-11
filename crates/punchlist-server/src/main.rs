@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
     AppState, Bootstrap, GithubClient, MIGRATOR, bootstrap, expire_leases, queue_workflow_load,
-    router, work_jobs,
+    router, warn_invalid_workflows, work_jobs,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -89,6 +89,9 @@ async fn main() -> anyhow::Result<()> {
             github_app_id,
             github_app_private_key,
         } => {
+            warn_invalid_workflows(&pool)
+                .await
+                .context("read the active workflows")?;
             let expiry_pool = pool.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));

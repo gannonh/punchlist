@@ -386,6 +386,9 @@ pub struct CreateComment {
 pub struct WorkflowInfo {
     /// The content hash recorded on every transition.
     pub version: String,
+    /// Why a push of this version would be refused today: the line, the key and the
+    /// problem. The version stays in force until a valid file is pushed. `None` when valid.
+    pub invalid: Option<String>,
     /// The default branch commit it was loaded from; `None` for the built-in workflow.
     pub commit_sha: Option<String>,
     pub statuses: Vec<String>,

@@ -440,9 +440,13 @@ fn with_gates(error: ClientError) -> anyhow::Error {
 
 /// `pl workflow show`.
 fn render_workflow(workflow: &WorkflowInfo) -> String {
+    let invalid = workflow.invalid.as_ref().map(|problem| {
+        format!("Invalid   {problem}; in force until a valid .punchlist/workflow.toml is pushed\n")
+    });
     format!(
-        "Version   {}\nCommit    {}\nStatuses  {}\n",
+        "Version   {}\n{}Commit    {}\nStatuses  {}\n",
         workflow.version,
+        invalid.unwrap_or_default(),
         workflow.commit_sha.as_deref().unwrap_or("built-in"),
         workflow.statuses.join(", ")
     )
@@ -722,12 +726,24 @@ mod tests {
     fn renders_the_workflow() {
         let info = WorkflowInfo {
             version: "sha256:ab".into(),
+            invalid: None,
             commit_sha: None,
             statuses: vec!["backlog".into(), "todo".into()],
         };
         assert_eq!(
             render_workflow(&info),
             "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n"
+        );
+        let info = WorkflowInfo {
+            invalid: Some("line 4, `statuses`: the runtime needs the status `start`".into()),
+            ..info
+        };
+        assert_eq!(
+            render_workflow(&info),
+            "Version   sha256:ab\n\
+             Invalid   line 4, `statuses`: the runtime needs the status `start`; \
+             in force until a valid .punchlist/workflow.toml is pushed\n\
+             Commit    built-in\nStatuses  backlog, todo\n"
         );
     }
 
