@@ -29,6 +29,11 @@ const DEFAULT_PROMPTS: [(&str, &str); 3] = [
 /// The preamble shared by every run, under `.punchlist/`. Optional (ADR 0001).
 pub const SYSTEM_PROMPT: &str = "prompts/system.md";
 
+/// Statuses the runtime hard-codes: a claim moves an issue from `START` to `IN_PROGRESS`
+/// and dispatches by the rule for `IN_PROGRESS`. A workflow must keep them.
+pub const START: &str = "start";
+pub const IN_PROGRESS: &str = "in_progress";
+
 /// The events a transition's `on` may name; the server makes each from a GitHub delivery.
 const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
 /// What a transition's `require` may ask a move to carry.
@@ -225,6 +230,16 @@ pub enum Problem {
     NoAgent,
     #[error("`max_concurrent` must be at least 1")]
     BadMaxConcurrent,
+    #[error("the runtime needs the status `{0}`")]
+    MissingStatus(&'static str),
+    #[error("the runtime needs a transition from `start` to `in_progress`")]
+    NoClaimTransition,
+    #[error("the runtime needs `runner` in `by` on the transition from `start` to `in_progress`")]
+    ClaimNotByRunner,
+    #[error("the runtime needs a runner to act on `start`, but this lock forbids it")]
+    ClaimLocked,
+    #[error("the runtime needs a dispatch rule for `in_progress`")]
+    NoClaimDispatch,
     #[error("prompt path `{0}` must be relative to .punchlist/, such as prompts/in_progress.md")]
     BadPromptPath(String),
     #[error("prompt file `.punchlist/{0}` does not exist")]
@@ -316,7 +331,7 @@ impl Workflow {
     pub fn from_toml(text: &str) -> Result<Workflow, LoadError> {
         Workflow::from_files(text, BTreeMap::new()).or_else(|error| match error.problem {
             // A prompt is checked once the files are read.
-            Problem::MissingPrompt(_) => Workflow::parse(text),
+            Problem::MissingPrompt(_) => Workflow::parse(text, true),
             _ => Err(error),
         })
     }
@@ -325,11 +340,23 @@ impl Workflow {
     /// by their path under `.punchlist/`. Every prompt the workflow names must be there;
     /// `prompts/system.md` is kept when present. The version is a content hash over the
     /// workflow file and the prompts kept (ADR 0001).
-    pub fn from_files(
+    pub fn from_files(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
+        Workflow::load_files(text, files, true)
+    }
+
+    /// Reads a version the server stored: `from_files` without the check that a runner can
+    /// claim from it, which applies only to a file being loaded. A version stored before a
+    /// rule existed stays readable.
+    pub fn from_stored(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
+        Workflow::load_files(text, files, false)
+    }
+
+    fn load_files(
         text: &str,
         mut files: BTreeMap<String, String>,
+        claimable: bool,
     ) -> Result<Workflow, LoadError> {
-        let mut workflow = Workflow::parse(text)?;
+        let mut workflow = Workflow::parse(text, claimable)?;
         let mut prompts = BTreeMap::new();
         for rule in &workflow.dispatch {
             let Some(path) = &rule.prompt else { continue };
@@ -355,7 +382,7 @@ impl Workflow {
         Ok(workflow)
     }
 
-    fn parse(text: &str) -> Result<Workflow, LoadError> {
+    fn parse(text: &str, claimable: bool) -> Result<Workflow, LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
             line: e.span().map(|span| errors.line(span.start)),
@@ -374,6 +401,7 @@ impl Workflow {
         if raw.statuses.get_ref().is_empty() {
             return Err(errors.at(raw.statuses.span(), "statuses", Problem::NoStatuses));
         }
+        let statuses_span = raw.statuses.span();
         let mut statuses: Vec<Status> = Vec::new();
         for (i, name) in raw.statuses.into_inner().into_iter().enumerate() {
             if statuses.iter().any(|s| s.0 == *name.get_ref()) {
@@ -405,6 +433,7 @@ impl Workflow {
         };
 
         let mut transitions: Vec<Transition> = Vec::new();
+        let mut claim_by = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -424,6 +453,7 @@ impl Workflow {
                 .map(|name| known(name, from_span.clone(), key("from")))
                 .collect::<Result<Vec<_>, _>>()?;
             let to = known(t.to.get_ref(), t.to.span(), key("to"))?;
+            let by_span = t.by.first().map(Spanned::span);
             let by = roles(t.by, &key("by"))?;
             if by.is_empty() && t.on.is_none() {
                 return Err(errors.at(t.to.span(), format!("transition[{i}]"), Problem::NoActor));
@@ -458,6 +488,13 @@ impl Workflow {
                     return Err(errors.at(t.to.span(), format!("transition[{i}]"), problem));
                 }
             }
+            if claim_by.is_none() && to.0 == IN_PROGRESS && from.iter().any(|f| f.0 == START) {
+                // The first match is the one the claim finds.
+                claim_by = Some(match by_span {
+                    Some(span) => (span, key("by")),
+                    None => (t.to.span(), format!("transition[{i}]")),
+                });
+            }
             transitions.push(Transition {
                 from,
                 to,
@@ -469,8 +506,12 @@ impl Workflow {
         }
 
         let mut locks = Vec::new();
+        let mut start_lock = None;
         for (name, locked) in raw.lock {
             let key = format!("lock.{name}");
+            if name == START {
+                start_lock = Some(locked.span());
+            }
             let status = known(&name, locked.span(), key.clone())?;
             locks.push((status, roles(locked.into_inner(), &key)?));
         }
@@ -498,7 +539,7 @@ impl Workflow {
             });
         }
 
-        Ok(Workflow {
+        let workflow = Workflow {
             version: content_hash(text, &BTreeMap::new()),
             source: text.to_string(),
             statuses,
@@ -506,7 +547,48 @@ impl Workflow {
             locks,
             dispatch,
             prompts: BTreeMap::new(),
-        })
+        };
+        if claimable {
+            workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
+        }
+        Ok(workflow)
+    }
+
+    /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
+    /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
+    /// of `check_transition`, as the claim does) and a dispatch rule for `in_progress`. Each
+    /// error points at the nearest place that exists in the file.
+    fn check_claimable(
+        &self,
+        errors: &Errors,
+        statuses_span: Range<usize>,
+        claim_by: Option<(Range<usize>, String)>,
+        start_lock: Option<Range<usize>>,
+    ) -> Result<(), LoadError> {
+        let at_statuses = |problem| errors.at(statuses_span.clone(), "statuses", problem);
+        for name in [START, IN_PROGRESS] {
+            if self.status(name).is_none() {
+                return Err(at_statuses(Problem::MissingStatus(name)));
+            }
+        }
+        match self.check_transition(START, IN_PROGRESS, Role::Runner) {
+            Ok(_) => {}
+            Err(Refusal::Locked { .. }) => {
+                let span = start_lock.unwrap_or(statuses_span.clone());
+                return Err(errors.at(span, format!("lock.{START}"), Problem::ClaimLocked));
+            }
+            Err(Refusal::NoTransition { .. }) => {
+                return Err(at_statuses(Problem::NoClaimTransition));
+            }
+            Err(_) => {
+                let (span, key) = claim_by.unwrap_or((statuses_span.clone(), "statuses".into()));
+                return Err(errors.at(span, key, Problem::ClaimNotByRunner));
+            }
+        }
+        if self.dispatch_for(IN_PROGRESS).is_none() {
+            return Err(at_statuses(Problem::NoClaimDispatch));
+        }
+        Ok(())
     }
 
     /// A content hash over the workflow file and its prompts, recorded on every transition.
@@ -683,7 +765,8 @@ struct RawWorkflow {
     #[serde(default)]
     #[schemars(with = "Option<u32>")]
     version: Option<Spanned<i64>>,
-    /// Every status, in order. A new issue starts in the first.
+    /// Every status, in order. A new issue starts in the first. `start` and `in_progress`
+    /// are required.
     #[schemars(with = "Vec<String>")]
     statuses: Spanned<Vec<Spanned<String>>>,
     /// The allowed moves.
@@ -915,15 +998,9 @@ mod tests {
 
     #[test]
     fn several_allowed_roles_are_listed() {
-        let workflow = Workflow::from_toml(
-            r#"
-            statuses = ["a", "b"]
-            [[transition]]
-            from = "a"
-            to = "b"
-            by = ["person", "agent"]
-            "#,
-        )
+        let workflow = Workflow::from_toml(&runnable(
+            "[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\", \"agent\"]",
+        ))
         .unwrap();
         assert_eq!(
             workflow
@@ -990,6 +1067,14 @@ mod tests {
     fn error(text: &str) -> (Option<usize>, String, Problem) {
         let e = Workflow::from_toml(text).unwrap_err();
         (e.line, e.key, e.problem)
+    }
+
+    /// A small workflow a runner can claim from: statuses `a` and `b`, `body`, and the
+    /// reserved statuses, runner transition and dispatch rule.
+    fn runnable(body: &str) -> String {
+        format!(
+            "statuses = [\"a\", \"b\", \"start\", \"in_progress\"]\n{body}\n[[transition]]\nfrom = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\n[dispatch.status.in_progress]\nagent = \"claude-code\"\n"
+        )
     }
 
     const PRD_TEMPLATE: &str = include_str!("default/workflow.toml");
@@ -1148,7 +1233,7 @@ mod tests {
             transition("by = [\"github\"]").2,
             Problem::UnknownRole("github".into())
         );
-        assert!(Workflow::from_toml("statuses = [\"a\", \"b\"]\n[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]")
+        assert!(Workflow::from_toml(&runnable("[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]"))
         .is_ok());
         assert_eq!(
             error(
@@ -1191,6 +1276,43 @@ mod tests {
         );
     }
 
+    /// `PRD_TEMPLATE` with `from` replaced by `to`; fails if the template no longer has `from`.
+    fn edited(from: &str, to: &str) -> String {
+        assert!(PRD_TEMPLATE.contains(from), "the template has {from:?}");
+        PRD_TEMPLATE.replacen(from, to, 1)
+    }
+
+    #[test]
+    fn a_workflow_the_runtime_cannot_run_names_its_line_and_key() {
+        let refused = |text: &str| Workflow::from_toml(text).unwrap_err().to_string();
+        assert_eq!(
+            refused(&PRD_TEMPLATE.replace("\"start\"", "\"begin\"")),
+            "line 4, `statuses`: the runtime needs the status `start`"
+        );
+        assert_eq!(
+            refused(&edited(
+                "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+                ""
+            )),
+            "line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`"
+        );
+        assert_eq!(
+            refused(&edited(
+                "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]",
+                "from = \"start\"\nto = \"agent_review\"\nby = [\"runner\"]"
+            )),
+            "line 4, `statuses`: the runtime needs a transition from `start` to `in_progress`"
+        );
+        assert_eq!(
+            refused(&edited("by = [\"runner\"]", "by = [\"person\"]")),
+            "line 20, `transition[2].by`: the runtime needs `runner` in `by` on the transition from `start` to `in_progress`"
+        );
+        assert_eq!(
+            refused(&edited("[lock]\n", "[lock]\nstart = [\"runner\"]\n")),
+            "line 51, `lock.start`: the runtime needs a runner to act on `start`, but this lock forbids it"
+        );
+    }
+
     #[test]
     fn an_unknown_key_is_refused() {
         // A misspelt `gates` must not load as a transition with no gates.
@@ -1203,7 +1325,8 @@ mod tests {
 
     #[test]
     fn prompts_load_hash_and_join() {
-        let text = "statuses = [\"a\"]\n[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"\n";
+        let text =
+            &runnable("[dispatch.status.a]\nagent = \"claude-code\"\nprompt = \"prompts/a.md\"");
         let files = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
             pairs
                 .iter()
