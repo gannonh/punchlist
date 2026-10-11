@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace SET workflow_refused_commit = 'abc123', workflow_refused_at = now(),\n         workflow_refused_reason = 'status in use is not in the workflow: `todo` by 1 issue(s)'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "68d82abdd28cb7657fe5fb971a461c44dfbfdef5c86bf522c1587754e6568717"
+}

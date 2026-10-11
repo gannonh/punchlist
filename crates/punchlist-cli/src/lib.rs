@@ -440,12 +440,16 @@ fn with_gates(error: ClientError) -> anyhow::Error {
 
 /// `pl workflow show`.
 fn render_workflow(workflow: &WorkflowInfo) -> String {
-    format!(
+    let mut out = format!(
         "Version   {}\nCommit    {}\nStatuses  {}\n",
         workflow.version,
         workflow.commit_sha.as_deref().unwrap_or("built-in"),
         workflow.statuses.join(", ")
-    )
+    );
+    if let Some(refused) = &workflow.refused {
+        out += &format!("Refused   {}: {}\n", refused.commit_sha, refused.reason);
+    }
+    out
 }
 
 /// The issue and its timeline from two requests. A move landing between them would show an
@@ -724,10 +728,23 @@ mod tests {
             version: "sha256:ab".into(),
             commit_sha: None,
             statuses: vec!["backlog".into(), "todo".into()],
+            refused: None,
         };
         assert_eq!(
             render_workflow(&info),
             "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n"
+        );
+        let info = WorkflowInfo {
+            refused: Some(punchlist_api::WorkflowRefusal {
+                commit_sha: "abc".into(),
+                at: chrono::DateTime::UNIX_EPOCH,
+                reason: "line 4, `statuses`: bad".into(),
+            }),
+            ..info
+        };
+        assert_eq!(
+            render_workflow(&info),
+            "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\nRefused   abc: line 4, `statuses`: bad\n"
         );
     }
 
