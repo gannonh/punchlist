@@ -28,6 +28,16 @@ pub(crate) async fn active_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> sqlx::Result<(Workflow, Option<String>)> {
+    let (workflow, commit_sha, _) = stored_workflow(conn, workspace_id).await?;
+    Ok((workflow, commit_sha))
+}
+
+/// `active_workflow`, and why a push of that version would be refused today, if it would.
+/// Such a version stays in force as stored (PRD, "The workflow file").
+async fn stored_workflow(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> sqlx::Result<(Workflow, Option<String>, Option<String>)> {
     let row = sqlx::query!(
         "SELECT v.workflow_toml, v.prompts, v.commit_sha
          FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id
@@ -37,16 +47,46 @@ pub(crate) async fn active_workflow(
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
-        return Ok((default_workflow().clone(), None));
+        return Ok((default_workflow().clone(), None, None));
     };
     // Only versions that loaded are stored, so one that no longer parses is corrupt data. A
-    // version stored before a runtime rule (KAT-3750) is read without that rule.
+    // version stored before a runtime rule (KAT-3750) comes back with that rule's problem.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
         serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;
-    let workflow =
+    let (workflow, invalid) =
         Workflow::from_stored(&row.workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
-    Ok((workflow, Some(row.commit_sha)))
+    Ok((
+        workflow,
+        Some(row.commit_sha),
+        invalid.map(|e| e.to_string()),
+    ))
+}
+
+/// Logs each workspace whose active version a push would be refused for today, and returns
+/// how many there are. Called once when the server starts: a version is valid when it
+/// loads, so only a newer server can find one.
+pub async fn warn_invalid_workflows(pool: &sqlx::PgPool) -> sqlx::Result<usize> {
+    let mut conn = pool.acquire().await?;
+    let mut invalid = 0;
+    for workspace_id in sqlx::query_scalar!("SELECT id FROM workspace ORDER BY created_at")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        match stored_workflow(&mut conn, workspace_id).await {
+            Ok((_, _, None)) => {}
+            Ok((workflow, _, Some(problem))) => {
+                invalid += 1;
+                tracing::warn!(
+                    "workspace {workspace_id}: the active workflow {} fails validation: \
+                     {problem}; it stays in force until a valid .punchlist/workflow.toml is pushed",
+                    workflow.version()
+                );
+            }
+            Err(error) => tracing::error!("workspace {workspace_id}: {error}"),
+        }
+    }
+    Ok(invalid)
 }
 
 /// Locks the workspace row until the transaction ends. Every transaction that changes an
@@ -227,7 +267,7 @@ async fn show_workflow(
     actor: Actor,
 ) -> Result<Json<WorkflowInfo>, ApiError> {
     let mut conn = state.pool.acquire().await?;
-    let (workflow, commit_sha) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let (workflow, commit_sha, invalid) = stored_workflow(&mut conn, actor.workspace_id).await?;
     let refused = sqlx::query!(
         "SELECT workflow_refused_commit, workflow_refused_at, workflow_refused_reason
          FROM workspace WHERE id = $1",
@@ -237,6 +277,7 @@ async fn show_workflow(
     .await?;
     Ok(Json(WorkflowInfo {
         version: workflow.version().to_string(),
+        invalid,
         commit_sha,
         statuses: workflow
             .statuses()

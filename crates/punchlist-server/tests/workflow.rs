@@ -2,7 +2,7 @@
 //! end to end: requests against the router, a fake GitHub for `.punchlist/`, then the rows
 //! read back from Postgres.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -12,8 +12,10 @@ use axum::http::{Request, StatusCode};
 use axum::routing::get;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use punchlist_core::Workflow;
 use punchlist_server::{
     AppState, Bootstrap, Bootstrapped, GithubClient, bootstrap, router, run_jobs_until_idle,
+    warn_invalid_workflows,
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -965,7 +967,9 @@ async fn a_passing_gate_on_pr_merged_is_recorded_on_the_move(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(pool: PgPool) {
+async fn a_stored_version_without_the_dispatch_rule_stays_in_force_until_a_valid_push(
+    pool: PgPool,
+) {
     let s = setup(&pool).await;
     let token = s.person.token.clone();
     // A version stored before the runtime required a dispatch rule for `in_progress`.
@@ -974,14 +978,21 @@ async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(poo
         "",
     );
     assert_ne!(old, PRD_WORKFLOW);
+    let prompts = BTreeMap::from([(
+        "prompts/agent_review.md".to_string(),
+        "Review it.".to_string(),
+    )]);
+    let (stored, _) = Workflow::from_stored(&old, prompts.clone()).unwrap();
+    let hash = stored.version();
     sqlx::query!(
         "WITH v AS (
              INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
-             SELECT id, 'sha256:old', $1, $2, '{\"prompts/agent_review.md\": \"Review it.\"}'::jsonb
-             FROM workspace RETURNING id)
+             SELECT id, $1, $2, $3, $4 FROM workspace RETURNING id)
          UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+        hash,
         "c".repeat(40),
         old,
+        json!(prompts),
     )
     .execute(&pool)
     .await
@@ -989,6 +1000,12 @@ async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(poo
     let (status, body) = call(&s.app, &token, "GET", "/api/workflow", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["commit_sha"], "c".repeat(40));
+    assert_eq!(body["version"], hash);
+    assert_eq!(
+        body["invalid"],
+        "line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`"
+    );
+    assert_eq!(warn_invalid_workflows(&pool).await.unwrap(), 1);
     let (status, _) = call(
         &s.app,
         &token,
@@ -1007,6 +1024,21 @@ async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(poo
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let issues = sqlx::query!("SELECT id, status FROM issue")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let issues: Vec<_> = issues.iter().map(|i| (&*i.id, &*i.status)).collect();
+    assert_eq!(issues, [("PL-1", "todo")]);
+    let moves = sqlx::query!("SELECT from_status, to_status, workflow_version FROM transition")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let moves: Vec<_> = moves
+        .iter()
+        .map(|t| (&*t.from_status, &*t.to_status, &*t.workflow_version))
+        .collect();
+    assert_eq!(moves, [("backlog", "todo", hash)]);
 
     // Pushing that same file is refused.
     {
@@ -1018,6 +1050,24 @@ async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(poo
     assert_eq!(workflow_versions(&pool).await, 1);
     let (_, after) = call(&s.app, &token, "GET", "/api/workflow", None).await;
     assert_eq!(after["commit_sha"], "c".repeat(40));
+
+    // Pushing a valid file replaces it.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "e".repeat(40);
+        repo.files
+            .insert("workflow.toml".into(), PRD_WORKFLOW.into());
+        repo.files
+            .insert("prompts/in_progress.md".into(), "Build it.\n".into());
+        repo.files
+            .insert("prompts/agent_review.md".into(), "Review it.\n".into());
+    }
+    deliver(&s, "push", "push-2", PUSH).await;
+    let (_, valid) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(valid["commit_sha"], "e".repeat(40));
+    assert_ne!(valid["version"], hash);
+    assert_eq!(valid["invalid"], Value::Null);
+    assert_eq!(warn_invalid_workflows(&pool).await.unwrap(), 0);
 }
 
 #[sqlx::test]
