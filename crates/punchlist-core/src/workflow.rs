@@ -224,6 +224,10 @@ pub enum Problem {
     UnknownGate(String),
     #[error("unknown requirement `{0}`; requirements are {requirements}", requirements = REQUIREMENTS.join(", "))]
     UnknownRequirement(String),
+    #[error(
+        "`require` only applies to a transition with `on`; the server reads it when an event closes a pull request"
+    )]
+    RequireWithoutEvent,
     #[error("transition {from} → {to} is listed twice")]
     DuplicateTransition { from: String, to: String },
     #[error("the dispatch rule names no agent")]
@@ -353,8 +357,8 @@ impl Workflow {
         Workflow::load_files(text, files, true).and_then(valid)
     }
 
-    /// Reads a version the server stored. A version stored before the rule that a runner can
-    /// claim from it stays readable: it comes back with the error a load of the same file is
+    /// Reads a version the server stored. A version stored before a rule that the server can
+    /// run it (a runner can claim from it, `require` rides an event) stays readable: it comes back with the error a load of the same file is
     /// refused with. Text that is not a workflow at all is still an error.
     pub fn from_stored(
         text: &str,
@@ -453,6 +457,7 @@ impl Workflow {
         let mut transitions: Vec<Transition> = Vec::new();
         let mut claim_by = None;
         let mut claim_gate = None;
+        let mut unrunnable = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -497,6 +502,13 @@ impl Workflow {
                     let problem = Problem::UnknownRequirement(name.get_ref().clone());
                     return Err(errors.at(name.span(), key(&format!("require[{j}]")), problem));
                 }
+            }
+            if t.on.is_none()
+                && let Some(name) = t.require.first()
+            {
+                // Kept, not returned, so a version stored before this rule still reads.
+                let error = errors.at(name.span(), key("require[0]"), Problem::RequireWithoutEvent);
+                unrunnable.get_or_insert(error);
             }
             for f in &from {
                 if transitions.iter().any(|o| o.to == to && o.from.contains(f)) {
@@ -570,7 +582,8 @@ impl Workflow {
         };
         let unclaimable = workflow
             .check_claimable(&errors, statuses_span, claim_by, claim_gate, start_lock)
-            .err();
+            .err()
+            .or(unrunnable);
         Ok((workflow, unclaimable))
     }
 
@@ -1262,6 +1275,14 @@ mod tests {
             transition("by = [\"github\"]").2,
             Problem::UnknownRole("github".into())
         );
+        assert_eq!(
+            Workflow::from_toml(&runnable(
+                "[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\"]\nrequire = [\"comment\"]"
+            ))
+            .unwrap_err()
+            .to_string(),
+            "line 6, `transition[0].require[0]`: `require` only applies to a transition with `on`; the server reads it when an event closes a pull request"
+        );
         assert!(Workflow::from_toml(&runnable("[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]"))
         .is_ok());
         assert_eq!(
@@ -1362,6 +1383,15 @@ mod tests {
         );
         let (_, problem) = Workflow::from_stored(PRD_TEMPLATE, prompts()).unwrap();
         assert_eq!(problem, None);
+        let (_, problem) = Workflow::from_stored(
+            &edited(
+                "by = [\"person\"]\n",
+                "by = [\"person\"]\nrequire = [\"comment\"]\n",
+            ),
+            prompts(),
+        )
+        .unwrap();
+        assert_eq!(problem.unwrap().key, "transition[5].require[0]");
         // Nothing to keep in force.
         assert!(Workflow::from_stored("statuses = [", prompts()).is_err());
     }
