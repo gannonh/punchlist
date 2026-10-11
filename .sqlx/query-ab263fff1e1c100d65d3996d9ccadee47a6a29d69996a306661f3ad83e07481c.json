@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT workflow_refused_commit, workflow_refused_at, workflow_refused_reason\n         FROM workspace WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_refused_commit",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "workflow_refused_commit"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "workflow_refused_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "workflow_refused_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "workflow_refused_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "workflow_refused_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ab263fff1e1c100d65d3996d9ccadee47a6a29d69996a306661f3ad83e07481c"
+}

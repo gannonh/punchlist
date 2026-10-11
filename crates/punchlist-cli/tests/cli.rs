@@ -527,6 +527,22 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
         )
     );
 
+    sqlx::query!(
+        "UPDATE workspace SET workflow_refused_commit = 'abc123', workflow_refused_at = now(),
+         workflow_refused_reason = 'status in use is not in the workflow: `todo` by 1 issue(s)'"
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let show = pl.run(&["workflow", "show"]).await;
+    assert!(
+        show.stdout.ends_with(
+            "\nRefused   abc123: status in use is not in the workflow: `todo` by 1 issue(s)\n"
+        ),
+        "{}",
+        show.stdout
+    );
+
     pl.run(&["issue", "create", "--title", "First"]).await;
     let moved = pl.run(&["issue", "transition", "PL-1", "todo"]).await;
     assert_eq!(

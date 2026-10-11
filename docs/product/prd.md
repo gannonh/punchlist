@@ -181,7 +181,9 @@ agent = "codex"
 prompt = "prompts/agent_review.md"
 ```
 
-The runtime reserves a few names: the statuses `start` and `in_progress`, the runner transition from `start` to `in_progress`, and the `dispatch.status.in_progress` rule. A claim moves an issue between those two statuses and starts the agent that rule names, so a workflow file must keep all four. The server refuses a file that lacks one, at load, with the line and key, and keeps the previous version active. Everything else in the file is free to change.
+The runtime reserves a few names: the statuses `start` and `in_progress`, the runner transition from `start` to `in_progress`, and the `dispatch.status.in_progress` rule. A claim moves an issue between those two statuses and starts the agent that rule names, so a workflow file must keep all four. The `start` to `in_progress` transition takes no gates in v1: every shipped gate reads evidence, such as a pull request, that exists only after the run starts, so a gate there would refuse every claim. The server refuses a file that lacks one or gates that transition, at load, with the line and key, and keeps the previous version active. Everything else in the file is free to change.
+
+A version that loaded stays in force even when a later server would refuse the same file, as happens when the runtime gains a rule. Transitions keep running against it as stored and record its hash. The server logs the problem once at each start, and `pl workflow show` marks the version invalid with the line, key and problem a push of that file would be refused with. Pushing a valid file replaces it. The server does not fall back to the built-in workflow, because issues may sit in statuses the built-in one lacks. A stored version whose text no longer parses as a workflow at all leaves nothing to keep in force: requests that need the workflow fail until a valid file is pushed.
 
 A status with a `dispatch.status` entry starts an agent with that prompt. A status without one waits for a person or a GitHub event, which is how a human gate is expressed.
 

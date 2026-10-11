@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::State;
-use punchlist_api::{ErrorBody, WorkflowInfo};
+use punchlist_api::{ErrorBody, WorkflowInfo, WorkflowRefusal};
 use punchlist_core::{Workflow, default_workflow, workflow_schema};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -28,6 +28,16 @@ pub(crate) async fn active_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> sqlx::Result<(Workflow, Option<String>)> {
+    let (workflow, commit_sha, _) = stored_workflow(conn, workspace_id).await?;
+    Ok((workflow, commit_sha))
+}
+
+/// `active_workflow`, and why a push of that version would be refused today, if it would.
+/// Such a version stays in force as stored (PRD, "The workflow file").
+async fn stored_workflow(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> sqlx::Result<(Workflow, Option<String>, Option<String>)> {
     let row = sqlx::query!(
         "SELECT v.workflow_toml, v.prompts, v.commit_sha
          FROM workspace w JOIN workflow_version v ON v.id = w.workflow_version_id
@@ -37,16 +47,46 @@ pub(crate) async fn active_workflow(
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
-        return Ok((default_workflow().clone(), None));
+        return Ok((default_workflow().clone(), None, None));
     };
     // Only versions that loaded are stored, so one that no longer parses is corrupt data. A
-    // version stored before a runtime rule (KAT-3750) is read without that rule.
+    // version stored before a runtime rule (KAT-3750) comes back with that rule's problem.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
         serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;
-    let workflow =
+    let (workflow, invalid) =
         Workflow::from_stored(&row.workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
-    Ok((workflow, Some(row.commit_sha)))
+    Ok((
+        workflow,
+        Some(row.commit_sha),
+        invalid.map(|e| e.to_string()),
+    ))
+}
+
+/// Logs each workspace whose active version a push would be refused for today, and returns
+/// how many there are. Called once when the server starts: a version is valid when it
+/// loads, so only a newer server can find one.
+pub async fn warn_invalid_workflows(pool: &sqlx::PgPool) -> sqlx::Result<usize> {
+    let mut conn = pool.acquire().await?;
+    let mut invalid = 0;
+    for workspace_id in sqlx::query_scalar!("SELECT id FROM workspace ORDER BY created_at")
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        match stored_workflow(&mut conn, workspace_id).await {
+            Ok((_, _, None)) => {}
+            Ok((workflow, _, Some(problem))) => {
+                invalid += 1;
+                tracing::warn!(
+                    "workspace {workspace_id}: the active workflow {} fails validation: \
+                     {problem}; it stays in force until a valid .punchlist/workflow.toml is pushed",
+                    workflow.version()
+                );
+            }
+            Err(error) => tracing::error!("workspace {workspace_id}: {error}"),
+        }
+    }
+    Ok(invalid)
 }
 
 /// Locks the workspace row until the transaction ends. Every transaction that changes an
@@ -105,7 +145,8 @@ fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
 
 /// Reads `.punchlist/workflow.toml` and its prompts at the head of the default branch and
 /// makes them the active version. A file that does not load is refused with its line and
-/// reason in the log, and the active version stays. Runs inside the job's transaction.
+/// reason in the log and on the workspace, and the active version stays. Runs inside the
+/// job's transaction.
 pub(crate) async fn load(
     state: &AppState,
     tx: &mut sqlx::PgConnection,
@@ -141,13 +182,24 @@ pub(crate) async fn load(
         tracing::info!("no .punchlist/workflow.toml on {place}; the workflow stays as it is");
         return Ok(());
     };
-    let refused = |reason: &dyn std::fmt::Display| {
+    // The refusal is committed with the job, so `GET /api/workflow` can say why the push
+    // did not load.
+    let refused = async |tx: &mut sqlx::PgConnection, reason: String| {
         tracing::warn!("refused .punchlist/workflow.toml on {place}: {reason}");
+        sqlx::query!(
+            "UPDATE workspace SET workflow_refused_commit = $2, workflow_refused_at = now(),
+                 workflow_refused_reason = $3 WHERE id = $1",
+            workspace_id,
+            head.sha,
+            reason,
+        )
+        .execute(tx)
+        .await?;
         Ok(())
     };
     let parsed = match Workflow::from_toml(&text) {
         Ok(parsed) => parsed,
-        Err(error) => return refused(&error),
+        Err(error) => return refused(&mut *tx, error.to_string()).await,
     };
     let mut prompts = BTreeMap::new();
     for path in parsed.prompt_paths() {
@@ -157,7 +209,7 @@ pub(crate) async fn load(
     }
     let workflow = match Workflow::from_files(&text, prompts) {
         Ok(workflow) => workflow,
-        Err(error) => return refused(&error),
+        Err(error) => return refused(&mut *tx, error.to_string()).await,
     };
     // Waits for moves in flight and holds off new ones until commit (`lock_workspace`), so
     // no issue can enter a dropped status between this check and the switch.
@@ -175,9 +227,8 @@ pub(crate) async fn load(
     .fetch_all(&mut *tx)
     .await?;
     if !dropped.is_empty() {
-        return refused(&dropped_message(
-            dropped.iter().map(|d| (d.status.as_str(), d.issues)),
-        ));
+        let reason = dropped_message(dropped.iter().map(|d| (d.status.as_str(), d.issues)));
+        return refused(&mut *tx, reason).await;
     }
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
@@ -193,7 +244,8 @@ pub(crate) async fn load(
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query!(
-        "UPDATE workspace SET workflow_version_id = $2 WHERE id = $1",
+        "UPDATE workspace SET workflow_version_id = $2, workflow_refused_commit = NULL,
+             workflow_refused_at = NULL, workflow_refused_reason = NULL WHERE id = $1",
         workspace_id,
         version_id,
     )
@@ -203,7 +255,8 @@ pub(crate) async fn load(
     Ok(())
 }
 
-/// The workspace's active workflow: its version, the commit it came from, its statuses.
+/// The workspace's active workflow: its version, the commit it came from, its statuses and
+/// the last push that was refused.
 #[utoipa::path(
     get,
     path = "/api/workflow",
@@ -214,15 +267,32 @@ async fn show_workflow(
     actor: Actor,
 ) -> Result<Json<WorkflowInfo>, ApiError> {
     let mut conn = state.pool.acquire().await?;
-    let (workflow, commit_sha) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let (workflow, commit_sha, invalid) = stored_workflow(&mut conn, actor.workspace_id).await?;
+    let refused = sqlx::query!(
+        "SELECT workflow_refused_commit, workflow_refused_at, workflow_refused_reason
+         FROM workspace WHERE id = $1",
+        actor.workspace_id,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(Json(WorkflowInfo {
         version: workflow.version().to_string(),
+        invalid,
         commit_sha,
         statuses: workflow
             .statuses()
             .iter()
             .map(|s| s.as_str().to_string())
             .collect(),
+        refused: refused
+            .workflow_refused_commit
+            .zip(refused.workflow_refused_at)
+            .zip(refused.workflow_refused_reason)
+            .map(|((commit_sha, at), reason)| WorkflowRefusal {
+                commit_sha,
+                at,
+                reason,
+            }),
     }))
 }
 

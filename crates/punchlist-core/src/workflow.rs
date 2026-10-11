@@ -236,6 +236,10 @@ pub enum Problem {
     NoClaimTransition,
     #[error("the runtime needs `runner` in `by` on the transition from `start` to `in_progress`")]
     ClaimNotByRunner,
+    #[error(
+        "the transition from `start` to `in_progress` takes no gates; an issue in `start` has no evidence yet"
+    )]
+    ClaimGated,
     #[error("the runtime needs a runner to act on `start`, but this lock forbids it")]
     ClaimLocked,
     #[error("the runtime needs a dispatch rule for `in_progress`")]
@@ -304,6 +308,11 @@ fn role_list(roles: &[Role]) -> String {
     }
 }
 
+/// A workflow a file may load as: one with no problem.
+fn valid((workflow, problem): (Workflow, Option<LoadError>)) -> Result<Workflow, LoadError> {
+    problem.map_or(Ok(workflow), Err)
+}
+
 /// Builds `LoadError`s for one file: turns byte spans into lines.
 struct Errors<'a> {
     text: &'a str,
@@ -331,7 +340,7 @@ impl Workflow {
     pub fn from_toml(text: &str) -> Result<Workflow, LoadError> {
         Workflow::from_files(text, BTreeMap::new()).or_else(|error| match error.problem {
             // A prompt is checked once the files are read.
-            Problem::MissingPrompt(_) => Workflow::parse(text, true),
+            Problem::MissingPrompt(_) => Workflow::parse(text).and_then(valid),
             _ => Err(error),
         })
     }
@@ -341,22 +350,30 @@ impl Workflow {
     /// `prompts/system.md` is kept when present. The version is a content hash over the
     /// workflow file and the prompts kept (ADR 0001).
     pub fn from_files(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
-        Workflow::load_files(text, files, true)
+        Workflow::load_files(text, files, true).and_then(valid)
     }
 
-    /// Reads a version the server stored: `from_files` without the check that a runner can
-    /// claim from it, which applies only to a file being loaded. A version stored before a
-    /// rule existed stays readable.
-    pub fn from_stored(text: &str, files: BTreeMap<String, String>) -> Result<Workflow, LoadError> {
+    /// Reads a version the server stored. A version stored before the rule that a runner can
+    /// claim from it stays readable: it comes back with the error a load of the same file is
+    /// refused with. Text that is not a workflow at all is still an error.
+    pub fn from_stored(
+        text: &str,
+        files: BTreeMap<String, String>,
+    ) -> Result<(Workflow, Option<LoadError>), LoadError> {
         Workflow::load_files(text, files, false)
     }
 
+    /// `loading` reports a workflow no runner can claim from before a missing prompt, as a
+    /// load always has.
     fn load_files(
         text: &str,
         mut files: BTreeMap<String, String>,
-        claimable: bool,
-    ) -> Result<Workflow, LoadError> {
-        let mut workflow = Workflow::parse(text, claimable)?;
+        loading: bool,
+    ) -> Result<(Workflow, Option<LoadError>), LoadError> {
+        let (mut workflow, unclaimable) = Workflow::parse(text)?;
+        if loading && let Some(error) = &unclaimable {
+            return Err(error.clone());
+        }
         let mut prompts = BTreeMap::new();
         for rule in &workflow.dispatch {
             let Some(path) = &rule.prompt else { continue };
@@ -379,10 +396,11 @@ impl Workflow {
         }
         workflow.version = content_hash(text, &prompts);
         workflow.prompts = prompts;
-        Ok(workflow)
+        Ok((workflow, unclaimable))
     }
 
-    fn parse(text: &str, claimable: bool) -> Result<Workflow, LoadError> {
+    /// The workflow, and why no runner can claim from it if none can.
+    fn parse(text: &str) -> Result<(Workflow, Option<LoadError>), LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
             line: e.span().map(|span| errors.line(span.start)),
@@ -434,6 +452,7 @@ impl Workflow {
 
         let mut transitions: Vec<Transition> = Vec::new();
         let mut claim_by = None;
+        let mut claim_gate = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -494,6 +513,7 @@ impl Workflow {
                     Some(span) => (span, key("by")),
                     None => (t.to.span(), format!("transition[{i}]")),
                 });
+                claim_gate = t.gates.first().map(|g| (g.span(), key("gates[0]")));
             }
             transitions.push(Transition {
                 from,
@@ -548,21 +568,22 @@ impl Workflow {
             dispatch,
             prompts: BTreeMap::new(),
         };
-        if claimable {
-            workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
-        }
-        Ok(workflow)
+        let unclaimable = workflow
+            .check_claimable(&errors, statuses_span, claim_by, claim_gate, start_lock)
+            .err();
+        Ok((workflow, unclaimable))
     }
 
     /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
     /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
-    /// of `check_transition`, as the claim does) and a dispatch rule for `in_progress`. Each
-    /// error points at the nearest place that exists in the file.
+    /// of `check_transition`, as the claim does) and that has no gates, and a dispatch rule
+    /// for `in_progress`. Each error points at the nearest place that exists in the file.
     fn check_claimable(
         &self,
         errors: &Errors,
         statuses_span: Range<usize>,
         claim_by: Option<(Range<usize>, String)>,
+        claim_gate: Option<(Range<usize>, String)>,
         start_lock: Option<Range<usize>>,
     ) -> Result<(), LoadError> {
         let at_statuses = |problem| errors.at(statuses_span.clone(), "statuses", problem);
@@ -572,7 +593,13 @@ impl Workflow {
             }
         }
         match self.check_transition(START, IN_PROGRESS, Role::Runner) {
-            Ok(_) => {}
+            Ok(_) => {
+                // No shipped gate has evidence before the run starts, so a gate here
+                // would refuse every claim.
+                if let Some((span, key)) = claim_gate {
+                    return Err(errors.at(span, key, Problem::ClaimGated));
+                }
+            }
             Err(Refusal::Locked { .. }) => {
                 let span = start_lock.unwrap_or(statuses_span.clone());
                 return Err(errors.at(span, format!("lock.{START}"), Problem::ClaimLocked));
@@ -1312,6 +1339,46 @@ mod tests {
         assert_eq!(
             refused(&edited("[lock]\n", "[lock]\nstart = [\"runner\"]\n")),
             "line 51, `lock.start`: the runtime needs a runner to act on `start`, but this lock forbids it"
+        );
+    }
+
+    #[test]
+    fn a_stored_version_the_runtime_cannot_run_is_read_with_its_problem() {
+        let prompts = || {
+            BTreeMap::from([
+                ("prompts/in_progress.md".to_string(), "Build.".to_string()),
+                ("prompts/agent_review.md".to_string(), "Review.".to_string()),
+            ])
+        };
+        let old = edited(
+            "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+            "",
+        );
+        let (workflow, problem) = Workflow::from_stored(&old, prompts()).unwrap();
+        assert_eq!(workflow.statuses().len(), 9);
+        assert_eq!(
+            problem.unwrap().to_string(),
+            "line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`"
+        );
+        let (_, problem) = Workflow::from_stored(PRD_TEMPLATE, prompts()).unwrap();
+        assert_eq!(problem, None);
+        // Nothing to keep in force.
+        assert!(Workflow::from_stored("statuses = [", prompts()).is_err());
+    }
+
+    #[test]
+    fn a_gate_on_the_claim_transition_is_refused() {
+        let gated = edited(
+            "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]",
+            "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\ngates = [\"pr_open\"]",
+        );
+        assert_eq!(
+            Workflow::from_toml(&gated).unwrap_err().to_string(),
+            "line 21, `transition[2].gates[0]`: the transition from `start` to `in_progress` takes no gates; an issue in `start` has no evidence yet"
+        );
+        assert_eq!(
+            Workflow::from_toml(PRD_TEMPLATE).unwrap().statuses().len(),
+            9
         );
     }
 
