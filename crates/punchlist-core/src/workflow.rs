@@ -344,7 +344,7 @@ impl Workflow {
     pub fn from_toml(text: &str) -> Result<Workflow, LoadError> {
         Workflow::from_files(text, BTreeMap::new()).or_else(|error| match error.problem {
             // A prompt is checked once the files are read.
-            Problem::MissingPrompt(_) => Workflow::parse(text).and_then(valid),
+            Problem::MissingPrompt(_) => Workflow::parse(text, true).and_then(valid),
             _ => Err(error),
         })
     }
@@ -357,9 +357,10 @@ impl Workflow {
         Workflow::load_files(text, files, true).and_then(valid)
     }
 
-    /// Reads a version the server stored. A version stored before a rule that the server can
-    /// run it (a runner can claim from it, `require` rides an event) stays readable: it comes back with the error a load of the same file is
-    /// refused with. Text that is not a workflow at all is still an error.
+    /// Reads a version the server stored. A version stored before the rule that a runner can
+    /// claim from it stays readable: it comes back with the error a load of the same file is
+    /// refused with. A `require` no event reads is ignored, as it was when the version was
+    /// stored. Text that is not a workflow at all is still an error.
     pub fn from_stored(
         text: &str,
         files: BTreeMap<String, String>,
@@ -374,7 +375,7 @@ impl Workflow {
         mut files: BTreeMap<String, String>,
         loading: bool,
     ) -> Result<(Workflow, Option<LoadError>), LoadError> {
-        let (mut workflow, unclaimable) = Workflow::parse(text)?;
+        let (mut workflow, unclaimable) = Workflow::parse(text, loading)?;
         if loading && let Some(error) = &unclaimable {
             return Err(error.clone());
         }
@@ -403,8 +404,9 @@ impl Workflow {
         Ok((workflow, unclaimable))
     }
 
-    /// The workflow, and why no runner can claim from it if none can.
-    fn parse(text: &str) -> Result<(Workflow, Option<LoadError>), LoadError> {
+    /// The workflow, and why no runner can claim from it if none can. A `require` no event
+    /// reads is an error only when `loading`: a version stored before that rule still reads.
+    fn parse(text: &str, loading: bool) -> Result<(Workflow, Option<LoadError>), LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
             line: e.span().map(|span| errors.line(span.start)),
@@ -457,7 +459,6 @@ impl Workflow {
         let mut transitions: Vec<Transition> = Vec::new();
         let mut claim_by = None;
         let mut claim_gate = None;
-        let mut unrunnable = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -503,12 +504,12 @@ impl Workflow {
                     return Err(errors.at(name.span(), key(&format!("require[{j}]")), problem));
                 }
             }
-            if t.on.is_none()
+            if loading
+                && t.on.is_none()
                 && let Some(name) = t.require.first()
             {
-                // Kept, not returned, so a version stored before this rule still reads.
-                let error = errors.at(name.span(), key("require[0]"), Problem::RequireWithoutEvent);
-                unrunnable.get_or_insert(error);
+                let problem = Problem::RequireWithoutEvent;
+                return Err(errors.at(name.span(), key("require[0]"), problem));
             }
             for f in &from {
                 if transitions.iter().any(|o| o.to == to && o.from.contains(f)) {
@@ -582,8 +583,7 @@ impl Workflow {
         };
         let unclaimable = workflow
             .check_claimable(&errors, statuses_span, claim_by, claim_gate, start_lock)
-            .err()
-            .or(unrunnable);
+            .err();
         Ok((workflow, unclaimable))
     }
 
@@ -1391,7 +1391,7 @@ mod tests {
             prompts(),
         )
         .unwrap();
-        assert_eq!(problem.unwrap().key, "transition[5].require[0]");
+        assert_eq!(problem, None);
         // Nothing to keep in force.
         assert!(Workflow::from_stored("statuses = [", prompts()).is_err());
     }
