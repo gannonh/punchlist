@@ -383,7 +383,7 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
     let prepared = {
         let mut stop = stop_rx.clone();
         tokio::select! {
-            prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.issue.id) => Some(prepared),
+            prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.merged_branches, &claim.issue.id) => Some(prepared),
             _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
         }
     };

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch FROM pull_request WHERE issue_id = $1\n         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "branch"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f9595e640416f555c30bff19a0c268b590490bb0788016bc23ee46a8e2db8b0"
+}

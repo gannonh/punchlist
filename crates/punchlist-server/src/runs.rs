@@ -122,7 +122,23 @@ async fn try_claim(
         &gates,
     )
     .await?;
-    let branch = branch_name(&id, &moved.issue.title);
+    // A branch whose pull request merged is finished: the next lifecycle gets the next
+    // name, which still names the issue. An open pull request keeps its branch, and so does
+    // a retry, because nothing has merged on the branch it was given.
+    let merged = sqlx::query_scalar!(
+        "SELECT branch FROM pull_request WHERE issue_id = $1
+         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')",
+        id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let base = branch_name(&id, &moved.issue.title);
+    let mut branch = base.clone();
+    let mut merged_branches = Vec::new();
+    while merged.contains(&branch) {
+        merged_branches.push(branch);
+        branch = format!("{base}-{}", merged_branches.len() + 1);
+    }
     let run_id = sqlx::query_scalar!(
         "INSERT INTO run (workspace_id, issue_id, status, agent, branch)
          VALUES ($1, $2, 'in_progress', $3, $4) RETURNING id",
@@ -177,6 +193,7 @@ async fn try_claim(
         issue: moved.issue,
         repository,
         branch,
+        merged_branches,
         lease_expires_at,
         prompt: workflow.prompt_for(IN_PROGRESS),
         agent_token,
