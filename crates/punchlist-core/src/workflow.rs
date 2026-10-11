@@ -359,8 +359,8 @@ impl Workflow {
 
     /// Reads a version the server stored. A version stored before the rule that a runner can
     /// claim from it stays readable: it comes back with the error a load of the same file is
-    /// refused with. A `require` no event reads is ignored, as it was when the version was
-    /// stored. Text that is not a workflow at all is still an error.
+    /// refused with. A `require` on a transition without `on` is kept; no event reads it.
+    /// Text that is not a workflow at all is still an error.
     pub fn from_stored(
         text: &str,
         files: BTreeMap<String, String>,
@@ -404,8 +404,8 @@ impl Workflow {
         Ok((workflow, unclaimable))
     }
 
-    /// The workflow, and why no runner can claim from it if none can. A `require` no event
-    /// reads is an error only when `loading`: a version stored before that rule still reads.
+    /// The workflow, and why no runner can claim from it if none can. A `require` on a
+    /// transition without `on` is an error only when `loading`.
     fn parse(text: &str, loading: bool) -> Result<(Workflow, Option<LoadError>), LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
