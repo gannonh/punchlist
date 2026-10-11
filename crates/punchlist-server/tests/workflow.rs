@@ -780,8 +780,18 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
     }
     deliver(&s, "push", "push-2", PUSH).await;
     assert_eq!(workflow_versions(&pool).await, 1);
-    let (_, after) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    let (_, mut after) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    let refused = after["refused"].take();
     assert_eq!(after, loaded);
+    assert_eq!(refused["commit_sha"], "b".repeat(40));
+    assert!(
+        refused["reason"]
+            .as_str()
+            .unwrap()
+            .contains("unknown gate `pr_redy`"),
+        "{refused}"
+    );
+    assert!(refused["at"].is_string());
 
     // A push to another branch, or one that leaves .punchlist/ alone, loads nothing.
     s.github.lock().unwrap().files.insert(
@@ -1209,6 +1219,11 @@ async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
     assert_eq!(workflow_versions(&pool).await, 0);
     let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
     assert_eq!(shown["commit_sha"], Value::Null);
+    assert_eq!(shown["refused"]["commit_sha"], "a".repeat(40));
+    assert_eq!(
+        shown["refused"]["reason"],
+        "status in use is not in the workflow: `todo` by 1 issue(s)"
+    );
 
     // The issue can still move; with it out of Todo the same file loads.
     let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "start"}))).await;
@@ -1217,6 +1232,7 @@ async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
     assert_eq!(workflow_versions(&pool).await, 1);
     let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
     assert_eq!(shown["commit_sha"], "a".repeat(40));
+    assert_eq!(shown["refused"], Value::Null);
 }
 
 /// Waits until some backend waits on a lock, so a test needs no sleep as synchronization.
