@@ -5,7 +5,7 @@ statuses = ["backlog", "todo", "start", "in_progress", "agent_review",
             "human_review", "merging", "done", "canceled"]
 
 [[transition]]
-from = "backlog"
+from = ["backlog", "merging"]    # merging: after a gate refused its merge
 to = "todo"
 by = ["person"]                  # approval
 

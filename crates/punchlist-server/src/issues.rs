@@ -66,6 +66,8 @@ struct EventRow {
     workflow_version: Option<String>,
     delivery_id: Option<String>,
     comment_body: Option<String>,
+    gate: Option<String>,
+    reason: Option<String>,
 }
 
 impl TryFrom<EventRow> for Event {
@@ -75,6 +77,27 @@ impl TryFrom<EventRow> for Event {
         let corrupt = |what: &str| sqlx::Error::Decode(format!("{what} event row").into());
         let detail = match (row.kind.as_str(), row.comment_body) {
             ("comment", Some(body)) => EventDetail::Comment { body },
+            ("refusal", None) => match (
+                row.from_status,
+                row.to_status,
+                row.gate,
+                row.reason,
+                row.workflow_version,
+            ) {
+                (Some(from), Some(to), Some(gate), Some(reason), Some(version)) => {
+                    EventDetail::Refusal {
+                        from_name: display_name(&from),
+                        to_name: display_name(&to),
+                        from,
+                        to,
+                        gate,
+                        reason,
+                        workflow_version: version,
+                        delivery_id: row.delivery_id,
+                    }
+                }
+                _ => return Err(corrupt("incomplete refusal")),
+            },
             ("transition", None) => match (row.from_status, row.to_status, row.workflow_version) {
                 (Some(from), Some(to), Some(version)) => EventDetail::Transition {
                     from_name: display_name(&from),
@@ -554,13 +577,17 @@ async fn issue_events(
         EventRow,
         r#"SELECT e.seq, e.issue_id, e.created_at,
                 a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,
-                e.kind, t.from_status AS "from_status?", t.to_status AS "to_status?",
-                t.workflow_version AS "workflow_version?", t.delivery_id AS "delivery_id?",
-                c.body AS "comment_body?"
+                e.kind,
+                coalesce(t.from_status, r.from_status) AS "from_status?",
+                coalesce(t.to_status, r.to_status) AS "to_status?",
+                coalesce(t.workflow_version, r.workflow_version) AS "workflow_version?",
+                coalesce(t.delivery_id, r.delivery_id) AS "delivery_id?",
+                c.body AS "comment_body?", r.gate AS "gate?", r.reason AS "reason?"
          FROM event e
          JOIN actor a ON a.id = e.actor_id
          LEFT JOIN transition t ON t.id = e.transition_id
          LEFT JOIN comment c ON c.id = e.comment_id
+         LEFT JOIN refusal r ON r.id = e.refusal_id
          WHERE e.workspace_id = $1 AND e.issue_id = $2
          ORDER BY e.seq"#,
         actor.workspace_id,
@@ -620,6 +647,57 @@ pub(crate) async fn record_comment(
             body: body.to_string(),
         },
     })
+}
+
+/// Writes the refusal of a transition that a GitHub event would have made, and its event:
+/// `gate` failed for `reason`, so the issue stays in `from`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn record_refusal(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: &str,
+    to: &str,
+    gate: &str,
+    reason: &str,
+    delivery_id: Option<&str>,
+    workflow_version: &str,
+) -> sqlx::Result<()> {
+    let refusal_id = sqlx::query_scalar!(
+        "INSERT INTO refusal
+             (issue_id, from_status, to_status, gate, reason, actor_id, workflow_version,
+              delivery_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        id,
+        from,
+        to,
+        gate,
+        reason,
+        actor.id,
+        workflow_version,
+        delivery_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let seq = sqlx::query_scalar!(
+        "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
+         RETURNING last_event_seq",
+        actor.workspace_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, refusal_id)
+         VALUES ($1, $2, $3, 'refusal', $4, $5)",
+        actor.workspace_id,
+        seq,
+        id,
+        actor.id,
+        refusal_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 /// An agent's comment ends with `(agent)` on its own line. Punchlist adds it when missing.

@@ -24,7 +24,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 - Run `pl` only through `$C pl "$RUN" ...` so the transcript records it.
 - Run SQL only through `$C sql "$RUN" "..."`. Reads only; never write rows to set up a state a user could reach with `pl`.
 - Treat every command as literal. Status arguments are workflow keys such as `in_progress`, not display names.
-- The person actor can make only `backlog → todo`, `todo → start` and `human_review → merging`. `start → in_progress` is made by a runner started with `$C runner` (see [runner.md](runner.md)). Later statuses need an agent actor: each claim creates one for its run, and only that run's `pl mcp` holds its token (see [workflow-and-gates.md](workflow-and-gates.md)). Do not insert actors by hand to get there.
+- The person actor can make only `backlog → todo`, `todo → start`, `human_review → merging` and `merging → todo`. `start → in_progress` is made by a runner started with `$C runner` (see [runner.md](runner.md)). Later statuses need an agent actor: each claim creates one for its run, and only that run's `pl mcp` holds its token (see [workflow-and-gates.md](workflow-and-gates.md)). Do not insert actors by hand to get there.
 
 ## Proof and skip reporting
 

@@ -99,6 +99,26 @@ pub enum EventDetail {
         /// Markdown.
         body: String,
     },
+    /// A transition that a GitHub event would have made and a gate refused. The issue
+    /// stayed in `from`.
+    Refusal {
+        from: String,
+        /// `from` as people read it, such as `Merging`.
+        from_name: String,
+        to: String,
+        /// `to` as people read it.
+        to_name: String,
+        /// The gate that failed, such as `proof_attached`.
+        gate: String,
+        /// Why it failed.
+        reason: String,
+        /// The content hash of the workflow the transition was checked against.
+        workflow_version: String,
+        /// The GitHub webhook delivery that brought the event; absent when the server read
+        /// the pull request from GitHub itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery_id: Option<String>,
+    },
 }
 
 impl EventDetail {
@@ -461,6 +481,24 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&detail).unwrap(),
             r#"{"kind":"comment","body":"Closed"}"#
+        );
+    }
+
+    #[test]
+    fn refusal_detail_is_tagged_by_kind() {
+        let detail = EventDetail::Refusal {
+            from: "merging".into(),
+            from_name: "Merging".into(),
+            to: "done".into(),
+            to_name: "Done".into(),
+            gate: "proof_attached".into(),
+            reason: "no proof".into(),
+            workflow_version: "sha256:ab".into(),
+            delivery_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&detail).unwrap(),
+            r#"{"kind":"refusal","from":"merging","from_name":"Merging","to":"done","to_name":"Done","gate":"proof_attached","reason":"no proof","workflow_version":"sha256:ab"}"#
         );
     }
 

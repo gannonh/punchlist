@@ -29,6 +29,6 @@ Preconditions:
 
 ## Gotchas
 
-- A person can only make `backlog → todo`, `todo → start` and `human_review → merging`. `start → in_progress` needs a runner; see [issue-refusals.md](issue-refusals.md).
+- A person can only make `backlog → todo`, `todo → start`, `human_review → merging` and `merging → todo`. `start → in_progress` needs a runner; see [issue-refusals.md](issue-refusals.md).
 - Event `seq` counts per workspace across all issues, not per issue.
 - Timeline times are UTC; compare order, not wall-clock values.

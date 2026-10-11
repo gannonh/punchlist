@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, refusal_id)\n         VALUES ($1, $2, $3, 'refusal', $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cb5648b1e6bdd5ded63bcd57a3cd789645455aab318e6d3c72ae86bd6af8be60"
+}

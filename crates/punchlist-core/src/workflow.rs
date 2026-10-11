@@ -890,6 +890,8 @@ mod tests {
         ("backlog", "todo", Person, Ok(())),
         ("backlog", "todo", Agent, Err("role_not_allowed")),
         ("backlog", "todo", Runner, Err("role_not_allowed")),
+        ("merging", "todo", Person, Ok(())),
+        ("merging", "todo", Agent, Err("role_not_allowed")),
         ("todo", "start", Person, Ok(())),
         ("todo", "start", Agent, Err("role_not_allowed")),
         ("todo", "start", Runner, Err("role_not_allowed")),
@@ -1118,7 +1120,7 @@ mod tests {
         assert_eq!(
             transitions,
             [
-                "backlog -> todo by [person] on - gates [] require []",
+                "backlog,merging -> todo by [person] on - gates [] require []",
                 "todo -> start by [person] on - gates [] require []",
                 "start -> in_progress by [runner] on - gates [] require []",
                 "in_progress -> agent_review by [agent] on - gates [pr_open,pr_ready,pr_names_issue] require []",
