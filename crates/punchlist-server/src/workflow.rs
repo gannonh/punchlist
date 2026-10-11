@@ -105,7 +105,8 @@ fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
 
 /// Reads `.punchlist/workflow.toml` and its prompts at the head of the default branch and
 /// makes them the active version. A file that does not load is refused with its line and
-/// reason in the log and on the workspace, and the active version stays. Runs inside the job's transaction.
+/// reason in the log and on the workspace, and the active version stays. Runs inside the
+/// job's transaction.
 pub(crate) async fn load(
     state: &AppState,
     tx: &mut sqlx::PgConnection,
