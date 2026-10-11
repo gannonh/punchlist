@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, hash_token, new_token};
 use crate::issues::{check_move, record_transition};
 use crate::runners::{RunnerRow, runner_of};
-use crate::workflow::active_workflow;
+use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 const MAX_WAIT_SECONDS: u32 = 30;
@@ -62,6 +62,8 @@ async fn try_claim(
     target: &Target,
 ) -> Result<Option<Claim>, ApiError> {
     let mut tx = state.pool.begin().await?;
+    // Before the workflow is read, so a claim waiting behind a load uses the new one.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let Some(dispatch) = workflow.dispatch_for("in_progress") else {
         return Ok(None);

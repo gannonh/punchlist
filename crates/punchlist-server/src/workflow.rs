@@ -48,6 +48,23 @@ pub(crate) async fn active_workflow(
     Ok((workflow, Some(row.commit_sha)))
 }
 
+/// Locks the workspace row until the transaction ends. Every transaction that changes an
+/// issue's status or creates an issue takes it first, before any issue row lock, so `load`
+/// cannot switch workflows while a move decided against the old one is in flight, and
+/// two paths never take the two locks in opposite orders.
+pub(crate) async fn lock_workspace(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "SELECT id FROM workspace WHERE id = $1 FOR NO KEY UPDATE",
+        workspace_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// The payload of a `workflow_load` job.
 #[derive(Debug, Serialize, Deserialize)]
 struct LoadJob {
@@ -72,6 +89,17 @@ pub async fn queue_workflow_load(
     .execute(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// Why a workflow that drops statuses issues are in is refused.
+fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
+    let in_use: Vec<_> = in_use
+        .map(|(status, issues)| format!("`{status}` by {issues} issue(s)"))
+        .collect();
+    format!(
+        "status in use is not in the workflow: {}",
+        in_use.join(", ")
+    )
 }
 
 /// Reads `.punchlist/workflow.toml` and its prompts at the head of the default branch and
@@ -112,13 +140,13 @@ pub(crate) async fn load(
         tracing::info!("no .punchlist/workflow.toml on {place}; the workflow stays as it is");
         return Ok(());
     };
-    let refused = |error: punchlist_core::LoadError| {
-        tracing::warn!("refused .punchlist/workflow.toml on {place}: {error}");
+    let refused = |reason: &dyn std::fmt::Display| {
+        tracing::warn!("refused .punchlist/workflow.toml on {place}: {reason}");
         Ok(())
     };
     let parsed = match Workflow::from_toml(&text) {
         Ok(parsed) => parsed,
-        Err(error) => return refused(error),
+        Err(error) => return refused(&error),
     };
     let mut prompts = BTreeMap::new();
     for path in parsed.prompt_paths() {
@@ -128,8 +156,28 @@ pub(crate) async fn load(
     }
     let workflow = match Workflow::from_files(&text, prompts) {
         Ok(workflow) => workflow,
-        Err(error) => return refused(error),
+        Err(error) => return refused(&error),
     };
+    // Waits for moves in flight and holds off new ones until commit (`lock_workspace`), so
+    // no issue can enter a dropped status between this check and the switch.
+    lock_workspace(&mut *tx, workspace_id).await?;
+    let dropped = sqlx::query!(
+        r#"SELECT status, count(*) AS "issues!" FROM issue
+           WHERE workspace_id = $1 AND status <> ALL($2) GROUP BY status ORDER BY status"#,
+        workspace_id,
+        &workflow
+            .statuses()
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if !dropped.is_empty() {
+        return refused(&dropped_message(
+            dropped.iter().map(|d| (d.status.as_str(), d.issues)),
+        ));
+    }
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
          VALUES ($1, $2, $3, $4, $5)
@@ -186,4 +234,17 @@ async fn show_workflow(
 )]
 async fn schema() -> Json<schemars::Schema> {
     Json(workflow_schema())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_refusal_names_each_status_and_its_issue_count() {
+        assert_eq!(
+            dropped_message([("done", 2), ("todo", 1)].into_iter()),
+            "status in use is not in the workflow: `done` by 2 issue(s), `todo` by 1 issue(s)"
+        );
+    }
 }
