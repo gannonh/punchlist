@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::State;
-use punchlist_api::{ErrorBody, WorkflowInfo};
+use punchlist_api::{ErrorBody, WorkflowInfo, WorkflowRefusal};
 use punchlist_core::{Workflow, default_workflow, workflow_schema};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -105,7 +105,8 @@ fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
 
 /// Reads `.punchlist/workflow.toml` and its prompts at the head of the default branch and
 /// makes them the active version. A file that does not load is refused with its line and
-/// reason in the log, and the active version stays. Runs inside the job's transaction.
+/// reason in the log and on the workspace, and the active version stays. Runs inside the
+/// job's transaction.
 pub(crate) async fn load(
     state: &AppState,
     tx: &mut sqlx::PgConnection,
@@ -141,13 +142,24 @@ pub(crate) async fn load(
         tracing::info!("no .punchlist/workflow.toml on {place}; the workflow stays as it is");
         return Ok(());
     };
-    let refused = |reason: &dyn std::fmt::Display| {
+    // The refusal is committed with the job, so `GET /api/workflow` can say why the push
+    // did not load.
+    let refused = async |tx: &mut sqlx::PgConnection, reason: String| {
         tracing::warn!("refused .punchlist/workflow.toml on {place}: {reason}");
+        sqlx::query!(
+            "UPDATE workspace SET workflow_refused_commit = $2, workflow_refused_at = now(),
+                 workflow_refused_reason = $3 WHERE id = $1",
+            workspace_id,
+            head.sha,
+            reason,
+        )
+        .execute(tx)
+        .await?;
         Ok(())
     };
     let parsed = match Workflow::from_toml(&text) {
         Ok(parsed) => parsed,
-        Err(error) => return refused(&error),
+        Err(error) => return refused(&mut *tx, error.to_string()).await,
     };
     let mut prompts = BTreeMap::new();
     for path in parsed.prompt_paths() {
@@ -157,7 +169,7 @@ pub(crate) async fn load(
     }
     let workflow = match Workflow::from_files(&text, prompts) {
         Ok(workflow) => workflow,
-        Err(error) => return refused(&error),
+        Err(error) => return refused(&mut *tx, error.to_string()).await,
     };
     // Waits for moves in flight and holds off new ones until commit (`lock_workspace`), so
     // no issue can enter a dropped status between this check and the switch.
@@ -175,9 +187,8 @@ pub(crate) async fn load(
     .fetch_all(&mut *tx)
     .await?;
     if !dropped.is_empty() {
-        return refused(&dropped_message(
-            dropped.iter().map(|d| (d.status.as_str(), d.issues)),
-        ));
+        let reason = dropped_message(dropped.iter().map(|d| (d.status.as_str(), d.issues)));
+        return refused(&mut *tx, reason).await;
     }
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
@@ -193,7 +204,8 @@ pub(crate) async fn load(
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query!(
-        "UPDATE workspace SET workflow_version_id = $2 WHERE id = $1",
+        "UPDATE workspace SET workflow_version_id = $2, workflow_refused_commit = NULL,
+             workflow_refused_at = NULL, workflow_refused_reason = NULL WHERE id = $1",
         workspace_id,
         version_id,
     )
@@ -203,7 +215,8 @@ pub(crate) async fn load(
     Ok(())
 }
 
-/// The workspace's active workflow: its version, the commit it came from, its statuses.
+/// The workspace's active workflow: its version, the commit it came from, its statuses and
+/// the last push that was refused.
 #[utoipa::path(
     get,
     path = "/api/workflow",
@@ -215,6 +228,13 @@ async fn show_workflow(
 ) -> Result<Json<WorkflowInfo>, ApiError> {
     let mut conn = state.pool.acquire().await?;
     let (workflow, commit_sha) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let refused = sqlx::query!(
+        "SELECT workflow_refused_commit, workflow_refused_at, workflow_refused_reason
+         FROM workspace WHERE id = $1",
+        actor.workspace_id,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(Json(WorkflowInfo {
         version: workflow.version().to_string(),
         commit_sha,
@@ -223,6 +243,15 @@ async fn show_workflow(
             .iter()
             .map(|s| s.as_str().to_string())
             .collect(),
+        refused: refused
+            .workflow_refused_commit
+            .zip(refused.workflow_refused_at)
+            .zip(refused.workflow_refused_reason)
+            .map(|((commit_sha, at), reason)| WorkflowRefusal {
+                commit_sha,
+                at,
+                reason,
+            }),
     }))
 }
 
