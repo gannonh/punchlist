@@ -411,6 +411,44 @@ mod tests {
         assert!(err.contains("is on `feature/pl-1-first-issue`, not `feature/other`"));
     }
 
+    /// A second lifecycle: the issue's first branch was pushed and squash-merged, and the
+    /// issue is claimed again, by the runner that still has the worktree and by a new one.
+    #[tokio::test]
+    async fn prepare_after_the_branch_was_merged_continues_from_the_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        make_origin(&origin);
+        let remote_base = origin.to_string_lossy().to_string();
+        let first = Worktrees::with_remote_base(temp.path().join("first"), remote_base.clone());
+        let branch = "feature/pl-1-first-issue";
+        let commit = |dir: &Path, file: &str| {
+            std::fs::write(dir.join(file), file).unwrap();
+            run(dir, &["add", "."]);
+            let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+            run(dir, &[&identity[..], &["commit", "-m", file]].concat());
+            run(dir, &["rev-parse", "HEAD"])
+        };
+
+        let path = first.prepare(&repository(), branch, "PL-1").await.unwrap();
+        let branch_sha = commit(&path, "one.txt");
+        run(&path, &["push", "-u", "origin", branch]);
+        let seed = origin.join("seed");
+        run(&seed, &["fetch", "origin"]);
+        run(&seed, &["merge", "--squash", &format!("origin/{branch}")]);
+        commit(&seed, "squash.txt");
+        run(&seed, &["push", "origin", "HEAD:main"]);
+
+        let again = first.prepare(&repository(), branch, "PL-1").await.unwrap();
+        assert_eq!(again, path);
+        assert_eq!(run(&again, &["rev-parse", "HEAD"]), branch_sha);
+
+        let second = Worktrees::with_remote_base(temp.path().join("second"), remote_base);
+        let fresh = second.prepare(&repository(), branch, "PL-1").await.unwrap();
+        assert_eq!(run(&fresh, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+        // Both continue from the pushed branch, as a retry does, not from the new `main`.
+        assert_eq!(run(&fresh, &["rev-parse", "HEAD"]), branch_sha);
+    }
+
     #[tokio::test]
     async fn prepare_rejects_unsafe_repository_names() {
         let temp = tempfile::tempdir().unwrap();
