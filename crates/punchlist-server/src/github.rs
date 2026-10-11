@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::ErrorBody;
-use punchlist_core::{Role, linked_issue_id};
+use punchlist_core::{Refusal, Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::issues::{check_gates, record_comment, write_transition};
+use crate::issues::{check_gates, record_comment, record_refusal, write_transition};
 use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
 
@@ -494,10 +494,8 @@ async fn record_pull_request(
     };
     let merge_state = pr.mergeable_state.as_deref().unwrap_or("unknown");
     // Locks the row: a second payload closing it waits here, then reads the closed state.
-    // ponytail: two deliveries that are both the first to record a pull request, closed and
-    // unmerged, in jobs running at once, both read no row and both count as closing it; the
-    // issue having left the status the event moves it from is then the only guard. Lock the
-    // repository row if that bites.
+    // Two payloads that are both the first to record it closed wait on the workspace lock
+    // above instead, so the second still reads the first's row.
     let was = sqlx::query_scalar!(
         "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
         repository_id,
@@ -666,8 +664,8 @@ async fn recompute_checks(
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
 /// event from the issue's status and that transition's gates pass. With no such transition
-/// the pull request's new state is all that is recorded. With a failed gate the refusal is
-/// logged and nothing is written to the issue: no status, transition, comment or actor.
+/// the pull request's new state is all that is recorded. With a failed gate the issue stays
+/// where it is and the refusal goes on its timeline: no status, transition or comment.
 /// Runs once per close: see `record_pull_request`. `closed_by` is the GitHub login that
 /// closed it, when known.
 async fn close_issue_on_pull_request(
@@ -702,12 +700,6 @@ async fn close_issue_on_pull_request(
     // With nobody to credit the actor is GitHub itself. No GitHub login is empty, so that
     // actor is never a user's.
     let (name, login) = closed_by.map_or(("GitHub", ""), |login| (login, login));
-    let gates = match check_gates(tx, transition, name, issue_id, &status, Some(pr.number)).await {
-        Ok(gates) => gates,
-        // `check_gates` logged the gate and its reason. Nothing is written to the issue.
-        Err(ApiError::GateFailed(_)) => return Ok(()),
-        Err(error) => return Err(error),
-    };
     let actor_id = sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $3)
@@ -725,6 +717,32 @@ async fn close_issue_on_pull_request(
         workspace_id,
         name: name.to_string(),
         role: Role::Github,
+    };
+    let gates = match check_gates(tx, transition, name, issue_id, &status, Some(pr.number)).await {
+        Ok(gates) => gates,
+        // `check_gates` logged it too. The event is not tried again, so the timeline is
+        // where a person learns why the issue did not move.
+        Err(ApiError::GateFailed(failure)) => {
+            if let Refusal::GateFailed {
+                to, gate, reason, ..
+            } = &failure.refusal
+            {
+                record_refusal(
+                    tx,
+                    &actor,
+                    issue_id,
+                    &status,
+                    to,
+                    gate,
+                    reason,
+                    delivery_id,
+                    workflow.version(),
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
     let (_, transition_id) = write_transition(
         tx,

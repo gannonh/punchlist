@@ -869,6 +869,16 @@ async fn rows_from_github(pool: &PgPool) -> (i64, i64, i64) {
     .unwrap()
 }
 
+/// PL-1's timeline rows, counted by kind.
+async fn events_by_kind(pool: &PgPool) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT kind, count(*) FROM event WHERE issue_id = 'PL-1' GROUP BY kind ORDER BY kind",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 #[sqlx::test]
 async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
     let s = setup(&pool).await;
@@ -883,7 +893,8 @@ async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
         .await,
         "in_progress"
     );
-    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+    // The actor is the refusal's, on the timeline.
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
 }
 
 #[sqlx::test]
@@ -905,7 +916,8 @@ async fn a_failed_gate_is_final_when_the_close_arrives_again_and_would_now_pass(
         .await
         .unwrap();
     assert_eq!(status, "in_progress");
-    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
+    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
 }
 
 #[sqlx::test]
@@ -932,12 +944,50 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
         close_with_gate(&s, "pr_merged", "proof_attached", "merging", MERGED).await,
         "merging"
     );
-    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
     let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(state, "merged");
+
+    // One refusal on the timeline and no transition, after the three deliveries above and
+    // after the first of them once more.
+    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
+    deliver(&s, "pull_request", "closed-1", MERGED).await;
+    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
+    let token = s.person.token.clone();
+    let (status, events) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
+    assert_eq!(status, StatusCode::OK, "{events}");
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    let detail = &events[0]["detail"];
+    assert_eq!(events[0]["actor"]["name"], "octocat");
+    assert_eq!(detail["kind"], "refusal");
+    assert_eq!(detail["from"], "merging");
+    assert_eq!(detail["to"], "done");
+    assert_eq!(detail["gate"], "proof_attached");
+    assert_eq!(
+        detail["reason"],
+        "Punchlist does not evaluate the proof_attached gate yet"
+    );
+    assert_eq!(detail["delivery_id"], "closed-1");
+
+    // The PRD's way out of Merging: a person sends the issue back to Todo.
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "todo");
+    assert_eq!(
+        events_by_kind(&pool).await,
+        [("refusal".to_string(), 1), ("transition".to_string(), 1)]
+    );
 }
 
 #[sqlx::test]

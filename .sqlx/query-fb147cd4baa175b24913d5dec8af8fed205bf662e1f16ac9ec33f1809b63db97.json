@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                e.kind, t.from_status AS \"from_status?\", t.to_status AS \"to_status?\",\n                t.workflow_version AS \"workflow_version?\", t.delivery_id AS \"delivery_id?\",\n                c.body AS \"comment_body?\"\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
+  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                e.kind,\n                coalesce(t.from_status, r.from_status) AS \"from_status?\",\n                coalesce(t.to_status, r.to_status) AS \"to_status?\",\n                coalesce(t.workflow_version, r.workflow_version) AS \"workflow_version?\",\n                coalesce(t.delivery_id, r.delivery_id) AS \"delivery_id?\",\n                c.body AS \"comment_body?\", r.gate AS \"gate?\", r.reason AS \"reason?\"\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         LEFT JOIN refusal r ON r.id = e.refusal_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
   "describe": {
     "columns": [
       {
@@ -84,45 +84,25 @@
         "ordinal": 7,
         "name": "from_status?",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "transition",
-            "name": "from_status"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 8,
         "name": "to_status?",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "transition",
-            "name": "to_status"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 9,
         "name": "workflow_version?",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "transition",
-            "name": "workflow_version"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 10,
         "name": "delivery_id?",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "transition",
-            "name": "delivery_id"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 11,
@@ -132,6 +112,28 @@
           "Table": {
             "table": "comment",
             "name": "body"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "gate?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "gate"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "reason?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "reason"
           }
         }
       }
@@ -150,12 +152,14 @@
       false,
       false,
       false,
+      null,
+      null,
+      null,
+      null,
       false,
       false,
-      false,
-      true,
       false
     ]
   },
-  "hash": "ae738a602e1f88771e06a6d364d048c10deb529f468cd68b60c858e02822072a"
+  "hash": "fb147cd4baa175b24913d5dec8af8fed205bf662e1f16ac9ec33f1809b63db97"
 }

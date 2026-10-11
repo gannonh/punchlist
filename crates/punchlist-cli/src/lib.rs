@@ -467,7 +467,7 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
         // Comments do not change the status, so compare with the last transition.
         let last_move = events.iter().rev().find_map(|event| match &event.detail {
             EventDetail::Transition { to, .. } => Some(to),
-            EventDetail::Comment { .. } => None,
+            EventDetail::Comment { .. } | EventDetail::Refusal { .. } => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -507,6 +507,22 @@ fn render_show(issue: &Issue, pull_requests: &[PullRequest], events: &[Event]) -
                 ..
             } => {
                 text.push_str(&format!("{who}{from_name} → {to_name}"));
+                if let Some(delivery_id) = delivery_id {
+                    text.push_str(&format!("  [delivery {delivery_id}]"));
+                }
+                text.push('\n');
+            }
+            EventDetail::Refusal {
+                from_name,
+                to_name,
+                gate,
+                reason,
+                delivery_id,
+                ..
+            } => {
+                text.push_str(&format!(
+                    "{who}refused {from_name} → {to_name}: gate {gate} failed: {reason}"
+                ));
                 if let Some(delivery_id) = delivery_id {
                     text.push_str(&format!("  [delivery {delivery_id}]"));
                 }
@@ -712,6 +728,20 @@ mod tests {
                     body: "Closed without merging.\n\nSee #12.\n".into(),
                 },
             ),
+            event(
+                punchlist_api::Role::Github,
+                "gannonh",
+                EventDetail::Refusal {
+                    from: "merging".into(),
+                    from_name: "Merging".into(),
+                    to: "done".into(),
+                    to_name: "Done".into(),
+                    gate: "proof_attached".into(),
+                    reason: "no proof".into(),
+                    workflow_version: "sha256:ab".into(),
+                    delivery_id: Some("d-2".into()),
+                },
+            ),
         ];
         assert_eq!(
             render_show(&issue, &[], &events),
@@ -722,7 +752,8 @@ mod tests {
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  commented:\n\
              \x20   Closed without merging.\n\
              \n\
-             \x20   See #12.\n"
+             \x20   See #12.\n\
+             \x20 2026-10-10 12:30:45 UTC  gannonh (github)  refused Merging → Done: gate proof_attached failed: no proof  [delivery d-2]\n"
         );
     }
 
