@@ -494,10 +494,8 @@ async fn record_pull_request(
     };
     let merge_state = pr.mergeable_state.as_deref().unwrap_or("unknown");
     // Locks the row: a second payload closing it waits here, then reads the closed state.
-    // ponytail: two deliveries that are both the first to record a pull request, closed and
-    // unmerged, in jobs running at once, both read no row and both count as closing it; the
-    // issue having left the status the event moves it from is then the only guard. Lock the
-    // repository row if that bites.
+    // Two payloads that are both the first to record it closed wait on the workspace lock
+    // above instead, so the second still reads the first's row.
     let was = sqlx::query_scalar!(
         "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
         repository_id,
