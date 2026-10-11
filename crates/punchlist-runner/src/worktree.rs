@@ -411,8 +411,9 @@ mod tests {
         assert!(err.contains("is on `feature/pl-1-first-issue`, not `feature/other`"));
     }
 
-    /// A second lifecycle: the issue's first branch was pushed and squash-merged, and the
-    /// issue is claimed again, by the runner that still has the worktree and by a new one.
+    /// A second lifecycle: the issue's first branch was pushed and squash-merged, the remote
+    /// keeps the branch, and the issue is claimed again, by the runner that still has the
+    /// worktree and by a new one.
     #[tokio::test]
     async fn prepare_after_the_branch_was_merged_continues_from_the_branch() {
         let temp = tempfile::tempdir().unwrap();
