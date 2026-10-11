@@ -561,9 +561,9 @@ impl Workflow {
     }
 
     /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
-    /// `start` and `in_progress`, a runner transition between them with no gates that no lock blocks (asked
-    /// of `check_transition`, as the claim does) and a dispatch rule for `in_progress`. Each
-    /// error points at the nearest place that exists in the file.
+    /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
+    /// of `check_transition`, as the claim does) and that has no gates, and a dispatch rule
+    /// for `in_progress`. Each error points at the nearest place that exists in the file.
     fn check_claimable(
         &self,
         errors: &Errors,
