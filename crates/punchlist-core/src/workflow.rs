@@ -236,6 +236,10 @@ pub enum Problem {
     NoClaimTransition,
     #[error("the runtime needs `runner` in `by` on the transition from `start` to `in_progress`")]
     ClaimNotByRunner,
+    #[error(
+        "the transition from `start` to `in_progress` takes no gates; an issue in `start` has no evidence yet"
+    )]
+    ClaimGated,
     #[error("the runtime needs a runner to act on `start`, but this lock forbids it")]
     ClaimLocked,
     #[error("the runtime needs a dispatch rule for `in_progress`")]
@@ -434,6 +438,7 @@ impl Workflow {
 
         let mut transitions: Vec<Transition> = Vec::new();
         let mut claim_by = None;
+        let mut claim_gate = None;
         for (i, t) in raw.transitions.into_iter().enumerate() {
             let key = |field: &str| format!("transition[{i}].{field}");
             let from_span = t.from.span();
@@ -494,6 +499,7 @@ impl Workflow {
                     Some(span) => (span, key("by")),
                     None => (t.to.span(), format!("transition[{i}]")),
                 });
+                claim_gate = t.gates.first().map(|g| (g.span(), key("gates[0]")));
             }
             transitions.push(Transition {
                 from,
@@ -549,13 +555,13 @@ impl Workflow {
             prompts: BTreeMap::new(),
         };
         if claimable {
-            workflow.check_claimable(&errors, statuses_span, claim_by, start_lock)?;
+            workflow.check_claimable(&errors, statuses_span, claim_by, claim_gate, start_lock)?;
         }
         Ok(workflow)
     }
 
     /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
-    /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
+    /// `start` and `in_progress`, a runner transition between them with no gates that no lock blocks (asked
     /// of `check_transition`, as the claim does) and a dispatch rule for `in_progress`. Each
     /// error points at the nearest place that exists in the file.
     fn check_claimable(
@@ -563,6 +569,7 @@ impl Workflow {
         errors: &Errors,
         statuses_span: Range<usize>,
         claim_by: Option<(Range<usize>, String)>,
+        claim_gate: Option<(Range<usize>, String)>,
         start_lock: Option<Range<usize>>,
     ) -> Result<(), LoadError> {
         let at_statuses = |problem| errors.at(statuses_span.clone(), "statuses", problem);
@@ -572,7 +579,13 @@ impl Workflow {
             }
         }
         match self.check_transition(START, IN_PROGRESS, Role::Runner) {
-            Ok(_) => {}
+            Ok(_) => {
+                // No shipped gate has evidence before the run starts, so a gate here
+                // would refuse every claim.
+                if let Some((span, key)) = claim_gate {
+                    return Err(errors.at(span, key, Problem::ClaimGated));
+                }
+            }
             Err(Refusal::Locked { .. }) => {
                 let span = start_lock.unwrap_or(statuses_span.clone());
                 return Err(errors.at(span, format!("lock.{START}"), Problem::ClaimLocked));
@@ -1310,6 +1323,22 @@ mod tests {
         assert_eq!(
             refused(&edited("[lock]\n", "[lock]\nstart = [\"runner\"]\n")),
             "line 51, `lock.start`: the runtime needs a runner to act on `start`, but this lock forbids it"
+        );
+    }
+
+    #[test]
+    fn a_gate_on_the_claim_transition_is_refused() {
+        let gated = edited(
+            "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]",
+            "from = \"start\"\nto = \"in_progress\"\nby = [\"runner\"]\ngates = [\"pr_open\"]",
+        );
+        assert_eq!(
+            Workflow::from_toml(&gated).unwrap_err().to_string(),
+            "line 21, `transition[2].gates[0]`: the transition from `start` to `in_progress` takes no gates; an issue in `start` has no evidence yet"
+        );
+        assert_eq!(
+            Workflow::from_toml(PRD_TEMPLATE).unwrap().statuses().len(),
+            9
         );
     }
 
