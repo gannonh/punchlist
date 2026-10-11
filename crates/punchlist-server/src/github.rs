@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::GithubClient;
 use crate::auth::Actor;
 use crate::issues::{check_gates, record_comment, write_transition};
-use crate::workflow::{active_workflow, queue_workflow_load};
+use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -348,6 +348,10 @@ pub(crate) async fn process(
     let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
+            // Before the pull request row's foreign key touches the issue row.
+            if event.action == "closed" {
+                lock_workspace(tx, job.workspace_id).await?;
+            }
             // A pull request closes once. The same close under another delivery id applies
             // again, and must not check the transition's gates a second time: a failed gate
             // is final for its event.
