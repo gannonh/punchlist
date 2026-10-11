@@ -801,6 +801,215 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
     assert_eq!(jobs, 2);
 }
 
+/// Loads the PRD workflow with `gate` on its `on = "<event>"` transition, puts PL-1 in
+/// `from` and delivers `closed`, the pull request event that closes its pull request.
+/// Returns PL-1's status.
+async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed: &str) -> String {
+    let on = format!("on = \"{event}\"");
+    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
+    // The template still has the line this replaces, so the gate is in the file.
+    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert("workflow.toml".into(), gated);
+        for prompt in ["system", "in_progress", "agent_review"] {
+            repo.files
+                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
+        }
+    }
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&s.state.pool).await, 1);
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    // A person has no short path to these statuses, so the test puts the issue there.
+    sqlx::query("UPDATE issue SET status = $1 WHERE id = 'PL-1'")
+        .bind(from)
+        .execute(&s.state.pool)
+        .await
+        .unwrap();
+    deliver(s, "pull_request", "closed-1", closed).await;
+    // Redelivery, and the same event under another delivery id, change nothing.
+    deliver(s, "pull_request", "closed-1", closed).await;
+    deliver(s, "pull_request", "closed-2", closed).await;
+    sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&s.state.pool)
+        .await
+        .unwrap()
+}
+
+/// How many transitions, comments and GitHub actors there are. A person made none of them
+/// in these tests.
+async fn rows_from_github(pool: &PgPool) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM transition), (SELECT count(*) FROM comment),
+                (SELECT count(*) FROM actor WHERE role = 'github')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(
+            &s,
+            "pr_closed_unmerged",
+            "proof_attached",
+            "in_progress",
+            CLOSED
+        )
+        .await,
+        "in_progress"
+    );
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+}
+
+#[sqlx::test]
+async fn a_failed_gate_is_final_when_the_close_arrives_again_and_would_now_pass(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(&s, "pr_closed_unmerged", "pr_open", "in_progress", CLOSED).await,
+        "in_progress"
+    );
+    // Another pull request opens for the issue, so `pr_open` would pass now.
+    let mut opened: Value = serde_json::from_str(OPENED).unwrap();
+    opened["number"] = json!(13);
+    opened["pull_request"]["number"] = json!(13);
+    opened["pull_request"]["id"] = json!(1934102999_i64);
+    deliver(&s, "pull_request", "opened-13", &opened.to_string()).await;
+    deliver(&s, "pull_request", "closed-3", CLOSED).await;
+    let status = sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "in_progress");
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+}
+
+#[sqlx::test]
+async fn a_passing_gate_on_pr_closed_unmerged_moves_the_issue_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(
+            &s,
+            "pr_closed_unmerged",
+            "pr_names_issue",
+            "in_progress",
+            CLOSED
+        )
+        .await,
+        "todo"
+    );
+    assert_eq!(rows_from_github(&pool).await, (1, 1, 1));
+}
+
+#[sqlx::test]
+async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(&s, "pr_merged", "proof_attached", "merging", MERGED).await,
+        "merging"
+    );
+    assert_eq!(rows_from_github(&pool).await, (0, 0, 0));
+    let state: String = sqlx::query_scalar("SELECT state FROM pull_request WHERE number = 12")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "merged");
+}
+
+#[sqlx::test]
+async fn a_passing_gate_on_pr_merged_is_recorded_on_the_move(pool: PgPool) {
+    let s = setup(&pool).await;
+    assert_eq!(
+        close_with_gate(&s, "pr_merged", "pr_names_issue", "merging", MERGED).await,
+        "done"
+    );
+    let gates: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT t.from_status, t.to_status, g.gate, g.result, g.reason
+         FROM transition t LEFT JOIN transition_gate g ON g.transition_id = t.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        gates,
+        vec![(
+            "merging".into(),
+            "done".into(),
+            "pr_names_issue".into(),
+            "pass".into(),
+            "pull request #12's branch names PL-1".into()
+        )]
+    );
+}
+
+#[sqlx::test]
+async fn a_stored_version_without_the_dispatch_rule_is_served_but_not_loaded(pool: PgPool) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    // A version stored before the runtime required a dispatch rule for `in_progress`.
+    let old = PRD_WORKFLOW.replace(
+        "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n",
+        "",
+    );
+    assert_ne!(old, PRD_WORKFLOW);
+    sqlx::query!(
+        "WITH v AS (
+             INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+             SELECT id, 'sha256:old', $1, $2, '{\"prompts/agent_review.md\": \"Review it.\"}'::jsonb
+             FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+        "c".repeat(40),
+        old,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["commit_sha"], "c".repeat(40));
+    let (status, _) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Pushing that same file is refused.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "d".repeat(40);
+        repo.files.insert("workflow.toml".into(), old);
+    }
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (_, after) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(after["commit_sha"], "c".repeat(40));
+}
+
 #[sqlx::test]
 async fn a_missing_prompt_is_refused(pool: PgPool) {
     let s = setup(&pool).await;
@@ -914,4 +1123,169 @@ async fn a_reverted_workflow_reports_the_commit_it_was_loaded_from(pool: PgPool)
         ["a".repeat(40), "b".repeat(40), "c".repeat(40)]
     );
     assert_eq!(workflow_versions(&pool).await, 2);
+}
+
+#[sqlx::test]
+async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+    let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "todo"}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert(
+            "workflow.toml".into(),
+            PRD_WORKFLOW.replace("todo", "ready"),
+        );
+        repo.files
+            .insert("prompts/system.md".into(), "System.\n".into());
+        repo.files
+            .insert("prompts/in_progress.md".into(), "Build it.\n".into());
+        repo.files
+            .insert("prompts/agent_review.md".into(), "Review it.\n".into());
+    }
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 0);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], Value::Null);
+
+    // The issue can still move; with it out of Todo the same file loads.
+    let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "start"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    deliver(&s, "push", "push-2", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], "a".repeat(40));
+}
+
+/// Waits until some backend waits on a lock, so a test needs no sleep as synchronization.
+async fn wait_for_lock_waiter(pool: &PgPool) {
+    for _ in 0..500 {
+        let waiting = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "n!" FROM pg_stat_activity
+               WHERE wait_event_type = 'Lock' AND datname = current_database()"#
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("nothing waited on a lock");
+}
+
+fn put_workflow(s: &Setup, sha: &str, toml: String) {
+    let mut repo = s.github.lock().unwrap();
+    repo.sha = sha.repeat(40);
+    repo.files.insert("workflow.toml".into(), toml);
+    for (path, text) in [
+        ("prompts/system.md", "System.\n"),
+        ("prompts/in_progress.md", "Build it.\n"),
+        ("prompts/agent_review.md", "Review it.\n"),
+    ] {
+        repo.files.insert(path.into(), text.into());
+    }
+}
+
+#[sqlx::test]
+async fn a_load_waits_for_a_move_in_flight_and_then_refuses(pool: PgPool) {
+    let s = Arc::new(setup(&pool).await);
+    let token = s.person.token.clone();
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let id = issue["id"].as_str().unwrap().to_string();
+    put_workflow(&s, "a", PRD_WORKFLOW.replace("todo", "ready"));
+
+    // A move in flight: it holds the workspace lock and has put the issue in Todo.
+    let mut mover = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *mover)
+        .await
+        .unwrap();
+    sqlx::query!("UPDATE issue SET status = 'todo' WHERE id = $1", id)
+        .execute(&mut *mover)
+        .await
+        .unwrap();
+    let load = tokio::spawn({
+        let s = s.clone();
+        async move { deliver(&s, "push", "push-1", PUSH).await }
+    });
+    wait_for_lock_waiter(&pool).await;
+    assert!(!load.is_finished());
+    mover.commit().await.unwrap();
+    load.await.unwrap();
+    assert_eq!(workflow_versions(&pool).await, 0);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], Value::Null);
+}
+
+#[sqlx::test]
+async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPool) {
+    let s = Arc::new(setup(&pool).await);
+    let token = s.person.token.clone();
+    put_workflow(&s, "a", PRD_WORKFLOW.into());
+    deliver(&s, "push", "push-1", PUSH).await;
+    let (_, first) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    let (_, issue) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+
+    // A load in flight: it holds the workspace lock and has switched to a version with `ready`.
+    let mut load = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *load)
+        .await
+        .unwrap();
+    let ready = sqlx::query_scalar!(
+        "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+         SELECT workspace_id, 'sha256:ready', $1, replace(workflow_toml, 'todo', 'ready'), prompts
+         FROM workflow_version RETURNING id",
+        "b".repeat(40),
+    )
+    .fetch_one(&mut *load)
+    .await
+    .unwrap();
+    sqlx::query!("UPDATE workspace SET workflow_version_id = $1", ready)
+        .execute(&mut *load)
+        .await
+        .unwrap();
+    let mover = tokio::spawn({
+        let s = s.clone();
+        async move { call(&s.app, &token, "POST", &path, Some(json!({"to": "ready"}))).await }
+    });
+    wait_for_lock_waiter(&pool).await;
+    assert!(!mover.is_finished());
+    load.commit().await.unwrap();
+    let (status, moved) = mover.await.unwrap();
+    // The built-in workflow would answer 409 unknown_status for `ready`.
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        moved["event"]["detail"]["workflow_version"],
+        first["version"]
+    );
 }

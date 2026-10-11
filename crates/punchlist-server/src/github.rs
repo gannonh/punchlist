@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::issues::{record_comment, write_transition};
-use crate::workflow::{active_workflow, queue_workflow_load};
+use crate::issues::{check_gates, record_comment, write_transition};
+use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -461,6 +461,11 @@ async fn record_pull_request(
     closed_by: Option<&str>,
     delivery_id: Option<&str>,
 ) -> Result<Uuid, ApiError> {
+    // A close can move the issue. Before the pull request row's foreign key touches the
+    // issue row.
+    if pr.state != "open" {
+        lock_workspace(tx, workspace_id).await?;
+    }
     let prefix = sqlx::query_scalar!(
         "SELECT issue_prefix FROM workspace WHERE id = $1",
         workspace_id
@@ -660,8 +665,11 @@ async fn recompute_checks(
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
-/// event from the issue's status. Otherwise the event is only evidence. Runs once per close:
-/// see `record_pull_request`. `closed_by` is the GitHub login that closed it, when known.
+/// event from the issue's status and that transition's gates pass. With no such transition
+/// the pull request's new state is all that is recorded. With a failed gate the refusal is
+/// logged and nothing is written to the issue: no status, transition, comment or actor.
+/// Runs once per close: see `record_pull_request`. `closed_by` is the GitHub login that
+/// closed it, when known.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -694,6 +702,12 @@ async fn close_issue_on_pull_request(
     // With nobody to credit the actor is GitHub itself. No GitHub login is empty, so that
     // actor is never a user's.
     let (name, login) = closed_by.map_or(("GitHub", ""), |login| (login, login));
+    let gates = match check_gates(tx, transition, name, issue_id, &status, Some(pr.number)).await {
+        Ok(gates) => gates,
+        // `check_gates` logged the gate and its reason. Nothing is written to the issue.
+        Err(ApiError::GateFailed(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let actor_id = sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $3)
@@ -720,7 +734,7 @@ async fn close_issue_on_pull_request(
         transition.to.as_str(),
         delivery_id,
         workflow.version(),
-        &[],
+        &gates,
     )
     .await?;
     // The agent working this issue has nothing left to do: its pull request is gone, and the

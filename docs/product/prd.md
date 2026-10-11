@@ -181,9 +181,15 @@ agent = "codex"
 prompt = "prompts/agent_review.md"
 ```
 
+The runtime reserves a few names: the statuses `start` and `in_progress`, the runner transition from `start` to `in_progress`, and the `dispatch.status.in_progress` rule. A claim moves an issue between those two statuses and starts the agent that rule names, so a workflow file must keep all four. The server refuses a file that lacks one, at load, with the line and key, and keeps the previous version active. Everything else in the file is free to change.
+
 A status with a `dispatch.status` entry starts an agent with that prompt. A status without one waits for a person or a GitHub event, which is how a human gate is expressed.
 
 v1 ships a fixed set of gates implemented in code. Each gate is a pure function over recorded evidence, such as check runs, review threads and proof records, so an agent cannot waive one by claiming it passed. Custom gates that run a command or call a webhook come later.
+
+A gate in the file is always checked. A transition with `on` evaluates its gates when the event arrives, as a requested transition does. If they all pass, the move is recorded with each gate's result. If one fails, the issue stays where it is and nothing is written to it; the server log names the gate and the reason, and is the only record. A failed gate is final for that event: the event is not tried again, and later evidence does not re-run it. Moving the issue afterwards takes a requested transition, which passes only if its own gates do or it has none. A transition with both `by` and `on` has one list of gates, checked on either path.
+
+`pr_open` and `pr_ready` read the issue's one open pull request, on an event as on a request. They say nothing about the pull request that a `pr_merged` or `pr_closed_unmerged` event closed: they fail when the issue has no other open pull request, and otherwise describe that other one. `pr_names_issue` is the gate that describes the closed pull request, so it is the one that can pass because of it: on these events it checks the pull request that was merged or closed, and on a requested transition it checks the issue's one open pull request. A pull request's title and branch are not recorded again after it merges, so a `pr_names_issue` that failed on `pr_merged` cannot pass later for that pull request.
 
 The server publishes a JSON Schema for `workflow.toml`, so editors with a TOML language server can complete and check it.
 

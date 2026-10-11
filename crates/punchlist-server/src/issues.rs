@@ -8,8 +8,8 @@ use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, Workflow,
-    display_name,
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, START, Transition,
+    Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::github::refresh_pull_requests;
-use crate::workflow::active_workflow;
+use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -123,6 +123,7 @@ async fn create_issue(
         return Err(ApiError::Invalid("an issue needs a title".into()));
     }
     let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let next = sqlx::query!(
         r#"UPDATE workspace SET next_issue_number = next_issue_number + 1 WHERE id = $1
@@ -238,6 +239,7 @@ async fn move_issue(
 ) -> Result<Json<Moved>, ApiError> {
     refresh_evidence(&state, &actor, &id, &request.to).await?;
     let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
@@ -275,7 +277,7 @@ async fn move_issue(
     )
     .await?;
     tx.commit().await?;
-    if request.to == "start" {
+    if request.to == START {
         // Wake runners that are long-polling for work. No receivers is fine.
         let _ = state.starts.send((actor.workspace_id, id));
     }
@@ -330,10 +332,24 @@ pub(crate) async fn check_move(
     to: &str,
 ) -> Result<Vec<GateResult>, ApiError> {
     let transition = workflow.check_transition(from, to, actor.role)?;
+    check_gates(tx, transition, &actor.name, id, from, None).await
+}
+
+/// Evaluates a transition's gates over the issue's recorded evidence, for a requested move
+/// and for one a GitHub event causes: `closed_pull_request` is the pull request that event
+/// merged or closed. Returns the results, all passed, or `ApiError::GateFailed`.
+pub(crate) async fn check_gates(
+    tx: &mut sqlx::PgConnection,
+    transition: &Transition,
+    actor_name: &str,
+    id: &str,
+    from: &str,
+    closed_pull_request: Option<i64>,
+) -> Result<Vec<GateResult>, ApiError> {
     if transition.gates.is_empty() {
         return Ok(Vec::new());
     }
-    let evidence = evidence(tx, id).await?;
+    let evidence = evidence(tx, id, closed_pull_request).await?;
     let gates: Vec<GateResult> = transition
         .gates
         .iter()
@@ -342,11 +358,11 @@ pub(crate) async fn check_move(
     if let Some(failed) = gates.iter().find(|result| !result.passed) {
         let refusal = Refusal::GateFailed {
             from: from.to_string(),
-            to: to.to_string(),
+            to: transition.to.as_str().to_string(),
             gate: failed.gate.clone(),
             reason: failed.reason.clone(),
         };
-        tracing::info!(issue = id, actor = %actor.name, "refused: {refusal}");
+        tracing::info!(issue = id, actor = %actor_name, "refused: {refusal}");
         return Err(ApiError::GateFailed(Box::new(GateFailure {
             refusal,
             evidence,
@@ -356,8 +372,13 @@ pub(crate) async fn check_move(
     Ok(gates)
 }
 
-/// What the gates read: the pull requests linked to the issue.
-async fn evidence(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Evidence> {
+/// What the gates read: the pull requests linked to the issue, and the one a GitHub event
+/// merged or closed when that event is causing the move.
+async fn evidence(
+    tx: &mut sqlx::PgConnection,
+    id: &str,
+    closed_pull_request: Option<i64>,
+) -> sqlx::Result<Evidence> {
     let rows = sqlx::query!(
         "SELECT number, title, branch, state, draft FROM pull_request
          WHERE issue_id = $1 ORDER BY number DESC",
@@ -383,6 +404,7 @@ async fn evidence(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Evidenc
     Ok(Evidence {
         issue_id: id.to_string(),
         pull_requests,
+        closed_pull_request,
     })
 }
 
@@ -636,6 +658,8 @@ async fn add_comment(
         return Err(ApiError::Invalid("a comment needs a body".into()));
     }
     let mut tx = state.pool.begin().await?;
+    // Workspace before issue, as everywhere; the comment event updates the workspace row.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     let status = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
