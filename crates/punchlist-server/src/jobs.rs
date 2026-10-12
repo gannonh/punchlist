@@ -12,6 +12,8 @@ use crate::AppState;
 const LEASE_SECONDS: i32 = 30;
 /// A job that fails this many times is marked `failed` and not retried.
 const MAX_ATTEMPTS: i32 = 10;
+/// How many times one run of a `github_event` job reads GitHub before a dropped read fails it.
+const MAX_READS: u32 = 3;
 /// How long the worker sleeps when no job wakes it.
 const POLL: Duration = Duration::from_secs(1);
 
@@ -65,17 +67,33 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
         match job.kind.as_str() {
             "github_event" => {
                 // GitHub is read before the transaction begins, so no lock or connection is
-                // held across the network, and within half the lease, so a slow GitHub
-                // fails the job instead of outliving it.
-                let read = crate::github::read_current(state, &job.payload);
-                let (event, current) = tokio::time::timeout(
-                    Duration::from_secs_f64(f64::from(LEASE_SECONDS) / 2.0),
-                    read,
-                )
-                .await
-                .context("GitHub did not answer in time")??;
-                tx = state.pool.begin().await?;
-                crate::github::process(&mut tx, &event, current).await?;
+                // held across the network. A read that is dropped because another was
+                // recorded first is made again here, so it does not spend one of the job's
+                // attempts. Every read is done within half the lease from the first's start,
+                // so a slow GitHub fails the job instead of outliving it.
+                let deadline = tokio::time::Instant::now()
+                    + Duration::from_secs_f64(f64::from(LEASE_SECONDS) / 2.0);
+                let mut reads = 0;
+                tx = loop {
+                    let read = crate::github::read_current(state, &job.payload);
+                    let (event, current) = tokio::time::timeout_at(deadline, read)
+                        .await
+                        .context("GitHub did not answer in time")??;
+                    let mut tx = state.pool.begin().await?;
+                    if crate::github::process(&mut tx, &event, current).await? {
+                        break tx;
+                    }
+                    tx.rollback().await?;
+                    reads += 1;
+                    anyhow::ensure!(
+                        reads < MAX_READS,
+                        "another read of the pull request was recorded first, {MAX_READS} times"
+                    );
+                    tracing::info!(
+                        job = job.id,
+                        "another read of the pull request was recorded first, reading again"
+                    );
+                };
             }
             // ponytail: the GitHub reads run inside the transaction, holding a connection
             // for their few seconds; fine at one load per push to `.punchlist/`.

@@ -354,7 +354,7 @@ pub(crate) struct Current {
     /// For a review thread event: it carries no time, and none is sent for a new thread.
     threads: Option<Vec<ReviewThread>>,
     /// The pull request row's version before either read, for `claim_read`: 0 with no row.
-    /// `None` when nothing was read.
+    /// `None` when GitHub gave no answer, so the payload is recorded as one without a read.
     version: Option<i64>,
 }
 
@@ -395,18 +395,20 @@ pub(crate) async fn read_current(
     if thread_event {
         current.threads = unless_gone(github.review_threads(owner, name, pr.number).await)?;
     }
-    if closes || thread_event {
+    if current.pull_request.is_some() || current.threads.is_some() {
         current.version = Some(version);
     }
     Ok((job, current))
 }
 
-/// Records one delivery. Runs inside the job's transaction, and is safe to run again.
+/// Records one delivery. Runs inside the job's transaction, and is safe to run again. False
+/// when what `current` read is dropped (`claim_read`) and nothing was written: the caller
+/// rolls back and reads again.
 pub(crate) async fn process(
     tx: &mut sqlx::PgConnection,
     job: &GithubJob,
     current: Current,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     match &job.event {
         GithubEvent::PullRequest(event) => {
             // Only a `closed` event's sender closed it; another event may still be the first
@@ -417,16 +419,24 @@ pub(crate) async fn process(
                 Some(now) if now.closed_at != event.pull_request.closed_at => None,
                 _ => (event.action == "closed").then_some(&event.sender),
             };
+            let pr = current.pull_request.as_ref().unwrap_or(&event.pull_request);
+            if let Some(version) = current.version
+                && !claim_read(tx, job.workspace_id, job.repository_id, pr, version).await?
+            {
+                return Ok(false);
+            }
             let id = record_pull_request(
                 tx,
                 job.workspace_id,
                 job.repository_id,
-                current.pull_request.as_ref().unwrap_or(&event.pull_request),
+                pr,
                 closed_by.map(|account| account.login.as_str()),
                 Some(&job.delivery_id),
             )
             .await?;
-            claim_read_or_fail(tx, id, current.version, event.pull_request.number).await?;
+            if current.version.is_some() {
+                record_read(tx, id).await?;
+            }
         }
         GithubEvent::CheckRun(event) => {
             let run = &event.check_run;
@@ -466,6 +476,12 @@ pub(crate) async fn process(
             // still tells it whether the pull request was merged.
             // Locked before the thread rows are written, as `record_pull_request` locks it:
             // the gated request's refresh holds this lock while it writes the same rows.
+            let pr = current.pull_request.as_ref().unwrap_or(&event.pull_request);
+            if let Some(version) = current.version
+                && !claim_read(tx, job.workspace_id, job.repository_id, pr, version).await?
+            {
+                return Ok(false);
+            }
             let known = sqlx::query_scalar!(
                 "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
                 job.repository_id,
@@ -480,20 +496,16 @@ pub(crate) async fn process(
                         tx,
                         job.workspace_id,
                         job.repository_id,
-                        current.pull_request.as_ref().unwrap_or(&event.pull_request),
+                        pr,
                         None,
                         Some(&job.delivery_id),
                     )
                     .await?
                 }
             };
-            claim_read_or_fail(
-                tx,
-                pull_request_id,
-                current.version,
-                event.pull_request.number,
-            )
-            .await?;
+            if current.version.is_some() {
+                record_read(tx, pull_request_id).await?;
+            }
             match &current.threads {
                 Some(threads) => {
                     forget_other_review_threads(tx, pull_request_id, threads).await?;
@@ -511,59 +523,57 @@ pub(crate) async fn process(
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
-/// Claims a pull request's row for a write of what a reader read from GitHub. True, and the
-/// row's `version` goes up by one, if it is still the version the reader noted before it
-/// read. False if another read was recorded since: this one may be the older, and the caller
-/// rolls back what it wrote. The caller holds the row's lock, from recording the pull
-/// request, so a pull request with no row when the read began is claimed at 0, the version
-/// its row is inserted with.
+/// Locks a pull request's row for a write of what GitHub answered a reader that noted the
+/// row at `version`, 0 for no row. False if a read has been recorded since: this one may be
+/// the older, so the caller writes nothing and reads again. A read that confirms what is
+/// recorded claims too: it is still newer than an older read in flight. A payload recorded
+/// with no answer from GitHub does not claim, and `github_updated_at` orders it, as before.
 ///
-/// Only a claim changes the version, so the reads recorded never overlap: each began after
-/// the one before it was committed, and is the newer. That orders two cases.
-/// - A read that began before another reader's write and is written after it is dropped: a
-///   job's read that was still in flight while a gated request read and recorded.
-/// - Of two reads that began at one version, the first written stands and the second is
-///   dropped, though GitHub may have answered the second later. So a dropped reader reads
-///   again: a job fails and the queue retries it, and `refresh_pull_requests` makes a second
-///   pass.
-///
-/// A payload recorded without a read neither checks the version nor changes it, so it never
-/// drops a read; `github_updated_at` orders it against what is recorded, as before.
+/// The workspace's lock comes first, as the lock order has it, when `pr` may close the pull
+/// request, and when there is no row to lock, so that two first reads do not both insert it.
 // ponytail: that time is in whole seconds, so a read and a payload recorded without one, both
 // from the same second, stand in the order they were written, as two such payloads do. Read
 // GitHub for every pull request payload if that bites.
 async fn claim_read(
     tx: &mut sqlx::PgConnection,
-    pull_request_id: Uuid,
+    workspace_id: Uuid,
+    repository_id: Uuid,
+    pr: &PullRequestData,
     version: i64,
 ) -> sqlx::Result<bool> {
-    let claimed = sqlx::query!(
-        "UPDATE pull_request SET version = version + 1 WHERE id = $1 AND version = $2",
+    let mut workspace_locked = pr.state != "open";
+    if workspace_locked {
+        lock_workspace(tx, workspace_id).await?;
+    }
+    loop {
+        let now = sqlx::query_scalar!(
+            "SELECT version FROM pull_request WHERE repository_id = $1 AND number = $2
+             FOR UPDATE",
+            repository_id,
+            pr.number,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if now.is_some() || workspace_locked {
+            return Ok(now.unwrap_or(0) == version);
+        }
+        lock_workspace(tx, workspace_id).await?;
+        workspace_locked = true;
+    }
+}
+
+/// Counts the read `claim_read` claimed, once its pull request is recorded: the row's lock is
+/// still held, and a row there was none of now exists.
+async fn record_read(tx: &mut sqlx::PgConnection, pull_request_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE pull_request SET version = version + 1 WHERE id = $1",
         pull_request_id,
-        version,
     )
     .execute(&mut *tx)
     .await?;
-    Ok(claimed.rows_affected() == 1)
-}
-
-/// `claim_read` for a job, which fails when its read is dropped: the retry reads again. With
-/// no `version` the job read nothing and records its payload.
-async fn claim_read_or_fail(
-    tx: &mut sqlx::PgConnection,
-    pull_request_id: Uuid,
-    version: Option<i64>,
-    number: i64,
-) -> anyhow::Result<()> {
-    if let Some(version) = version {
-        anyhow::ensure!(
-            claim_read(tx, pull_request_id, version).await?,
-            "another read of pull request #{number} was recorded first; reading again"
-        );
-    }
     Ok(())
 }
 
@@ -751,23 +761,27 @@ async fn record_pull_request(
 /// could pass a request on a pull request known to be merged or closed. The requester asks
 /// again; the pull requests already recorded stay recorded.
 ///
-/// A write dropped because another read was recorded first (`claim_read`) is not a failure:
-/// that read may have begun before this request, so everything is read once more. A write
-/// dropped on the second pass lost to a read that began after the first pass noted its
-/// versions, so after this request did, and what it recorded is new enough for the gates.
+/// A pull request whose write is dropped (`claim_read`) is read once more, alone. If that
+/// write is dropped too the request goes on, and the gates read what is recorded.
+// ponytail: the read recorded then began after this request did, but it may be half of one: a
+// thread event's job reads only the threads and a close's only the pull request, and both
+// raise the one version. So `draft` or `head_sha`, or the threads, can be from before the
+// request. A version for each thing read, or reading both every time, closes that.
 pub(crate) async fn refresh_pull_requests(
     github: &GithubClient,
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
 ) -> Result<(), ApiError> {
-    if refresh_once(github, pool, workspace_id, issue_id).await? {
-        refresh_once(github, pool, workspace_id, issue_id).await?;
+    let dropped = refresh_once(github, pool, workspace_id, issue_id, None).await?;
+    if !dropped.is_empty() {
+        refresh_once(github, pool, workspace_id, issue_id, Some(&dropped)).await?;
     }
     Ok(())
 }
 
-/// One pass of `refresh_pull_requests`. True if a write was dropped.
+/// One pass of `refresh_pull_requests`, over the pull requests numbered in `only` when it is
+/// given. Returns the numbers of those whose write was dropped.
 // ponytail: GitHub's pull request names who merged it but not who closed it, so a close read
 // here credits nobody; read the issue's `closed_by` if the name matters.
 async fn refresh_once(
@@ -775,7 +789,8 @@ async fn refresh_once(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
-) -> Result<bool, ApiError> {
+    only: Option<&[i64]>,
+) -> Result<Vec<i64>, ApiError> {
     let Some(repository) = sqlx::query!(
         "SELECT r.id, r.owner, r.name, w.issue_prefix FROM repository r
          JOIN workspace w ON w.id = r.workspace_id WHERE r.workspace_id = $1",
@@ -784,15 +799,17 @@ async fn refresh_once(
     .fetch_optional(pool)
     .await?
     else {
-        return Ok(false);
+        return Ok(Vec::new());
     };
     // Each version is noted here, before GitHub is read, for `claim_read`.
     // ponytail: every pull request of the repository, since GitHub's list can name one that
     // is recorded for another issue. Note only the 30 most recently updated and the issue's
     // own if a repository has enough pull requests for this to cost.
     let recorded = sqlx::query!(
-        "SELECT number, version, issue_id FROM pull_request WHERE repository_id = $1",
+        "SELECT number, version, issue_id FROM pull_request
+         WHERE repository_id = $1 AND ($2::bigint[] IS NULL OR number = ANY($2))",
         repository.id,
+        only,
     )
     .fetch_all(pool)
     .await?;
@@ -805,20 +822,28 @@ async fn refresh_once(
         linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
             == Some(issue_id)
     };
-    let fresh = match github
-        .pull_requests(&repository.owner, &repository.name, &known, names_issue)
-        .await
-    {
+    let (owner, name) = (&repository.owner, &repository.name);
+    let read = async {
+        let Some(numbers) = only else {
+            return github.pull_requests(owner, name, &known, names_issue).await;
+        };
+        let mut fresh = Vec::new();
+        for &number in numbers {
+            fresh.push(github.pull_request(owner, name, number).await?);
+        }
+        Ok(fresh)
+    };
+    let fresh = match read.await {
         Ok(fresh) => fresh,
         Err(error) => {
             tracing::warn!(
                 issue_id,
                 "cannot read pull requests from GitHub, the gates read the recorded ones: {error:#}"
             );
-            return Ok(false);
+            return Ok(Vec::new());
         }
     };
-    let mut dropped = false;
+    let mut dropped = Vec::new();
     for pr in &fresh {
         // A closed or merged pull request that was never recorded for this issue is history,
         // such as one closed while the server was down. It is not what the agent is working
@@ -838,23 +863,24 @@ async fn refresh_once(
             })
             .ok();
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
-        let mut tx = pool.begin().await?;
-        let id =
-            record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
         let version = recorded
             .iter()
             .find(|row| row.number == pr.number)
             .map_or(0, |row| row.version);
-        if !claim_read(&mut tx, id, version).await? {
+        let mut tx = pool.begin().await?;
+        if !claim_read(&mut tx, workspace_id, repository.id, pr, version).await? {
             tracing::info!(
                 issue_id,
                 number = pr.number,
                 "another read of the pull request was recorded first, this one is dropped"
             );
             tx.rollback().await?;
-            dropped = true;
+            dropped.push(pr.number);
             continue;
         }
+        let id =
+            record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        record_read(&mut tx, id).await?;
         if let Some(threads) = &threads {
             forget_other_review_threads(&mut tx, id, threads).await?;
             record_review_threads(&mut tx, id, threads).await?;
