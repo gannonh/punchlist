@@ -20,6 +20,7 @@ use punchlist_server::{
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::PgPool;
+use tokio::sync::Barrier;
 use tower::ServiceExt;
 
 const SECRET: &str = "test-webhook-secret";
@@ -33,7 +34,9 @@ const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workfl
 /// The default branch's head commit, the files under `.punchlist/` there, and the pull
 /// requests and review threads GitHub currently reports; every pull request has the same
 /// threads. `down` makes the pull request and review thread endpoints fail, `graphql_down` the
-/// review threads alone. A pull request GitHub does not have is a 404.
+/// review threads alone. A pull request GitHub does not have is a 404. `hold` keeps back the
+/// next answer about one pull request or its review threads: it is what GitHub had when it
+/// was asked, and it is sent after the test has met the barrier twice.
 #[derive(Default)]
 struct Repo {
     sha: String,
@@ -42,6 +45,15 @@ struct Repo {
     threads: Vec<Value>,
     down: bool,
     graphql_down: bool,
+    hold: Option<Arc<Barrier>>,
+}
+
+/// Waits out a `hold`: once to tell the test the answer is ready, once to be let go.
+async fn held(hold: Option<Arc<Barrier>>) {
+    if let Some(hold) = hold {
+        hold.wait().await;
+        hold.wait().await;
+    }
 }
 
 type FakeGithub = Arc<Mutex<Repo>>;
@@ -76,14 +88,19 @@ async fn fake_github() -> (FakeGithub, String) {
             get(
                 |State(repo): State<FakeGithub>,
                  Path((_, _, number)): Path<(String, String, i64)>| async move {
-                    let repo = repo.lock().unwrap();
-                    match repo.pulls.iter().find(|pr| pr["number"] == number) {
-                        _ if repo.down => {
-                            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({})))
-                        }
-                        Some(pr) => (StatusCode::OK, axum::Json(pr.clone())),
-                        None => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
-                    }
+                    let (answer, hold) = {
+                        let mut repo = repo.lock().unwrap();
+                        let answer = match repo.pulls.iter().find(|pr| pr["number"] == number) {
+                            _ if repo.down => {
+                                (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({})))
+                            }
+                            Some(pr) => (StatusCode::OK, axum::Json(pr.clone())),
+                            None => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                        };
+                        (answer, repo.hold.take())
+                    };
+                    held(hold).await;
+                    answer
                 },
             ),
         )
@@ -92,21 +109,26 @@ async fn fake_github() -> (FakeGithub, String) {
             "/graphql",
             post(
                 |State(repo): State<FakeGithub>, axum::Json(query): axum::Json<Value>| async move {
-                    let repo = repo.lock().unwrap();
-                    if repo.down || repo.graphql_down {
-                        return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
-                    }
-                    let after = &query["variables"]["after"];
-                    let from = after.as_str().map_or(0, |cursor| cursor.parse().unwrap());
-                    let to = repo.threads.len().min(from + 2);
-                    let threads = json!({
-                        "nodes": repo.threads[from..to],
-                        "pageInfo": {
-                            "hasNextPage": to < repo.threads.len(),
-                            "endCursor": to.to_string(),
-                        },
-                    });
-                    let data = json!({"repository": {"pullRequest": {"reviewThreads": threads}}});
+                    let (data, hold) = {
+                        let mut repo = repo.lock().unwrap();
+                        if repo.down || repo.graphql_down {
+                            return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
+                        }
+                        let after = &query["variables"]["after"];
+                        let from = after.as_str().map_or(0, |cursor| cursor.parse().unwrap());
+                        let to = repo.threads.len().min(from + 2);
+                        let threads = json!({
+                            "nodes": repo.threads[from..to],
+                            "pageInfo": {
+                                "hasNextPage": to < repo.threads.len(),
+                                "endCursor": to.to_string(),
+                            },
+                        });
+                        let data =
+                            json!({"repository": {"pullRequest": {"reviewThreads": threads}}});
+                        (data, repo.hold.take())
+                    };
+                    held(hold).await;
                     (StatusCode::OK, axum::Json(json!({"data": data})))
                 },
             ),
@@ -891,6 +913,183 @@ async fn a_gated_request_reads_a_new_review_thread_from_github(pool: PgPool) {
     assert_eq!(
         recorded_threads(&pool).await,
         (vec![("PRRT_kwDOA1b2c84AbCdE".into(), false)], 1)
+    );
+}
+
+/// The job of delivery `id`: its state, its attempts and its last error.
+async fn job(pool: &PgPool, id: &str) -> (String, i32, Option<String>) {
+    sqlx::query_as("SELECT state, attempts, last_error FROM job WHERE idempotency_key = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Runs the queued jobs again now, whatever their backoff.
+async fn retry_jobs(s: &Setup) {
+    sqlx::query("UPDATE job SET run_after = now()")
+        .execute(&s.state.pool)
+        .await
+        .unwrap();
+    run_jobs_until_idle(&s.state).await.unwrap();
+}
+
+const DROPPED: &str = "another read of pull request #12 was recorded first; reading again";
+
+#[sqlx::test]
+async fn a_jobs_older_read_of_the_threads_does_not_replace_a_gated_requests(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    let hold = Arc::new(Barrier::new(2));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![
+            thread("PRRT_kwDOA1b2c84AbCdE", false),
+            thread("PRRT_kwDOA1b2c84ZyXwV", false),
+        ];
+        repo.hold = Some(hold.clone());
+    }
+    let newer = (
+        vec![
+            ("PRRT_kwDOA1b2c84AbCdE".into(), true),
+            ("PRRT_kwDOA1b2c84ZyXwV".into(), false),
+        ],
+        1,
+    );
+
+    tokio::join!(
+        deliver(&s, "pull_request_review_thread", "d-resolved", THREAD),
+        async {
+            // The job has read two open threads, and its answer is on the way. The first is
+            // resolved, and a gated request reads and records that.
+            hold.wait().await;
+            s.github.lock().unwrap().threads[0] = thread("PRRT_kwDOA1b2c84AbCdE", true);
+            let (status, body) = request_agent_review(&s, &agent).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(recorded_threads(&pool).await, newer);
+            hold.wait().await;
+        }
+    );
+
+    // The job's answer came second and is the older one: it is dropped, and the job fails.
+    assert_eq!(recorded_threads(&pool).await, newer);
+    assert_eq!(
+        job(&pool, "d-resolved").await,
+        ("queued".into(), 1, Some(DROPPED.into()))
+    );
+    // Its retry reads again.
+    retry_jobs(&s).await;
+    assert_eq!(recorded_threads(&pool).await, newer);
+    assert_eq!(job(&pool, "d-resolved").await, ("done".into(), 2, None));
+}
+
+#[sqlx::test]
+async fn a_jobs_older_read_of_the_state_does_not_replace_a_gated_requests(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    // Closed and reopened within 18:30:00, so `updated_at` does not order the two states.
+    let reopened = edited(READY, |v| {
+        v["pull_request"]["updated_at"] = json!("2026-10-09T18:30:00Z");
+    });
+    let hold = Arc::new(Barrier::new(2));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(CLOSED)];
+        repo.hold = Some(hold.clone());
+    }
+
+    tokio::join!(deliver(&s, "pull_request", "d-closed", CLOSED), async {
+        // The job has read it closed, and its answer is on the way. It is reopened, and a
+        // gated request reads and records that.
+        hold.wait().await;
+        s.github.lock().unwrap().pulls = vec![pull_request_now(&reopened)];
+        let (status, body) = request_agent_review(&s, &agent).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        hold.wait().await;
+    });
+
+    // The job's closed answer came second and is the older one: nothing is closed or moved.
+    let open = ("open".into(), "agent_review".into());
+    assert_eq!(pull_request_and_issue(&pool).await, open);
+    assert_eq!(
+        job(&pool, "d-closed").await,
+        ("queued".into(), 1, Some(DROPPED.into()))
+    );
+    // Its retry reads again: GitHub says open.
+    retry_jobs(&s).await;
+    assert_eq!(pull_request_and_issue(&pool).await, open);
+    assert_eq!(event_transitions(&pool).await, []);
+    assert_eq!(job(&pool, "d-closed").await, ("done".into(), 2, None));
+}
+
+#[sqlx::test]
+async fn a_gated_request_whose_write_is_dropped_reads_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    let hold = Arc::new(Barrier::new(2));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", false)];
+        repo.hold = Some(hold.clone());
+    }
+    let resolved = (vec![("PRRT_kwDOA1b2c84AbCdE".into(), true)], 0);
+
+    let ((status, body), ()) = tokio::join!(request_agent_review(&s, &agent), async {
+        // The request has read the pull request, and that answer is on the way. The thread
+        // is resolved, and its delivery's job reads and records that first.
+        hold.wait().await;
+        s.github.lock().unwrap().threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+        deliver(&s, "pull_request_review_thread", "d-resolved", THREAD).await;
+        assert_eq!(recorded_threads(&pool).await, resolved);
+        hold.wait().await;
+    });
+
+    // The request's first write was dropped; it read again, and its second was recorded.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(recorded_threads(&pool).await, resolved);
+    assert_eq!(pull_request_version(&pool).await, 2);
+}
+
+async fn pull_request_version(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT version FROM pull_request WHERE number = 12")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn one_reader_at_a_time_records_what_it_read(pool: PgPool) {
+    let s = setup(&pool).await;
+    // Payloads recorded without a read leave the version alone.
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    assert_eq!(pull_request_version(&pool).await, 0);
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", false)];
+    }
+
+    deliver(&s, "pull_request_review_thread", "d-unresolved", THREAD).await;
+    assert_eq!(
+        recorded_threads(&pool).await,
+        (vec![("PRRT_kwDOA1b2c84AbCdE".into(), false)], 1)
+    );
+    assert_eq!(job(&pool, "d-unresolved").await, ("done".into(), 1, None));
+    assert_eq!(pull_request_version(&pool).await, 1);
+
+    s.github.lock().unwrap().threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        recorded_threads(&pool).await,
+        (vec![("PRRT_kwDOA1b2c84AbCdE".into(), true)], 0)
+    );
+    assert_eq!(pull_request_version(&pool).await, 2);
+    assert_eq!(
+        pull_request_and_issue(&pool).await,
+        ("open".into(), "agent_review".into())
     );
 }
 

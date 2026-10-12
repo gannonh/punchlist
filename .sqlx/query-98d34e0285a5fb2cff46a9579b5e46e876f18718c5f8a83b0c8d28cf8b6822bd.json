@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2",
+  "query": "SELECT state, version FROM pull_request WHERE repository_id = $1 AND number = $2",
   "describe": {
     "columns": [
       {
@@ -13,6 +13,17 @@
             "name": "state"
           }
         }
+      },
+      {
+        "ordinal": 1,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "version"
+          }
+        }
       }
     ],
     "parameters": {
@@ -22,8 +33,9 @@
       ]
     },
     "nullable": [
+      false,
       false
     ]
   },
-  "hash": "05545ac56c6ee5f698401c60417ddd5efe9c507f7dec26a6fec1ca2af0b3c785"
+  "hash": "98d34e0285a5fb2cff46a9579b5e46e876f18718c5f8a83b0c8d28cf8b6822bd"
 }

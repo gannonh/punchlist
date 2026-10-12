@@ -11,6 +11,7 @@ The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, ch
 - `checks` records `check_run` rows and sets `pull_request.checks` and the counts from the runs on the head commit.
 - `threads` records `review_thread` rows and sets `pull_request.open_threads` to the unresolved count. With App credentials a thread event makes the server read every review thread of the pull request from GitHub and replace the recorded ones, so the rows are GitHub's state now, whatever order the events came in, and include threads no event named.
 - `close-read` checks a payload that says closed without a merge against GitHub, with App credentials, and records what GitHub says now: a `closed` delivered after the `reopened` of the same second leaves the pull request open and the issue where it is.
+- `read-order` keeps an older read of a pull request from replacing a newer one. `pull_request.version` counts the reads recorded; a job or a gated request notes it before it reads GitHub and records only if it is unchanged. A job whose read is dropped fails once with `another read of pull request #<n> was recorded first; reading again` in `job.last_error` and its retry reads again; a gated request reads again itself and logs `another read of the pull request was recorded first`.
 - `github-move` moves the issue as actor role `github` and records the delivery id on the `transition`; the timeline line ends `[delivery <id>]`.
 - `comment` records a `comment` row and an `event` of kind `comment`; the timeline shows `<actor> (github)  commented:` and the body indented.
 - `unlinked` lists a pull request that names no issue under `pl pr unlinked` and not on any issue.
@@ -75,6 +76,7 @@ A run under `with-env` reads GitHub when a delivery could be stale, so these nee
 ## Gotchas
 
 - Out-of-order protection needs App credentials. A run started without `with-env` logs `no GitHub App credentials` and records payloads in arrival order, as before.
+- `pull_request.version` goes up by one for each read recorded (a thread event's job, a close read, each pull request of a gated request's refresh) and stays put for a payload recorded without a read, so a run without App credentials leaves it at `0`.
 - In a run with App credentials a fixture review thread delivery is answered from the sandbox's threads for that pull request number, not from the fixture; use a run without `with-env` for fixture deliveries. A job whose read of GitHub fails stays `queued` with the call in `job.last_error` and is retried.
 
 - `502 failed to connect to host` in the delivery log means GitHub could not reach the Funnel. Right after the Funnel is first turned on, public DNS for it can take some minutes; redeliver once `https://sartre.tail984796.ts.net:8443/api/github/webhook` answers from outside the tailnet.
