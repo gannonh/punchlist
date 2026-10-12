@@ -2505,6 +2505,21 @@ async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(p
         "1 of 1000 checks failed on 6dcb09b: `job999` (failure)"
     );
 
+    // A run created between the pages shifts the list: the second page repeats run 100.
+    s.github.lock().unwrap().check_runs = (0..150)
+        .map(|i| {
+            listed_run(
+                if i < 100 { i + 1 } else { i },
+                5,
+                &format!("job{i}"),
+                "success",
+            )
+        })
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+
     // More than ten full pages is refused rather than read without end.
     s.github.lock().unwrap().check_runs = (0..1001)
         .map(|i| listed_run(i + 1, 5, &format!("job{i}"), "success"))
