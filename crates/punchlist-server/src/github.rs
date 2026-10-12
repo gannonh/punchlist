@@ -758,15 +758,14 @@ async fn close_issue_on_pull_request(
     // The agent working this issue has nothing left to do: its pull request is gone, and the
     // issue is no longer in the status that started the run. Ending the run frees the issue
     // to be claimed again.
+    let how = if pr.is_merged() {
+        "merged"
+    } else {
+        "closed without merging"
+    };
     let reason = format!(
-        "the issue moved to {} because pull request #{} was {}",
-        transition.to,
-        pr.number,
-        if pr.is_merged() {
-            "merged"
-        } else {
-            "closed without merging"
-        }
+        "the issue moved to {} because pull request #{} was {how}",
+        transition.to, pr.number
     );
     sqlx::query!(
         "UPDATE attempt SET state = 'failed', finished_at = now(), failure_reason = $2
@@ -786,7 +785,7 @@ async fn close_issue_on_pull_request(
     if transition.require.iter().any(|r| r == "comment") {
         let by = closed_by.map_or_else(String::new, |login| format!(" by @{login}"));
         let body = format!(
-            "Pull request #{} was closed without merging{by}.\n\n{}",
+            "Pull request #{} was {how}{by}.\n\n{}",
             pr.number, pr.html_url
         );
         record_comment(tx, &actor, issue_id, &body, Some(transition_id)).await?;
