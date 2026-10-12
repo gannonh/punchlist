@@ -658,7 +658,7 @@ async fn a_gated_request_is_refused_when_github_cannot_be_read(pool: PgPool) {
     assert_eq!(issue_status(&pool).await, "agent_review");
     assert_eq!(gate_rows().await, 0);
 
-    // The pull request reads, but not its threads, which `no_open_threads` needs.
+    // The pull request reads, but not its threads.
     {
         let mut repo = s.github.lock().unwrap();
         repo.down = false;
@@ -1210,7 +1210,9 @@ async fn a_payload_that_inserts_the_row_during_a_read_does_not_drop_the_read(poo
 }
 
 #[sqlx::test]
-async fn a_gated_request_reads_the_pull_request_when_its_threads_cannot_be_read(pool: PgPool) {
+async fn a_gated_request_is_refused_when_an_open_pull_requests_threads_cannot_be_read(
+    pool: PgPool,
+) {
     let s = setup(&pool).await;
     let agent = claimed_issue(&s).await;
     deliver(&s, "pull_request", "d-opened", OPENED).await;
@@ -1221,10 +1223,17 @@ async fn a_gated_request_reads_the_pull_request_when_its_threads_cannot_be_read(
         repo.graphql_down = true;
     }
 
-    // GitHub says ready; without that read the request is refused, "is a draft".
+    // This transition's gates read no thread, but which gates it has is decided later,
+    // under the issue's lock: the request is refused whichever they are.
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+    assert_eq!(issue_status(&pool).await, "in_progress");
+    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
+
+    s.github.lock().unwrap().graphql_down = false;
     let (status, body) = request_agent_review(&s, &agent).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
 }
 
 #[sqlx::test]

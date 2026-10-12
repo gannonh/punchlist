@@ -771,9 +771,10 @@ async fn record_pull_request(
 /// transition right after it opens or readies a pull request; a gate must not read the state
 /// from before. So a read that fails refuses the request (`ApiError::GithubUnreadable`)
 /// rather than let the gates pass on rows from before a push: the list, any pull request it
-/// reads, and, when `threads_gate` says the transition has `no_open_threads`, an open pull
-/// request's review threads. Otherwise unread threads stand as recorded. A pull request
-/// GitHub answers 404 or 410 for is gone, and its recorded row stands.
+/// reads, and an open pull request's review threads, whichever gates the transition has (the
+/// workflow that decides them is read later, under the issue's lock). A closed pull
+/// request's unread threads stand as recorded: no gate reads them. A pull request GitHub
+/// answers 404 or 410 for is gone, and its recorded row stands.
 ///
 /// A recorded pull request that GitHub now reports closed or merged is recorded so, and
 /// moves the issue as its webhook would have: recording a merge stops that webhook from
@@ -799,12 +800,10 @@ pub(crate) async fn refresh_pull_requests(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
-    threads_gate: bool,
 ) -> Result<(), ApiError> {
-    let dropped = refresh_once(github, pool, workspace_id, issue_id, threads_gate, None).await?;
+    let dropped = refresh_once(github, pool, workspace_id, issue_id, None).await?;
     if !dropped.is_empty() {
-        let only = Some(dropped.as_slice());
-        refresh_once(github, pool, workspace_id, issue_id, threads_gate, only).await?;
+        refresh_once(github, pool, workspace_id, issue_id, Some(&dropped)).await?;
     }
     Ok(())
 }
@@ -818,7 +817,6 @@ async fn refresh_once(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
-    threads_gate: bool,
     only: Option<&[i64]>,
 ) -> Result<Vec<i64>, ApiError> {
     let Some(repository) = sqlx::query!(
@@ -881,11 +879,11 @@ async fn refresh_once(
         if pr.state != "open" && !known.contains(&pr.number) {
             continue;
         }
-        // The threads `no_open_threads` reads have to be GitHub's. Any others stand as
-        // recorded when they cannot be read.
+        // An open pull request's threads are what `no_open_threads` reads, so they have to
+        // be GitHub's. A closed one's stand as recorded when they cannot be read.
         let threads = match github.review_threads(owner, name, pr.number).await {
             Ok(threads) => Some(threads),
-            Err(error) if threads_gate && pr.state == "open" => {
+            Err(error) if pr.state == "open" => {
                 return Err(unreadable("review threads", error));
             }
             Err(error) => {

@@ -10,8 +10,8 @@ use punchlist_api::{
     MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState, Refusal,
-    ReviewThreadEvidence, Role, START, Transition, Workflow, display_name,
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence,
+    Role, START, Transition, Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -342,11 +342,11 @@ async fn refresh_evidence(
     let mut conn = state.pool.acquire().await?;
     let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
     drop(conn);
-    if let Ok(transition) = workflow.check_transition(&from, to, actor.role)
-        && !transition.gates.is_empty()
+    if workflow
+        .check_transition(&from, to, actor.role)
+        .is_ok_and(|transition| !transition.gates.is_empty())
     {
-        let threads = transition.gates.contains(&Gate::NoOpenThreads);
-        refresh_pull_requests(github, &state.pool, actor.workspace_id, id, threads).await?;
+        refresh_pull_requests(github, &state.pool, actor.workspace_id, id).await?;
     }
     Ok(())
 }
