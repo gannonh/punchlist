@@ -565,6 +565,37 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn a_move_to_start_under_a_version_no_runner_can_claim_warns(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "First"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    // A version stored before the runtime required a dispatch rule for `in_progress`.
+    let block = "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n";
+    let old = include_str!("../../punchlist-core/src/default/workflow.toml").replace(block, "");
+    sqlx::query(
+        "WITH v AS (
+             INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+             SELECT id, 'sha256:old', 'c', $1, $2 FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+    )
+    .bind(&old)
+    .bind(serde_json::json!({"prompts/agent_review.md": "Review it."}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let moved = pl.run(&["issue", "move", "PL-1", "start"]).await;
+    assert_eq!(
+        (moved.code, moved.stdout.as_str()),
+        (
+            0,
+            "PL-1  Todo → Start\n\
+             warning: no runner can claim PL-1 under the active workflow: \
+             line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`\n"
+        )
+    );
+}
+
 /// `pl mcp` over real pipes, as Claude Code runs it: the handshake, then a refused
 /// `request_transition` and a `comment`, with the agent token a claim returns.
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]

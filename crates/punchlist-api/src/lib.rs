@@ -56,6 +56,10 @@ pub struct MoveIssue {
 pub struct Moved {
     pub issue: Issue,
     pub event: Event,
+    /// Set when the move put the issue in Start under an active workflow version that fails
+    /// validation, so no runner can claim it: the validation problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

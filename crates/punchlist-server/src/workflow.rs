@@ -34,7 +34,7 @@ pub(crate) async fn active_workflow(
 
 /// `active_workflow`, and why a push of that version would be refused today, if it would.
 /// Such a version stays in force as stored (PRD, "The workflow file").
-async fn stored_workflow(
+pub(crate) async fn stored_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
 ) -> sqlx::Result<(Workflow, Option<String>, Option<String>)> {
