@@ -2487,6 +2487,24 @@ async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(p
         "1 of 150 checks failed on 6dcb09b: `job120` (failure)"
     );
 
+    // Exactly ten full pages is read: the last of 1000 is the end.
+    s.github.lock().unwrap().check_runs = (0..1000)
+        .map(|i| {
+            listed_run(
+                i + 1,
+                5,
+                &format!("job{i}"),
+                if i == 999 { "failure" } else { "success" },
+            )
+        })
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1000 checks failed on 6dcb09b: `job999` (failure)"
+    );
+
     // More than ten full pages is refused rather than read without end.
     s.github.lock().unwrap().check_runs = (0..1001)
         .map(|i| listed_run(i + 1, 5, &format!("job{i}"), "success"))

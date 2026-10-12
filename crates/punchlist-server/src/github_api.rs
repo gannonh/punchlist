@@ -292,7 +292,7 @@ impl GithubClient {
 
     /// Every check run on a commit, the superseded ones too: REST, a page of 100 at a time.
     /// The list ends on a short page; `total_count` is not trusted, as a run created between
-    /// pages shifts the list. More than `CHECK_RUN_PAGES` pages is an error, so that the
+    /// pages shifts the list. More than `CHECK_RUN_PAGES` pages (unless `total_count` says the last was the end) is an error, so that the
     /// refresh, which has no deadline of its own, always ends.
     pub(crate) async fn check_runs(
         &self,
@@ -302,6 +302,7 @@ impl GithubClient {
     ) -> anyhow::Result<Vec<CheckRunData>> {
         #[derive(Deserialize)]
         struct Page {
+            total_count: usize,
             check_runs: Vec<CheckRunData>,
         }
         const PER_PAGE: usize = 100;
@@ -319,7 +320,8 @@ impl GithubClient {
                 .await?;
             let short = answer.check_runs.len() < PER_PAGE;
             runs.extend(answer.check_runs);
-            if short {
+            // Exactly the cap fills the last page: GitHub's count says nothing is left.
+            if short || (page == CHECK_RUN_PAGES && answer.total_count <= runs.len()) {
                 return Ok(runs);
             }
         }
