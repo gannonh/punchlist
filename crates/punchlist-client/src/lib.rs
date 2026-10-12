@@ -3,8 +3,8 @@
 
 use punchlist_api::{
     AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
-    GateChecklist, Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, RegisterRunner,
-    RegisteredRunner, Run, RunLog, Runner, RunnerList, WorkflowInfo,
+    GateChecklist, Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, PullRequestsNow,
+    RegisterRunner, RegisteredRunner, Run, RunLog, Runner, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -108,12 +108,12 @@ impl Client {
             .await
     }
 
-    /// `issue_pull_requests`, after the server has read them and their review threads from
-    /// GitHub, so the threads are GitHub's now.
-    pub async fn fresh_issue_pull_requests(
+    /// An issue's pull requests and their unresolved review threads, after the server has
+    /// read both from GitHub.
+    pub async fn refresh_issue_pull_requests(
         &self,
         id: &str,
-    ) -> Result<Vec<PullRequest>, ClientError> {
+    ) -> Result<PullRequestsNow, ClientError> {
         let path = ["issues", id, "pull-requests", "refresh"];
         self.send::<(), _>(Method::POST, &path, None).await
     }

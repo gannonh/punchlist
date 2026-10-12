@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT number, title, branch, url, author_login, state, draft, merge_state, checks,\n                checks_total, checks_passed, open_threads, issue_id, p.updated_at,\n                (SELECT coalesce(jsonb_agg(jsonb_build_object(\n                             'id', t.node_id, 'path', t.path, 'line', t.line,\n                             'comments', coalesce(t.comments, '[]'),\n                             'comments_total', coalesce(t.comments_total, 0))\n                         ORDER BY t.path, t.line, t.node_id), '[]')\n                 FROM review_thread t\n                 WHERE t.pull_request_id = p.id AND NOT t.resolved) AS \"review_threads!\"\n         FROM pull_request p WHERE issue_id = $1\n         ORDER BY number DESC",
+  "query": "SELECT number, title, branch, url, author_login, state, draft, merge_state, checks,\n                checks_total, checks_passed, open_threads, issue_id, updated_at\n         FROM pull_request WHERE issue_id = $1\n         ORDER BY number DESC",
   "describe": {
     "columns": [
       {
@@ -156,12 +156,6 @@
             "name": "updated_at"
           }
         }
-      },
-      {
-        "ordinal": 14,
-        "name": "review_threads!",
-        "type_info": "Jsonb",
-        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -183,9 +177,8 @@
       false,
       false,
       true,
-      false,
-      null
+      false
     ]
   },
-  "hash": "ad2ea72f78fc6e777debd0d28318748c6fbfbbe91662932be9fed9250b8cc7a5"
+  "hash": "f94ea214d5555c3aac660b3234213e68120a06101d2aee1d359ea5c5122f4e6a"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.number, p.title, p.branch, p.url, p.author_login, p.state, p.draft,\n                p.merge_state, p.checks, p.checks_total, p.checks_passed, p.open_threads,\n                p.issue_id, p.updated_at,\n                (SELECT coalesce(jsonb_agg(jsonb_build_object(\n                             'id', t.node_id, 'path', t.path, 'line', t.line,\n                             'comments', coalesce(t.comments, '[]'),\n                             'comments_total', coalesce(t.comments_total, 0))\n                         ORDER BY t.path, t.line, t.node_id), '[]')\n                 FROM review_thread t\n                 WHERE t.pull_request_id = p.id AND NOT t.resolved) AS \"review_threads!\"\n         FROM pull_request p\n         JOIN repository r ON r.id = p.repository_id\n         WHERE r.workspace_id = $1 AND p.issue_id IS NULL\n         ORDER BY p.number DESC",
+  "query": "SELECT p.number, p.title, p.branch, p.url, p.author_login, p.state, p.draft,\n                p.merge_state, p.checks, p.checks_total, p.checks_passed, p.open_threads,\n                p.issue_id, p.updated_at\n         FROM pull_request p\n         JOIN repository r ON r.id = p.repository_id\n         WHERE r.workspace_id = $1 AND p.issue_id IS NULL\n         ORDER BY p.number DESC",
   "describe": {
     "columns": [
       {
@@ -156,12 +156,6 @@
             "name": "updated_at"
           }
         }
-      },
-      {
-        "ordinal": 14,
-        "name": "review_threads!",
-        "type_info": "Jsonb",
-        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -183,9 +177,8 @@
       false,
       false,
       true,
-      false,
-      null
+      false
     ]
   },
-  "hash": "99df791892d36d48e0d07fed0fb9f8003d9c918fb33852baa48496fdd9aab3c9"
+  "hash": "606db0d8366045e6e74dc25c4349dc22c995c3173fc6d4254ae103d5560a2e51"
 }

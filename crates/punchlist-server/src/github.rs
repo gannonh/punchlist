@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::github_api::{ReviewThread, ThreadCommentNode, ThreadComments, unless_gone};
+use crate::github_api::{
+    CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
+};
 use crate::issues::{check_gates, record_comment, record_refusal, write_transition};
 use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
@@ -368,7 +370,7 @@ pub(crate) struct Current {
     /// For a payload that would close the pull request: `updated_at` is in whole seconds.
     pull_request: Option<PullRequestData>,
     /// For a review thread event: it carries no time, and none is sent for a new thread.
-    threads: Option<Vec<ReviewThread>>,
+    threads: Option<Vec<GithubThread>>,
     /// The pull request row's version before either read, for `claim_read`: 0 with no row.
     /// `None` when GitHub gave no answer, so the payload is recorded as one without a read.
     version: Option<i64>,
@@ -531,22 +533,20 @@ pub(crate) async fn process(
                 // event left it, in the order it arrived.
                 None => {
                     let place = event.thread.comments.first();
-                    let comments = event
-                        .thread
-                        .comments
-                        .iter()
-                        .map(|comment| ThreadCommentNode {
-                            author: comment.user.clone(),
-                            body: comment.body.clone(),
-                        });
-                    let thread = ReviewThread {
+                    let all = &event.thread.comments;
+                    let newest = &all[all.len().saturating_sub(MAX_COMMENTS)..];
+                    let comments = newest.iter().map(|comment| ThreadCommentNode {
+                        author: comment.user.clone(),
+                        body: CommentBody::cut(&comment.body),
+                    });
+                    let thread = GithubThread {
                         id: event.thread.node_id.clone(),
                         is_resolved: event.action == "resolved",
                         path: place.map(|comment| comment.path.clone()),
                         line: place.and_then(|comment| comment.line),
                         original_line: place.and_then(|comment| comment.original_line),
                         comments: ThreadComments {
-                            total_count: event.thread.comments.len() as i32,
+                            total_count: all.len() as i32,
                             nodes: comments.collect(),
                         },
                     };
@@ -614,7 +614,7 @@ async fn record_read(tx: &mut sqlx::PgConnection, pull_request_id: Uuid) -> sqlx
 async fn forget_other_review_threads(
     tx: &mut sqlx::PgConnection,
     pull_request_id: Uuid,
-    threads: &[ReviewThread],
+    threads: &[GithubThread],
 ) -> sqlx::Result<()> {
     let ids: Vec<String> = threads.iter().map(|thread| thread.id.clone()).collect();
     sqlx::query!(
@@ -627,26 +627,17 @@ async fn forget_other_review_threads(
     Ok(())
 }
 
-/// What is kept of a thread's comments, as `review_thread.comments` holds them. The text is
-/// from outside the team: `get_issue` shows it to an agent, inside its fence.
-// ponytail: the first 10 comments, each cut at 2000 characters and marked, so one thread is at
-// most some 20 kB of an agent's context. Store them whole and page the read if that bites.
+/// A thread's comments as `review_thread.comments` holds them. The text is from outside the
+/// team: `get_issue` shows it to an agent, inside its fence.
 fn recorded_comments(comments: &ThreadComments) -> Vec<ReviewComment> {
-    let recorded = comments.nodes.iter().take(10).map(|comment| {
-        // Postgres text cannot hold a NUL.
-        let mut body = comment.body.replace('\0', "");
-        if let Some((end, _)) = body.char_indices().nth(2000) {
-            body.truncate(end);
-            body.push_str("\n[Punchlist cut this comment at 2000 characters]");
-        }
-        let author = comment
+    let recorded = comments.nodes.iter().map(|comment| ReviewComment {
+        author: comment
             .author
             .as_ref()
-            .map_or("ghost", |a| a.login.as_str());
-        ReviewComment {
-            author: author.to_string(),
-            body,
-        }
+            .map_or("ghost", |author| author.login.as_str())
+            .to_string(),
+        body: comment.body.text.clone(),
+        cut: comment.body.cut,
     });
     recorded.collect()
 }
@@ -656,7 +647,7 @@ fn recorded_comments(comments: &ThreadComments) -> Vec<ReviewComment> {
 async fn record_review_threads(
     tx: &mut sqlx::PgConnection,
     pull_request_id: Uuid,
-    threads: &[ReviewThread],
+    threads: &[GithubThread],
 ) -> sqlx::Result<()> {
     let (ids, resolved): (Vec<String>, Vec<bool>) = threads
         .iter()

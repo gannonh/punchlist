@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.node_id, p.number, t.path, t.line,\n                  coalesce(t.comments, '[]') AS \"comments!\",\n                  coalesce(t.comments_total, 0) AS \"comments_total!\"\n           FROM review_thread t JOIN pull_request p ON p.id = t.pull_request_id\n           WHERE p.issue_id = $1 AND p.state = 'open' AND NOT t.resolved\n           ORDER BY p.number DESC, t.path, t.line, t.node_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "node_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "node_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "number",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "line",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "line"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "comments!",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "comments_total!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "5adaa780ebe6df3c7c21e3dec5b8e5e24b0cd9157468a6f5fc76b9bd2aa8ce60"
+}
