@@ -129,6 +129,9 @@ fn render_error(error: &ClientError) -> String {
 // ponytail: at most `MAX_THREADS` unresolved threads and `MAX_THREAD_TEXT` bytes of them in
 // one answer, in whole threads; the rest are counted, and show once these are resolved. Page
 // `get_issue` if an agent needs them all at once.
+// The server caps a thread in characters (10 comments of 2000), so in bytes one thread can be
+// more than `MAX_THREAD_TEXT`, some 80 kB of four-byte characters. The first thread is
+// therefore always shown, whatever its size: a thread never shown could never be resolved.
 const MAX_THREADS: usize = 30;
 const MAX_THREAD_TEXT: usize = 60_000;
 
@@ -213,7 +216,8 @@ fn render_issue(issue: &Issue, now: &PullRequestsNow, events: &[Event]) -> Strin
     };
     for thread in now.review_threads.iter().filter(|t| safe(&t.id)) {
         let section = render_thread(thread);
-        if shown == MAX_THREADS || used + section.len() > MAX_THREAD_TEXT {
+        let over = shown > 0 && used + section.len() > MAX_THREAD_TEXT;
+        if shown == MAX_THREADS || over {
             hidden += 1;
             continue;
         }
@@ -519,6 +523,28 @@ mod tests {
                 "## Review thread PRRT_c on #12, line 41",
             ]
         );
+    }
+
+    #[test]
+    fn one_thread_larger_than_the_budget_is_still_shown() {
+        // Ten comments of 2000 four-byte characters: 80 kB, over the 60 kB budget alone.
+        let long = || {
+            (0..10)
+                .map(|_| comment("octocat", &"😀".repeat(2000)))
+                .collect()
+        };
+        let now = now(vec![thread("PRRT_a", long()), thread("PRRT_b", long())]);
+        let (above, inside) = above_and_inside(&render_issue(&issue(), &now, &[]));
+        assert_eq!(
+            above[4..],
+            [
+                "  Unresolved review thread PRRT_a on #12",
+                "  1 more unresolved review threads are not shown. They show once these are resolved.",
+            ]
+        );
+        let body = format!("> {}", "😀".repeat(2000));
+        assert_eq!(inside.iter().filter(|l| **l == body).count(), 10);
+        assert_eq!(inside[5], "## Review thread PRRT_a on #12, line 41");
     }
 
     #[test]
