@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT FROM issue WHERE id = (SELECT issue_id FROM run WHERE id = $1) FOR UPDATE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "87e123f39be644921884544331f7b4f2c920646f6432307054d8115595e11b9a"
+}

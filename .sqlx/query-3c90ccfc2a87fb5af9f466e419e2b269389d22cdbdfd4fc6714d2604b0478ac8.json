@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dispatch (issue_id, transition_id, agent, run_number)\n         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1 FROM dispatch d\n         WHERE d.run_id = $1 AND d.run_number < $2\n           AND d.transition_id = (SELECT e.transition_id FROM event e\n                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                  ORDER BY e.seq DESC LIMIT 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3c90ccfc2a87fb5af9f466e419e2b269389d22cdbdfd4fc6714d2604b0478ac8"
+}

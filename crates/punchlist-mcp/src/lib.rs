@@ -208,6 +208,7 @@ mod tests {
             status_name: "In Progress".into(),
             created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            waiting_on_person: None,
         }
     }
 

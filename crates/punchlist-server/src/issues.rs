@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::github::{newest_check_runs, refresh_pull_requests};
+use crate::runs::RUNS_PER_ENTRY;
 use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -52,6 +53,7 @@ impl From<IssueRow> for Issue {
             status: row.status,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            waiting_on_person: None,
         }
     }
 }
@@ -238,8 +240,28 @@ async fn get_issue(
     )
     .fetch_optional(&state.pool)
     .await?
-    .ok_or(ApiError::IssueNotFound(id))?;
-    Ok(Json(row.into()))
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    // The last run this entry into the status gets has ended, and the issue is still there:
+    // nothing dispatches it again (`queue_redispatch`).
+    let ended = sqlx::query_scalar!(
+        "SELECT d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
+         WHERE d.issue_id = $1 AND d.run_number >= $2 AND r.outcome <> 'running'
+           AND d.transition_id = (SELECT e.transition_id FROM event e
+                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                  ORDER BY e.seq DESC LIMIT 1)",
+        id,
+        RUNS_PER_ENTRY,
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    let mut issue = Issue::from(row);
+    issue.waiting_on_person = ended.map(|runs| {
+        format!(
+            "{runs} runs in {} ended without moving it",
+            issue.status_name
+        )
+    });
+    Ok(Json(issue))
 }
 
 /// Move an issue to another status. The workflow's lock, role and gate rules are checked,

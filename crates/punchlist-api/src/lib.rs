@@ -36,6 +36,10 @@ pub struct Issue {
     pub status_name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Set by `GET /api/issues/{id}` when the issue waits on a person, with why: every run
+    /// this entry into its status gets has ended and the issue has not moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on_person: Option<String>,
 }
 
 /// `GET /api/issues`.

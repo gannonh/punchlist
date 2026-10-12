@@ -286,6 +286,19 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
         .await
         .unwrap();
     assert_eq!(issue, "in_progress");
+    // The issue has not moved, so it is dispatched again: once, however often the sweep runs.
+    assert_eq!(expire_leases(&pool).await.unwrap(), 0);
+    let dispatches: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT run_number, run_id IS NULL FROM dispatch WHERE issue_id = 'PL-1'
+         ORDER BY run_number",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(dispatches, [(1, false), (2, true)]);
+    let (status, again) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(again["run_id"], claimed["run_id"]);
 }
 
 #[sqlx::test]
@@ -322,8 +335,8 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
         Some("lease expired: runner r1 stopped sending heartbeats")
     );
 
-    // A second issue whose attempt the runner does hold stays running past its first lease.
-    create_and_move(&app, &person.token, "Held", &["todo", "start"]).await;
+    // The issue was dispatched again when the lease expired. This attempt the runner does
+    // hold, so it stays running past its first lease.
     let (status, claimed2) = claim(&app, &r1, 0).await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
     let held = json!({"held": [{"run_id": claimed2["run_id"], "attempt": 1}]});
@@ -334,11 +347,12 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
     }
     // 1.8 s after the claim, past the original 1 s lease.
     assert_eq!(expire_leases(&pool).await.unwrap(), 0);
-    let state = sqlx::query_scalar!("SELECT state FROM attempt WHERE issue_id = 'PL-2'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "running");
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM attempt WHERE issue_id = 'PL-1' ORDER BY started_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states, ["failed", "running"]);
 }
 
 #[sqlx::test]

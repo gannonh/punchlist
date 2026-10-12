@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id\n         WHERE d.issue_id = $1 AND d.run_number >= $2 AND r.outcome <> 'running'\n           AND d.transition_id = (SELECT e.transition_id FROM event e\n                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                  ORDER BY e.seq DESC LIMIT 1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "run_number",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "dispatch",
+            "name": "run_number"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "341bb2ba3f52fbc8dae0782f8d832f164d8f2bc730dc4f229eea7c12f101a151"
+}

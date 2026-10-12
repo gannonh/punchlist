@@ -451,6 +451,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             status_name: "In Progress".into(),
             created_at: now,
             updated_at: now,
+            waiting_on_person: None,
         }
     }
 
