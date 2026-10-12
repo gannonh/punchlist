@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT FROM issue WHERE id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5bdaeb666be936adcbcbe64aa9a0e857aeebb1c8b83c12e868f6ab19d4ba9e6c"
+}

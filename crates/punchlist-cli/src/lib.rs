@@ -524,6 +524,9 @@ fn render_show(
         "{}  {}\nStatus: {}\n",
         issue.id, issue.title, issue.status_name
     );
+    if let Some(why) = &issue.waiting_on_person {
+        text.push_str(&format!("waiting on a person: {why}\n"));
+    }
     if !issue.body.is_empty() {
         text.push('\n');
         text.push_str(issue.body.trim_end());
@@ -768,6 +771,7 @@ mod tests {
             status_name: "Agent Review".into(),
             created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
         };
         let mut moved = EventDetail::transition(
             "in_progress".into(),
@@ -827,6 +831,7 @@ mod tests {
         assert_eq!(
             render_show(&issue, &[], Some(&gates), &events),
             "PL-7  Fix\nStatus: Agent Review\n\
+             waiting on a person: 3 runs in Agent Review ended without moving it\n\
              \nPull requests\n  None linked.\n\
              \nGates for Agent Review → Human Review\n\
              \x20 ci_green: fail (1 of 3 checks failed on 3f2a1c4: `e2e` (failure))\n\

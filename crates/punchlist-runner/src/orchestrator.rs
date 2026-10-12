@@ -2,7 +2,7 @@
 //! The claim loop: register, heartbeat, claim up to `max_concurrent` issues and run each
 //! attempt, backing off on server errors.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,8 +72,9 @@ fn is_code(error: &ClientError, wanted: &str) -> bool {
     matches!(error, ClientError::Refused(body) if body.code == wanted)
 }
 
-/// The attempts this runner is working on; the heartbeat renews exactly these leases.
-type Held = Arc<Mutex<HashSet<(Uuid, i32)>>>;
+/// The attempts this runner is working on, each with the signal that stops its agent. The
+/// heartbeat renews exactly these leases, and stops the ones the server answers are stale.
+type Held = Arc<Mutex<HashMap<(Uuid, i32), Arc<watch::Sender<bool>>>>>;
 
 /// Removes its attempt from the held set when dropped, however the attempt ends.
 struct HeldGuard {
@@ -82,8 +83,8 @@ struct HeldGuard {
 }
 
 impl HeldGuard {
-    fn new(held: Held, key: (Uuid, i32)) -> HeldGuard {
-        held.lock().expect("held set").insert(key);
+    fn new(held: Held, key: (Uuid, i32), stop: Arc<watch::Sender<bool>>) -> HeldGuard {
+        held.lock().expect("held set").insert(key, stop);
         HeldGuard { held, key }
     }
 }
@@ -153,7 +154,7 @@ pub(crate) async fn run_with_worktrees(
                     held: held
                         .lock()
                         .expect("held set")
-                        .iter()
+                        .keys()
                         .map(|&(run_id, attempt)| HeldAttempt { run_id, attempt })
                         .collect(),
                 };
@@ -163,7 +164,20 @@ pub(crate) async fn run_with_worktrees(
                 )
                 .await
                 {
-                    Ok(Ok(_)) => {}
+                    // The lease lapsed, so the issue may already have another run: stop
+                    // this one's agent now, not at its next log batch.
+                    Ok(Ok(reply)) => {
+                        let held = held.lock().expect("held set");
+                        for stale in reply.stale {
+                            if let Some(stop) = held.get(&(stale.run_id, stale.attempt)) {
+                                tracing::warn!(
+                                    "run {}: lease lost; stopping the agent",
+                                    stale.run_id
+                                );
+                                let _ = stop.send(true);
+                            }
+                        }
+                    }
                     Ok(Err(e)) => tracing::warn!("heartbeat failed: {e}"),
                     Err(_) => {
                         tracing::warn!("heartbeat timed out after {}s", HEARTBEAT_TIMEOUT.as_secs())
@@ -205,9 +219,11 @@ pub(crate) async fn run_with_worktrees(
             Ok(Some(claim)) => {
                 failures = 0;
                 let ctx = ctx.clone();
-                let guard = HeldGuard::new(held.clone(), (claim.run_id, claim.attempt));
+                let stop = Arc::new(watch::channel(false).0);
+                let key = (claim.run_id, claim.attempt);
+                let guard = HeldGuard::new(held.clone(), key, stop.clone());
                 attempts.spawn(async move {
-                    run_attempt(&ctx, claim).await;
+                    run_attempt(&ctx, claim, stop).await;
                     drop(guard);
                     drop(permit);
                 });
@@ -355,7 +371,7 @@ async fn flush_logs(
     stale
 }
 
-async fn run_attempt(ctx: &Context, claim: Claim) {
+async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<bool>>) {
     let start = Instant::now();
     let run_id = claim.run_id.to_string();
     let attempt = claim.attempt;
@@ -367,8 +383,7 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
     );
 
     let (lines_tx, lines_rx) = mpsc::channel(LOG_CHANNEL_LINES);
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let stop_tx = Arc::new(stop_tx);
+    let stop_rx = stop_tx.subscribe();
     let flusher = tokio::spawn(flush_logs(
         ctx.client.clone(),
         run_id.clone(),

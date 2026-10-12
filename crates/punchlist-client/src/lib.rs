@@ -3,8 +3,8 @@
 
 use punchlist_api::{
     AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
-    GateChecklist, Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, RegisterRunner,
-    RegisteredRunner, Run, RunLog, Runner, RunnerList, WorkflowInfo,
+    GateChecklist, Heartbeat, HeartbeatReply, Issue, IssueList, MoveIssue, Moved, PullRequest,
+    RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -127,13 +127,13 @@ impl Client {
         self.send::<(), _>(Method::GET, &["runners"], None).await
     }
 
-    /// Records a heartbeat and renews the leases of the attempts in `heartbeat.held`.
-    /// Runner token.
+    /// Records a heartbeat and renews the leases of the attempts in `heartbeat.held`. The
+    /// reply lists the ones that are stale. Runner token.
     pub async fn heartbeat(
         &self,
         runner_id: &str,
         heartbeat: &Heartbeat,
-    ) -> Result<Runner, ClientError> {
+    ) -> Result<HeartbeatReply, ClientError> {
         self.send(
             Method::POST,
             &["runners", runner_id, "heartbeat"],
