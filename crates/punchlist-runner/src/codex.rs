@@ -5,17 +5,19 @@
 //!
 //! Codex has no `--strict-mcp-config`. The run gets only what the runner gives it because
 //! `CODEX_HOME` is a directory made for the run, holding nothing but a link to the person's
-//! sign-in; apps, plugins and hooks are off; and the worktree is an untrusted project, so
-//! Codex loads no `.codex/` from the repository either.
+//! sign-in; apps, plugins and hooks are off; the worktree is an untrusted project, so Codex
+//! loads no `.codex/` configuration and no `AGENTS.md` from the repository; and every skill
+//! Codex finds, the person's and the repository's, is disabled for the thread.
 //!
 //! 1. Spawn `<codex> app-server` with the worktree as cwd and the run's `CODEX_HOME`.
-//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `thread/start(id=2)`
-//!    → await response.
+//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `skills/list(id=4)`
+//!    → await response → `thread/start(id=2)` → await response.
 //! 3. Turn: `turn/start(id=3)` → await response → stream events until `turn/completed`,
 //!    failure or timeout.
 //! 4. Stop: kill the subprocess and its process group.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -31,6 +33,10 @@ use crate::agent::{AgentExit, AgentResult, MAX_RECORD_BYTES, kill_group, read_re
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
 const TURN_START_ID: u64 = 3;
+const SKILLS_LIST_ID: u64 = 4;
+
+/// The name Codex knows Punchlist's MCP server by.
+const MCP_SERVER: &str = "punchlist";
 
 /// How long a response in the handshake may take.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -42,7 +48,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// is in no file and no process listing.
 pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     json!({
-        "punchlist": {
+        MCP_SERVER: {
             "command": config.mcp_command,
             "args": ["mcp"],
             "env": {
@@ -54,22 +60,69 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     })
 }
 
-/// Makes `home`, the `CODEX_HOME` of one run: an empty directory only this user can read,
-/// with a link to the sign-in in `person_home`, the person's own Codex home. A link, not a
-/// copy: Codex writes a refreshed token through it, so the person's sign-in stays current
-/// and removing `home` leaves no credential behind. The caller removes `home` after the run.
-// ponytail: a sign-in kept in the keyring (`cli_auth_credentials_store`) has no `auth.json`
-// to link, and the run fails as not signed in; have the runner pass the tokens over the
-// app-server's `account/login/start` when someone needs that.
-pub(crate) fn write_home(home: &Path, person_home: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    // What a run killed with its runner left behind.
-    let _ = std::fs::remove_dir_all(home);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(home)?;
-    std::os::unix::fs::symlink(person_home.join("auth.json"), home.join("auth.json"))
+/// The `CODEX_HOME` of one run: a directory only this user can read, holding a link to the
+/// person's Codex sign-in and, while the run goes on, Codex's own state (its databases and
+/// shell snapshots). A link, not a copy: Codex writes a refreshed token in place, through
+/// the link, so the person's sign-in stays current and removing the directory removes no
+/// credential. Dropping this removes the directory.
+pub(crate) struct CodexHome(PathBuf);
+
+impl CodexHome {
+    /// Makes `<root>/codex-home/<run_id>`, outside the worktree, linked to the sign-in in the
+    /// person's own Codex home.
+    pub(crate) fn create(root: &Path, run_id: &str) -> std::io::Result<CodexHome> {
+        let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
+        CodexHome::linked_to(&person, &root.join("codex-home").join(run_id))
+    }
+
+    // ponytail: only a sign-in in `auth.json` reaches the run. One kept in the keyring
+    // (`cli_auth_credentials_store`) has no file to link; have the runner pass the tokens
+    // over the app-server's `account/login/start` when someone needs that.
+    fn linked_to(person_home: &Path, home: &Path) -> std::io::Result<CodexHome> {
+        use std::os::unix::fs::DirBuilderExt;
+        let sign_in = person_home.join("auth.json");
+        if !sign_in.is_file() {
+            return Err(std::io::Error::other(format!(
+                "no Codex sign-in at {}: run `codex login` as the person who runs the runner \
+                 (a sign-in kept in the keyring is not supported)",
+                sign_in.display()
+            )));
+        }
+        // What a run killed with its runner left behind.
+        let _ = std::fs::remove_dir_all(home);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)?;
+        // From here a failure removes the directory.
+        let home = CodexHome(home.to_path_buf());
+        std::os::unix::fs::symlink(sign_in, home.0.join("auth.json"))?;
+        Ok(home)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for CodexHome {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!("cannot remove the Codex home {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// The person's own Codex home, as Codex finds it: `CODEX_HOME` when it is set and not
+/// empty, else `.codex` in the home directory. Absolute, so a link to it holds anywhere.
+fn person_home(codex_home: Option<OsString>, home: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    let dir = match codex_home.filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => home
+            .ok_or_else(|| std::io::Error::other("HOME is not set"))?
+            .join(".codex"),
+    };
+    std::path::absolute(dir)
 }
 
 /// The `thread/start` parameters of one run: the runner's model and reasoning effort, no
@@ -85,18 +138,16 @@ pub(crate) fn thread_params(
     mcp_servers: Value,
     worktree: &Path,
 ) -> Value {
-    // Codex trusts a project it starts with full access, and a trusted project's
-    // `.codex/config.toml` adds MCP servers and hooks. Say first that this one is not.
-    let untrusted: serde_json::Map<String, Value> = [
-        worktree.to_path_buf(),
-        worktree.canonicalize().unwrap_or(worktree.to_path_buf()),
-    ]
-    .iter()
-    .map(|path| {
-        let path = path.to_string_lossy().into_owned();
-        (path, json!({"trust_level": "untrusted"}))
-    })
-    .collect();
+    // Codex trusts a project it starts with full access, and a trusted project's `.codex/`
+    // adds MCP servers and hooks and its `AGENTS.md` adds instructions. Say first that this
+    // one is not trusted, under the path the runner uses and under the one it resolves to:
+    // Codex may look the project up by either.
+    let untrusted = json!({"trust_level": "untrusted"});
+    let mut projects = serde_json::Map::new();
+    projects.insert(worktree.to_string_lossy().into_owned(), untrusted.clone());
+    if let Ok(resolved) = worktree.canonicalize() {
+        projects.insert(resolved.to_string_lossy().into_owned(), untrusted);
+    }
     json!({
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
@@ -107,7 +158,7 @@ pub(crate) fn thread_params(
         "config": {
             "model_reasoning_effort": effort,
             "mcp_servers": mcp_servers,
-            "projects": untrusted
+            "projects": projects
         }
     })
 }
@@ -187,8 +238,9 @@ impl Session {
 
     /// Perform the startup handshake and return the `thread_id`.
     ///
-    /// Order: `initialize(id=1)` → await → `initialized` (no id) → `thread/start(id=2)` → await.
-    async fn start_thread(&mut self, thread_params: Value) -> Result<String, String> {
+    /// Order: `initialize(id=1)` → await → `initialized` (no id) → `skills/list(id=4)` →
+    /// await → `thread/start(id=2)` → await.
+    async fn start_thread(&mut self, mut thread_params: Value) -> Result<String, String> {
         self.send(&json!({
             "method": "initialize",
             "id": INITIALIZE_ID,
@@ -205,6 +257,28 @@ impl Session {
         self.await_response(INITIALIZE_ID).await?;
         self.send(&json!({"method": "initialized", "params": {}}))
             .await?;
+        // Skills are not configuration Codex reads from its home: it finds them under the
+        // person's home directory and in the worktree, trusted or not, lists them to the
+        // model and puts a skill's text in the turn when the prompt names it. So ask which
+        // it found and start the thread with each one disabled, and with none of its own.
+        self.send(&json!({
+            "method": "skills/list",
+            "id": SKILLS_LIST_ID,
+            "params": {"cwds": [thread_params["cwd"]], "forceReload": true}
+        }))
+        .await?;
+        let listed = self.await_response(SKILLS_LIST_ID).await?;
+        let found = (listed.get("data").and_then(Value::as_array))
+            .ok_or_else(|| format!("invalid skills payload: {listed}"))?;
+        let disabled: Vec<Value> = (found.iter())
+            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+            .map(|skill| json!({"path": skill["path"], "enabled": false}))
+            .collect();
+        thread_params["config"]["skills"] = json!({
+            "include_instructions": false,
+            "bundled": {"enabled": false},
+            "config": disabled
+        });
         self.send(&json!({
             "method": "thread/start",
             "id": THREAD_START_ID,
@@ -296,7 +370,7 @@ impl Session {
             }
             "mcpServer/elicitation/request" => {
                 let server = payload.pointer("/params/serverName");
-                let ours = server.and_then(Value::as_str) == Some("punchlist");
+                let ours = server.and_then(Value::as_str) == Some(MCP_SERVER);
                 let action = if ours { "accept" } else { "decline" };
                 json!({"id": id, "result": {"action": action}})
             }
@@ -309,10 +383,10 @@ impl Session {
     }
 }
 
-/// Runs one Codex turn in `worktree` with `prompt`, with `home` (see `write_home`) as its
-/// `CODEX_HOME` and `thread_params` (see `thread_params`) for its thread. The app-server's messages go to `lines`
-/// as they arrive, without the streaming deltas; its stderr lines go there prefixed with
-/// `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
+/// Runs one Codex turn in `worktree` with `prompt`, with `home` (a `CodexHome`) as its
+/// `CODEX_HOME` and `thread_params` (from `thread_params`) for its thread. The app-server's
+/// messages go to `lines` as they arrive, without the streaming deltas; its stderr lines go
+/// there prefixed with `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
 /// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
 pub(crate) async fn run_codex(
     codex_command: &Path,
@@ -330,7 +404,10 @@ pub(crate) async fn run_codex(
         .args(["-c", "features.apps=false"])
         .args(["-c", "features.plugins=false"])
         .args(["-c", "features.hooks=false"])
+        .args(["-c", "features.skill_mcp_dependency_install=false"])
         .env("CODEX_HOME", home)
+        // It would put Codex's state databases somewhere runs and the person share.
+        .env_remove("CODEX_SQLITE_HOME")
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
@@ -409,18 +486,18 @@ mod tests {
     /// deltas of every message but the first. The answer to `thread/start` and its
     /// `thread/started` were recorded again, from the same version without a turn, once the
     /// adapter asked for an ephemeral thread; the turn's messages carry the id of the thread
-    /// they were recorded in.
+    /// they were recorded in. `skills_list.jsonl` is not a recording: it is an answer in
+    /// the shape 0.162.1 gives, with one skill of the person's and one of the repository's.
     fn replay() -> String {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
         format!(
             r#"[ "$1" = app-server ] || exit 64
 echo "$*" > args.txt
 echo "$CODEX_HOME" > codex-home.txt
-ls -A "$CODEX_HOME" > codex-home-entries.txt
-cat "$CODEX_HOME/auth.json" > sign-in.txt
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) cat {fixtures}/initialize.jsonl ;;
+    *'"method":"skills/list"'*) echo "$line" > skills-list.json; cat {fixtures}/skills_list.jsonl ;;
     *'"method":"thread/start"'*) echo "$line" > thread-start.json; cat {fixtures}/thread_start.jsonl ;;
     *'"method":"turn/start"'*) echo "$line" > turn-start.json; cat {fixtures}/turn_start.jsonl ;;
   esac
@@ -434,13 +511,7 @@ done"#
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let mcp = json!({"punchlist": {"command": "pl", "args": ["mcp"]}});
-        // The person's Codex home: a sign-in, and a configuration the run must not get.
-        let person = temp.path().join("person");
-        std::fs::create_dir(&person).unwrap();
-        std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
-        std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
-        let home = temp.path().join("codex-home/run-1");
-        write_home(&home, &person).unwrap();
+        let home = temp.path().join("codex-home");
         let exit = run_codex(
             &command,
             &home,
@@ -473,7 +544,7 @@ done"#
         );
 
         // Every message of the recording is a log line, in order, except the deltas.
-        let recorded: Vec<String> = ["initialize", "thread_start", "turn_start"]
+        let recorded: Vec<String> = ["initialize", "skills_list", "thread_start", "turn_start"]
             .iter()
             .flat_map(|name| {
                 let path = format!(
@@ -502,25 +573,20 @@ done"#
                 .starts_with(r#"{"method":"turn/completed","#)
         );
 
-        // What Codex was started with: a home of its own that holds the person's sign-in
-        // and nothing else of theirs, and apps, plugins and hooks off.
+        // What Codex was started with: the home it was given, and apps, plugins, hooks and
+        // skill installs off.
         let seen = |file: &str| std::fs::read_to_string(temp.path().join(file)).unwrap();
-        let home = temp.path().join("codex-home/run-1");
+        let home = temp.path().join("codex-home");
         assert_eq!(seen("codex-home.txt").trim(), home.to_str().unwrap());
-        assert_eq!(seen("codex-home-entries.txt"), "auth.json\n");
-        assert_eq!(seen("sign-in.txt"), "the sign-in");
         assert_eq!(
             seen("args.txt").trim(),
-            "app-server -c features.apps=false -c features.plugins=false -c features.hooks=false"
+            "app-server -c features.apps=false -c features.plugins=false -c features.hooks=false \
+             -c features.skill_mcp_dependency_install=false"
         );
-        // The home is a link to the sign-in, not a copy: removing it removes no sign-in.
-        assert!(home.join("auth.json").is_symlink());
-        std::fs::remove_dir_all(&home).unwrap();
-        assert_eq!(seen("person/auth.json"), "the sign-in");
 
         // What the adapter asked for: the model and effort, no sandbox or approvals,
-        // Punchlist's MCP server and no other, the worktree as an untrusted project, and
-        // the prompt as the turn's input.
+        // Punchlist's MCP server and no other, the worktree as an untrusted project, every
+        // skill Codex listed for the worktree disabled, and the prompt as the turn's input.
         let sent = |file: &str| -> Value { serde_json::from_str(&seen(file)).unwrap() };
         let thread = sent("thread-start.json");
         assert_eq!(thread["params"]["model"], "gpt-6-luna");
@@ -536,12 +602,30 @@ done"#
         );
         let worktree = temp.path().to_str().unwrap();
         assert_eq!(config["projects"][worktree]["trust_level"], "untrusted");
+        assert_eq!(
+            sent("skills-list.json")["params"],
+            json!({"cwds": [worktree], "forceReload": true})
+        );
+        assert_eq!(
+            config["skills"],
+            json!({
+                "include_instructions": false,
+                "bundled": {"enabled": false},
+                "config": [
+                    {"path": "/home/person/.agents/skills/deploy/SKILL.md", "enabled": false},
+                    {
+                        "path": "/w/worktrees/acme/widgets/PL-1/.agents/skills/planted/SKILL.md",
+                        "enabled": false
+                    }
+                ]
+            })
+        );
         assert_eq!(thread["params"]["approvalPolicy"], "never");
         assert_eq!(thread["params"]["sandbox"], "danger-full-access");
         assert_eq!(thread["params"]["ephemeral"], true);
         // Codex 0.162.1 honors it: the thread it answers with is ephemeral and has no
         // rollout file.
-        let answer: Value = serde_json::from_str(&lines[1]).unwrap();
+        let answer: Value = serde_json::from_str(&lines[2]).unwrap();
         assert_eq!(answer["id"], 2);
         assert_eq!(answer["result"]["thread"]["ephemeral"], true);
         assert_eq!(answer["result"]["thread"]["path"], Value::Null);
@@ -557,16 +641,84 @@ done"#
         assert_eq!(turn["params"]["threadId"], RECORDED_THREAD_ID);
     }
 
+    #[test]
+    fn a_runs_home_holds_a_link_to_the_persons_sign_in_and_is_removed_when_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let person = temp.path().join("person");
+        let home = temp.path().join("root/codex-home/run-1");
+
+        // No sign-in: refused, naming the file, and nothing is made.
+        std::fs::create_dir(&person).unwrap();
+        let refused = CodexHome::linked_to(&person, &home).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "no Codex sign-in at {}/auth.json: run `codex login` as the person who runs \
+                 the runner (a sign-in kept in the keyring is not supported)",
+                person.display()
+            )
+        );
+        assert!(!home.exists());
+
+        // A home left by a killed run is replaced: only the link is in the new one.
+        std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
+        std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
+        std::fs::create_dir_all(home.join("shell_snapshots")).unwrap();
+        let made = CodexHome::linked_to(&person, &home).unwrap();
+        assert_eq!(made.path(), home);
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let entries: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["auth.json"]);
+        assert_eq!(
+            std::fs::read_link(home.join("auth.json")).unwrap(),
+            person.join("auth.json")
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("auth.json")).unwrap(),
+            "the sign-in"
+        );
+
+        // Dropping it removes the home and leaves the person's sign-in.
+        drop(made);
+        assert!(!home.exists());
+        assert_eq!(
+            std::fs::read_to_string(person.join("auth.json")).unwrap(),
+            "the sign-in"
+        );
+    }
+
+    #[test]
+    fn the_persons_codex_home_is_codex_home_when_set_else_dot_codex_and_always_absolute() {
+        let home = || Some(PathBuf::from("/home/p"));
+        let found =
+            |codex_home: Option<&str>| person_home(codex_home.map(OsString::from), home()).unwrap();
+        assert_eq!(found(None), PathBuf::from("/home/p/.codex"));
+        assert_eq!(found(Some("")), PathBuf::from("/home/p/.codex"));
+        assert_eq!(found(Some("/srv/codex")), PathBuf::from("/srv/codex"));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(found(Some("rel/codex")), cwd.join("rel/codex"));
+        assert_eq!(
+            person_home(None, None).unwrap_err().to_string(),
+            "HOME is not set"
+        );
+    }
+
     const RECORDED_THREAD_ID: &str = "01a1311f-a14d-7052-9470-5458b555231a";
     const RECORDED_INPUT_TOKENS: i64 = 299_517;
     const RECORDED_OUTPUT_TOKENS: i64 = 2810;
-    const RECORDED_LOG_LINES: usize = 96;
+    const RECORDED_LOG_LINES: usize = 97;
 
     #[tokio::test]
     async fn a_failed_turn_fails_the_run_with_codexs_message_and_keeps_the_tokens() {
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"t1"}}}' ;;
     *'"method":"turn/start"'*)
       echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
@@ -586,8 +738,8 @@ done"#;
                 output_tokens: Some(9),
             })
         );
-        assert_eq!(lines.len(), 7);
-        assert_eq!(lines[3], "not json");
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[4], "not json");
     }
 
     #[tokio::test]
@@ -597,6 +749,7 @@ done"#;
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"t1"}}}' ;;
     *'"method":"turn/start"'*)
       echo '{"id":3,"method":"item/commandExecution/requestApproval","params":{}}' ;;
@@ -623,6 +776,7 @@ done"#;
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"error":{"code":-32600,"message":"no such model"}}'; exit 0 ;;
   esac
 done"#;

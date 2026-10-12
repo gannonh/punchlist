@@ -27,7 +27,8 @@ pub struct RunnerConfig {
     pub model: Option<String>,
     /// The `codex` executable, run as `codex app-server`.
     pub codex_command: PathBuf,
-    /// The model a Codex thread starts with when set, such as `gpt-6-luna`.
+    /// The model a Codex thread starts with when set, such as `gpt-6-luna`; else Codex's
+    /// built-in default, not the person's.
     pub codex_model: Option<String>,
     /// The reasoning effort a Codex thread starts with, such as `medium`.
     pub codex_effort: String,

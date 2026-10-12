@@ -98,7 +98,9 @@ pub struct RunnerStart {
     /// `claude-code`, `codex`. Default: `claude-code`.
     #[arg(long, value_delimiter = ',')]
     pub agents: Option<Vec<String>>,
-    /// The model a Codex run starts with, such as `gpt-6-luna`.
+    /// The model a Codex run starts with, such as `gpt-6-luna`. Default: Codex's built-in
+    /// default model. The model, provider and proxy settings in your own Codex
+    /// `config.toml` do not reach a run.
     #[arg(long)]
     pub codex_model: Option<String>,
     /// The reasoning effort a Codex run starts with, one the model offers, such as `low`

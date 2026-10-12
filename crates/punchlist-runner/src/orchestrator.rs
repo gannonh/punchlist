@@ -3,7 +3,7 @@
 //! attempt, backing off on server errors.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use crate::RunnerConfig;
 use crate::agent::{
     AgentExit, AgentResult, build_prompt, claude_args, run_claude, write_mcp_config,
 };
-use crate::codex::{mcp_servers, run_codex, thread_params, write_home};
+use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::worktree::Worktrees;
 
 /// The agent keys this runner has an adapter for.
@@ -489,16 +489,11 @@ async fn run_agent(
     };
     match claim.agent.as_str() {
         "codex" => {
-            // The person's own Codex home, as Codex finds it. The run gets one of its own.
-            let person_home = (std::env::var_os("CODEX_HOME").map(PathBuf::from))
-                .or_else(|| Some(std::env::home_dir()?.join(".codex")));
-            let Some(person_home) = person_home else {
-                return failed("cannot find the Codex home: HOME is not set".into());
+            // Outside the worktree, and removed when this returns or is dropped.
+            let home = match CodexHome::create(&config.worktree_root, &claim.run_id.to_string()) {
+                Ok(home) => home,
+                Err(e) => return failed(format!("cannot make the Codex home: {e}")),
             };
-            let home = (config.worktree_root.join("codex-home")).join(claim.run_id.to_string());
-            if let Err(e) = write_home(&home, &person_home) {
-                return failed(format!("cannot write the Codex home: {e}"));
-            }
             let params = thread_params(
                 config.codex_model.as_deref(),
                 &config.codex_effort,
@@ -506,9 +501,7 @@ async fn run_agent(
                 worktree,
             );
             let command = &config.codex_command;
-            let exit = run_codex(command, &home, params, worktree, prompt, lines, stop).await;
-            let _ = std::fs::remove_dir_all(&home);
-            exit
+            run_codex(command, home.path(), params, worktree, prompt, lines, stop).await
         }
         "claude-code" => {
             // Outside the worktree, so the agent cannot commit its token.
