@@ -43,6 +43,8 @@ struct Repo {
     files: HashMap<String, String>,
     pulls: Vec<Value>,
     threads: Vec<Value>,
+    /// The check runs on any commit, as the REST list answers them.
+    check_runs: Vec<Value>,
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
@@ -101,6 +103,24 @@ async fn fake_github() -> (FakeGithub, String) {
                     };
                     held(hold).await;
                     answer
+                },
+            ),
+        )
+        // The check runs of a commit, two to a page.
+        .route(
+            "/repos/{owner}/{name}/commits/{sha}/check-runs",
+            get(
+                |State(repo): State<FakeGithub>,
+                 axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
+                    let repo = repo.lock().unwrap();
+                    if repo.down {
+                        return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
+                    }
+                    let from = (q["page"].parse::<usize>().unwrap() - 1) * 2;
+                    let to = repo.check_runs.len().min(from + 2);
+                    let runs = repo.check_runs.get(from..to).unwrap_or_default();
+                    let answer = json!({"total_count": repo.check_runs.len(), "check_runs": runs});
+                    (StatusCode::OK, axum::Json(answer))
                 },
             ),
         )
@@ -2390,6 +2410,54 @@ fn check_run(id: i64, status: &str, conclusion: Option<&str>) -> String {
         v["check_run"]["status"] = json!(status);
         v["check_run"]["conclusion"] = json!(conclusion);
     })
+}
+
+/// A check run as GitHub's list reports it, on #12's head commit.
+fn listed_run(id: i64, suite: i64, name: &str, conclusion: &str) -> Value {
+    json!({"id": id, "name": name, "status": "completed", "conclusion": conclusion,
+           "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "check_suite": {"id": suite}})
+}
+
+#[sqlx::test]
+async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_not_hide_it(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // One delivered pass in suite 3112233445; GitHub also has a failing `check` in another
+    // suite (three runs, so the list takes two pages).
+    deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, |_| {})).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![
+            listed_run(4021877310, 3112233445, "check", "success"),
+            listed_run(7, 8, "check", "failure"),
+            listed_run(9, 8, "lint", "success"),
+        ];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "ci_green");
+    assert_eq!(
+        body["reason"],
+        "1 of 3 checks failed on 6dcb09b: `check` (failure)"
+    );
+    let rows: Vec<(i64, Option<i64>)> =
+        sqlx::query_as("SELECT id, check_suite_id FROM check_run ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [(7, Some(8)), (9, Some(8)), (4021877310, Some(3112233445))]
+    );
+
+    // GitHub cannot be asked: the request is refused, nothing moves.
+    s.github.lock().unwrap().down = true;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
 }
 
 #[sqlx::test]

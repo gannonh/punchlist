@@ -13,7 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github::PullRequestData;
+use crate::github::{CheckRunData, PullRequestData};
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -288,6 +288,45 @@ impl GithubClient {
             .await?
             .json()
             .await?)
+    }
+
+    /// Every check run on a commit, the superseded ones too: REST, a page of 100 at a time.
+    pub(crate) async fn check_runs(
+        &self,
+        owner: &str,
+        name: &str,
+        sha: &str,
+    ) -> anyhow::Result<Vec<CheckRunData>> {
+        #[derive(Deserialize)]
+        struct Page {
+            total_count: usize,
+            check_runs: Vec<CheckRunData>,
+        }
+        let token = self.token(owner, name).await?;
+        let mut runs = Vec::new();
+        for page in 1.. {
+            let path = format!(
+                "/repos/{owner}/{name}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}"
+            );
+            let answer: Page = self
+                .call(&token, reqwest::Method::GET, &path)
+                .await?
+                .json()
+                .await?;
+            // The refresh has no deadline of its own, so an empty page short of the total
+            // must not loop.
+            anyhow::ensure!(
+                !answer.check_runs.is_empty() || runs.len() >= answer.total_count,
+                "GitHub listed {} of {} check runs on {sha}",
+                runs.len(),
+                answer.total_count
+            );
+            runs.extend(answer.check_runs);
+            if runs.len() >= answer.total_count {
+                break;
+            }
+        }
+        Ok(runs)
     }
 
     /// Every review thread on a pull request, resolved or not. REST has no review threads, so
