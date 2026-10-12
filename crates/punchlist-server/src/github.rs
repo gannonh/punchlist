@@ -534,9 +534,14 @@ pub(crate) async fn process(
 /// `read_started`, the database's clock before GitHub was asked: it overwrites the status and
 /// conclusion of any row last written at or before then (so a recorded `completed` can give
 /// way to GitHub's `in_progress` for a restarted run), and leaves a row a delivery wrote since,
-/// which is newer than the list. Every write sets `updated_at` from `clock_timestamp()`, the
-/// moment of the write, not of its transaction's start. A rerun gets a new id, in the same
-/// suite. A suite once known is kept.
+/// which is newer than the list. `updated_at` is when the row's content was current: a
+/// delivery stamps the write clock (`clock_timestamp()`, not its transaction's start), a read
+/// stamps its `read_started`, the time of its snapshot, whenever it writes. Nothing else reads
+/// the column. So of two overlapping reads (snapshots t1 < t2): the older writes first, stamp
+/// t1, and the newer sees t1 <= t2 and overwrites; the newer writes first, stamp t2, and the
+/// older sees t2 <= t1 false and is dropped. A delivery written during a read has a stamp after
+/// the read's snapshot, so it stands; a read begun after it overwrites. A rerun gets a new id,
+/// in the same suite. A suite once known is kept.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -548,12 +553,12 @@ async fn record_check_run(
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
                                 check_suite_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()))
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
-             updated_at = clock_timestamp()
+             updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
                       ELSE 0 END)

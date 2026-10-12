@@ -2569,6 +2569,57 @@ async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: Pg
 }
 
 #[sqlx::test]
+async fn an_older_read_writing_before_a_newer_one_does_not_keep_its_stale_pass(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (hold_a, hold_b) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.runs_hold = Some(hold_a.clone());
+    }
+    let conclusion = || async {
+        sqlx::query_scalar::<_, String>("SELECT conclusion FROM check_run WHERE id = 1")
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+    };
+    // A's list (success) is taken first. B's (failure) is taken later. A then writes before
+    // B does: B must still replace it.
+    let (_, b, ()) = tokio::join!(
+        request_human_review(&s, &codex),
+        async {
+            hold_a.wait().await;
+            {
+                let mut repo = s.github.lock().unwrap();
+                repo.check_runs = vec![listed_run(1, 5, "check", "failure")];
+                repo.runs_hold = Some(hold_b.clone());
+            }
+            request_human_review(&s, &codex).await
+        },
+        async {
+            // Once B has its list, let A go, wait for A's write, then let B go.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            hold_b.wait().await;
+            hold_a.wait().await;
+            while conclusion().await.as_deref() != Some("success") {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // B's pull request write is dropped behind A's, and it reads once more: unheld.
+            s.github.lock().unwrap().runs_hold = None;
+            hold_b.wait().await;
+        }
+    );
+    assert_eq!(b.0, StatusCode::CONFLICT, "{}", b.1);
+    assert_eq!(
+        b.1["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+    assert_eq!(conclusion().await.as_deref(), Some("failure"));
+}
+
+#[sqlx::test]
 async fn a_rerun_with_a_suite_supersedes_a_failure_recorded_with_none(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;
