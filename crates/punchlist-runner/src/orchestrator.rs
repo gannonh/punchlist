@@ -3,6 +3,7 @@
 //! attempt, backing off on server errors.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -413,43 +414,7 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
                     &claim.branch,
                     &claim.prompt,
                 );
-                // Outside the worktree, so the agent cannot commit its token.
-                let mcp_dir = ctx.config.worktree_root.join("mcp");
-                if claim.agent == "codex" {
-                    run_codex(
-                        &ctx.config.codex_command,
-                        ctx.config.codex_model.as_deref(),
-                        mcp_servers(&ctx.config, &claim),
-                        &path,
-                        &prompt,
-                        lines_tx.clone(),
-                        stop_rx,
-                    )
-                    .await
-                } else {
-                    match write_mcp_config(&mcp_dir, &run_id, &ctx.config, &claim) {
-                        Ok(mcp_config) => {
-                            let args = claude_args(ctx.config.model.as_deref(), Some(&mcp_config));
-                            let exit = run_claude(
-                                &ctx.config.claude_command,
-                                &args,
-                                &path,
-                                &prompt,
-                                lines_tx.clone(),
-                                stop_rx,
-                            )
-                            .await;
-                            let _ = std::fs::remove_file(&mcp_config);
-                            exit
-                        }
-                        Err(e) => AgentExit::Finished(AgentResult {
-                            outcome: RunOutcome::Failed,
-                            reason: Some(format!("cannot write the MCP config: {e}")),
-                            input_tokens: None,
-                            output_tokens: None,
-                        }),
-                    }
-                }
+                run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
             }
             Err(reason) => {
                 let _ = lines_tx
@@ -502,6 +467,48 @@ async fn run_attempt(ctx: &Context, claim: Claim) {
         FINAL_REPORT_TIMEOUT,
     )
     .await;
+}
+
+/// Runs the agent the claim names in the worktree, with Punchlist's MCP server attached.
+async fn run_agent(
+    ctx: &Context,
+    claim: &Claim,
+    worktree: &Path,
+    prompt: &str,
+    lines: mpsc::Sender<String>,
+    stop: watch::Receiver<bool>,
+) -> AgentExit {
+    let config = &ctx.config;
+    let failed = |reason: String| {
+        AgentExit::Finished(AgentResult {
+            outcome: RunOutcome::Failed,
+            reason: Some(reason),
+            input_tokens: None,
+            output_tokens: None,
+        })
+    };
+    match claim.agent.as_str() {
+        "codex" => {
+            let (command, model) = (&config.codex_command, config.codex_model.as_deref());
+            let mcp = mcp_servers(config, claim);
+            run_codex(command, model, mcp, worktree, prompt, lines, stop).await
+        }
+        "claude-code" => {
+            // Outside the worktree, so the agent cannot commit its token.
+            let mcp_dir = config.worktree_root.join("mcp");
+            let run_id = claim.run_id.to_string();
+            let mcp_config = match write_mcp_config(&mcp_dir, &run_id, config, claim) {
+                Ok(mcp_config) => mcp_config,
+                Err(e) => return failed(format!("cannot write the MCP config: {e}")),
+            };
+            let args = claude_args(config.model.as_deref(), Some(&mcp_config));
+            let exit =
+                run_claude(&config.claude_command, &args, worktree, prompt, lines, stop).await;
+            let _ = std::fs::remove_file(&mcp_config);
+            exit
+        }
+        other => failed(format!("this runner has no adapter for agent `{other}`")),
+    }
 }
 
 /// Once shutdown starts, how long the outcome report may still take before the runner

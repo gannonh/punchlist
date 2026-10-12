@@ -3,15 +3,15 @@
 
 -- One row per transition into a status with a `dispatch.status` rule. It waits (`run_id`
 -- NULL) until a runner that can run `agent` claims it, which sets `run_id` in the claim's
--- transaction. The transition that takes the issue out of `status` deletes a row still
--- waiting, so an issue has at most one.
+-- transaction. The issue's next transition deletes a row still waiting, so an issue has at
+-- most one, and it is for the status the issue is in.
 CREATE TABLE dispatch (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     issue_id      text NOT NULL REFERENCES issue (id),
-    -- The transition that put the issue in `status`.
+    -- The transition that put the issue in the status, whose `to_status` it is for. Unique:
+    -- a transition queues one dispatch.
     transition_id uuid NOT NULL UNIQUE REFERENCES transition (id),
-    status        text NOT NULL,
-    -- The agent key of the status's dispatch rule when the issue entered it.
+    -- The agent key of that status's dispatch rule when the issue entered it.
     agent         text NOT NULL,
     -- The run a runner claimed it with.
     run_id        uuid UNIQUE REFERENCES run (id),

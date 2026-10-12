@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::ErrorBody;
-use punchlist_core::{Refusal, Role, linked_issue_id};
+use punchlist_core::{CheckRunEvidence, Refusal, Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
@@ -915,32 +915,47 @@ async fn refresh_once(
     Ok(dropped)
 }
 
-/// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun
-/// is a new run with the same name, so only the newest run of each name counts.
+/// The check runs on a commit that count: a rerun is a new run with the same name, so the
+/// newest run of each name. What `ci_green` reads and what `pull_request.checks` summarizes.
+pub(crate) async fn newest_check_runs(
+    tx: &mut sqlx::PgConnection,
+    repository_id: Uuid,
+    head_sha: &str,
+) -> sqlx::Result<Vec<CheckRunEvidence>> {
+    sqlx::query_as!(
+        CheckRunEvidence,
+        "SELECT DISTINCT ON (name) name, status, conclusion FROM check_run
+         WHERE repository_id = $1 AND head_sha = $2 ORDER BY name, id DESC",
+        repository_id,
+        head_sha,
+    )
+    .fetch_all(&mut *tx)
+    .await
+}
+
+/// Summarizes the check runs on a commit onto every pull request whose head it is.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     head_sha: &str,
 ) -> sqlx::Result<()> {
+    let runs = newest_check_runs(tx, repository_id, head_sha).await?;
+    let count = |state: Option<bool>| runs.iter().filter(|run| run.passed() == state).count();
+    let (passed, failed, pending) = (count(Some(true)), count(Some(false)), count(None));
+    let checks = match (runs.len(), failed, pending) {
+        (0, _, _) => "none",
+        (_, 1.., _) => "failing",
+        (_, _, 1..) => "pending",
+        _ => "passing",
+    };
     sqlx::query!(
-        "UPDATE pull_request p SET
-             checks = CASE WHEN c.total = 0 THEN 'none'
-                           WHEN c.failed > 0 THEN 'failing'
-                           WHEN c.pending > 0 THEN 'pending'
-                           ELSE 'passing' END,
-             checks_total = c.total, checks_passed = c.passed
-         FROM (SELECT count(*)::int AS total,
-                      (count(*) FILTER (WHERE status = 'completed'
-                           AND conclusion IN ('success', 'neutral', 'skipped')))::int AS passed,
-                      (count(*) FILTER (WHERE status = 'completed'
-                           AND coalesce(conclusion, '') NOT IN ('success', 'neutral', 'skipped')))::int AS failed,
-                      (count(*) FILTER (WHERE status <> 'completed'))::int AS pending
-               FROM (SELECT DISTINCT ON (name) status, conclusion FROM check_run
-                     WHERE repository_id = $1 AND head_sha = $2
-                     ORDER BY name, id DESC) latest) c
-         WHERE p.repository_id = $1 AND p.head_sha = $2",
+        "UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
+         WHERE repository_id = $1 AND head_sha = $2",
         repository_id,
         head_sha,
+        checks,
+        runs.len() as i32,
+        passed as i32,
     )
     .execute(&mut *tx)
     .await?;
@@ -1029,7 +1044,7 @@ async fn close_issue_on_pull_request(
         }
         Err(error) => return Err(error),
     };
-    let (_, transition_id) = write_transition(
+    let (_, transition_id, _) = write_transition(
         tx,
         &actor,
         issue_id,

@@ -41,7 +41,6 @@ mod codex;
 pub mod error;
 mod orchestrator;
 pub mod path_safety;
-mod token_accounting;
 pub mod workspace;
 mod worktree;
 

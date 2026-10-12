@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2\n                         ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
+  "query": "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2\n                 ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
   "describe": {
     "columns": [
       {
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "bdb4a3ec602f564d448b0c504c3051eb51e80d485809aa33b4ab3a2231c52138"
+  "hash": "d3502114c12c495183a92a8869fb7209b885b15e28f2d2548f91ccd538bdd18e"
 }

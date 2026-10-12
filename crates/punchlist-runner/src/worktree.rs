@@ -65,7 +65,7 @@ impl Worktrees {
     }
 
     /// Makes the issue's worktree and returns its path. Reuses it when it already exists
-    /// on `branch`, and replaces it when it is on one of `merged_branches`, the issue's
+    /// on `branch`, fast-forwarded to the branch on the remote, and replaces it when it is on one of `merged_branches`, the issue's
     /// earlier branches whose pull requests merged. Dropping the future kills the git
     /// command it is running.
     pub async fn prepare(
@@ -250,6 +250,28 @@ fn prepare_blocking(
             "git rev-parse",
         )?;
         if head == branch {
+            // Another runner, or a person, may have pushed to the branch since this worktree
+            // was last used: bring it up to the remote branch, when there is one. Commits
+            // made here and not yet pushed stay ahead of it.
+            git.ok(&clone_dir, &["fetch", "origin", branch], "git fetch")?;
+            let remote_ref = format!("refs/remotes/origin/{branch}");
+            if git.ok(
+                &clone_dir,
+                &["rev-parse", "--verify", "--quiet", &remote_ref],
+                "git rev-parse",
+            )? {
+                git.run(
+                    Some(&worktree),
+                    &["merge", "--ff-only", &format!("origin/{branch}")],
+                    "git merge --ff-only",
+                )
+                .map_err(|e| {
+                    format!(
+                        "worktree {} cannot fast-forward to origin/{branch}: {e}",
+                        worktree.display()
+                    )
+                })?;
+            }
             return Ok(worktree);
         }
         if merged_branches.contains(&head) {
@@ -484,6 +506,30 @@ mod tests {
             .unwrap();
         assert_eq!(run(&unmerged, &["rev-parse", "HEAD"]), branch_sha);
 
+        // The other runner pushes to the branch: the first one's worktree is reused at that
+        // commit, and one that diverged from the remote is an error, not a silent stale run.
+        let pushed_sha = commit(&unmerged, "review.txt");
+        run(&unmerged, &["push", "origin", branch]);
+        let reused = first
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap();
+        assert_eq!(reused, path);
+        assert_eq!(run(&reused, &["rev-parse", "HEAD"]), pushed_sha);
+        commit(&unmerged, "more.txt");
+        run(&unmerged, &["push", "origin", branch]);
+        run(&path, &["reset", "--hard", &branch_sha]);
+        commit(&path, "diverged.txt");
+        let err = first
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("cannot fast-forward to origin/feature/pl-1-first-issue"),
+            "{err}"
+        );
+        run(&path, &["reset", "--hard", &format!("origin/{branch}")]);
+
         let seed = origin.join("seed");
         run(&seed, &["fetch", "origin"]);
         run(&seed, &["merge", "--squash", &format!("origin/{branch}")]);
@@ -518,7 +564,7 @@ mod tests {
         assert_eq!(run(&again, &["rev-parse", "HEAD"]), main_sha);
         assert_eq!(
             run(&again, &["ls-files"]),
-            "README.md\nlater.txt\none.txt\nsquash.txt"
+            "README.md\nlater.txt\nmore.txt\none.txt\nreview.txt\nsquash.txt"
         );
 
         let second = Worktrees::with_remote_base(temp.path().join("second"), remote_base);

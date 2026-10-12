@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.status, d.agent\n                         FROM dispatch d JOIN issue i ON i.id = d.issue_id\n                         WHERE i.workspace_id = $1 AND d.run_id IS NULL AND d.status = i.status\n                           AND d.agent = ANY($2)\n                           AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id\n                                           AND run.outcome = 'running')\n                         ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED",
+  "query": "SELECT i.id, i.status AS \"from\", d.agent\n           FROM dispatch d JOIN issue i ON i.id = d.issue_id\n           WHERE i.workspace_id = $1 AND d.run_id IS NULL AND d.agent = ANY($2)\n             AND ($3::text IS NULL OR i.id = $3)\n             AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id\n                             AND run.outcome = 'running')\n           ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED",
   "describe": {
     "columns": [
       {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "status",
+        "name": "from",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -40,7 +40,8 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "TextArray"
+        "TextArray",
+        "Text"
       ]
     },
     "nullable": [
@@ -49,5 +50,5 @@
       false
     ]
   },
-  "hash": "797a6a4b67405bbcb48f5214a883fe325cfc6866fbfea71a503f6db0870f448d"
+  "hash": "aa1492782131e2edddb0d3e578a56755ef93fcaf2b580222bd4120ba77af1d02"
 }

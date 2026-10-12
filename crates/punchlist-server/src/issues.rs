@@ -10,8 +10,8 @@ use punchlist_api::{
     MoveIssue, Moved,
 };
 use punchlist_core::{
-    CheckRunEvidence, Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal,
-    ReviewThreadEvidence, Role, START, Transition, Workflow, display_name,
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence,
+    Role, START, Transition, Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
-use crate::github::refresh_pull_requests;
+use crate::github::{newest_check_runs, refresh_pull_requests};
 use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -291,7 +291,7 @@ async fn move_issue(
     }
     let (workflow, _, invalid) = stored_workflow(&mut tx, actor.workspace_id).await?;
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
-    let mut moved = record_transition(
+    let (mut moved, _, dispatched) = write_transition(
         &mut tx,
         &actor,
         &id,
@@ -306,7 +306,7 @@ async fn move_issue(
     if request.to == START {
         moved.warning = invalid;
     }
-    if request.to == START || workflow.dispatch_for(&request.to).is_some() {
+    if request.to == START || dispatched {
         // Wake runners that are long-polling for work. No receivers is fine.
         let _ = state.starts.send((actor.workspace_id, id));
     }
@@ -378,12 +378,7 @@ pub(crate) async fn check_gates(
     if transition.gates.is_empty() {
         return Ok(Vec::new());
     }
-    let evidence = evidence(tx, id, closed_pull_request).await?;
-    let gates: Vec<GateResult> = transition
-        .gates
-        .iter()
-        .map(|gate| gate.evaluate(&evidence))
-        .collect();
+    let (evidence, gates) = evaluate_gates(tx, transition, id, closed_pull_request).await?;
     if let Some(failed) = gates.iter().find(|result| !result.passed) {
         let refusal = Refusal::GateFailed {
             from: from.to_string(),
@@ -399,6 +394,22 @@ pub(crate) async fn check_gates(
         })));
     }
     Ok(gates)
+}
+
+/// Each of a transition's gates, checked against the issue's recorded evidence, with that
+/// evidence. The one evaluation behind a move and behind the checklist `pl issue show`
+/// prints, so the two cannot disagree on the same rows.
+async fn evaluate_gates(
+    tx: &mut sqlx::PgConnection,
+    transition: &Transition,
+    id: &str,
+    closed_pull_request: Option<i64>,
+) -> sqlx::Result<(Evidence, Vec<GateResult>)> {
+    let evidence = evidence(tx, id, closed_pull_request).await?;
+    let gates = (transition.gates.iter())
+        .map(|gate| gate.evaluate(&evidence))
+        .collect();
+    Ok((evidence, gates))
 }
 
 /// What the gates read: the pull requests linked to the issue, each open one with the check
@@ -423,17 +434,7 @@ async fn evidence(
         })?;
         let (mut check_runs, mut review_threads) = (Vec::new(), Vec::new());
         if state == PullRequestState::Open {
-            // A rerun is a new run with the same name, so the newest of each name counts,
-            // as in `recompute_checks`.
-            check_runs = sqlx::query_as!(
-                CheckRunEvidence,
-                r#"SELECT DISTINCT ON (name) name, status, conclusion FROM check_run
-                   WHERE repository_id = $1 AND head_sha = $2 ORDER BY name, id DESC"#,
-                row.repository_id,
-                row.head_sha,
-            )
-            .fetch_all(&mut *tx)
-            .await?;
+            check_runs = newest_check_runs(tx, row.repository_id, &row.head_sha).await?;
             review_threads = sqlx::query_as!(
                 ReviewThreadEvidence,
                 "SELECT path, line, resolved FROM review_thread
@@ -464,8 +465,9 @@ async fn evidence(
 
 /// Writes a transition that the caller has already checked and whose issue row it has
 /// locked: the new status, the transition with the workflow version and gate results, its
-/// event, and the dispatch that waits for a runner when `to` has a dispatch rule. Shared by `move_issue`, claims and GitHub events, which pass the webhook
-/// delivery that caused the move.
+/// event, and the dispatch that waits for a runner when `to` has a dispatch rule. Shared by
+/// `move_issue`, claims and GitHub events, which pass the webhook delivery that caused the
+/// move.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_transition(
     tx: &mut sqlx::PgConnection,
@@ -479,10 +481,45 @@ pub(crate) async fn record_transition(
 ) -> Result<Moved, ApiError> {
     write_transition(tx, actor, id, from, to, delivery_id, workflow, gates)
         .await
-        .map(|(moved, _)| moved)
+        .map(|(moved, _, _)| moved)
 }
 
-/// `record_transition`, also returning the new transition's id.
+/// Dispatch on entry. The issue has left the status a dispatch still waiting was for, so
+/// that one goes; `to` gets its own, for this transition, when it has a dispatch rule and
+/// the workflow does not lock agents or runners out of it. True when one was queued.
+async fn queue_dispatch(
+    tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
+    id: &str,
+    to: &str,
+    transition_id: Uuid,
+) -> sqlx::Result<bool> {
+    sqlx::query!(
+        "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+    let unlocked = |role| workflow.check_unlocked(to, role).is_ok();
+    let Some(dispatch) = workflow
+        .dispatch_for(to)
+        .filter(|_| unlocked(Role::Agent) && unlocked(Role::Runner))
+    else {
+        return Ok(false);
+    };
+    sqlx::query!(
+        "INSERT INTO dispatch (issue_id, transition_id, agent) VALUES ($1, $2, $3)",
+        id,
+        transition_id,
+        dispatch.agent,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(true)
+}
+
+/// `record_transition`, also returning the new transition's id and whether a dispatch was
+/// queued for the new status.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_transition(
     tx: &mut sqlx::PgConnection,
@@ -493,7 +530,7 @@ pub(crate) async fn write_transition(
     delivery_id: Option<&str>,
     workflow: &Workflow,
     gates: &[GateResult],
-) -> Result<(Moved, Uuid), ApiError> {
+) -> Result<(Moved, Uuid, bool), ApiError> {
     let workflow_version = workflow.version();
     let issue = sqlx::query_as!(
         IssueRow,
@@ -530,30 +567,7 @@ pub(crate) async fn write_transition(
         .execute(&mut *tx)
         .await?;
     }
-    // Dispatch on entry. The issue has left the status a dispatch still waiting was for, so
-    // that one goes; `to` gets its own, one per transition, unless the workflow locks
-    // agents or runners out of `to`.
-    sqlx::query!(
-        "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
-        id
-    )
-    .execute(&mut *tx)
-    .await?;
-    if let Some(dispatch) = workflow.dispatch_for(to)
-        && [Role::Agent, Role::Runner]
-            .iter()
-            .all(|role| workflow.check_unlocked(to, *role).is_ok())
-    {
-        sqlx::query!(
-            "INSERT INTO dispatch (issue_id, transition_id, status, agent) VALUES ($1, $2, $3, $4)",
-            id,
-            transition_id,
-            to,
-            dispatch.agent,
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
+    let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
     let seq = sqlx::query_scalar!(
         "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
          RETURNING last_event_seq",
@@ -591,7 +605,7 @@ pub(crate) async fn write_transition(
         },
         warning: None,
     };
-    Ok((moved, transition_id))
+    Ok((moved, transition_id, dispatched))
 }
 
 /// An issue's timeline, oldest first.
@@ -670,33 +684,27 @@ async fn issue_gates(
     actor: Actor,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    // One snapshot for the status and the evidence.
-    let mut tx = state.pool.begin().await?;
-    sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await?;
+    let mut conn = state.pool.acquire().await?;
     let status = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
         id,
         actor.workspace_id,
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
     let Some(transition) = workflow.next_gated(&status) else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let evidence = evidence(&mut tx, &id, None).await?;
+    let (_, gates) = evaluate_gates(&mut conn, transition, &id, None).await?;
     let to = transition.to.as_str().to_string();
     Ok(Json(GateChecklist {
         from_name: display_name(&status),
         from: status,
         to_name: display_name(&to),
         to,
-        gates: (transition.gates.iter())
-            .map(|gate| gate.evaluate(&evidence))
-            .collect(),
+        gates,
     })
     .into_response())
 }

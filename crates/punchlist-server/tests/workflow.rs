@@ -2048,13 +2048,14 @@ async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPoo
 
 const CHECK_RUN: &str = include_str!("fixtures/github/check_run_completed.json");
 
-/// Every dispatch of PL-1 that waits for a runner: its status, agent, and whether it is for
-/// the issue's latest transition.
+/// Every dispatch of PL-1 that waits for a runner: the status its transition moved to, its
+/// agent, and whether that transition is the issue's latest.
 async fn waiting_dispatches(pool: &PgPool) -> Vec<(String, String, bool)> {
     sqlx::query_as(
-        "SELECT status, agent, transition_id = (SELECT id FROM transition
+        "SELECT t.to_status, d.agent, t.id = (SELECT id FROM transition
              WHERE issue_id = 'PL-1' ORDER BY created_at DESC LIMIT 1)
-         FROM dispatch WHERE issue_id = 'PL-1' AND run_id IS NULL",
+         FROM dispatch d JOIN transition t ON t.id = d.transition_id
+         WHERE d.issue_id = 'PL-1' AND d.run_id IS NULL",
     )
     .fetch_all(pool)
     .await

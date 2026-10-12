@@ -758,7 +758,8 @@ impl Workflow {
 
     /// The gated transition an actor can request from `from`, such as `agent_review →
     /// human_review`: the one whose gates an issue in `from` has to pass next. `None` when
-    /// no requested transition from `from` has gates.
+    /// no requested transition from `from` has gates. This is the only rule for which
+    /// transition a gate checklist shows: the first in the file's order, when two qualify.
     pub fn next_gated(&self, from: &str) -> Option<&Transition> {
         self.transitions
             .iter()

@@ -133,18 +133,14 @@ pub struct PullRequestEvidence {
     pub state: PullRequestState,
     pub draft: bool,
     /// The head commit.
-    #[serde(default)]
     pub head_sha: String,
     /// GitHub's `mergeable_state`, such as `clean` or `dirty`; `unknown` until GitHub has
     /// computed it.
-    #[serde(default)]
     pub merge_state: String,
     /// The check runs on the head commit, the newest of each name. Read for an open pull
     /// request.
-    #[serde(default)]
     pub check_runs: Vec<CheckRunEvidence>,
     /// Its review threads, resolved or not. Read for an open pull request.
-    #[serde(default)]
     pub review_threads: Vec<ReviewThreadEvidence>,
 }
 
@@ -157,6 +153,18 @@ pub struct CheckRunEvidence {
     pub status: String,
     /// Set once completed, such as `success` or `failure`.
     pub conclusion: Option<String>,
+}
+
+impl CheckRunEvidence {
+    /// Whether the run passed: completed with success, neutral or skipped. `None` while it
+    /// has not completed.
+    pub fn passed(&self) -> Option<bool> {
+        let passed = matches!(
+            self.conclusion.as_deref(),
+            Some("success" | "neutral" | "skipped")
+        );
+        (self.status == "completed").then_some(passed)
+    }
 }
 
 /// A review thread on a pull request.
@@ -277,11 +285,6 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
     }
 }
 
-/// The first seven characters of a commit, as people quote one.
-fn short(sha: &str) -> &str {
-    sha.get(..7).unwrap_or(sha)
-}
-
 /// Check runs named with their status or conclusion: `` `e2e` (failure) ``.
 fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> String {
     runs.map(|run| {
@@ -296,19 +299,17 @@ fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> String {
 /// with no check run fails: right after a push GitHub has not started them, and passing
 /// then would let the request through before CI ran.
 fn ci_green(pr: &PullRequestEvidence) -> Result<String, String> {
-    let commit = short(&pr.head_sha);
+    // The first seven characters of the commit, as people quote one.
+    let commit = pr.head_sha.get(..7).unwrap_or(&pr.head_sha);
     let total = pr.check_runs.len();
-    let completed = |run: &&CheckRunEvidence| run.status == "completed";
-    let passed = |run: &&CheckRunEvidence| {
-        matches!(
-            run.conclusion.as_deref(),
-            Some("success" | "neutral" | "skipped")
-        )
-    };
-    let failed: Vec<_> = (pr.check_runs.iter())
-        .filter(|run| completed(run) && !passed(run))
-        .collect();
-    let pending: Vec<_> = pr.check_runs.iter().filter(|run| !completed(run)).collect();
+    let (mut failed, mut pending) = (Vec::new(), Vec::new());
+    for run in &pr.check_runs {
+        match run.passed() {
+            Some(true) => {}
+            Some(false) => failed.push(run),
+            None => pending.push(run),
+        }
+    }
     if total == 0 {
         Err(format!("no check run has reported on commit {commit}"))
     } else if !failed.is_empty() {

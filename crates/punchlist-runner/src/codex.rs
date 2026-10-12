@@ -1,11 +1,13 @@
-// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes and token accounting, auto-approval, the non-interactive answer to `requestUserInput`, `needs_input` and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle and the workspace check (worktree.rs checks the path). Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, and the model and MCP server sent in `thread/start`.
+// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes, auto-approval and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle, the input-required heuristics and the workspace check (worktree.rs checks the path). Token accounting is not Symphony's `token_accounting.rs`: the app-server reports the thread's running totals, which is all a one-turn thread needs. Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, and the model and MCP server sent in `thread/start`.
 //! The Codex adapter: runs `codex app-server` in the worktree, starts a thread and one turn
 //! with the prompt over JSON-RPC on its stdio, streams its messages as log lines, and reads
 //! the turn's outcome and token counts.
 //!
 //! 1. Spawn `<codex> app-server` with the worktree as cwd.
-//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `thread/start(id=2)` → await response.
-//! 3. Turn: `turn/start(id=3)` → await response → stream events until `turn/completed` / failure / timeout.
+//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `thread/start(id=2)`
+//!    → await response.
+//! 3. Turn: `turn/start(id=3)` → await response → stream events until `turn/completed`,
+//!    failure or timeout.
 //! 4. Stop: kill the subprocess and its process group.
 
 use std::path::Path;
@@ -20,12 +22,6 @@ use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
 use crate::agent::{AgentExit, AgentResult, MAX_RECORD_BYTES, kill_group, read_record};
-use crate::token_accounting::{TokenState, extract_token_delta};
-
-/// Answer sent to Codex when the session is non-interactive and cannot provide
-/// operator input.
-const NON_INTERACTIVE_ANSWER: &str =
-    "This is a non-interactive session. Operator input is unavailable.";
 
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
@@ -39,7 +35,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Codex's `mcp_servers` config for one run: Punchlist's MCP server for the claimed issue,
 /// with the run's agent token. It goes to Codex in `thread/start`, over stdin, so the token
 /// is in no file and no process listing.
-pub fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
+pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     json!({
         "punchlist": {
             "command": config.mcp_command,
@@ -53,12 +49,11 @@ pub fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     })
 }
 
-/// The app-server's stdio, the run log, and the tokens the turn has used so far.
+/// The app-server's stdio, the run log, and the tokens the thread has used so far.
 struct Session {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     lines: mpsc::Sender<String>,
-    token_state: TokenState,
     input_tokens: u64,
     output_tokens: u64,
 }
@@ -105,16 +100,18 @@ impl Session {
     }
 
     /// Read messages until the response to `request_id` is found, and return its `result`.
-    /// Other messages are skipped.
+    /// A request from Codex that arrives first is answered; notifications are skipped.
     async fn await_response(&mut self, request_id: u64) -> Result<Value, String> {
         loop {
             let Some(payload) = self.next(READ_TIMEOUT).await? else {
                 return Err("codex exited during the handshake".to_string());
             };
             // A request from Codex has an id of its own numbering, and a method.
-            if payload.get("id").and_then(Value::as_u64) != Some(request_id)
-                || payload.get("method").is_some()
-            {
+            if payload.get("method").is_some() {
+                self.answer_request(&payload).await?;
+                continue;
+            }
+            if payload.get("id").and_then(Value::as_u64) != Some(request_id) {
                 continue;
             }
             if let Some(error) = payload.get("error") {
@@ -163,6 +160,8 @@ impl Session {
                 "sandbox": "danger-full-access",
                 "cwd": worktree.to_string_lossy(),
                 "model": model,
+                // Codex keeps no copy of the session under `~/.codex/sessions`.
+                "ephemeral": true,
                 "config": {"mcp_servers": mcp_servers}
             }
         }))
@@ -198,19 +197,18 @@ impl Session {
                 return Err("codex exited during the turn".to_string());
             };
 
-            // ── Token accounting ──────────────────────────
-            let delta = extract_token_delta(&self.token_state, &payload);
-            self.input_tokens += delta.input_tokens;
-            self.output_tokens += delta.output_tokens;
-            self.token_state.last_input = delta.input_reported;
-            self.token_state.last_output = delta.output_reported;
-
-            let Some(method) = payload.get("method").and_then(Value::as_str) else {
-                continue;
-            };
-            let params = payload.get("params").cloned().unwrap_or(Value::Null);
-            match method {
-                "turn/completed" => {
+            match payload.get("method").and_then(Value::as_str) {
+                // The thread's running totals. It has this one turn, so they are the run's.
+                Some("thread/tokenUsage/updated") => {
+                    let total = |key: &str| {
+                        payload
+                            .pointer(&format!("/params/tokenUsage/total/{key}"))
+                            .and_then(Value::as_u64)
+                    };
+                    self.input_tokens = total("inputTokens").unwrap_or(self.input_tokens);
+                    self.output_tokens = total("outputTokens").unwrap_or(self.output_tokens);
+                }
+                Some("turn/completed") => {
                     // Check if turn/completed carries a failure status
                     // (e.g. usageLimitExceeded, model unavailable)
                     let status = (payload.pointer("/params/turn/status"))
@@ -224,115 +222,47 @@ impl Session {
                         .unwrap_or("no error message");
                     return Err(format!("codex turn {status}: {message}"));
                 }
-                "turn/failed" => return Err(format!("codex turn failed: {params}")),
-                "turn/cancelled" => return Err(format!("codex turn cancelled: {params}")),
-
-                // The approval policy is `never`, so a request for approval is approved.
-                "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
-                    self.answer(&payload, json!({"decision": "acceptForSession"}))
-                        .await?;
+                Some(method @ ("turn/failed" | "turn/cancelled")) => {
+                    let params = payload.get("params").unwrap_or(&Value::Null);
+                    return Err(format!("codex {}: {params}", method.replace('/', " ")));
                 }
-                "execCommandApproval" | "applyPatchApproval" => {
-                    self.answer(&payload, json!({"decision": "approved_for_session"}))
-                        .await?;
-                }
-                "mcpServer/elicitation/request" => {
-                    self.answer(&payload, json!({"action": "accept"})).await?;
-                }
-                "item/tool/requestUserInput" => {
-                    let Some(answers) = build_non_interactive_answers(&params) else {
-                        return Err("codex asked for input this session cannot give".into());
-                    };
-                    self.answer(&payload, json!({"answers": answers})).await?;
-                }
-                other if needs_input(other, &payload) => {
-                    return Err(format!("codex needs operator input ({other})"));
-                }
-                // Any other request would wait for an answer forever.
-                other if payload.get("id").is_some() => {
-                    let error = json!({
-                        "code": -32601,
-                        "message": format!("the Punchlist runner does not handle {other}")
-                    });
-                    let id = payload.get("id");
-                    self.send(&json!({"id": id, "error": error})).await?;
-                }
-                _ => {}
+                _ => self.answer_request(&payload).await?,
             }
         }
     }
 
-    /// Sends `{"id": <id>, "result": <result>}` in answer to a request from Codex.
-    async fn answer(&mut self, request: &Value, result: Value) -> Result<(), String> {
-        self.send(&json!({"id": request.get("id"), "result": result}))
-            .await
+    /// Answers a request from Codex, so it does not wait forever; a notification needs no
+    /// answer. The approval policy is `never`, so a request for approval is approved. A
+    /// request this runner does not handle gets a JSON-RPC error.
+    async fn answer_request(&mut self, payload: &Value) -> Result<(), String> {
+        let (Some(id), Some(method)) = (
+            payload.get("id"),
+            payload.get("method").and_then(Value::as_str),
+        ) else {
+            return Ok(());
+        };
+        let answer = match method {
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                json!({"id": id, "result": {"decision": "acceptForSession"}})
+            }
+            "execCommandApproval" | "applyPatchApproval" => {
+                json!({"id": id, "result": {"decision": "approved_for_session"}})
+            }
+            "mcpServer/elicitation/request" => json!({"id": id, "result": {"action": "accept"}}),
+            other => json!({"id": id, "error": {
+                "code": -32601,
+                "message": format!("the Punchlist runner does not handle {other}")
+            }}),
+        };
+        self.send(&answer).await
     }
-}
-
-/// Build non-interactive answers for all questions.
-///
-/// Returns `Some(answers_map)` if every question has a string `id` field.
-/// Returns `None` if any question lacks one.
-fn build_non_interactive_answers(params: &Value) -> Option<Value> {
-    let questions = params.get("questions")?.as_array()?;
-    if questions.is_empty() {
-        return None;
-    }
-
-    let mut answers = serde_json::Map::new();
-    for question in questions {
-        let question_id = question.get("id")?.as_str()?;
-        answers.insert(
-            question_id.to_string(),
-            json!({"answers": [NON_INTERACTIVE_ANSWER]}),
-        );
-    }
-
-    Some(Value::Object(answers))
-}
-
-/// Detect whether `method` + `payload` indicate a generic input-required event.
-///
-/// - Method must start with `"turn/"`.
-/// - Method is in the known input-required list, OR payload/params have a
-///   `requiresInput`, `needsInput`, `input_required`, `inputRequired`, `type`
-///   flag set to `true` / `"input_required"` / `"needs_input"`.
-fn needs_input(method: &str, payload: &Value) -> bool {
-    const INPUT_METHODS: &[&str] = &[
-        "turn/input_required",
-        "turn/needs_input",
-        "turn/need_input",
-        "turn/request_input",
-        "turn/request_response",
-        "turn/provide_input",
-        "turn/approval_required",
-    ];
-    if !method.starts_with("turn/") {
-        return false;
-    }
-    if INPUT_METHODS.contains(&method) {
-        return true;
-    }
-    // Check payload and params for input-required flags
-    let params = payload.get("params");
-    payload_needs_input(payload) || params.is_some_and(payload_needs_input)
-}
-
-fn payload_needs_input(payload: &Value) -> bool {
-    let flag = |key: &str| payload.get(key).and_then(Value::as_bool) == Some(true);
-    let kind = payload.get("type").and_then(Value::as_str);
-    flag("requiresInput")
-        || flag("needsInput")
-        || flag("input_required")
-        || flag("inputRequired")
-        || matches!(kind, Some("input_required" | "needs_input"))
 }
 
 /// Runs one Codex turn in `worktree` with `prompt`. The app-server's messages go to `lines`
 /// as they arrive, without the streaming deltas; its stderr lines go there prefixed with
 /// `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
 /// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
-pub async fn run_codex(
+pub(crate) async fn run_codex(
     codex_command: &Path,
     model: Option<&str>,
     mcp_servers: Value,
@@ -376,7 +306,6 @@ pub async fn run_codex(
         stdin: child.stdin.take().expect("stdin is piped"),
         stdout: BufReader::new(child.stdout.take().expect("stdout is piped")),
         lines,
-        token_state: TokenState::default(),
         input_tokens: 0,
         output_tokens: 0,
     };
@@ -412,7 +341,7 @@ pub async fn run_codex(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tests::fake_claude;
+    use crate::agent::tests::fake_agent;
 
     /// A fake `codex app-server` that answers each request with the lines a real one sent
     /// after it. `tests/fixtures/codex/` is the stdout of codex-cli 0.162.1 on `gpt-6-luna`
@@ -436,7 +365,7 @@ done"#
 
     async fn run_fake(script: &str) -> (AgentExit, Vec<String>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), script);
+        let command = fake_agent(temp.path(), script);
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let mcp = json!({"punchlist": {"command": "pl", "args": ["mcp"]}});
@@ -510,6 +439,7 @@ done"#
         assert_eq!(thread["params"]["model"], "gpt-6-luna");
         assert_eq!(thread["params"]["approvalPolicy"], "never");
         assert_eq!(thread["params"]["sandbox"], "danger-full-access");
+        assert_eq!(thread["params"]["ephemeral"], true);
         assert_eq!(
             thread["params"]["config"]["mcp_servers"]["punchlist"]["args"][0],
             "mcp"
@@ -557,15 +487,16 @@ done"#;
 
     #[tokio::test]
     async fn a_request_from_codex_is_answered_so_the_turn_goes_on() {
-        // The fake waits for the answer to each of its requests before it goes on.
+        // The fake waits for the answer to each of its requests before it goes on. The first
+        // comes before the response to `turn/start`, with that request's own id.
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"t1"}}}' ;;
     *'"method":"turn/start"'*)
-      echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
-      echo '{"id":0,"method":"item/commandExecution/requestApproval","params":{}}' ;;
+      echo '{"id":3,"method":"item/commandExecution/requestApproval","params":{}}' ;;
     *'"decision":"acceptForSession"'*)
+      echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
       echo '{"id":1,"method":"account/chatgptAuthTokens/refresh","params":{}}' ;;
     *'does not handle account/chatgptAuthTokens/refresh'*)
       echo '{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed"}}}' ;;
@@ -597,7 +528,7 @@ done"#;
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), "sleep 30");
+        let command = fake_agent(temp.path(), "sleep 30");
         let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();

@@ -409,7 +409,7 @@ pub(crate) mod tests {
         let script = r#"i=0
 while [ $i -lt 30 ]; do echo "line $i"; i=$((i+1)); done
 echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":5,"output_tokens":7}}'"#;
-        let command = fake_claude(temp.path(), script);
+        let command = fake_agent(temp.path(), script);
         let (tx, mut rx) = mpsc::channel(1);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let drain = tokio::spawn(async move {
@@ -462,12 +462,12 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         }
     }
 
-    /// Writes an executable fake agent, named `claude`. Another test thread that forks while the file is
+    /// Writes an executable fake agent (a fake `claude`, or a fake `codex`). Another test thread that forks while the file is
     /// open for writing holds the write handle until its child execs, and an exec of the
     /// file fails with ETXTBSY meanwhile. Probe until one exec succeeds: the handle is then
     /// gone from every process, and nothing can copy it again, so later execs are safe.
-    pub(crate) fn fake_claude(dir: &Path, script: &str) -> PathBuf {
-        let path = dir.join("claude");
+    pub(crate) fn fake_agent(dir: &Path, script: &str) -> PathBuf {
+        let path = dir.join("agent");
         std::fs::write(
             &path,
             format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{script}\n"),
@@ -480,15 +480,15 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 Err(e) if e.raw_os_error() == Some(26) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(e) => panic!("cannot run the fake claude: {e}"),
+                Err(e) => panic!("cannot run the fake agent: {e}"),
             }
         }
-        panic!("the fake claude stayed busy");
+        panic!("the fake agent stayed busy");
     }
 
     async fn run_fake(script: &str, prompt: &str) -> (AgentExit, Vec<String>) {
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), script);
+        let command = fake_agent(temp.path(), script);
         // Drained only after the agent exits, so big enough for a whole run.
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
@@ -659,7 +659,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     #[tokio::test]
     async fn the_stop_signal_kills_the_agent() {
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), "sleep 30");
+        let command = fake_agent(temp.path(), "sleep 30");
         let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let handle = tokio::spawn(async move {
@@ -703,7 +703,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let temp = tempfile::tempdir().unwrap();
         let pidfile = temp.path().join("child.pid");
         let script = format!("sleep 30 &\necho $! > {}\nwait", pidfile.display());
-        let command = fake_claude(temp.path(), &script);
+        let command = fake_agent(temp.path(), &script);
         let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
