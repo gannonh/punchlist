@@ -1,5 +1,6 @@
-//! Reads files from a repository's default branch through GitHub's REST API, as the
-//! GitHub App. The server uses it to load `.punchlist/` (ADR 0010).
+//! Reads GitHub as the GitHub App: files from a repository's default branch, to load
+//! `.punchlist/` (ADR 0010), and the current state of pull requests and their review threads,
+//! which webhooks alone cannot order.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -48,6 +49,39 @@ struct AccessToken {
 struct RepositoryInfo {
     default_branch: String,
 }
+
+/// A review thread on a pull request, as GraphQL's `reviewThreads` reports it now.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewThread {
+    /// The thread's node id: `thread.node_id` in a webhook.
+    pub id: String,
+    pub is_resolved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadPage {
+    nodes: Vec<ReviewThread>,
+    page_info: PageInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+const REVIEW_THREADS: &str =
+    "query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviewThreads(first: 100, after: $after) {
+      nodes { id isResolved }
+      pageInfo { hasNextPage endCursor }
+    }
+  } }
+}";
 
 /// A repository's default branch and the commit at its head.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,18 +162,35 @@ impl GithubClient {
         method: reqwest::Method,
         path: &str,
     ) -> anyhow::Result<reqwest::Response> {
-        let response = self
+        self.send(token, method, path, None).await
+    }
+
+    /// `call`, with a JSON body when there is one.
+    async fn send(
+        &self,
+        token: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> anyhow::Result<reqwest::Response> {
+        let mut request = self
             .http
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(token)
             .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
+            .header("x-github-api-version", "2022-11-28");
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
             .send()
             .await
             .with_context(|| format!("GitHub {path}"))?;
         let status = response.status();
-        anyhow::ensure!(status.is_success(), "GitHub {path} answered {status}");
-        Ok(response)
+        // reqwest's error keeps the status, for `unless_gone`.
+        response
+            .error_for_status()
+            .with_context(|| format!("GitHub {path} answered {status}"))
     }
 
     /// The head commit of the repository's default branch, whose files `Files` reads.
@@ -191,12 +242,13 @@ impl GithubClient {
         wanted: impl Fn(&PullRequestData) -> bool,
     ) -> anyhow::Result<Vec<PullRequestData>> {
         let token = self.token(owner, name).await?;
-        let path = format!("/repos/{owner}/{name}/pulls");
         let recent: Vec<PullRequestData> = self
             .call(
                 &token,
                 reqwest::Method::GET,
-                &format!("{path}?state=all&sort=updated&direction=desc&per_page=30"),
+                &format!(
+                    "/repos/{owner}/{name}/pulls?state=all&sort=updated&direction=desc&per_page=30"
+                ),
             )
             .await?
             .json()
@@ -208,14 +260,90 @@ impl GithubClient {
             .collect();
         let mut pull_requests = Vec::new();
         for number in numbers {
-            pull_requests.push(
-                self.call(&token, reqwest::Method::GET, &format!("{path}/{number}"))
-                    .await?
-                    .json()
-                    .await?,
-            );
+            pull_requests.push(self.pull_request(owner, name, number).await?);
         }
         Ok(pull_requests)
+    }
+
+    /// One pull request's current state.
+    pub(crate) async fn pull_request(
+        &self,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> anyhow::Result<PullRequestData> {
+        let token = self.token(owner, name).await?;
+        let path = format!("/repos/{owner}/{name}/pulls/{number}");
+        Ok(self
+            .call(&token, reqwest::Method::GET, &path)
+            .await?
+            .json()
+            .await?)
+    }
+
+    /// Every review thread on a pull request, resolved or not. REST has no review threads, so
+    /// this is GraphQL, a page of 100 at a time. GraphQL answers 200 with `errors` and no
+    /// data when it refuses, so a missing list is an error.
+    pub(crate) async fn review_threads(
+        &self,
+        owner: &str,
+        name: &str,
+        number: i64,
+    ) -> anyhow::Result<Vec<ReviewThread>> {
+        let token = &self.token(owner, name).await?;
+        let mut threads = Vec::new();
+        let mut after = None;
+        loop {
+            let query = serde_json::json!({
+                "query": REVIEW_THREADS,
+                "variables": {"owner": owner, "name": name, "number": number, "after": after},
+            });
+            let mut answer: serde_json::Value = self
+                .send(token, reqwest::Method::POST, "/graphql", Some(&query))
+                .await?
+                .json()
+                .await?;
+            let page = answer
+                .pointer_mut("/data/repository/pullRequest/reviewThreads")
+                .map(serde_json::Value::take);
+            let Some(page) = page else {
+                anyhow::bail!(
+                    "GitHub GraphQL has no review threads for {owner}/{name}#{number}: {}",
+                    answer["errors"]
+                );
+            };
+            let page: ReviewThreadPage = serde_json::from_value(page)?;
+            threads.extend(page.nodes);
+            if !page.page_info.has_next_page {
+                return Ok(threads);
+            }
+            let cursor = page.page_info.end_cursor;
+            let cursor = cursor.context("GitHub GraphQL named no cursor for the next page")?;
+            // The gated-request refresh has no deadline of its own, so a page that names the
+            // cursor it was asked for must not loop.
+            anyhow::ensure!(
+                after.as_deref() != Some(cursor.as_str()),
+                "GitHub GraphQL repeated the cursor {cursor}"
+            );
+            after = Some(cursor);
+        }
+    }
+}
+
+/// `None` when GitHub answered 404 or 410: what was asked for is gone, and no retry finds it.
+/// Any other failure is still the error.
+pub(crate) fn unless_gone<T>(read: anyhow::Result<T>) -> anyhow::Result<Option<T>> {
+    let status = |error: &anyhow::Error| error.downcast_ref::<reqwest::Error>()?.status();
+    match read {
+        Err(error)
+            if matches!(
+                status(&error),
+                Some(StatusCode::NOT_FOUND | StatusCode::GONE)
+            ) =>
+        {
+            Ok(None)
+        }
+        read => read.map(Some),
     }
 }
 
