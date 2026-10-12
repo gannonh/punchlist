@@ -19,7 +19,7 @@ pub enum Gate {
     PrNamesIssue,
     /// Every check run on that pull request's head commit completed successfully.
     CiGreen,
-    /// GitHub's merge state for it is `clean`.
+    /// GitHub's merge state for it is `clean` or `has_hooks`.
     Mergeable,
     /// None of its review threads is unresolved.
     NoOpenThreads,
@@ -329,13 +329,14 @@ fn ci_green(pr: &PullRequestEvidence) -> Result<String, String> {
     }
 }
 
-/// GitHub's merge state is `clean`. `unknown` is GitHub still computing it, which it starts
+/// GitHub's merge state is `clean`, or `has_hooks`. `unknown` is GitHub still computing it, which it starts
 /// when the pull request is read, so the reason says to ask again.
 fn mergeable(pr: &PullRequestEvidence) -> Result<String, String> {
     let number = pr.number;
     match pr.merge_state.as_str() {
-        "clean" => Ok(format!(
-            "pull request #{number} has no conflicts and GitHub's merge state is clean"
+        // `has_hooks` is GitHub's `clean` on a repository with pre-receive hooks.
+        state @ ("clean" | "has_hooks") => Ok(format!(
+            "pull request #{number} has no conflicts and GitHub's merge state is {state}"
         )),
         "unknown" | "" => Err(format!(
             "GitHub has not computed pull request #{number}'s merge state yet; request again"
@@ -690,6 +691,13 @@ mod tests {
             (
                 true,
                 "pull request #12 has no conflicts and GitHub's merge state is clean".into()
+            )
+        );
+        assert_eq!(
+            state("has_hooks"),
+            (
+                true,
+                "pull request #12 has no conflicts and GitHub's merge state is has_hooks".into()
             )
         );
         assert_eq!(

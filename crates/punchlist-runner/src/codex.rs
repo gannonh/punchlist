@@ -348,7 +348,10 @@ mod tests {
     /// in a live check of this adapter: a run that fixed a failing check, answered a review
     /// thread and requested Human Review. It is cut where each request was answered, and
     /// trimmed: hook, account and rate-limit notifications are dropped, and so are the
-    /// deltas of every message but the first.
+    /// deltas of every message but the first. The answer to `thread/start` and its
+    /// `thread/started` were recorded again, from the same version without a turn, once the
+    /// adapter asked for an ephemeral thread; the turn's messages carry the id of the thread
+    /// they were recorded in.
     fn replay() -> String {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
         format!(
@@ -440,6 +443,12 @@ done"#
         assert_eq!(thread["params"]["approvalPolicy"], "never");
         assert_eq!(thread["params"]["sandbox"], "danger-full-access");
         assert_eq!(thread["params"]["ephemeral"], true);
+        // Codex 0.162.1 honors it: the thread it answers with is ephemeral and has no
+        // rollout file.
+        let answer: Value = serde_json::from_str(&lines[1]).unwrap();
+        assert_eq!(answer["id"], 2);
+        assert_eq!(answer["result"]["thread"]["ephemeral"], true);
+        assert_eq!(answer["result"]["thread"]["path"], Value::Null);
         assert_eq!(
             thread["params"]["config"]["mcp_servers"]["punchlist"]["args"][0],
             "mcp"
@@ -452,7 +461,7 @@ done"#
         assert_eq!(turn["params"]["threadId"], RECORDED_THREAD_ID);
     }
 
-    const RECORDED_THREAD_ID: &str = "01a130f2-f3d8-7083-8649-3af6cd58bb7c";
+    const RECORDED_THREAD_ID: &str = "01a1311f-a14d-7052-9470-5458b555231a";
     const RECORDED_INPUT_TOKENS: i64 = 299_517;
     const RECORDED_OUTPUT_TOKENS: i64 = 2810;
     const RECORDED_LOG_LINES: usize = 96;

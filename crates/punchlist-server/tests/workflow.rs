@@ -2226,15 +2226,82 @@ async fn a_long_polling_codex_runner_claims_once_the_run_before_it_ends(pool: Pg
     assert_eq!(claim["issue"]["status"], "agent_review");
 }
 
-/// PL-1 in Agent Review with pull request #12 open and ready, and a Codex run claimed for
-/// it. Returns that run's agent token.
-async fn issue_in_agent_review(s: &Setup) -> String {
+/// PL-1 in Agent Review with pull request #12 open and ready, its Claude Code run ended, and
+/// its dispatch for Codex waiting.
+async fn waiting_in_agent_review(s: &Setup) {
     let (agent, runner, first) = claimed_by_runner(s).await;
     deliver(s, "pull_request", "d-opened", OPENED).await;
     deliver(s, "pull_request", "d-ready", READY).await;
     let (status, body) = request_agent_review(s, &agent).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     finish(s, &runner, &first).await;
+}
+
+#[sqlx::test]
+async fn a_dispatch_keeps_the_agent_and_prompt_of_the_workflow_it_was_queued_under(pool: PgPool) {
+    let s = setup(&pool).await;
+    // Queued under the built-in workflow: Codex, with its review prompt.
+    waiting_in_agent_review(&s).await;
+    let queued_under = punchlist_core::default_workflow().prompt_for("agent_review");
+
+    // A version loads that gives Agent Review to Claude Code, with other prompts.
+    let reassigned = PRD_WORKFLOW.replace("agent = \"codex\"", "agent = \"claude-code\"");
+    assert_ne!(reassigned, PRD_WORKFLOW);
+    put_workflow(&s, "c", reassigned);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+
+    // The waiting dispatch is still Codex's, and its run gets the prompt that came with it.
+    let claude_runner = register(&s, "r2", &["claude-code"]).await;
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    let codex_runner = register(&s, "r3", &["codex"]).await;
+    let (status, claim) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["agent"], "codex");
+    assert_eq!(claim["prompt"], queued_under);
+    assert!(queued_under.contains("ready for a person to review"));
+}
+
+#[sqlx::test]
+async fn a_waiting_dispatch_on_an_older_issue_is_claimed_before_a_started_one(pool: PgPool) {
+    let s = setup(&pool).await;
+    waiting_in_agent_review(&s).await;
+    let token = &s.person.token;
+    let (status, _) = call(
+        &s.app,
+        token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Next"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for to in ["todo", "start"] {
+        let moved = Some(json!({"to": to}));
+        let (status, _) = call(&s.app, token, "POST", "/api/issues/PL-2/transitions", moved).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // A runner that can run both takes them in issue order, whichever kind each is.
+    let runner = register(&s, "r2", &["claude-code", "codex"]).await;
+    let (_, first) = claim(&s, &runner).await;
+    assert_eq!(
+        (&first["issue"]["id"], &first["agent"]),
+        (&json!("PL-1"), &json!("codex"))
+    );
+    let (_, second) = claim(&s, &runner).await;
+    assert_eq!(
+        (&second["issue"]["id"], &second["agent"]),
+        (&json!("PL-2"), &json!("claude-code"))
+    );
+    assert_eq!(second["issue"]["status"], "in_progress");
+    assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+}
+
+/// PL-1 in Agent Review with pull request #12 open and ready, and a Codex run claimed for
+/// it. Returns that run's agent token.
+async fn issue_in_agent_review(s: &Setup) -> String {
+    waiting_in_agent_review(s).await;
     let codex_runner = register(s, "r2", &["codex"]).await;
     let (status, claim) = claim(s, &codex_runner).await;
     assert_eq!(status, StatusCode::OK, "{claim}");

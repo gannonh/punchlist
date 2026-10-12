@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT v.workflow_toml, v.prompts\n         FROM dispatch d JOIN transition t ON t.id = d.transition_id\n         JOIN workflow_version v ON v.workspace_id = $1 AND v.hash = t.workflow_version\n         WHERE d.issue_id = $2 AND d.run_id IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_toml",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "workflow_toml"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "prompts",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "workflow_version",
+            "name": "prompts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2a7b29ed28ee9d5b3c2305383390c1816d9fabed4ea80d55dfc3e9e0d560ef4e"
+}

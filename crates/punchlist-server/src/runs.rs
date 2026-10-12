@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, hash_token, new_token};
 use crate::issues::{IssueRow, check_move, record_transition};
 use crate::runners::{RunnerRow, runner_of};
-use crate::workflow::{active_workflow, lock_workspace};
+use crate::workflow::{active_workflow, dispatch_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 const MAX_WAIT_SECONDS: u32 = 30;
@@ -60,12 +60,12 @@ struct Claimable {
     agent: String,
 }
 
-/// Selects what the runner can claim and locks its issue row: an issue in Start, when the
-/// runner can run the agent In Progress dispatches, or else an issue whose dispatch waits in
-/// the status it entered, names an agent the runner can run, and is not behind a run of the
-/// issue that is still running (one run works on an issue at a time; `finish_run` wakes the
-/// runners when that run ends). `Target::Any` takes the lowest-numbered one no other claim
-/// has locked.
+/// Selects what the runner can claim and locks its issue row: the lowest-numbered issue no
+/// other claim has locked that is in Start, when the runner can run the agent In Progress
+/// dispatches, or whose dispatch waits in the status it entered, names an agent the runner
+/// can run, and is not behind a run of the issue that is still running (one run works on an
+/// issue at a time; `finish_run` wakes the runners when that run ends). The two kinds are
+/// ordered together, so started issues do not hold back a dispatch on an older one.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -76,59 +76,40 @@ async fn select_claimable(
     // The agent a claim from Start runs, if this runner can run it.
     let start_agent = workflow
         .dispatch_for(IN_PROGRESS)
-        .map(|dispatch| &dispatch.agent)
-        .filter(|agent| runner.agents.contains(agent));
-    let started = match (target, start_agent) {
-        (Target::Any, Some(_)) => {
-            sqlx::query_scalar!(
-                "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2
-                 ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
-                workspace_id,
-                START,
-            )
-            .fetch_optional(&mut *tx)
-            .await?
-        }
-        (Target::Any, None) => None,
-        // Waits for a claim that holds the issue, then reads the status it left.
-        (Target::Issue(id), _) => {
-            let status = sqlx::query_scalar!(
-                "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        .map(|dispatch| dispatch.agent.as_str())
+        .filter(|agent| runner.agents.iter().any(|a| a == agent));
+    let only = match target {
+        Target::Any => None,
+        Target::Issue(id) => {
+            // Waits for a claim that holds the issue, so the selection reads what it left.
+            sqlx::query!(
+                "SELECT FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
                 id,
                 workspace_id,
             )
             .fetch_optional(&mut *tx)
             .await?;
-            match (status.as_deref() == Some(START), start_agent) {
-                (true, None) => return Ok(None),
-                (started, _) => started.then(|| id.clone()),
-            }
+            Some(id.as_str())
         }
-    };
-    if let (Some(id), Some(agent)) = (started, start_agent) {
-        return Ok(Some(Claimable {
-            id,
-            from: START.to_string(),
-            agent: agent.clone(),
-        }));
-    }
-    let only = match target {
-        Target::Any => None,
-        Target::Issue(id) => Some(id.as_str()),
     };
     // A waiting dispatch is always for the status its issue is in: `queue_dispatch`.
     sqlx::query_as!(
         Claimable,
-        r#"SELECT i.id, i.status AS "from", d.agent
-           FROM dispatch d JOIN issue i ON i.id = d.issue_id
-           WHERE i.workspace_id = $1 AND d.run_id IS NULL AND d.agent = ANY($2)
-             AND ($3::text IS NULL OR i.id = $3)
-             AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
-                             AND run.outcome = 'running')
+        r#"SELECT i.id, i.status AS "from",
+                  CASE WHEN i.status = $4 THEN $5 ELSE d.agent END AS "agent!"
+           FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL
+           WHERE i.workspace_id = $1 AND ($3::text IS NULL OR i.id = $3)
+             AND CASE WHEN i.status = $4 THEN $5::text IS NOT NULL
+                      ELSE d.agent = ANY($2)
+                           AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
+                                           AND run.outcome = 'running')
+                 END
            ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
         workspace_id,
         &runner.agents,
         only,
+        START,
+        start_agent,
     )
     .fetch_optional(&mut *tx)
     .await
@@ -174,8 +155,9 @@ async fn try_claim(
             None => Ok(None),
         };
     };
-    // The status the run is for, and the issue in that status.
-    let (status, issue) = if from == START {
+    // The status the run is for, the issue in that status, and the prompt of the workflow
+    // version that named the agent.
+    let (status, issue, prompt) = if from == START {
         let gates = check_move(&mut tx, &workflow, actor, &id, START, IN_PROGRESS).await?;
         let moved = record_transition(
             &mut tx,
@@ -188,7 +170,8 @@ async fn try_claim(
             &gates,
         )
         .await?;
-        (IN_PROGRESS.to_string(), moved.issue)
+        let prompt = workflow.prompt_for(IN_PROGRESS);
+        (IN_PROGRESS.to_string(), moved.issue, prompt)
     } else {
         let issue = sqlx::query_as!(
             IssueRow,
@@ -197,7 +180,9 @@ async fn try_claim(
         )
         .fetch_one(&mut *tx)
         .await?;
-        (from, issue.into())
+        let queued_under = dispatch_workflow(&mut tx, actor.workspace_id, &id).await?;
+        let prompt = queued_under.prompt_for(&from);
+        (from, issue.into(), prompt)
     };
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
@@ -288,7 +273,7 @@ async fn try_claim(
         branch,
         merged_branches,
         lease_expires_at,
-        prompt: workflow.prompt_for(&status),
+        prompt,
         agent_token,
     }))
 }
