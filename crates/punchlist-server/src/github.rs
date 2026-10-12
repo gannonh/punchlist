@@ -82,6 +82,8 @@ pub(crate) struct PullRequestData {
     #[serde(default)]
     pub merged_by: Option<Account>,
     #[serde(default)]
+    pub closed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub mergeable_state: Option<String>,
     pub head: Head,
     pub updated_at: DateTime<Utc>,
@@ -404,9 +406,10 @@ pub(crate) async fn process(
         GithubEvent::PullRequest(event) => {
             // Only a `closed` event's sender closed it; another event may still be the first
             // to carry the closed state. If GitHub says it has been merged since, whoever
-            // merged it did.
+            // merged it did; if it was closed again since, GitHub does not say who did.
             let closed_by = match &current.pull_request {
                 Some(now) if now.is_merged() => now.merged_by.as_ref(),
+                Some(now) if now.closed_at != event.pull_request.closed_at => None,
                 _ => (event.action == "closed").then_some(&event.sender),
             };
             record_pull_request(

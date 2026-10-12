@@ -770,6 +770,36 @@ async fn a_closed_delivery_for_a_pull_request_merged_since_records_the_merge_onc
     );
 }
 
+#[sqlx::test]
+async fn a_late_closed_delivery_does_not_name_who_closed_it_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    issue_with_a_ready_pull_request(&s).await;
+    // Closed by octocat, reopened, and closed again later by someone GitHub does not name;
+    // octocat's `closed` is the first to arrive.
+    let mut again = pull_request_now(CLOSED);
+    again["closed_at"] = json!("2026-10-09T19:00:00Z");
+    s.github.lock().unwrap().pulls = vec![again];
+
+    deliver(&s, "pull_request", "d-closed", CLOSED).await;
+    assert_eq!(
+        event_transitions(&pool).await,
+        [moved("in_progress", "todo", "GitHub", Some("d-closed"))]
+    );
+}
+
+#[sqlx::test]
+async fn a_closed_delivery_github_confirms_credits_its_sender(pool: PgPool) {
+    let s = setup(&pool).await;
+    issue_with_a_ready_pull_request(&s).await;
+    s.github.lock().unwrap().pulls = vec![pull_request_now(CLOSED)];
+
+    deliver(&s, "pull_request", "d-closed", CLOSED).await;
+    assert_eq!(
+        event_transitions(&pool).await,
+        [moved("in_progress", "todo", "octocat", Some("d-closed"))]
+    );
+}
+
 const THREAD: &str = include_str!("fixtures/github/pull_request_review_thread_resolved.json");
 
 /// A review thread as GraphQL reports it.
