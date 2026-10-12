@@ -1,19 +1,25 @@
 //! `/api/issues/{id}/pull-requests` and `/api/pull-requests/unlinked`: the pull requests
 //! that GitHub's events recorded, read by issue or as the ones no issue claimed.
+//! `/api/issues/{id}/pull-requests/refresh` reads GitHub first, and adds what the reviewers
+//! wrote.
 
 use axum::Json;
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
-use punchlist_api::{ChecksState, ErrorBody, PullRequest, PullRequestState};
+use punchlist_api::{
+    ChecksState, ErrorBody, PullRequest, PullRequestState, PullRequestsNow, ReviewThread,
+};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::Actor;
+use crate::github::refresh_pull_requests;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(issue_pull_requests))
+        .routes(routes!(refresh_issue_pull_requests))
         .routes(routes!(unlinked_pull_requests))
 }
 
@@ -82,6 +88,76 @@ async fn issue_pull_requests(
     Path(id): Path<String>,
 ) -> Result<Json<Vec<PullRequest>>, ApiError> {
     let mut conn = state.pool.acquire().await?;
+    Ok(Json(recorded(&mut conn, &actor, &id).await?))
+}
+
+/// An issue's pull requests and the unresolved review threads of the open ones, after
+/// reading both from GitHub as a gated request does: a new review thread sends no webhook,
+/// so this is how an agent reads what its reviewers wrote. The thread text is from outside
+/// the team; only this route returns it. When GitHub cannot be read, or there is no GitHub
+/// App, `refreshed` is false and the answer is what is recorded.
+#[utoipa::path(
+    post,
+    path = "/api/issues/{id}/pull-requests/refresh",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = PullRequestsNow),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn refresh_issue_pull_requests(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Json<PullRequestsNow>, ApiError> {
+    // The issue is checked before GitHub is read, and the connection is not held meanwhile.
+    recorded(&mut *state.pool.acquire().await?, &actor, &id).await?;
+    let refreshed = match &state.github {
+        Some(github) => refresh_pull_requests(github, &state.pool, actor.workspace_id, &id)
+            .await
+            .inspect_err(|error| tracing::warn!(issue_id = id, "not refreshed: {error}"))
+            .is_ok(),
+        None => false,
+    };
+    let mut conn = state.pool.acquire().await?;
+    let pull_requests = recorded(&mut conn, &actor, &id).await?;
+    // Only an open pull request's threads: those are what `no_open_threads` reads.
+    let threads = sqlx::query!(
+        r#"SELECT t.node_id, p.number, t.path, t.line,
+                  coalesce(t.comments, '[]') AS "comments!",
+                  coalesce(t.comments_total, 0) AS "comments_total!"
+           FROM review_thread t JOIN pull_request p ON p.id = t.pull_request_id
+           WHERE p.issue_id = $1 AND p.state = 'open' AND NOT t.resolved
+           ORDER BY p.number DESC, t.path, t.line, t.node_id"#,
+        id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let review_threads = threads.into_iter().map(|row| {
+        Ok(ReviewThread {
+            id: row.node_id,
+            pull_request: row.number,
+            path: row.path,
+            line: row.line,
+            comments: serde_json::from_value(row.comments)
+                .map_err(|error| sqlx::Error::Decode(error.into()))?,
+            comments_total: row.comments_total,
+        })
+    });
+    Ok(Json(PullRequestsNow {
+        pull_requests,
+        review_threads: review_threads.collect::<sqlx::Result<_>>()?,
+        refreshed,
+    }))
+}
+
+/// The recorded pull requests of an issue of the actor's workspace, newest number first.
+async fn recorded(
+    conn: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+) -> Result<Vec<PullRequest>, ApiError> {
     let exists = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM issue WHERE id = $1 AND workspace_id = $2) AS "exists!""#,
         id,
@@ -90,7 +166,7 @@ async fn issue_pull_requests(
     .fetch_one(&mut *conn)
     .await?;
     if !exists {
-        return Err(ApiError::IssueNotFound(id));
+        return Err(ApiError::IssueNotFound(id.to_string()));
     }
     let rows = sqlx::query_as!(
         PullRequestRow,
@@ -102,11 +178,10 @@ async fn issue_pull_requests(
     )
     .fetch_all(&mut *conn)
     .await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(PullRequest::try_from)
-            .collect::<Result<_, _>>()?,
-    ))
+    Ok(rows
+        .into_iter()
+        .map(PullRequest::try_from)
+        .collect::<Result<_, _>>()?)
 }
 
 /// The workspace repository's pull requests that name no issue, newest number first.

@@ -996,6 +996,71 @@ async fn a_gated_request_reads_a_new_review_thread_from_github(pool: PgPool) {
     );
 }
 
+#[sqlx::test]
+async fn refreshing_an_issues_pull_requests_reads_its_review_threads_from_github(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    let mut said = thread("PRRT_kwDOA1b2c84AbCdE", false);
+    said["path"] = json!("src/lib.rs");
+    said["line"] = json!(41);
+    // GitHub lists null for a comment it cannot show, and for a deleted author.
+    said["comments"] = json!({"totalCount": 12, "nodes": [
+        {"author": {"login": "octocat"}, "body": "Should this return an error?"},
+        null,
+        {"author": null, "body": "x".repeat(2001)},
+    ]});
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![said, thread("PRRT_kwDOA1b2c84ZyXwV", true)];
+    }
+    let recorded = json!([{
+        "id": "PRRT_kwDOA1b2c84AbCdE",
+        "pull_request": 12,
+        "path": "src/lib.rs",
+        "line": 41,
+        "comments": [
+            {"author": "octocat", "body": "Should this return an error?", "cut": false},
+            {"author": "ghost", "body": "x".repeat(2000), "cut": true},
+        ],
+        "comments_total": 12,
+    }]);
+
+    // No event is sent for a new thread, so nothing is recorded until the agent's read asks
+    // GitHub.
+    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
+    let uri = "/api/issues/PL-1/pull-requests/refresh";
+    let (status, now) = call(&s.app, &agent, "POST", uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{now}");
+    assert_eq!(now["pull_requests"][0]["open_threads"], 1);
+    assert_eq!(
+        (&now["review_threads"], &now["refreshed"]),
+        (&recorded, &json!(true))
+    );
+
+    // When GitHub cannot be read, the answer is what is recorded, and says so.
+    s.github.lock().unwrap().down = true;
+    let (status, stale) = call(&s.app, &agent, "POST", uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(
+        (&stale["review_threads"], &stale["refreshed"]),
+        (&recorded, &json!(false))
+    );
+
+    // An issue that does not exist is refused before GitHub is asked.
+    let missing = "/api/issues/PL-9/pull-requests/refresh";
+    let (status, _) = call(&s.app, &s.person.token, "POST", missing, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A closed pull request's threads are no longer the agent's to answer.
+    sqlx::query("UPDATE pull_request SET state = 'closed'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, closed) = call(&s.app, &agent, "POST", uri, None).await;
+    assert_eq!(closed["review_threads"], json!([]));
+}
+
 /// The job of delivery `id`: its state, its attempts and its last error.
 async fn job(pool: &PgPool, id: &str) -> (String, i32, Option<String>) {
     sqlx::query_as("SELECT state, attempts, last_error FROM job WHERE idempotency_key = $1")

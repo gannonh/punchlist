@@ -13,7 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github::{CheckRunData, PullRequestData};
+use crate::github::{Account, CheckRunData, PullRequestData};
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -53,7 +53,7 @@ struct RepositoryInfo {
 /// A review thread on a pull request, as GraphQL's `reviewThreads` reports it now.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReviewThread {
+pub(crate) struct GithubThread {
     /// The thread's node id: `thread.node_id` in a webhook.
     pub id: String,
     pub is_resolved: bool,
@@ -65,12 +65,70 @@ pub(crate) struct ReviewThread {
     /// The line before the file changed under the thread, when `line` is gone.
     #[serde(default)]
     pub original_line: Option<i64>,
+    #[serde(default)]
+    pub comments: ThreadComments,
+}
+
+// ponytail: a thread's last `MAX_COMMENTS` comments are read, each cut to `MAX_BODY_CHARS`
+// characters where it is parsed, and `MAX_THREAD_PAGES` pages of 100 threads, so no pull
+// request can make a read, a row or an agent's context large. Page the comments and store
+// them whole if a reviewer's earlier or longer text matters.
+pub(crate) const MAX_COMMENTS: usize = 10;
+pub(crate) const MAX_BODY_CHARS: usize = 2000;
+const MAX_THREAD_PAGES: usize = 10;
+
+/// A review thread's newest comments, oldest first, and how many it has.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadComments {
+    pub total_count: i32,
+    /// GraphQL lists null for a comment it cannot show.
+    #[serde(deserialize_with = "present")]
+    pub nodes: Vec<ThreadCommentNode>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(nodes: D) -> Result<Vec<ThreadCommentNode>, D::Error> {
+    let nodes = Vec::<Option<ThreadCommentNode>>::deserialize(nodes)?;
+    Ok(nodes.into_iter().flatten().collect())
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadCommentNode {
+    /// `None` when the account was deleted.
+    #[serde(default)]
+    pub author: Option<Account>,
+    pub body: CommentBody,
+}
+
+/// A comment's text, at most `MAX_BODY_CHARS` characters of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommentBody {
+    pub text: String,
+    /// The comment was longer.
+    pub cut: bool,
+}
+
+impl CommentBody {
+    pub(crate) fn cut(body: &str) -> CommentBody {
+        let end = body.char_indices().nth(MAX_BODY_CHARS).map(|(end, _)| end);
+        CommentBody {
+            // Postgres text cannot hold a NUL.
+            text: body[..end.unwrap_or(body.len())].replace('\0', ""),
+            cut: end.is_some(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CommentBody {
+    fn deserialize<D: serde::Deserializer<'de>>(body: D) -> Result<CommentBody, D::Error> {
+        Ok(CommentBody::cut(&String::deserialize(body)?))
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewThreadPage {
-    nodes: Vec<ReviewThread>,
+    nodes: Vec<GithubThread>,
     page_info: PageInfo,
 }
 
@@ -81,15 +139,21 @@ struct PageInfo {
     end_cursor: Option<String>,
 }
 
-const REVIEW_THREADS: &str =
-    "query($owner: String!, $name: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-    reviewThreads(first: 100, after: $after) {
-      nodes { id isResolved path line originalLine }
-      pageInfo { hasNextPage endCursor }
-    }
-  } }
-}";
+fn review_threads_query() -> String {
+    format!(
+        "query($owner: String!, $name: String!, $number: Int!, $after: String) {{
+  repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{
+    reviewThreads(first: 100, after: $after) {{
+      nodes {{
+        id isResolved path line originalLine
+        comments(last: {MAX_COMMENTS}) {{ totalCount nodes {{ author {{ login }} body }} }}
+      }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }} }}
+}}"
+    )
+}
 
 /// A repository's default branch and the commit at its head.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,19 +409,22 @@ impl GithubClient {
 
     /// Every review thread on a pull request, resolved or not. REST has no review threads, so
     /// this is GraphQL, a page of 100 at a time. GraphQL answers 200 with `errors` and no
-    /// data when it refuses, so a missing list is an error.
+    /// data when it refuses, so a missing list is an error. So is a pull request with more
+    /// than `MAX_THREAD_PAGES` pages: a list cut short would forget its other threads, and
+    /// `no_open_threads` would pass over them.
     pub(crate) async fn review_threads(
         &self,
         owner: &str,
         name: &str,
         number: i64,
-    ) -> anyhow::Result<Vec<ReviewThread>> {
+    ) -> anyhow::Result<Vec<GithubThread>> {
         let token = &self.token(owner, name).await?;
         let mut threads = Vec::new();
         let mut after = None;
-        loop {
+        let text = review_threads_query();
+        for _ in 0..MAX_THREAD_PAGES {
             let query = serde_json::json!({
-                "query": REVIEW_THREADS,
+                "query": text,
                 "variables": {"owner": owner, "name": name, "number": number, "after": after},
             });
             let mut answer: serde_json::Value = self
@@ -389,6 +456,10 @@ impl GithubClient {
             );
             after = Some(cursor);
         }
+        anyhow::bail!(
+            "{owner}/{name}#{number} has more than {} review threads, which is more than is read",
+            MAX_THREAD_PAGES * 100
+        )
     }
 }
 

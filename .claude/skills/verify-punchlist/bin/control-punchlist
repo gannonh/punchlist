@@ -4,6 +4,7 @@
 #   control-punchlist up [RUN_ID]         start Postgres, a fresh database and the server; bootstrap a person
 #   control-punchlist doctor RUN_ID       read-only health check
 #   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
+#   control-punchlist get-issue RUN_ID ISSUE  call the MCP tool `get_issue` through `pl mcp`, with no model; record it
 #   control-punchlist sql RUN_ID QUERY    run a query on the run's database; record it
 #   control-punchlist curl RUN_ID ARGS... curl with the run's token (e.g. "$SERVER_URL/api/issues")
 #   control-punchlist webhook RUN_ID EVENT PAYLOAD_FILE [DELIVERY_ID]  post a signed GitHub webhook delivery
@@ -138,6 +139,31 @@ cmd_pl() {
     env PUNCHLIST_CONFIG="$CONFIG" "$REPO/target/debug/pl" "$@"
 }
 
+# What an agent's `get_issue` prints, without an agent: `pl mcp` on stdio with the run's person
+# token, which goes in the environment so it stays out of process listings.
+cmd_get_issue() {
+  load "${1:-}"; local issue="${2:-}"
+  [ -n "$issue" ] || die "usage: get-issue RUN_ID ISSUE"
+  PUNCHLIST_TOKEN="$(token)" PUNCHLIST_SERVER_URL="$SERVER_URL" PUNCHLIST_ISSUE="$issue" \
+    record "$EVIDENCE/transcript.txt" "get_issue $issue (pl mcp)" python3 -c '
+import json, subprocess, sys
+mcp = subprocess.Popen([sys.argv[1], "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL, text=True)
+def send(message):
+    mcp.stdin.write(json.dumps({"jsonrpc": "2.0", **message}) + "\n"); mcp.stdin.flush()
+send({"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+      "clientInfo": {"name": "control-punchlist", "version": "0"}}})
+for line in mcp.stdout:
+    answer = json.loads(line)
+    if answer.get("id") == 1:
+        send({"method": "notifications/initialized"})
+        send({"id": 2, "method": "tools/call", "params": {"name": "get_issue", "arguments": {}}})
+    elif answer.get("id") == 2:
+        print(answer["result"]["content"][0]["text"], end="")
+        sys.exit(1 if answer["result"].get("isError") else 0)
+sys.exit("pl mcp ended without answering")' "$REPO/target/debug/pl"
+}
+
 cmd_sql() {
   load "${1:-}"; shift
   record "$EVIDENCE/transcript.txt" "psql: $*" psql "$DATABASE_URL" -X -P pager=off -c "$*"
@@ -242,10 +268,11 @@ case "${1:-}" in
   doctor) shift; cmd_doctor "$@" ;;
   pl) shift; cmd_pl "$@" ;;
   curl) shift; cmd_curl "$@" ;;
+  get-issue) shift; cmd_get_issue "$@" ;;
   sql) shift; cmd_sql "$@" ;;
   webhook) shift; cmd_webhook "$@" ;;
   runner) shift; cmd_runner "$@" ;;
   runner-stop) shift; cmd_runner_stop "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

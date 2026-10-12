@@ -4,7 +4,7 @@
 use punchlist_api::{
     AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
     GateChecklist, Heartbeat, HeartbeatReply, Issue, IssueList, MoveIssue, Moved, PullRequest,
-    RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
+    PullRequestsNow, RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -106,6 +106,16 @@ impl Client {
     pub async fn issue_pull_requests(&self, id: &str) -> Result<Vec<PullRequest>, ClientError> {
         self.send::<(), _>(Method::GET, &["issues", id, "pull-requests"], None)
             .await
+    }
+
+    /// An issue's pull requests and their unresolved review threads, after the server has
+    /// read both from GitHub.
+    pub async fn refresh_issue_pull_requests(
+        &self,
+        id: &str,
+    ) -> Result<PullRequestsNow, ClientError> {
+        let path = ["issues", id, "pull-requests", "refresh"];
+        self.send::<(), _>(Method::POST, &path, None).await
     }
 
     /// The pull requests that name no issue, newest number first.

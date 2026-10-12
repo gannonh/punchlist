@@ -87,6 +87,8 @@ The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its clone
 
 A GitHub delivery, signed with the run's webhook secret: `$C webhook "$RUN" pull_request payload.json [DELIVERY_ID]` prints the HTTP status and records it in the transcript. Recipes are in [features/github.md](features/github.md).
 
+What an agent's `get_issue` prints, without a model: `$C get-issue "$RUN" PL-1` calls the MCP tool through `pl mcp` with the run's person token and records the text ([features/workflow-and-gates.md](features/workflow-and-gates.md)).
+
 Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
 The feature map in `features/` has a recipe per feature. Read `features/README.md` first.

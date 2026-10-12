@@ -415,6 +415,45 @@ pub struct PullRequest {
     pub updated_at: DateTime<Utc>,
 }
 
+/// `POST /api/issues/{id}/pull-requests/refresh`: the issue's pull requests and what their
+/// reviewers wrote, after reading both from GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PullRequestsNow {
+    /// Newest number first.
+    pub pull_requests: Vec<PullRequest>,
+    /// The unresolved review threads of the open ones.
+    pub review_threads: Vec<ReviewThread>,
+    /// False when GitHub could not be read, or the server has no GitHub App: the rest is
+    /// then what was last recorded.
+    pub refreshed: bool,
+}
+
+/// An unresolved review thread. Its path, authors and bodies are text from outside the team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReviewThread {
+    /// GitHub's node id for the thread, which its reply and resolve mutations take.
+    pub id: String,
+    /// The number of the pull request it is on.
+    pub pull_request: i64,
+    pub path: Option<String>,
+    /// The line the thread is on, or was on before the file changed under it.
+    pub line: Option<i64>,
+    /// The thread's newest comments, oldest first.
+    pub comments: Vec<ReviewComment>,
+    /// How many comments the thread has, which can be more than `comments`.
+    pub comments_total: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReviewComment {
+    /// The author's GitHub login.
+    pub author: String,
+    pub body: String,
+    /// The comment is longer than `body`.
+    #[serde(default)]
+    pub cut: bool,
+}
+
 impl PullRequest {
     /// The word people read for the state: `draft` for an open draft, otherwise the state.
     pub fn state_word(&self) -> &'static str {

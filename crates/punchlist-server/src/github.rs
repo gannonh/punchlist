@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use punchlist_api::ErrorBody;
+use punchlist_api::{ErrorBody, ReviewComment};
 use punchlist_core::{CheckRunEvidence, Refusal, Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::github_api::{ReviewThread, unless_gone};
+use crate::github_api::{
+    CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
+};
 use crate::issues::{check_gates, record_comment, record_refusal, write_transition};
 use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
@@ -143,6 +145,10 @@ pub(crate) struct ThreadComment {
     pub line: Option<i64>,
     #[serde(default)]
     pub original_line: Option<i64>,
+    #[serde(default)]
+    pub user: Option<Account>,
+    #[serde(default)]
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -372,7 +378,7 @@ pub(crate) struct Current {
     /// For a payload that would close the pull request: `updated_at` is in whole seconds.
     pull_request: Option<PullRequestData>,
     /// For a review thread event: it carries no time, and none is sent for a new thread.
-    threads: Option<Vec<ReviewThread>>,
+    threads: Option<Vec<GithubThread>>,
     /// The pull request row's version before either read, for `claim_read`: 0 with no row.
     /// `None` when GitHub gave no answer, so the payload is recorded as one without a read.
     version: Option<i64>,
@@ -514,12 +520,22 @@ pub(crate) async fn process(
                 // event left it, in the order it arrived.
                 None => {
                     let place = event.thread.comments.first();
-                    let thread = ReviewThread {
+                    let all = &event.thread.comments;
+                    let newest = &all[all.len().saturating_sub(MAX_COMMENTS)..];
+                    let comments = newest.iter().map(|comment| ThreadCommentNode {
+                        author: comment.user.clone(),
+                        body: CommentBody::cut(&comment.body),
+                    });
+                    let thread = GithubThread {
                         id: event.thread.node_id.clone(),
                         is_resolved: event.action == "resolved",
                         path: place.map(|comment| comment.path.clone()),
                         line: place.and_then(|comment| comment.line),
                         original_line: place.and_then(|comment| comment.original_line),
+                        comments: ThreadComments {
+                            total_count: all.len() as i32,
+                            nodes: comments.collect(),
+                        },
                     };
                     record_review_threads(tx, pull_request_id, &[thread]).await?;
                 }
@@ -674,7 +690,7 @@ async fn record_read(tx: &mut sqlx::PgConnection, pull_request_id: Uuid) -> sqlx
 async fn forget_other_review_threads(
     tx: &mut sqlx::PgConnection,
     pull_request_id: Uuid,
-    threads: &[ReviewThread],
+    threads: &[GithubThread],
 ) -> sqlx::Result<()> {
     let ids: Vec<String> = threads.iter().map(|thread| thread.id.clone()).collect();
     sqlx::query!(
@@ -687,12 +703,27 @@ async fn forget_other_review_threads(
     Ok(())
 }
 
+/// A thread's comments as `review_thread.comments` holds them. The text is from outside the
+/// team: `get_issue` shows it to an agent, inside its fence.
+fn recorded_comments(comments: &ThreadComments) -> Vec<ReviewComment> {
+    let recorded = comments.nodes.iter().map(|comment| ReviewComment {
+        author: comment
+            .author
+            .as_ref()
+            .map_or("ghost", |author| author.login.as_str())
+            .to_string(),
+        body: comment.body.text.clone(),
+        cut: comment.body.cut,
+    });
+    recorded.collect()
+}
+
 /// Records review threads on a pull request and recounts its open ones. The caller holds the
 /// pull request's row lock: the lock order is workspace, pull request, issue, then threads.
 async fn record_review_threads(
     tx: &mut sqlx::PgConnection,
     pull_request_id: Uuid,
-    threads: &[ReviewThread],
+    threads: &[GithubThread],
 ) -> sqlx::Result<()> {
     let (ids, resolved): (Vec<String>, Vec<bool>) = threads
         .iter()
@@ -700,21 +731,39 @@ async fn record_review_threads(
         .unzip();
     let paths: Vec<Option<String>> = threads.iter().map(|t| t.path.clone()).collect();
     let lines: Vec<Option<i64>> = threads.iter().map(|t| t.line.or(t.original_line)).collect();
+    // An event can come without its comments: NULL then, which keeps what is recorded.
+    let (comments, totals): (Vec<Option<serde_json::Value>>, Vec<Option<i32>>) = threads
+        .iter()
+        .map(|t| &t.comments)
+        .map(|c| match c.nodes.is_empty() {
+            true => (None, None),
+            false => (
+                Some(serde_json::json!(recorded_comments(c))),
+                Some(c.total_count),
+            ),
+        })
+        .unzip();
     sqlx::query!(
-        "INSERT INTO review_thread (node_id, pull_request_id, resolved, path, line)
-         SELECT node_id, $1, resolved, path, line
-         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[])
-             AS t (node_id, resolved, path, line)
+        "INSERT INTO review_thread
+             (node_id, pull_request_id, resolved, path, line, comments, comments_total)
+         SELECT node_id, $1, resolved, path, line, comments, comments_total
+         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[], $6::jsonb[], $7::int[])
+             AS t (node_id, resolved, path, line, comments, comments_total)
          ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
              resolved = EXCLUDED.resolved, updated_at = now(),
-             -- An event without its comments does not forget where the thread is.
+             -- An event without its comments does not forget where the thread is, or what
+             -- it says. One with them replaces what was recorded.
              path = coalesce(EXCLUDED.path, review_thread.path),
-             line = coalesce(EXCLUDED.line, review_thread.line)",
+             line = coalesce(EXCLUDED.line, review_thread.line),
+             comments = coalesce(EXCLUDED.comments, review_thread.comments),
+             comments_total = coalesce(EXCLUDED.comments_total, review_thread.comments_total)",
         pull_request_id,
         &ids,
         &resolved,
         &paths as &[Option<String>],
         &lines as &[Option<i64>],
+        &comments as &[Option<serde_json::Value>],
+        &totals as &[Option<i32>],
     )
     .execute(&mut *tx)
     .await?;

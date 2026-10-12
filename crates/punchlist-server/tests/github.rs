@@ -530,6 +530,88 @@ async fn review_threads_count_toward_open_threads(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_thread_event_records_the_comment_author_and_body(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    let comments = || async {
+        sqlx::query_as::<_, (Option<Value>, Option<i32>)>(
+            "SELECT comments, comments_total FROM review_thread",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let said = json!([
+        {"author": "octocat", "body": "Should this return an error?", "cut": false}
+    ]);
+
+    let unresolved = edited(THREAD, |v| v["action"] = json!("unresolved"));
+    deliver(&s, "pull_request_review_thread", "d1", &unresolved).await;
+    assert_eq!(comments().await, (Some(said.clone()), Some(1)));
+
+    // An event without its comments keeps them.
+    let bare = edited(THREAD, |v| v["thread"]["comments"] = json!([]));
+    deliver(&s, "pull_request_review_thread", "d2", &bare).await;
+    assert_eq!(comments().await, (Some(said.clone()), Some(1)));
+
+    // One with them replaces them: the last 10 are kept, and a body over 2000 characters is
+    // cut there and marked.
+    let long = edited(THREAD, |v| {
+        let first = v["thread"]["comments"][0].clone();
+        let mut later = first.clone();
+        later["body"] = json!("é".repeat(2001));
+        let mut all = vec![later; 11];
+        all[0] = first;
+        v["thread"]["comments"] = json!(all);
+    });
+    deliver(&s, "pull_request_review_thread", "d3", &long).await;
+    let (recorded, total) = comments().await;
+    let cut = json!({"author": "octocat", "body": "é".repeat(2000), "cut": true});
+    assert_eq!((recorded, total), (Some(json!(vec![cut; 10])), Some(11)));
+
+    // The unresolved thread is read with the issue's pull requests, by the refresh route
+    // only, and a resolved one is not. Without a GitHub App nothing is refreshed.
+    deliver(&s, "pull_request_review_thread", "d4", &unresolved).await;
+    let read = |method: &'static str, uri: &'static str| {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", s.person.token))
+            .body(Body::empty())
+            .unwrap();
+        async {
+            let response = s.app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        }
+    };
+    let (_, listed) = read("GET", "/api/issues/PL-1/pull-requests").await;
+    assert_eq!(listed[0]["number"], 12);
+    assert_eq!(listed[0].get("review_threads"), None);
+    let (_, now) = read("POST", "/api/issues/PL-1/pull-requests/refresh").await;
+    assert_eq!(now["pull_requests"], listed);
+    assert_eq!(now["refreshed"], false);
+    assert_eq!(
+        now["review_threads"],
+        json!([{
+            "id": "PRRT_kwDOA1b2c84AbCdE",
+            "pull_request": 12,
+            "path": "src/lib.rs",
+            "line": null,
+            "comments": said,
+            "comments_total": 1,
+        }])
+    );
+    deliver(&s, "pull_request_review_thread", "d5", THREAD).await;
+    let (_, now) = read("POST", "/api/issues/PL-1/pull-requests/refresh").await;
+    assert_eq!(now["review_threads"], json!([]));
+
+    let (status, _) = read("POST", "/api/issues/PL-9/pull-requests/refresh").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
 async fn a_failing_job_is_retried_with_backoff_then_marked_failed(pool: PgPool) {
     let s = setup(&pool).await;
     sqlx::query(
