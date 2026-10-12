@@ -224,6 +224,10 @@ pub enum Problem {
     UnknownGate(String),
     #[error("unknown requirement `{0}`; requirements are {requirements}", requirements = REQUIREMENTS.join(", "))]
     UnknownRequirement(String),
+    #[error(
+        "`require` only applies to a transition with `on`; the server reads it when an event closes a pull request"
+    )]
+    RequireWithoutEvent,
     #[error("transition {from} → {to} is listed twice")]
     DuplicateTransition { from: String, to: String },
     #[error("the dispatch rule names no agent")]
@@ -340,7 +344,7 @@ impl Workflow {
     pub fn from_toml(text: &str) -> Result<Workflow, LoadError> {
         Workflow::from_files(text, BTreeMap::new()).or_else(|error| match error.problem {
             // A prompt is checked once the files are read.
-            Problem::MissingPrompt(_) => Workflow::parse(text).and_then(valid),
+            Problem::MissingPrompt(_) => Workflow::parse(text, true).and_then(valid),
             _ => Err(error),
         })
     }
@@ -355,7 +359,8 @@ impl Workflow {
 
     /// Reads a version the server stored. A version stored before the rule that a runner can
     /// claim from it stays readable: it comes back with the error a load of the same file is
-    /// refused with. Text that is not a workflow at all is still an error.
+    /// refused with. A `require` on a transition without `on` is kept; no event reads it.
+    /// Text that is not a workflow at all is still an error.
     pub fn from_stored(
         text: &str,
         files: BTreeMap<String, String>,
@@ -370,7 +375,7 @@ impl Workflow {
         mut files: BTreeMap<String, String>,
         loading: bool,
     ) -> Result<(Workflow, Option<LoadError>), LoadError> {
-        let (mut workflow, unclaimable) = Workflow::parse(text)?;
+        let (mut workflow, unclaimable) = Workflow::parse(text, loading)?;
         if loading && let Some(error) = &unclaimable {
             return Err(error.clone());
         }
@@ -399,8 +404,9 @@ impl Workflow {
         Ok((workflow, unclaimable))
     }
 
-    /// The workflow, and why no runner can claim from it if none can.
-    fn parse(text: &str) -> Result<(Workflow, Option<LoadError>), LoadError> {
+    /// The workflow, and why no runner can claim from it if none can. A `require` on a
+    /// transition without `on` is an error only when `loading`.
+    fn parse(text: &str, loading: bool) -> Result<(Workflow, Option<LoadError>), LoadError> {
         let errors = Errors { text };
         let raw: RawWorkflow = toml::from_str(text).map_err(|e| LoadError {
             line: e.span().map(|span| errors.line(span.start)),
@@ -497,6 +503,13 @@ impl Workflow {
                     let problem = Problem::UnknownRequirement(name.get_ref().clone());
                     return Err(errors.at(name.span(), key(&format!("require[{j}]")), problem));
                 }
+            }
+            if loading
+                && t.on.is_none()
+                && let Some(name) = t.require.first()
+            {
+                let problem = Problem::RequireWithoutEvent;
+                return Err(errors.at(name.span(), key("require[0]"), problem));
             }
             for f in &from {
                 if transitions.iter().any(|o| o.to == to && o.from.contains(f)) {
@@ -1262,6 +1275,14 @@ mod tests {
             transition("by = [\"github\"]").2,
             Problem::UnknownRole("github".into())
         );
+        assert_eq!(
+            Workflow::from_toml(&runnable(
+                "[[transition]]\nfrom = \"a\"\nto = \"b\"\nby = [\"person\"]\nrequire = [\"comment\"]"
+            ))
+            .unwrap_err()
+            .to_string(),
+            "line 6, `transition[0].require[0]`: `require` only applies to a transition with `on`; the server reads it when an event closes a pull request"
+        );
         assert!(Workflow::from_toml(&runnable("[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"pr_merged\"\nrequire = [\"comment\"]"))
         .is_ok());
         assert_eq!(
@@ -1361,6 +1382,15 @@ mod tests {
             "line 4, `statuses`: the runtime needs a dispatch rule for `in_progress`"
         );
         let (_, problem) = Workflow::from_stored(PRD_TEMPLATE, prompts()).unwrap();
+        assert_eq!(problem, None);
+        let (_, problem) = Workflow::from_stored(
+            &edited(
+                "by = [\"person\"]\n",
+                "by = [\"person\"]\nrequire = [\"comment\"]\n",
+            ),
+            prompts(),
+        )
+        .unwrap();
         assert_eq!(problem, None);
         // Nothing to keep in force.
         assert!(Workflow::from_stored("statuses = [", prompts()).is_err());
