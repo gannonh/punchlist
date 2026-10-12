@@ -532,16 +532,18 @@ pub(crate) async fn process(
 /// Records one check run. A delivery only moves a run forward (queued, in_progress,
 /// completed), so one arriving late does not undo a newer one. A read is GitHub's list as of
 /// `read_started`, the database's clock before GitHub was asked: it overwrites the status and
-/// conclusion of any row last written at or before then (so a recorded `completed` can give
-/// way to GitHub's `in_progress` for a restarted run), and leaves a row a delivery wrote since,
-/// which is newer than the list. `updated_at` is when the row's content was current: a
-/// delivery stamps the write clock (`clock_timestamp()`, not its transaction's start), a read
-/// stamps its `read_started`, the time of its snapshot, whenever it writes. Nothing else reads
-/// the column. So of two overlapping reads (snapshots t1 < t2): the older writes first, stamp
-/// t1, and the newer sees t1 <= t2 and overwrites; the newer writes first, stamp t2, and the
-/// older sees t2 <= t1 false and is dropped. A delivery written during a read has a stamp after
-/// the read's snapshot, so it stands; a read begun after it overwrites. A rerun gets a new id,
-/// in the same suite. A suite once known is kept.
+/// conclusion of a row last stamped at or before then (so a recorded `completed` can give way
+/// to GitHub's `in_progress` for a restarted run). A row stamped after it, by a delivery or by
+/// a newer read, is not overwritten, and if its state differs from what the read saw the read
+/// does not guess which is current: this returns true, the pull request is read again, and a
+/// second conflict refuses the request. A delivery carries no order from its source, so its
+/// stamp cannot say that. `updated_at` is when the row's content was current: a delivery
+/// stamps the write clock (`clock_timestamp()`, not its transaction's start), a read its
+/// `read_started`, the time of its snapshot. Nothing else reads the column. Of two overlapping
+/// reads (snapshots t1 < t2): the older writes first, stamp t1, and the newer sees t1 <= t2
+/// and overwrites; the newer writes first, stamp t2, and the older sees t2 <= t1 false and is
+/// skipped (a conflict, unless it saw the same). A rerun gets a new id, in the same suite. A
+/// suite once known is kept.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -549,8 +551,8 @@ async fn record_check_run(
     repository_id: Uuid,
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
-) -> sqlx::Result<()> {
-    sqlx::query!(
+) -> sqlx::Result<bool> {
+    let written = sqlx::query_scalar!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
                                 check_suite_id, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()))
@@ -563,7 +565,8 @@ async fn record_check_run(
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
                       ELSE 0 END)
                   <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
-                      ELSE 0 END) END",
+                      ELSE 0 END) END
+         RETURNING id",
         run.id,
         repository_id,
         run.head_sha,
@@ -573,9 +576,19 @@ async fn record_check_run(
         run.check_suite.as_ref().map(|suite| suite.id),
         read_started,
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(())
+    if written.is_some() || read_started.is_none() {
+        return Ok(false);
+    }
+    // Skipped for a read: a conflict only if the recorded state is not what the read saw.
+    let recorded = sqlx::query!(
+        "SELECT status, conclusion FROM check_run WHERE id = $1",
+        run.id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(recorded.status != run.status || recorded.conclusion != run.conclusion)
 }
 
 /// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before
@@ -588,16 +601,18 @@ async fn record_read_check_runs(
     head_sha: &str,
     mut runs: Vec<CheckRunData>,
     read_started: DateTime<Utc>,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
     // The head asked for is the head judged: a run listed for another is not this commit's.
     runs.retain(|run| run.head_sha == head_sha);
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
+    let mut conflict = false;
     for run in &runs {
-        record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
+        conflict |= record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
     }
     recompute_checks(&mut tx, repository_id, head_sha).await?;
-    tx.commit().await
+    tx.commit().await?;
+    Ok(conflict)
 }
 
 /// Locks a pull request's row for a write of what GitHub answered a reader that noted the
@@ -848,8 +863,11 @@ async fn record_pull_request(
 /// request known to be merged or closed. The requester asks again; the pull requests already
 /// recorded stay recorded.
 ///
-/// A pull request whose write is dropped (`claim_read`) is read once more, alone. If that
-/// write is dropped too the request goes on, and the gates read what is recorded.
+/// A pull request whose write is dropped (`claim_read`), whose head moved, or whose check
+/// runs conflict with a row written since the read began (`record_check_run`) is read once
+/// more, alone; a conflict on that read refuses the request.
+/// If a dropped write is dropped again the request goes on, and the gates read what is
+/// recorded.
 // ponytail: the read recorded then began after this request did, but it may be half of one: a
 // thread event's job reads only the threads and a close's only the pull request, and both
 // raise the one version. So `draft` or `head_sha`, or the threads, can be from before the
@@ -964,7 +982,21 @@ async fn refresh_once(
                 .await?;
             let runs = (github.check_runs(owner, name, &pr.head.sha).await)
                 .map_err(|error| unreadable("check runs", error))?;
-            record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started).await?;
+            let conflict =
+                record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started)
+                    .await?;
+            if conflict {
+                // A row written since the read began disagrees with it: read again, after it.
+                // The second read conflicting too refuses the request.
+                if only.is_some() {
+                    return Err(unreadable(
+                        "check runs",
+                        anyhow::anyhow!("a delivery changed a check run during both reads"),
+                    ));
+                }
+                dropped.push(pr.number);
+                continue;
+            }
         }
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let version = recorded

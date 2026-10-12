@@ -2536,36 +2536,91 @@ async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(p
     assert_eq!(body["code"], "github_unreadable");
 }
 
-#[sqlx::test]
-async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: PgPool) {
-    let s = setup(&pool).await;
-    let codex = issue_in_agent_review(&s).await;
-    let hold = Arc::new(Barrier::new(2));
+/// A request whose first read of #12's check runs is held with `listed` (run 1 of `check`).
+/// `during_first` runs while it is held; it is let go when that returns. GitHub's list is
+/// `now_listed` for the second read, which is not held unless `second` delivers a run during it.
+async fn request_with_deliveries_during_the_reads(
+    s: &Setup,
+    token: &str,
+    listed: &str,
+    first: &str,
+    now_listed: &str,
+    second: Option<&str>,
+) -> (StatusCode, Value) {
+    let (hold, hold2) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
     {
         let mut repo = s.github.lock().unwrap();
         repo.pulls = vec![ready_with_merge_state("clean")];
-        // GitHub's list still has run 1 as passed when the answer is taken.
-        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.check_runs = vec![listed_run(1, 5, "check", listed)];
         repo.runs_hold = Some(hold.clone());
     }
-    // The request reads the list, which is held; the failure is delivered meanwhile.
-    let (request, ()) = tokio::join!(request_human_review(&s, &codex), async {
+    let (request, ()) = tokio::join!(request_human_review(s, token), async {
+        let conclusion = |c: &str| check_run(1, "completed", Some(c));
         hold.wait().await;
-        deliver(
-            &s,
-            "check_run",
-            "c-failed",
-            &check_run(1, "completed", Some("failure")),
-        )
-        .await;
+        deliver(s, "check_run", "c-first", &conclusion(first)).await;
+        {
+            // GitHub's list now: what the second read sees, held if a delivery is to land.
+            let mut repo = s.github.lock().unwrap();
+            repo.check_runs = vec![listed_run(1, 5, "check", now_listed)];
+            repo.runs_hold = second.map(|_| hold2.clone());
+        }
         hold.wait().await;
+        if let Some(delivered) = second {
+            hold2.wait().await;
+            deliver(s, "check_run", "c-second", &conclusion(delivered)).await;
+            hold2.wait().await;
+        }
     });
-    let (status, body) = request;
+    request
+}
+
+#[sqlx::test]
+async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: PgPool) {
+    // GitHub's list was the stale success when the first read took it; the failure delivered
+    // meanwhile is what GitHub says now, so the second read (after the delivery) lists it.
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) =
+        request_with_deliveries_during_the_reads(&s, &codex, "success", "failure", "failure", None)
+            .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(
         body["reason"],
         "1 of 1 checks failed on 6dcb09b: `check` (failure)"
     );
+}
+
+#[sqlx::test]
+async fn a_stale_pass_delivered_during_a_read_that_saw_a_failure_is_corrected_by_a_second_read(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) =
+        request_with_deliveries_during_the_reads(&s, &codex, "failure", "success", "failure", None)
+            .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+}
+
+#[sqlx::test]
+async fn a_conflicting_delivery_during_both_reads_refuses_the_request(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) = request_with_deliveries_during_the_reads(
+        &s,
+        &codex,
+        "failure",
+        "success",
+        "failure",
+        Some("success"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
 }
 
 #[sqlx::test]
