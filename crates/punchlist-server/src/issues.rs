@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::github::refresh_pull_requests;
-use crate::workflow::{active_workflow, lock_workspace};
+use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -286,9 +286,9 @@ async fn move_issue(
             return Err(ApiError::Unauthorized);
         }
     }
-    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    let (workflow, _, invalid) = stored_workflow(&mut tx, actor.workspace_id).await?;
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
-    let moved = record_transition(
+    let mut moved = record_transition(
         &mut tx,
         &actor,
         &id,
@@ -301,6 +301,7 @@ async fn move_issue(
     .await?;
     tx.commit().await?;
     if request.to == START {
+        moved.warning = invalid;
         // Wake runners that are long-polling for work. No receivers is fine.
         let _ = state.starts.send((actor.workspace_id, id));
     }
@@ -542,6 +543,7 @@ pub(crate) async fn write_transition(
             created_at,
             detail,
         },
+        warning: None,
     };
     Ok((moved, transition_id))
 }
