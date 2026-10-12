@@ -116,6 +116,17 @@ pub(crate) struct CheckRunData {
     /// GitHub's schema allows none, and a job queued by an older binary has none.
     #[serde(default)]
     pub check_suite: Option<CheckSuite>,
+    /// The GitHub App that created the run. GitHub's schema allows none, and a job queued by
+    /// an older binary has none.
+    #[serde(default)]
+    pub app: Option<CheckApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CheckApp {
+    /// Such as `github-actions`.
+    #[serde(default)]
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -559,7 +570,7 @@ pub(crate) async fn process(
 /// reads (snapshots t1 < t2): the older writes first, stamp t1, and the newer sees t1 <= t2
 /// and overwrites; the newer writes first, stamp t2, and the older sees t2 <= t1 false and is
 /// skipped (a conflict, unless it saw the same). A rerun gets a new id, in the same suite. A
-/// suite once known is kept.
+/// suite once known is kept, and so is the app that owns the run.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -568,14 +579,16 @@ async fn record_check_run(
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
 ) -> sqlx::Result<bool> {
+    let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
     let written = sqlx::query_scalar!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
-                                check_suite_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()))
+                                check_suite_id, updated_at, app)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9)
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
+             app = COALESCE(EXCLUDED.app, check_run.app),
              updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
@@ -591,6 +604,7 @@ async fn record_check_run(
         run.conclusion,
         run.check_suite.as_ref().map(|suite| suite.id),
         read_started,
+        app,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -599,15 +613,18 @@ async fn record_check_run(
     }
     // Skipped for a read: a conflict only if the recorded state is not what the read saw.
     let recorded = sqlx::query!(
-        "SELECT name, status, conclusion FROM check_run WHERE id = $1",
+        "SELECT name, status, conclusion, app FROM check_run WHERE id = $1",
         run.id
     )
     .fetch_one(&mut *tx)
     .await?;
-    // Every field the gate reads: the suite is kept once known and the head is filtered.
+    // Every field the gate reads: the suite is kept once known and the head is filtered. An
+    // app the row lacks (a delivery queued by an older binary) is a conflict, so that the
+    // second read records it.
     Ok(recorded.name != run.name
         || recorded.status != run.status
-        || recorded.conclusion != run.conclusion)
+        || recorded.conclusion != run.conclusion
+        || (app.is_some() && recorded.app.as_deref() != app))
 }
 
 /// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before
@@ -1101,7 +1118,7 @@ pub(crate) async fn newest_check_runs(
 ) -> sqlx::Result<Vec<CheckRunEvidence>> {
     sqlx::query_as!(
         CheckRunEvidence,
-        "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion
+        "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion, c.app
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
            AND NOT (c.check_suite_id IS NULL AND EXISTS (
                SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
@@ -1199,7 +1216,16 @@ async fn close_issue_on_pull_request(
         name: name.to_string(),
         role: Role::Github,
     };
-    let gates = match check_gates(tx, transition, name, issue_id, &status, Some(pr.number)).await {
+    let checked = check_gates(
+        tx,
+        &workflow,
+        transition,
+        name,
+        issue_id,
+        &status,
+        Some(pr.number),
+    );
+    let gates = match checked.await {
         Ok(gates) => gates,
         // `check_gates` logged it too. The event is not tried again, so the timeline is
         // where a person learns why the issue did not move.

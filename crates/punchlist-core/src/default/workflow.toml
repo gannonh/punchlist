@@ -60,3 +60,9 @@ prompt = "prompts/in_progress.md"
 [dispatch.status.agent_review]
 agent = "codex"
 prompt = "prompts/agent_review.md"
+
+# `ci_green` passes when every check run on the head commit passed. To also require named
+# checks, so that a branch that deletes its CI workflow does not pass, list them: a name is a
+# check GitHub Actions produces, and a table names another GitHub App by its slug.
+# [gate.ci_green]
+# required = ["test", { name = "deploy", app = "vercel" }]

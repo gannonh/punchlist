@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, status, conclusion FROM check_run WHERE id = $1",
+  "query": "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion, c.app\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id))\n         ORDER BY c.check_suite_id, c.name, c.id DESC",
   "describe": {
     "columns": [
       {
@@ -35,18 +35,31 @@
             "name": "conclusion"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "app",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "app"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "b182c689e0e856df9028b886feed22aedbe2523990f245c86ebd280405c21b94"
+  "hash": "c1647618bcad496af017ce9d7a8ef52fc65e525f1b4228e017b08b9781c318f3"
 }
