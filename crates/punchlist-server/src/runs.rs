@@ -11,7 +11,7 @@ use punchlist_api::{
     AppendLog, Claim, ClaimRequest, ErrorBody, FinishRun, LogLine, Repository, Run, RunLog,
     RunOutcome, RunnerRef,
 };
-use punchlist_core::{IN_PROGRESS, START, Workflow, agent_display_name, branch_name};
+use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
@@ -531,9 +531,11 @@ async fn finish_run(
         _ => None,
     };
     let mut tx = state.pool.begin().await?;
-    // The issue before the attempt, as a claim, a move and a pull request close lock them.
-    // It serializes the end of the run with a move of the issue, so the dispatch queued
-    // below is for the status the issue is in.
+    // The workspace, then the issue, before the attempt, as a claim, a move and a pull
+    // request close lock them. They serialize the end of the run with a workflow load and
+    // with a move of the issue, so the dispatch queued below is for the status the issue is
+    // in, under the workflow that is active.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     sqlx::query!(
         "SELECT FROM issue WHERE id = (SELECT issue_id FROM run WHERE id = $1) FOR UPDATE",
         id,
@@ -567,7 +569,7 @@ async fn finish_run(
     )
     .execute(&mut *tx)
     .await?;
-    queue_redispatch(&mut tx, id).await?;
+    queue_redispatch(&mut tx, actor.workspace_id, id).await?;
     tx.commit().await?;
     let run = load_runs(&state.pool, &actor, None, Some(id))
         .await?
@@ -583,17 +585,30 @@ async fn finish_run(
 }
 
 /// Dispatch again. The caller has just ended the run in this transaction, whatever the
-/// outcome, and holds its issue's lock. When the issue is still where the run's dispatch put
-/// it (that dispatch's transition is the issue's latest), queues the next dispatch of that
-/// transition, for the same agent; `dispatch_workflow` gives its run the prompt of the
-/// transition's workflow version. That version had the status unlocked and gave it the
-/// rule, or the first dispatch would not exist. Nothing is queued for a run without a
-/// dispatch, an issue that moved, or run `RUNS_PER_ENTRY` of the entry: that issue waits on
-/// a person, and `get_issue` says so.
+/// outcome, and holds the workspace's lock and then its issue's. When the issue is still
+/// where the run's dispatch put it (that dispatch's transition is the issue's latest),
+/// queues the next dispatch of that transition, for the same agent; `dispatch_workflow`
+/// gives its run the prompt of the transition's workflow version. Nothing is queued for a
+/// run without a dispatch, an issue that moved, a status the active workflow now locks to
+/// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
+/// run `RUNS_PER_ENTRY` of the entry: that issue waits on a person. `get_issue` reads the
+/// same two rules, the latest transition and the limit, to say so; change them together.
 ///
 /// Once per run: an attempt leaves `running` once, under its row lock, so one transaction
 /// gets here; and `dispatch` is unique on the transition and the run number.
-async fn queue_redispatch(tx: &mut sqlx::PgConnection, run_id: Uuid) -> sqlx::Result<()> {
+async fn queue_redispatch(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    run_id: Uuid,
+) -> sqlx::Result<()> {
+    let status = sqlx::query_scalar!("SELECT status FROM run WHERE id = $1", run_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let (active, _) = active_workflow(tx, workspace_id).await?;
+    let unlocked = |role| active.check_unlocked(&status, role).is_ok();
+    if active.dispatch_for(&status).is_none() || !unlocked(Role::Agent) || !unlocked(Role::Runner) {
+        return Ok(());
+    }
     sqlx::query!(
         "INSERT INTO dispatch (issue_id, transition_id, agent, run_number)
          SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1 FROM dispatch d
@@ -610,55 +625,75 @@ async fn queue_redispatch(tx: &mut sqlx::PgConnection, run_id: Uuid) -> sqlx::Re
 }
 
 /// Fails every running attempt whose lease has lapsed, and its run, and dispatches the issue
-/// again if it has not moved (`queue_redispatch`): each run in its own transaction. Returns
-/// how many attempts expired.
+/// again if it has not moved (`queue_redispatch`). Returns how many attempts expired.
 // ponytail: nothing wakes a long-polling runner for the dispatch queued here, so it is
 // claimed at that runner's next poll, at most `MAX_WAIT_SECONDS` later. Upgrade path: give
 // the sweep `AppState::starts`.
 pub async fn expire_leases(pool: &PgPool) -> sqlx::Result<u64> {
     let lapsed = sqlx::query!(
-        "SELECT run_id, issue_id FROM attempt
-         WHERE state = 'running' AND lease_expires_at < now()"
+        "SELECT a.run_id, a.issue_id, r.workspace_id FROM attempt a JOIN run r ON r.id = a.run_id
+         WHERE a.state = 'running' AND a.lease_expires_at < now()"
     )
     .fetch_all(pool)
     .await?;
     let mut expired = 0;
+    // One transaction per attempt: the workspace and issue rows are locked before the
+    // attempt row, as everywhere, which one UPDATE over every lapsed attempt cannot do. One
+    // attempt's error is logged and the sweep goes on to the rest.
     for attempt in lapsed {
-        let mut tx = pool.begin().await?;
-        // The issue before the attempt: see `finish_run`.
-        sqlx::query!(
-            "SELECT FROM issue WHERE id = $1 FOR UPDATE",
-            attempt.issue_id
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        // The attempt may have finished, or a heartbeat renewed it, since it was listed.
-        let failed = sqlx::query!(
-            "UPDATE attempt SET state = 'failed', finished_at = now(),
-                    failure_reason = 'lease expired: runner ' || runner.name
-                                     || ' stopped sending heartbeats'
-             FROM runner
-             WHERE runner.id = attempt.runner_id AND attempt.run_id = $1
-               AND attempt.state = 'running' AND attempt.lease_expires_at < now()",
+        match expire_lease(
+            pool,
+            attempt.workspace_id,
+            &attempt.issue_id,
             attempt.run_id,
         )
-        .execute(&mut *tx)
-        .await?;
-        if failed.rows_affected() == 0 {
-            continue;
+        .await
+        {
+            Ok(true) => expired += 1,
+            Ok(false) => {}
+            Err(error) => tracing::error!(run = %attempt.run_id, %error, "expire lease"),
         }
-        sqlx::query!(
-            "UPDATE run SET outcome = 'failed', finished_at = now()
-             WHERE id = $1 AND outcome = 'running'",
-            attempt.run_id,
-        )
-        .execute(&mut *tx)
-        .await?;
-        queue_redispatch(&mut tx, attempt.run_id).await?;
-        tx.commit().await?;
-        expired += 1;
     }
     Ok(expired)
+}
+
+/// `expire_leases` for one run. False when its attempt finished, or a heartbeat renewed it,
+/// since it was listed.
+async fn expire_lease(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    issue_id: &str,
+    run_id: Uuid,
+) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    lock_workspace(&mut tx, workspace_id).await?;
+    sqlx::query!("SELECT FROM issue WHERE id = $1 FOR UPDATE", issue_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let failed = sqlx::query!(
+        "UPDATE attempt SET state = 'failed', finished_at = now(),
+                failure_reason = 'lease expired: runner ' || runner.name
+                                 || ' stopped sending heartbeats'
+         FROM runner
+         WHERE runner.id = attempt.runner_id AND attempt.run_id = $1
+           AND attempt.state = 'running' AND attempt.lease_expires_at < now()",
+        run_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if failed.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query!(
+        "UPDATE run SET outcome = 'failed', finished_at = now()
+         WHERE id = $1 AND outcome = 'running'",
+        run_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+    queue_redispatch(&mut tx, workspace_id, run_id).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 struct RunRow {

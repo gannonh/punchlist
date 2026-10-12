@@ -2358,10 +2358,22 @@ async fn a_run_that_ends_without_moving_its_issue_is_dispatched_again_up_to_the_
     assert_eq!(workflow_versions(&pool).await, 1);
 
     let runner = register(&s, "r2", &["claude-code", "codex"]).await;
-    for run in 1..=3 {
+    // Each run ends without a request, the second one failed. After the first and the second
+    // exactly one more dispatch waits; after the third, none.
+    let finishes = [
+        json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1}),
+        json!({"attempt": 1, "outcome": "failed", "reason": "gave up", "duration_ms": 1}),
+        json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1}),
+    ];
+    let after: [&[(i32, bool)]; 3] = [
+        &[(1, false), (2, true)],
+        &[(1, false), (2, false), (3, true)],
+        &[(1, false), (2, false), (3, false)],
+    ];
+    for (outcome, after) in finishes.into_iter().zip(after) {
         assert_eq!(waiting_on_person(&s).await, Value::Null);
         let (status, claimed) = claim(&s, &runner).await;
-        assert_eq!(status, StatusCode::OK, "run {run}: {claimed}");
+        assert_eq!(status, StatusCode::OK, "{claimed}");
         assert_eq!(claimed["agent"], "codex");
         assert_eq!(claimed["issue"]["status"], "agent_review");
         assert_eq!(claimed["prompt"], queued_under);
@@ -2369,20 +2381,13 @@ async fn a_run_that_ends_without_moving_its_issue_is_dispatched_again_up_to_the_
         // One run at a time: nothing is claimable while this one runs.
         assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
 
-        // The run ends without a request, failed or not.
         let uri = format!("/api/runs/{}/finish", claimed["run_id"].as_str().unwrap());
-        let outcome = if run == 2 {
-            json!({"attempt": 1, "outcome": "failed", "reason": "gave up", "duration_ms": 1})
-        } else {
-            json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1})
-        };
         let (status, body) = call(&s.app, &runner, "POST", &uri, Some(outcome.clone())).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         // A second finish of the same attempt is refused and queues nothing.
         let (status, body) = call(&s.app, &runner, "POST", &uri, Some(outcome)).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        let expected: Vec<(i32, bool)> = (1..=(run + 1).min(3)).map(|n| (n, n > run)).collect();
-        assert_eq!(dispatches_into(&pool, "agent_review").await, expected);
+        assert_eq!(dispatches_into(&pool, "agent_review").await, after);
     }
 
     // Past the limit nothing is claimable, and the issue says why.
@@ -2402,6 +2407,97 @@ async fn a_run_that_ends_without_moving_its_issue_is_dispatched_again_up_to_the_
         .await
         .unwrap();
     assert_eq!(runs, 3);
+}
+
+/// The PRD's workflow, with Agent Review and In Progress open to a person in both
+/// directions, loaded.
+async fn load_a_workflow_a_person_can_move_through(s: &Setup, pool: &PgPool) {
+    let gated = "to = \"agent_review\"\nby = [\"agent\"]\ngates = [\"pr_open\", \"pr_ready\", \"pr_names_issue\"]";
+    let workflow = PRD_WORKFLOW
+        .replace(gated, "to = \"agent_review\"\nby = [\"agent\", \"person\"]")
+        + "\n[[transition]]\nfrom = \"agent_review\"\nto = \"in_progress\"\nby = [\"person\"]\n";
+    assert!(!workflow.contains(gated));
+    put_workflow(s, "b", workflow);
+    let system = "Call request_transition.\n".to_string();
+    (s.github.lock().unwrap().files).insert("prompts/system.md".into(), system);
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(pool).await, 1);
+}
+
+async fn person_moves(s: &Setup, to: &str) {
+    let uri = "/api/issues/PL-1/transitions";
+    let (status, body) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        uri,
+        Some(json!({"to": to})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_new_transition_into_the_status_starts_the_count_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, claude_runner, first) = claimed_by_runner(&s).await;
+    person_moves(&s, "agent_review").await;
+    finish(&s, &claude_runner, &first).await;
+
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    for _ in 0..3 {
+        let (status, claimed) = claim(&s, &codex_runner).await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        finish(&s, &codex_runner, &claimed).await;
+    }
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "3 runs in Agent Review ended without moving it"
+    );
+
+    // Out and in again: a new entry, with its own three runs.
+    person_moves(&s, "in_progress").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    person_moves(&s, "agent_review").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, false), (3, false), (1, true)]
+    );
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["agent"], "codex");
+    finish(&s, &codex_runner, &claimed).await;
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, false), (3, false), (1, false), (2, true)]
+    );
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+}
+
+#[sqlx::test]
+async fn a_run_that_ends_in_a_status_the_active_workflow_no_longer_dispatches_is_the_last(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    waiting_in_agent_review(&s).await;
+    let runner = register(&s, "r2", &["codex"]).await;
+
+    // Locked to agents and runners by a version loaded while the run works.
+    let (status, locked_run) = claim(&s, &runner).await;
+    assert_eq!(status, StatusCode::OK, "{locked_run}");
+    let locks = "[lock]\n";
+    let locked = PRD_WORKFLOW.replace(locks, "[lock]\nagent_review = [\"agent\", \"runner\"]\n");
+    assert_ne!(locked, PRD_WORKFLOW);
+    put_workflow(&s, "c", locked);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    finish(&s, &runner, &locked_run).await;
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, false)]);
+    assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
 }
 
 #[sqlx::test]
@@ -2438,30 +2534,11 @@ async fn a_run_claimed_from_start_that_ends_without_a_request_is_dispatched_agai
 #[sqlx::test]
 async fn a_run_that_ends_after_its_issue_left_and_came_back_is_not_dispatched_again(pool: PgPool) {
     let s = setup(&pool).await;
-    let gated = "to = \"agent_review\"\nby = [\"agent\"]\ngates = [\"pr_open\", \"pr_ready\", \"pr_names_issue\"]";
-    let workflow = PRD_WORKFLOW
-        .replace(gated, "to = \"agent_review\"\nby = [\"agent\", \"person\"]")
-        + "\n[[transition]]\nfrom = \"agent_review\"\nto = \"in_progress\"\nby = [\"person\"]\n";
-    assert!(!workflow.contains(gated));
-    put_workflow(&s, "b", workflow);
-    let system = "Call request_transition.\n".to_string();
-    (s.github.lock().unwrap().files).insert("prompts/system.md".into(), system);
-    deliver(&s, "push", "push-1", PUSH).await;
-    assert_eq!(workflow_versions(&pool).await, 1);
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
 
     let (_, runner, first) = claimed_by_runner(&s).await;
-    for to in ["agent_review", "in_progress"] {
-        let uri = "/api/issues/PL-1/transitions";
-        let (status, body) = call(
-            &s.app,
-            &s.person.token,
-            "POST",
-            uri,
-            Some(json!({"to": to})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
+    person_moves(&s, "agent_review").await;
+    person_moves(&s, "in_progress").await;
     // In Progress again, by a later transition, whose own dispatch waits behind the run.
     assert_eq!(
         dispatches_into(&pool, "in_progress").await,

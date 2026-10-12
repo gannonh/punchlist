@@ -34,10 +34,9 @@ pub struct AppState {
     pub pool: PgPool,
     /// How long a lease lasts without a heartbeat.
     pub lease: std::time::Duration,
-    /// Sent after an issue becomes claimable (it entered Start or a status with a dispatch
-    /// rule, or a run of it ended, which frees a waiting dispatch or queues the next), to wake
-    /// runners that are
-    /// long-polling.
+    /// Sent after an issue becomes claimable, to wake runners that are long-polling for a
+    /// claim: it entered Start or a status with a dispatch rule, or a run of it ended, which
+    /// frees a dispatch that waited behind the run or queues the next one.
     pub starts: tokio::sync::broadcast::Sender<(uuid::Uuid, String)>,
     /// The secret GitHub signs webhook deliveries with. Without it the webhook route
     /// answers 503.

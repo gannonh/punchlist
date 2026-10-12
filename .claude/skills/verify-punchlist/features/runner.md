@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `register` makes a runner actor (role `runner`) and a `runner` row; `pl runner list` shows it with its last heartbeat.
-- `heartbeat` updates `runner.last_heartbeat` and renews only the leases of the attempts the body lists in `held`; a claim the runner never received expires.
+- `heartbeat` updates `runner.last_heartbeat` and renews only the leases of the attempts the body lists in `held`; a claim the runner never received expires. The answer's `stale` lists the held attempts it did not renew (finished, or failed by `lease-expiry`); the runner stops their agents and its log says `run <id>: lease lost; stopping the agent`.
 - `claim` moves `start → in_progress` as the runner, writes a `run` row and an `attempt` row with `attempt = 1`.
 - `claim-taken` is what a second runner gets when it raced for the same issue: its log says `claim taken: PL-<n> was claimed by runner <name>`, and no second `attempt` row exists.
 - `worktree` is a checkout under the runner's `--worktree-root` on the issue's branch.
@@ -13,7 +13,7 @@
 - `finish` records `succeeded` or `failed`, `duration_ms`, `input_tokens` and `output_tokens`.
 - `lease-expiry` fails an attempt whose runner stopped heartbeating with `lease expired: runner <name> stopped sending heartbeats`.
 - `dispatch-on-entry` writes one `dispatch` row per transition into a status with a dispatch rule (`agent`, and the `transition_id` whose `to_status` it is for); the issue's next transition deletes one still unclaimed, and the claim sets its `run_id`. The claim from Start writes and claims its own row in one transaction.
-- `dispatch-again` queues one more `dispatch` row when a run ends (`finish` with either outcome, or `lease-expiry`) and its issue has made no transition since the one that dispatched the run: same `transition_id` and `agent`, `run_number` one higher, written in the transaction that ends the run. It applies to every dispatch, so to the Claude Code run in In Progress too. A run that moved its issue, or whose issue a person or a GitHub event moved, queues nothing. The limit is 3 runs per transition (`RUNS_PER_ENTRY` in `runs.rs`); a new transition into the status starts at `run_number` 1.
+- `dispatch-again` queues one more `dispatch` row when a run ends (`finish` with either outcome, or `lease-expiry`) and its issue has made no transition since the one that dispatched the run: same `transition_id` and `agent`, `run_number` one higher, written in the transaction that ends the run. It applies to every dispatch, so to the Claude Code run in In Progress too. A run that moved its issue, or whose issue a person or a GitHub event moved, queues nothing. Nor does a run that ends in a status the active workflow now locks to agents or runners, or no longer gives a dispatch rule. The limit is 3 runs per transition (`RUNS_PER_ENTRY` in `runs.rs`); a new transition into the status starts at `run_number` 1.
 - `waiting-on-person`: after the third run of one entry ends with the issue still there, no row is queued, and `pl issue show` prints `waiting on a person: 3 runs in <status name> ended without moving it` on the line under `Status:` (`waiting_on_person` in `GET /api/issues/{id}`; absent otherwise).
 - `codex-run` is the run a runner started with `--agents claude-code,codex` gets for that row: `pl issue show` lists it above the Claude Code run as `Codex  runner <name>`, on the same branch, with token counts from Codex's `thread/tokenUsage/updated`. Its log is the app-server's JSON-RPC messages, without the streaming deltas.
 

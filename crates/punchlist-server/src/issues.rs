@@ -242,7 +242,8 @@ async fn get_issue(
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     // The last run this entry into the status gets has ended, and the issue is still there:
-    // nothing dispatches it again (`queue_redispatch`).
+    // nothing dispatches it again. The same two rules as `queue_redispatch`, the latest
+    // transition and the limit; change them together.
     let ended = sqlx::query_scalar!(
         "SELECT d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
          WHERE d.issue_id = $1 AND d.run_number >= $2 AND r.outcome <> 'running'
