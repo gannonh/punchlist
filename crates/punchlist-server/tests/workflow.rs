@@ -2341,6 +2341,264 @@ async fn a_dispatch_keeps_the_agent_and_prompt_of_the_workflow_it_was_queued_und
     assert!(queued_under.contains("ready for a person to review"));
 }
 
+/// The run number of every dispatch of PL-1 into `status`, in order, and whether it waits.
+async fn dispatches_into(pool: &PgPool, status: &str) -> Vec<(i32, bool)> {
+    sqlx::query_as(
+        "SELECT d.run_number, d.run_id IS NULL
+         FROM dispatch d JOIN transition t ON t.id = d.transition_id
+         WHERE d.issue_id = 'PL-1' AND t.to_status = $1 ORDER BY t.created_at, d.run_number",
+    )
+    .bind(status)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn waiting_on_person(s: &Setup) -> Value {
+    let (status, issue) = call(&s.app, &s.person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::OK, "{issue}");
+    issue["waiting_on_person"].clone()
+}
+
+#[sqlx::test]
+async fn a_run_that_ends_without_moving_its_issue_is_dispatched_again_up_to_the_limit(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    waiting_in_agent_review(&s).await;
+    // The Claude Code run moved its issue before it ended: nothing waits for In Progress.
+    let codex = ("agent_review".to_string(), "codex".to_string(), true);
+    assert_eq!(
+        waiting_dispatches(&pool).await,
+        std::slice::from_ref(&codex)
+    );
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, false)]);
+    let queued_under = punchlist_core::default_workflow().prompt_for("agent_review");
+
+    // A version loads that gives Agent Review to Claude Code: the runs of this entry stay
+    // Codex's, with the prompt of the version the issue entered under.
+    put_workflow(
+        &s,
+        "c",
+        PRD_WORKFLOW.replace("agent = \"codex\"", "agent = \"claude-code\""),
+    );
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+
+    let runner = register(&s, "r2", &["claude-code", "codex"]).await;
+    // Each run ends without a request, the second one failed. After the first and the second
+    // exactly one more dispatch waits; after the third, none.
+    let finishes = [
+        json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1}),
+        json!({"attempt": 1, "outcome": "failed", "reason": "gave up", "duration_ms": 1}),
+        json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1}),
+    ];
+    let after: [&[(i32, bool)]; 3] = [
+        &[(1, false), (2, true)],
+        &[(1, false), (2, false), (3, true)],
+        &[(1, false), (2, false), (3, false)],
+    ];
+    for (outcome, after) in finishes.into_iter().zip(after) {
+        assert_eq!(waiting_on_person(&s).await, Value::Null);
+        let (status, claimed) = claim(&s, &runner).await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        assert_eq!(claimed["agent"], "codex");
+        assert_eq!(claimed["issue"]["status"], "agent_review");
+        assert_eq!(claimed["prompt"], queued_under);
+        assert_eq!(waiting_dispatches(&pool).await, []);
+        // One run at a time: nothing is claimable while this one runs.
+        assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+
+        let uri = format!("/api/runs/{}/finish", claimed["run_id"].as_str().unwrap());
+        let (status, body) = call(&s.app, &runner, "POST", &uri, Some(outcome.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // A second finish of the same attempt is refused and queues nothing.
+        let (status, body) = call(&s.app, &runner, "POST", &uri, Some(outcome)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(dispatches_into(&pool, "agent_review").await, after);
+    }
+
+    // Past the limit nothing is claimable, and the issue says why.
+    assert_eq!(waiting_dispatches(&pool).await, []);
+    assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, false), (3, false)]
+    );
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "3 runs in Agent Review ended without moving it"
+    );
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM run WHERE status = 'agent_review'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 3);
+}
+
+/// The PRD's workflow, with Agent Review and In Progress open to a person in both
+/// directions, loaded.
+async fn load_a_workflow_a_person_can_move_through(s: &Setup, pool: &PgPool) {
+    let gated = "to = \"agent_review\"\nby = [\"agent\"]\ngates = [\"pr_open\", \"pr_ready\", \"pr_names_issue\"]";
+    let workflow = PRD_WORKFLOW
+        .replace(gated, "to = \"agent_review\"\nby = [\"agent\", \"person\"]")
+        + "\n[[transition]]\nfrom = \"agent_review\"\nto = \"in_progress\"\nby = [\"person\"]\n";
+    assert!(!workflow.contains(gated));
+    put_workflow(s, "b", workflow);
+    let system = "Call request_transition.\n".to_string();
+    (s.github.lock().unwrap().files).insert("prompts/system.md".into(), system);
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(pool).await, 1);
+}
+
+async fn person_moves(s: &Setup, to: &str) {
+    let uri = "/api/issues/PL-1/transitions";
+    let (status, body) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        uri,
+        Some(json!({"to": to})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_new_transition_into_the_status_starts_the_count_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, claude_runner, first) = claimed_by_runner(&s).await;
+    person_moves(&s, "agent_review").await;
+    finish(&s, &claude_runner, &first).await;
+
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    for _ in 0..3 {
+        let (status, claimed) = claim(&s, &codex_runner).await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        finish(&s, &codex_runner, &claimed).await;
+    }
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "3 runs in Agent Review ended without moving it"
+    );
+
+    // Out and in again: a new entry, with its own three runs.
+    person_moves(&s, "in_progress").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    person_moves(&s, "agent_review").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, false), (3, false), (1, true)]
+    );
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["agent"], "codex");
+    finish(&s, &codex_runner, &claimed).await;
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, false), (3, false), (1, false), (2, true)]
+    );
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+}
+
+#[sqlx::test]
+async fn a_run_that_ends_in_a_status_the_active_workflow_no_longer_dispatches_is_the_last(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    waiting_in_agent_review(&s).await;
+    let runner = register(&s, "r2", &["codex"]).await;
+
+    // Locked to agents and runners by a version loaded while the run works.
+    let (status, locked_run) = claim(&s, &runner).await;
+    assert_eq!(status, StatusCode::OK, "{locked_run}");
+    let locks = "[lock]\n";
+    let locked = PRD_WORKFLOW.replace(locks, "[lock]\nagent_review = [\"agent\", \"runner\"]\n");
+    assert_ne!(locked, PRD_WORKFLOW);
+    put_workflow(&s, "c", locked);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    finish(&s, &runner, &locked_run).await;
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, false)]);
+    assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+}
+
+#[sqlx::test]
+async fn a_run_ends_when_the_active_workflow_cannot_be_read(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, runner, first) = claimed_by_runner(&s).await;
+    sqlx::query("UPDATE workflow_version SET workflow_toml = 'not a workflow ['")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    finish(&s, &runner, &first).await;
+    let outcome: String = sqlx::query_scalar("SELECT outcome FROM run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "succeeded");
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, false)]);
+}
+
+#[sqlx::test]
+async fn a_run_claimed_from_start_that_ends_without_a_request_is_dispatched_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    let (_, runner, first) = claimed_by_runner(&s).await;
+    // The claim from Start made one run, on the dispatch its own transition queued.
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, false)]);
+    finish(&s, &runner, &first).await;
+    assert_eq!(
+        waiting_dispatches(&pool).await,
+        [("in_progress".to_string(), "claude-code".to_string(), true)]
+    );
+
+    let (status, second) = claim(&s, &runner).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_ne!(second["run_id"], first["run_id"]);
+    assert_eq!(second["agent"], "claude-code");
+    assert_eq!(second["issue"]["status"], "in_progress");
+    assert_eq!(second["branch"], first["branch"]);
+    assert_eq!(second["prompt"], first["prompt"]);
+    assert_eq!(
+        dispatches_into(&pool, "in_progress").await,
+        [(1, false), (2, false)]
+    );
+    // The second claim made no transition.
+    let moves: i64 = sqlx::query_scalar("SELECT count(*) FROM transition WHERE issue_id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moves, 3, "todo, start, in_progress");
+}
+
+#[sqlx::test]
+async fn a_run_that_ends_after_its_issue_left_and_came_back_is_not_dispatched_again(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+
+    let (_, runner, first) = claimed_by_runner(&s).await;
+    person_moves(&s, "agent_review").await;
+    person_moves(&s, "in_progress").await;
+    // In Progress again, by a later transition, whose own dispatch waits behind the run.
+    assert_eq!(
+        dispatches_into(&pool, "in_progress").await,
+        [(1, false), (1, true)]
+    );
+    finish(&s, &runner, &first).await;
+    assert_eq!(
+        dispatches_into(&pool, "in_progress").await,
+        [(1, false), (1, true)]
+    );
+    assert_eq!(dispatches_into(&pool, "agent_review").await, []);
+}
+
 #[sqlx::test]
 async fn a_waiting_dispatch_on_an_older_issue_is_claimed_before_a_started_one(pool: PgPool) {
     let s = setup(&pool).await;

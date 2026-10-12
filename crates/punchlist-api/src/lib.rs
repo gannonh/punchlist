@@ -36,6 +36,11 @@ pub struct Issue {
     pub status_name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Why the issue waits on a person, when it does: every run this entry into its status
+    /// gets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;
+    /// every other response that carries an issue leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on_person: Option<String>,
 }
 
 /// `GET /api/issues`.
@@ -236,6 +241,18 @@ pub struct Heartbeat {
     /// running attempt of this runner expires and the sweep fails it.
     #[serde(default)]
     pub held: Vec<HeldAttempt>,
+}
+
+/// The response to `POST /api/runners/{id}/heartbeat`: the runner, and what it must stop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HeartbeatReply {
+    #[serde(flatten)]
+    pub runner: Runner,
+    /// The attempts in `held` that are not this runner's running attempts any more: finished,
+    /// or failed when the lease lapsed. The issue may already have another run, so the runner
+    /// stops their agents.
+    #[serde(default)]
+    pub stale: Vec<HeldAttempt>,
 }
 
 /// `POST /api/runs/{id}/log`.

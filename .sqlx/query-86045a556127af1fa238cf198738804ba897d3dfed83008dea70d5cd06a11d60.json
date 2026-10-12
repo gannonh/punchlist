@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attempt SET state = 'failed', finished_at = now(),\n                failure_reason = 'lease expired: runner ' || runner.name\n                                 || ' stopped sending heartbeats'\n         FROM runner\n         WHERE runner.id = attempt.runner_id AND attempt.run_id = $1\n           AND attempt.state = 'running' AND attempt.lease_expires_at < now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "86045a556127af1fa238cf198738804ba897d3dfed83008dea70d5cd06a11d60"
+}
