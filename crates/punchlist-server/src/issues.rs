@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
-use crate::github::{newest_check_runs, refresh_pull_requests};
+use crate::github::{
+    PullRequestRead, lock_pull_requests, newest_check_runs, refresh_pull_requests, written_since,
+};
 use crate::runs::RUNS_PER_ENTRY;
 use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
@@ -286,9 +288,12 @@ async fn move_issue(
     Path(id): Path<String>,
     Json(request): Json<MoveIssue>,
 ) -> Result<Json<Moved>, ApiError> {
-    refresh_evidence(&state, &actor, &id, &request.to).await?;
+    let read = refresh_evidence(&state, &actor, &id, &request.to).await?;
     let mut tx = state.pool.begin().await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
+    if let Some(read) = &read {
+        lock_pull_requests(&mut tx, &id, read).await?;
+    }
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
@@ -313,7 +318,23 @@ async fn move_issue(
         }
     }
     let (workflow, _, invalid) = stored_workflow(&mut tx, actor.workspace_id).await?;
-    let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
+    let checked = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await;
+    // The gates judged the rows as they are now. If one was written since this request read
+    // GitHub, that is not what it read: nothing is decided, pass or fail, and it asks again.
+    let judged = match &checked {
+        Ok(gates) => !gates.is_empty(),
+        Err(error) => matches!(error, ApiError::GateFailed(_)),
+    };
+    if let (true, Some(read)) = (judged, &read)
+        && written_since(&mut tx, &id, read).await?
+    {
+        tracing::info!(
+            issue = id,
+            "evidence was written after it was read from GitHub"
+        );
+        return Err(ApiError::GithubUnreadable(id));
+    }
+    let gates = checked?;
     let (mut moved, _, dispatched) = write_transition(
         &mut tx,
         &actor,
@@ -343,14 +364,17 @@ async fn move_issue(
 /// not exist, is left for `move_issue` to refuse. A read that fails refuses the request
 /// (`GithubUnreadable`): the recorded rows may be from before a push. Without a GitHub App
 /// nothing is read, and the gates judge what the webhooks recorded.
+///
+/// Returns the pull requests as the read left them, or `None` when nothing was read: with
+/// those `move_issue` locks the rows and refuses a request whose evidence was written since.
 async fn refresh_evidence(
     state: &AppState,
     actor: &Actor,
     id: &str,
     to: &str,
-) -> Result<(), ApiError> {
+) -> Result<Option<Vec<PullRequestRead>>, ApiError> {
     let Some(github) = &state.github else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(from) = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
@@ -360,7 +384,7 @@ async fn refresh_evidence(
     .fetch_optional(&state.pool)
     .await?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let mut conn = state.pool.acquire().await?;
     let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
@@ -369,9 +393,10 @@ async fn refresh_evidence(
         .check_transition(&from, to, actor.role)
         .is_ok_and(|transition| !transition.gates.is_empty())
     {
-        refresh_pull_requests(github, &state.pool, actor.workspace_id, id).await?;
+        let read = refresh_pull_requests(github, &state.pool, actor.workspace_id, id).await?;
+        return Ok(Some(read));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Checks a requested move against the workflow: the lock, the role, then each gate over

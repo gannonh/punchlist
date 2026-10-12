@@ -1237,7 +1237,7 @@ async fn a_gated_request_whose_write_is_dropped_reads_again(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_gated_request_dropped_twice_is_judged_on_what_is_recorded(pool: PgPool) {
+async fn a_gated_request_dropped_twice_is_refused(pool: PgPool) {
     let s = setup(&pool).await;
     let agent = issue_with_a_ready_pull_request(&s).await;
     {
@@ -1266,9 +1266,11 @@ async fn a_gated_request_dropped_twice_is_judged_on_what_is_recorded(pool: PgPoo
         let_go(&hold).await;
     });
 
-    // The request's second write was dropped too. It is answered, not failed, and the rows
-    // are the second job's.
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // The request's second write was dropped too: the rows are the second job's, not what
+    // the request read, so it is not judged on them.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+    assert_eq!(issue_status(&pool).await, "in_progress");
     assert_eq!(recorded_threads(&pool).await, resolved);
     assert_eq!(pull_request_version(&pool).await, 2);
 }
@@ -3260,4 +3262,113 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// A request for Human Review with a delivery processed after its refresh has committed and
+/// before its gates are evaluated. The test holds the workspace's row, the evaluation's first
+/// lock, which neither the refresh of an open pull request nor the delivery's job takes.
+async fn request_with_a_delivery_before_the_evaluation(
+    s: &Setup,
+    pool: &PgPool,
+    token: &str,
+    event: &str,
+    body: &str,
+) -> (StatusCode, Value) {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let (request, ()) = tokio::join!(request_human_review(s, token), async {
+        wait_for_lock_waiter(pool).await;
+        deliver(s, event, "d-late", body).await;
+        assert_eq!(job(pool, "d-late").await, ("done".into(), 1, None));
+        lock.commit().await.unwrap();
+    });
+    request
+}
+
+#[sqlx::test]
+async fn a_stale_pass_delivered_after_the_read_and_before_the_gates_refuses_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "failure")];
+    }
+    let conclusion = || async {
+        sqlx::query_scalar::<_, Option<String>>("SELECT conclusion FROM check_run WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+
+    // The request read the failure. A delayed, older `success` for the same run is recorded
+    // before its gates are evaluated: `ci_green` would pass on it.
+    let stale = check_run(1, "completed", Some("success"));
+    let (status, body) =
+        request_with_a_delivery_before_the_evaluation(&s, &pool, &codex, "check_run", &stale).await;
+    assert_eq!(conclusion().await.as_deref(), Some("success"));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+    assert_eq!(
+        body["message"],
+        "GitHub could not be read, so the gates for PL-1 were not checked and it did not move; \
+         request again"
+    );
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    // Requested again, GitHub's failure is read over the stale row and the gate names it.
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["message"],
+        "agent_review → human_review needs gate ci_green: \
+         1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+    assert_eq!(conclusion().await.as_deref(), Some("failure"));
+}
+
+#[sqlx::test]
+async fn a_thread_event_recorded_after_the_read_and_before_the_gates_refuses_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+    }
+
+    // The request read the thread resolved. It is opened again, and a thread event's job
+    // records that before the gates are evaluated: the request passes or fails on neither.
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let ((status, body), ()) = tokio::join!(request_human_review(&s, &codex), async {
+        wait_for_lock_waiter(&pool).await;
+        s.github.lock().unwrap().threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", false)];
+        deliver(&s, "pull_request_review_thread", "d-late", THREAD).await;
+        lock.commit().await.unwrap();
+    });
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "no_open_threads");
+
+    // With nothing recorded in between, the request is judged as before: accepted.
+    s.github.lock().unwrap().threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "human_review");
 }

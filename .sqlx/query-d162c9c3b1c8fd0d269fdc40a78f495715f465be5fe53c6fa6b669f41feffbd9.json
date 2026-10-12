@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM check_run WHERE repository_id = $1 AND head_sha = $2\n                          AND updated_at > $3) AS \"conflict!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conflict!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d162c9c3b1c8fd0d269fdc40a78f495715f465be5fe53c6fa6b669f41feffbd9"
+}

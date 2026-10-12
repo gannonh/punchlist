@@ -12,8 +12,9 @@ pub enum ApiError {
     Unauthorized,
     #[error("the GitHub webhook secret is not configured")]
     GithubNotConfigured,
-    /// A gated request's read of GitHub failed, so its gates had no current evidence to
-    /// read. Nothing was checked and nothing moved; the same request can succeed later.
+    /// A gated request's read of GitHub failed, or what it read was written again before its
+    /// gates were judged, so they had no current evidence that was the request's own.
+    /// Nothing was decided and nothing moved; the same request can succeed later.
     #[error(
         "GitHub could not be read, so the gates for {0} were not checked and it did not move; request again"
     )]
