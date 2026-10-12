@@ -662,3 +662,97 @@ async fn a_retried_log_batch_is_stored_once_and_first_line_starts_at_one(pool: P
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+/// Records a pull request for the issue, as a GitHub event would.
+async fn pull_request(pool: &PgPool, number: i64, issue: &str, branch: &str, state: &str) {
+    sqlx::query(
+        "INSERT INTO pull_request (repository_id, number, github_id, title, branch, head_sha,
+                                   url, author_login, state, draft, issue_id, github_updated_at)
+         SELECT id, $1, $1, 'Fix', $3, 'abc', 'https://example.com', 'octocat', $4, false, $2,
+                now()
+         FROM repository",
+    )
+    .bind(number)
+    .bind(issue)
+    .bind(branch)
+    .bind(state)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn a_claim_after_the_branchs_pull_request_merged_names_the_next_branch(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    for title in ["Merged", "Open", "Merged then open", "No pull request"] {
+        create_and_move(&app, &person.token, title, &["todo", "start"]).await;
+    }
+    pull_request(&pool, 11, "PL-1", "feature/pl-1-merged", "merged").await;
+    pull_request(&pool, 12, "PL-2", "feature/pl-2-open", "open").await;
+    pull_request(&pool, 13, "PL-3", "feature/pl-3-merged-then-open", "merged").await;
+    pull_request(&pool, 14, "PL-3", "feature/pl-3-merged-then-open", "open").await;
+
+    let (_, first) = claim(&app, &r1, 0).await;
+    assert_eq!(first["issue"]["id"], "PL-1");
+    assert_eq!(first["branch"], "feature/pl-1-merged-2");
+    assert_eq!(first["merged_branches"], json!(["feature/pl-1-merged"]));
+    for (issue, branch) in [
+        ("PL-2", "feature/pl-2-open"),
+        ("PL-3", "feature/pl-3-merged-then-open"),
+        ("PL-4", "feature/pl-4-no-pull-request"),
+    ] {
+        let (_, claimed) = claim(&app, &r1, 0).await;
+        assert_eq!(claimed["issue"]["id"], issue);
+        assert_eq!(claimed["branch"], branch);
+        assert_eq!(claimed["merged_branches"], json!([]));
+    }
+
+    // The next claim of the same lifecycle, with or without its open pull request, gets the
+    // same branch. Once that one merges too, the lifecycle after it gets the third.
+    let reclaim = async |run: &Value| {
+        let (status, _) = call(
+            &app,
+            &r1.token,
+            "POST",
+            &format!("/api/runs/{}/finish", run["run_id"].as_str().unwrap()),
+            Some(json!({"attempt": 1, "outcome": "failed", "reason": "x", "duration_ms": 1})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        sqlx::query("UPDATE issue SET status = 'start' WHERE id = 'PL-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        claim(&app, &r1, 0).await.1
+    };
+    let retry = reclaim(&first).await;
+    assert_eq!(retry["branch"], "feature/pl-1-merged-2");
+    pull_request(&pool, 15, "PL-1", "feature/pl-1-merged-2", "open").await;
+    let retry = reclaim(&retry).await;
+    assert_eq!(retry["branch"], "feature/pl-1-merged-2");
+    assert_eq!(retry["merged_branches"], json!(["feature/pl-1-merged"]));
+    sqlx::query("UPDATE pull_request SET state = 'merged' WHERE number = 15")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let third = reclaim(&retry).await;
+    assert_eq!(third["branch"], "feature/pl-1-merged-3");
+    assert_eq!(
+        third["merged_branches"],
+        json!(["feature/pl-1-merged", "feature/pl-1-merged-2"])
+    );
+
+    // After a title edit the branch is cut from the new title, and the claim still lists the
+    // merged branches under the old one, so a runner can replace its worktree on them.
+    sqlx::query("UPDATE issue SET title = 'New title' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let renamed = reclaim(&third).await;
+    assert_eq!(renamed["branch"], "feature/pl-1-new-title");
+    assert_eq!(
+        renamed["merged_branches"],
+        json!(["feature/pl-1-merged", "feature/pl-1-merged-2"])
+    );
+}
