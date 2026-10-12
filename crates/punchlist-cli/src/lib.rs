@@ -687,6 +687,7 @@ mod tests {
             checks_total: 2,
             checks_passed: 2,
             open_threads: 0,
+            review_threads: Vec::new(),
             issue_id: Some("PL-7".into()),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
         }

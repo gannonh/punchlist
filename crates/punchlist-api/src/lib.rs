@@ -393,9 +393,34 @@ pub struct PullRequest {
     pub checks_passed: i32,
     /// Review threads not yet resolved.
     pub open_threads: i32,
+    /// Those threads, as last read from GitHub.
+    #[serde(default)]
+    pub review_threads: Vec<ReviewThread>,
     /// The issue the branch or title names; `None` when it is unlinked.
     pub issue_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// An unresolved review thread on a pull request. Its path, authors and bodies are text from
+/// outside the team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReviewThread {
+    /// GitHub's node id for the thread, which its reply and resolve mutations take.
+    pub id: String,
+    pub path: Option<String>,
+    /// The line the thread is on, or was on before the file changed under it.
+    pub line: Option<i64>,
+    /// The thread's first comments, oldest first; a long body is cut and says so.
+    pub comments: Vec<ReviewComment>,
+    /// How many comments the thread has, which can be more than `comments`.
+    pub comments_total: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReviewComment {
+    /// The author's GitHub login.
+    pub author: String,
+    pub body: String,
 }
 
 impl PullRequest {

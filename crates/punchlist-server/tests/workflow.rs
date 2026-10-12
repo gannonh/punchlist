@@ -969,6 +969,49 @@ async fn a_gated_request_reads_a_new_review_thread_from_github(pool: PgPool) {
 }
 
 /// The job of delivery `id`: its state, its attempts and its last error.
+#[sqlx::test]
+async fn refreshing_an_issues_pull_requests_reads_its_review_threads_from_github(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    let mut said = thread("PRRT_kwDOA1b2c84AbCdE", false);
+    said["path"] = json!("src/lib.rs");
+    said["line"] = json!(41);
+    said["comments"] = json!({"totalCount": 12, "nodes": [
+        {"author": {"login": "octocat"}, "body": "Should this return an error?"},
+        {"author": null, "body": "Yes."},
+    ]});
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![said, thread("PRRT_kwDOA1b2c84ZyXwV", true)];
+    }
+    let recorded = json!([{
+        "id": "PRRT_kwDOA1b2c84AbCdE",
+        "path": "src/lib.rs",
+        "line": 41,
+        "comments": [
+            {"author": "octocat", "body": "Should this return an error?"},
+            {"author": "ghost", "body": "Yes."},
+        ],
+        "comments_total": 12,
+    }]);
+
+    // No event is sent for a new thread, so the recorded pull request has none until the
+    // agent's read asks GitHub.
+    let uri = "/api/issues/PL-1/pull-requests";
+    let (_, listed) = call(&s.app, &agent, "GET", uri, None).await;
+    assert_eq!(listed[0]["review_threads"], json!([]));
+    let (status, fresh) = call(&s.app, &agent, "POST", &format!("{uri}/refresh"), None).await;
+    assert_eq!(status, StatusCode::OK, "{fresh}");
+    assert_eq!(fresh[0]["review_threads"], recorded);
+
+    // When GitHub cannot be read, the read answers with what is recorded.
+    s.github.lock().unwrap().down = true;
+    let (status, stale) = call(&s.app, &agent, "POST", &format!("{uri}/refresh"), None).await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale[0]["review_threads"], recorded);
+}
+
 async fn job(pool: &PgPool, id: &str) -> (String, i32, Option<String>) {
     sqlx::query_as("SELECT state, attempts, last_error FROM job WHERE idempotency_key = $1")
         .bind(id)

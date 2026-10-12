@@ -13,7 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github::PullRequestData;
+use crate::github::{Account, PullRequestData};
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -65,6 +65,24 @@ pub(crate) struct ReviewThread {
     /// The line before the file changed under the thread, when `line` is gone.
     #[serde(default)]
     pub original_line: Option<i64>,
+    #[serde(default)]
+    pub comments: ThreadComments,
+}
+
+/// A review thread's comments, oldest first, and how many it has: `nodes` can be fewer.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadComments {
+    pub total_count: i32,
+    pub nodes: Vec<ThreadCommentNode>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadCommentNode {
+    /// `None` when the account was deleted.
+    #[serde(default)]
+    pub author: Option<Account>,
+    pub body: String,
 }
 
 #[derive(Deserialize)]
@@ -81,11 +99,17 @@ struct PageInfo {
     end_cursor: Option<String>,
 }
 
+// ponytail: the first 10 comments of each thread, which `record_review_threads` cuts to 2000
+// characters each, so a long thread costs neither the read nor an agent's context. Page the
+// comments if a reviewer's eleventh matters.
 const REVIEW_THREADS: &str =
     "query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) {
-      nodes { id isResolved path line originalLine }
+      nodes {
+        id isResolved path line originalLine
+        comments(first: 10) { totalCount nodes { author { login } body } }
+      }
       pageInfo { hasNextPage endCursor }
     }
   } }

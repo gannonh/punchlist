@@ -1,5 +1,6 @@
 //! `/api/issues/{id}/pull-requests` and `/api/pull-requests/unlinked`: the pull requests
 //! that GitHub's events recorded, read by issue or as the ones no issue claimed.
+//! `/api/issues/{id}/pull-requests/refresh` reads GitHub first.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -9,11 +10,13 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::Actor;
+use crate::github::refresh_pull_requests;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(issue_pull_requests))
+        .routes(routes!(refresh_issue_pull_requests))
         .routes(routes!(unlinked_pull_requests))
 }
 
@@ -30,6 +33,8 @@ struct PullRequestRow {
     checks_total: i32,
     checks_passed: i32,
     open_threads: i32,
+    /// The unresolved threads, as a JSON array of `punchlist_api::ReviewThread`.
+    review_threads: serde_json::Value,
     issue_id: Option<String>,
     updated_at: DateTime<Utc>,
 }
@@ -46,6 +51,8 @@ impl TryFrom<PullRequestRow> for PullRequest {
         let checks = ChecksState::parse(&row.checks).ok_or_else(|| {
             sqlx::Error::Decode(format!("unknown checks state `{}`", row.checks).into())
         })?;
+        let review_threads = serde_json::from_value(row.review_threads)
+            .map_err(|error| sqlx::Error::Decode(error.into()))?;
         Ok(PullRequest {
             number: row.number,
             title: row.title,
@@ -59,6 +66,7 @@ impl TryFrom<PullRequestRow> for PullRequest {
             checks_total: row.checks_total,
             checks_passed: row.checks_passed,
             open_threads: row.open_threads,
+            review_threads,
             issue_id: row.issue_id,
             updated_at: row.updated_at,
         })
@@ -81,6 +89,42 @@ async fn issue_pull_requests(
     actor: Actor,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<PullRequest>>, ApiError> {
+    recorded_pull_requests(&state, &actor, id).await
+}
+
+/// An issue's pull requests, after reading them and their review threads from GitHub, as a
+/// gated request does: a new review thread sends no webhook, so this is how an agent reads
+/// what its reviewers wrote. When GitHub cannot be read, or there is no GitHub App, the
+/// recorded ones are returned.
+#[utoipa::path(
+    post,
+    path = "/api/issues/{id}/pull-requests/refresh",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = Vec<PullRequest>),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn refresh_issue_pull_requests(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<PullRequest>>, ApiError> {
+    if let Some(github) = &state.github
+        && let Err(error) =
+            refresh_pull_requests(github, &state.pool, actor.workspace_id, &id).await
+    {
+        tracing::warn!(issue_id = id, "pull requests not refreshed: {error}");
+    }
+    recorded_pull_requests(&state, &actor, id).await
+}
+
+async fn recorded_pull_requests(
+    state: &AppState,
+    actor: &Actor,
+    id: String,
+) -> Result<Json<Vec<PullRequest>>, ApiError> {
     let mut conn = state.pool.acquire().await?;
     let exists = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM issue WHERE id = $1 AND workspace_id = $2) AS "exists!""#,
@@ -94,10 +138,17 @@ async fn issue_pull_requests(
     }
     let rows = sqlx::query_as!(
         PullRequestRow,
-        "SELECT number, title, branch, url, author_login, state, draft, merge_state, checks,
-                checks_total, checks_passed, open_threads, issue_id, updated_at
-         FROM pull_request WHERE issue_id = $1
-         ORDER BY number DESC",
+        r#"SELECT number, title, branch, url, author_login, state, draft, merge_state, checks,
+                checks_total, checks_passed, open_threads, issue_id, p.updated_at,
+                (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                             'id', t.node_id, 'path', t.path, 'line', t.line,
+                             'comments', coalesce(t.comments, '[]'),
+                             'comments_total', coalesce(t.comments_total, 0))
+                         ORDER BY t.path, t.line, t.node_id), '[]')
+                 FROM review_thread t
+                 WHERE t.pull_request_id = p.id AND NOT t.resolved) AS "review_threads!"
+         FROM pull_request p WHERE issue_id = $1
+         ORDER BY number DESC"#,
         id,
     )
     .fetch_all(&mut *conn)
@@ -121,13 +172,20 @@ async fn unlinked_pull_requests(
 ) -> Result<Json<Vec<PullRequest>>, ApiError> {
     let rows = sqlx::query_as!(
         PullRequestRow,
-        "SELECT p.number, p.title, p.branch, p.url, p.author_login, p.state, p.draft,
+        r#"SELECT p.number, p.title, p.branch, p.url, p.author_login, p.state, p.draft,
                 p.merge_state, p.checks, p.checks_total, p.checks_passed, p.open_threads,
-                p.issue_id, p.updated_at
+                p.issue_id, p.updated_at,
+                (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                             'id', t.node_id, 'path', t.path, 'line', t.line,
+                             'comments', coalesce(t.comments, '[]'),
+                             'comments_total', coalesce(t.comments_total, 0))
+                         ORDER BY t.path, t.line, t.node_id), '[]')
+                 FROM review_thread t
+                 WHERE t.pull_request_id = p.id AND NOT t.resolved) AS "review_threads!"
          FROM pull_request p
          JOIN repository r ON r.id = p.repository_id
          WHERE r.workspace_id = $1 AND p.issue_id IS NULL
-         ORDER BY p.number DESC",
+         ORDER BY p.number DESC"#,
         actor.workspace_id,
     )
     .fetch_all(&state.pool)

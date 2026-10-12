@@ -108,6 +108,16 @@ impl Client {
             .await
     }
 
+    /// `issue_pull_requests`, after the server has read them and their review threads from
+    /// GitHub, so the threads are GitHub's now.
+    pub async fn fresh_issue_pull_requests(
+        &self,
+        id: &str,
+    ) -> Result<Vec<PullRequest>, ClientError> {
+        let path = ["issues", id, "pull-requests", "refresh"];
+        self.send::<(), _>(Method::POST, &path, None).await
+    }
+
     /// The pull requests that name no issue, newest number first.
     pub async fn unlinked_pull_requests(&self) -> Result<Vec<PullRequest>, ClientError> {
         self.send::<(), _>(Method::GET, &["pull-requests", "unlinked"], None)
