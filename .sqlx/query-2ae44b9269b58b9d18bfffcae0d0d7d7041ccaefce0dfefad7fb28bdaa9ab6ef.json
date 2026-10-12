@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, version, head_sha, clock_timestamp() AS \"at!\" FROM pull_request\n           WHERE repository_id = $1 AND number = $2 AND issue_id = $3",
+  "query": "SELECT id, head_sha, clock_timestamp() AS \"at!\" FROM pull_request\n           WHERE repository_id = $1 AND number = $2 AND issue_id = $3",
   "describe": {
     "columns": [
       {
@@ -16,17 +16,6 @@
       },
       {
         "ordinal": 1,
-        "name": "version",
-        "type_info": "Int8",
-        "origin": {
-          "Table": {
-            "table": "pull_request",
-            "name": "version"
-          }
-        }
-      },
-      {
-        "ordinal": 2,
         "name": "head_sha",
         "type_info": "Text",
         "origin": {
@@ -37,7 +26,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "at!",
         "type_info": "Timestamptz",
         "origin": "Expression"
@@ -53,9 +42,8 @@
     "nullable": [
       false,
       false,
-      false,
       null
     ]
   },
-  "hash": "3115b4f77453780edb90e38a1b3e148d4e2a32d43e72164403fab00a422a5d54"
+  "hash": "2ae44b9269b58b9d18bfffcae0d0d7d7041ccaefce0dfefad7fb28bdaa9ab6ef"
 }

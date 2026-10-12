@@ -288,11 +288,34 @@ async fn move_issue(
     Path(id): Path<String>,
     Json(request): Json<MoveIssue>,
 ) -> Result<Json<Moved>, ApiError> {
-    let read = refresh_evidence(&state, &actor, &id, &request.to).await?;
+    // The evaluation holds pull request rows that a delivery's job also wants, and Postgres
+    // ends one of two transactions that wait on each other (40P01; 40001 is a serialization
+    // failure). Nothing was decided for the one ended: it asks again, as when its evidence
+    // changed.
+    let ended = |error: &sqlx::Error| {
+        let code = error.as_database_error().and_then(|error| error.code());
+        matches!(code.as_deref(), Some("40P01" | "40001"))
+    };
+    match request_move(&state, &actor, &id, &request).await {
+        Err(ApiError::Database(error)) if ended(&error) => {
+            tracing::warn!(issue = id, %error, "a gated request lost a deadlock");
+            Err(ApiError::EvidenceChanged(id))
+        }
+        answer => answer.map(Json),
+    }
+}
+
+async fn request_move(
+    state: &AppState,
+    actor: &Actor,
+    id: &str,
+    request: &MoveIssue,
+) -> Result<Moved, ApiError> {
+    let read = refresh_evidence(state, actor, id, &request.to).await?;
     let mut tx = state.pool.begin().await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     if let Some(read) = &read {
-        lock_pull_requests(&mut tx, &id, read).await?;
+        lock_pull_requests(&mut tx, id, read).await?;
     }
     let from = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
@@ -301,7 +324,7 @@ async fn move_issue(
     )
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
     // The token was checked before the refresh, which ends the agent's run when it closes
     // the issue's pull request, as a webhook job may have meanwhile. Either holds the issue's
     // lock to do it, so under that lock the run is known to be running or not.
@@ -318,27 +341,21 @@ async fn move_issue(
         }
     }
     let (workflow, _, invalid) = stored_workflow(&mut tx, actor.workspace_id).await?;
-    let checked = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await;
-    // The gates judged the rows as they are now. If one was written since this request read
+    let checked = check_move(&mut tx, &workflow, actor, id, &from, &request.to).await;
+    // The gates judged the rows as they are now. If one changed since this request read
     // GitHub, that is not what it read: nothing is decided, pass or fail, and it asks again.
-    let judged = match &checked {
-        Ok(gates) => !gates.is_empty(),
-        Err(error) => matches!(error, ApiError::GateFailed(_)),
-    };
-    if let (true, Some(read)) = (judged, &read)
-        && written_since(&mut tx, &id, read).await?
+    // Any other refusal (the role, a lock, an unknown status) read no evidence, and stands.
+    if let (Some(read), Ok(_) | Err(ApiError::GateFailed(_))) = (&read, &checked)
+        && written_since(&mut tx, id, read).await?
     {
-        tracing::info!(
-            issue = id,
-            "evidence was written after it was read from GitHub"
-        );
-        return Err(ApiError::GithubUnreadable(id));
+        tracing::info!(issue = id, "evidence changed after it was read from GitHub");
+        return Err(ApiError::EvidenceChanged(id.to_string()));
     }
     let gates = checked?;
     let (mut moved, _, dispatched) = write_transition(
         &mut tx,
-        &actor,
-        &id,
+        actor,
+        id,
         from,
         &request.to,
         None,
@@ -352,9 +369,9 @@ async fn move_issue(
     }
     if request.to == START || dispatched {
         // Wake runners that are long-polling for work. No receivers is fine.
-        let _ = state.starts.send((actor.workspace_id, id));
+        let _ = state.starts.send((actor.workspace_id, id.to_string()));
     }
-    Ok(Json(moved))
+    Ok(moved)
 }
 
 /// Before the issue is locked: if the move has gates, reads the issue's pull requests from
@@ -366,7 +383,7 @@ async fn move_issue(
 /// nothing is read, and the gates judge what the webhooks recorded.
 ///
 /// Returns the pull requests as the read left them, or `None` when nothing was read: with
-/// those `move_issue` locks the rows and refuses a request whose evidence was written since.
+/// those `request_move` locks the rows and refuses a request whose evidence changed since.
 async fn refresh_evidence(
     state: &AppState,
     actor: &Actor,
@@ -465,6 +482,9 @@ async fn evaluate_gates(
 /// What the gates read: the pull requests linked to the issue, each open one with the check
 /// runs on its head commit and its review threads, and the one a GitHub event merged or
 /// closed when that event is causing the move.
+///
+/// `written_since` in `github.rs` is its mirror: it asks whether any of these rows changed
+/// after a gated request read them from GitHub. Change the two together.
 async fn evidence(
     tx: &mut sqlx::PgConnection,
     id: &str,
