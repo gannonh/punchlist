@@ -521,6 +521,7 @@ fn runner_start_help_lists_the_flags() {
         "--claude-command",
         "--agents",
         "--codex-model",
+        "--codex-effort",
         "--codex-command",
         "--max-concurrent",
     ] {

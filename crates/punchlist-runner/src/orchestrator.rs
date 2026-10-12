@@ -19,7 +19,7 @@ use crate::RunnerConfig;
 use crate::agent::{
     AgentExit, AgentResult, build_prompt, claude_args, run_claude, write_mcp_config,
 };
-use crate::codex::{mcp_servers, run_codex};
+use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::worktree::Worktrees;
 
 /// The agent keys this runner has an adapter for.
@@ -504,9 +504,19 @@ async fn run_agent(
     };
     match claim.agent.as_str() {
         "codex" => {
-            let (command, model) = (&config.codex_command, config.codex_model.as_deref());
-            let mcp = mcp_servers(config, claim);
-            run_codex(command, model, mcp, worktree, prompt, lines, stop).await
+            // Outside the worktree, and removed when this returns or is dropped.
+            let home = match CodexHome::create(&config.worktree_root, &claim.run_id.to_string()) {
+                Ok(home) => home,
+                Err(e) => return failed(format!("cannot make the Codex home: {e}")),
+            };
+            let params = thread_params(
+                config.codex_model.as_deref(),
+                &config.codex_effort,
+                mcp_servers(config, claim),
+                worktree,
+            );
+            let command = &config.codex_command;
+            run_codex(command, home.path(), params, worktree, prompt, lines, stop).await
         }
         "claude-code" => {
             // Outside the worktree, so the agent cannot commit its token.

@@ -1,16 +1,23 @@
-// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes, auto-approval and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle, the input-required heuristics and the workspace check (worktree.rs checks the path). Token accounting is not Symphony's `token_accounting.rs`: the app-server reports the thread's running totals, which is all a one-turn thread needs. Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, and the model and MCP server sent in `thread/start`.
+// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes, auto-approval and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle, the input-required heuristics and the workspace check (worktree.rs checks the path). Token accounting is not Symphony's `token_accounting.rs`: the app-server reports the thread's running totals, which is all a one-turn thread needs. Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, the per-run `CODEX_HOME`, and the model, effort and MCP server sent in `thread/start`.
 //! The Codex adapter: runs `codex app-server` in the worktree, starts a thread and one turn
 //! with the prompt over JSON-RPC on its stdio, streams its messages as log lines, and reads
 //! the turn's outcome and token counts.
 //!
-//! 1. Spawn `<codex> app-server` with the worktree as cwd.
-//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `thread/start(id=2)`
-//!    → await response.
+//! Codex has no `--strict-mcp-config`. The run gets only what the runner gives it because
+//! `CODEX_HOME` is a directory made for the run, holding nothing but a link to the person's
+//! sign-in; apps, plugins and hooks are off; the worktree is an untrusted project, so Codex
+//! loads no `.codex/` configuration and no `AGENTS.md` from the repository; and every skill
+//! Codex finds, the person's and the repository's, is disabled for the thread.
+//!
+//! 1. Spawn `<codex> app-server` with the worktree as cwd and the run's `CODEX_HOME`.
+//! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `skills/list(id=4)`
+//!    → await response → `thread/start(id=2)` → await response.
 //! 3. Turn: `turn/start(id=3)` → await response → stream events until `turn/completed`,
 //!    failure or timeout.
 //! 4. Stop: kill the subprocess and its process group.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -26,6 +33,10 @@ use crate::agent::{AgentExit, AgentResult, MAX_RECORD_BYTES, kill_group, read_re
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
 const TURN_START_ID: u64 = 3;
+const SKILLS_LIST_ID: u64 = 4;
+
+/// The name Codex knows Punchlist's MCP server by.
+const MCP_SERVER: &str = "punchlist";
 
 /// How long a response in the handshake may take.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -37,7 +48,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(3600);
 /// is in no file and no process listing.
 pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     json!({
-        "punchlist": {
+        MCP_SERVER: {
             "command": config.mcp_command,
             "args": ["mcp"],
             "env": {
@@ -45,6 +56,127 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
                 "PUNCHLIST_TOKEN": claim.agent_token,
                 "PUNCHLIST_ISSUE": claim.issue.id,
             }
+        }
+    })
+}
+
+/// The variable Codex's app-server takes a sign-in from when it is set, before any stored
+/// one. It is the only one: the app-server does not read `CODEX_API_KEY` or `OPENAI_API_KEY`.
+const SIGN_IN_ENV: &str = "CODEX_ACCESS_TOKEN";
+
+/// The `CODEX_HOME` of one run: a directory only this user can read, holding a link to the
+/// person's Codex sign-in and, while the run goes on, Codex's own state (its databases and
+/// shell snapshots). A link, not a copy: Codex writes a refreshed token in place, through
+/// the link, so the person's sign-in stays current and removing the directory removes no
+/// credential. Dropping this removes the directory.
+pub(crate) struct CodexHome(PathBuf);
+
+impl CodexHome {
+    /// Makes `<root>/codex-home/<run_id>`, outside the worktree, linked to the sign-in in the
+    /// person's own Codex home.
+    pub(crate) fn create(root: &Path, run_id: &str) -> std::io::Result<CodexHome> {
+        let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
+        let env_sign_in = std::env::var_os(SIGN_IN_ENV).is_some_and(|token| !token.is_empty());
+        CodexHome::linked_to(&person, &run_home(root, run_id)?, env_sign_in)
+    }
+
+    /// The link is made whenever the person has an `auth.json`. Without one the home has no
+    /// link, which is enough when `env_sign_in` says the runner's environment signs Codex
+    /// in, and is refused otherwise.
+    // ponytail: a stored sign-in reaches the run only from `auth.json`. One kept in the
+    // keyring (`cli_auth_credentials_store`) has no file to link; have the runner pass the
+    // tokens over the app-server's `account/login/start` when someone needs that.
+    fn linked_to(person_home: &Path, home: &Path, env_sign_in: bool) -> std::io::Result<CodexHome> {
+        use std::os::unix::fs::DirBuilderExt;
+        let sign_in = person_home.join("auth.json");
+        let stored = sign_in.is_file();
+        if !stored && !env_sign_in {
+            return Err(std::io::Error::other(format!(
+                "no Codex sign-in at {} and no {SIGN_IN_ENV}: run `codex login` as the person \
+                 who runs the runner (a sign-in kept in the keyring is not supported)",
+                sign_in.display()
+            )));
+        }
+        // What a run killed with its runner left behind.
+        let _ = std::fs::remove_dir_all(home);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)?;
+        // From here a failure removes the directory.
+        let home = CodexHome(home.to_path_buf());
+        if stored {
+            std::os::unix::fs::symlink(sign_in, home.0.join("auth.json"))?;
+        }
+        Ok(home)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for CodexHome {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!("cannot remove the Codex home {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Where one run's home goes under the runner's worktree root. Absolute: Codex gets it as
+/// `CODEX_HOME` with the worktree as its directory, and a relative root would name another
+/// place from there.
+fn run_home(root: &Path, run_id: &str) -> std::io::Result<PathBuf> {
+    Ok(std::path::absolute(root)?.join("codex-home").join(run_id))
+}
+
+/// The person's own Codex home, as Codex finds it: `CODEX_HOME` when it is set and not
+/// empty, else `.codex` in the home directory. Absolute, so a link to it holds anywhere.
+fn person_home(codex_home: Option<OsString>, home: Option<PathBuf>) -> std::io::Result<PathBuf> {
+    let dir = match codex_home.filter(|dir| !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => home
+            .ok_or_else(|| std::io::Error::other("HOME is not set"))?
+            .join(".codex"),
+    };
+    std::path::absolute(dir)
+}
+
+/// The `thread/start` parameters of one run: the runner's model and reasoning effort, no
+/// sandbox or approvals, and `mcp_servers` as the only MCP servers.
+// ponytail: `danger-full-access` and no approvals, as the Claude adapter's
+// `bypassPermissions`: the agent has to reach git's directory in the clone, the network
+// and `gh`. Codex's own `workspace-write` sandbox allows none of the three; give the
+// run a container or a sandbox policy with those holes when untrusted issue text needs
+// a tighter box.
+pub(crate) fn thread_params(
+    model: Option<&str>,
+    effort: &str,
+    mcp_servers: Value,
+    worktree: &Path,
+) -> Value {
+    // Codex trusts a project it starts with full access, and a trusted project's `.codex/`
+    // adds MCP servers and hooks and its `AGENTS.md` adds instructions. Say first that this
+    // one is not trusted, under the path the runner uses and under the one it resolves to:
+    // Codex may look the project up by either.
+    let untrusted = json!({"trust_level": "untrusted"});
+    let mut projects = serde_json::Map::new();
+    projects.insert(worktree.to_string_lossy().into_owned(), untrusted.clone());
+    if let Ok(resolved) = worktree.canonicalize() {
+        projects.insert(resolved.to_string_lossy().into_owned(), untrusted);
+    }
+    json!({
+        "approvalPolicy": "never",
+        "sandbox": "danger-full-access",
+        "cwd": worktree.to_string_lossy(),
+        "model": model,
+        // Codex keeps no copy of the session under its home's `sessions`.
+        "ephemeral": true,
+        "config": {
+            "model_reasoning_effort": effort,
+            "mcp_servers": mcp_servers,
+            "projects": projects
         }
     })
 }
@@ -73,7 +205,8 @@ impl Session {
 
     /// The next JSON message, logged; `None` when the subprocess closed its output. A line
     /// that is not JSON is logged and skipped. Streaming deltas are not logged: the item
-    /// that completes carries their text whole.
+    /// that completes carries their text whole. Nor is the answer to `skills/list`: it
+    /// names the person's own skills and where they are, and the run log is the team's.
     async fn next(&mut self, timeout: Duration) -> Result<Option<Value>, String> {
         loop {
             let read = read_record(&mut self.stdout, MAX_RECORD_BYTES);
@@ -90,7 +223,11 @@ impl Session {
             let delta = (payload.as_ref())
                 .and_then(|payload| payload.get("method")?.as_str())
                 .is_some_and(|method| method.to_ascii_lowercase().ends_with("delta"));
-            if !delta {
+            let skills = payload.as_ref().is_some_and(|payload| {
+                payload.get("method").is_none()
+                    && payload.get("id").and_then(Value::as_u64) == Some(SKILLS_LIST_ID)
+            });
+            if !delta && !skills {
                 let _ = self.lines.send(text).await;
             }
             if let Some(payload) = payload {
@@ -124,18 +261,9 @@ impl Session {
 
     /// Perform the startup handshake and return the `thread_id`.
     ///
-    /// Order: `initialize(id=1)` → await → `initialized` (no id) → `thread/start(id=2)` → await.
-    // ponytail: `danger-full-access` and no approvals, as the Claude adapter's
-    // `bypassPermissions`: the agent has to reach git's directory in the clone, the network
-    // and `gh`. Codex's own `workspace-write` sandbox allows none of the three; give the
-    // run a container or a sandbox policy with those holes when untrusted issue text needs
-    // a tighter box.
-    async fn start_thread(
-        &mut self,
-        worktree: &Path,
-        model: Option<&str>,
-        mcp_servers: Value,
-    ) -> Result<String, String> {
+    /// Order: `initialize(id=1)` → await → `initialized` (no id) → `skills/list(id=4)` →
+    /// await → `thread/start(id=2)` → await.
+    async fn start_thread(&mut self, mut thread_params: Value) -> Result<String, String> {
         self.send(&json!({
             "method": "initialize",
             "id": INITIALIZE_ID,
@@ -152,18 +280,34 @@ impl Session {
         self.await_response(INITIALIZE_ID).await?;
         self.send(&json!({"method": "initialized", "params": {}}))
             .await?;
+        // Skills are not configuration Codex reads from its home: it finds them under the
+        // person's home directory and in the worktree, trusted or not, lists them to the
+        // model and puts a skill's text in the turn when the prompt names it. So ask which
+        // it found and start the thread with each one disabled, and with none of its own.
+        self.send(&json!({
+            "method": "skills/list",
+            "id": SKILLS_LIST_ID,
+            "params": {"cwds": [thread_params["cwd"]], "forceReload": true}
+        }))
+        .await?;
+        let listed = self.await_response(SKILLS_LIST_ID).await?;
+        let found = (listed.get("data").and_then(Value::as_array))
+            .ok_or("codex's answer to skills/list has no list of skills")?;
+        let disabled: Vec<Value> = (found.iter())
+            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+            .map(|skill| json!({"path": skill["path"], "enabled": false}))
+            .collect();
+        let line = format!("disabled the {} skills Codex found", disabled.len());
+        let _ = self.lines.send(line).await;
+        thread_params["config"]["skills"] = json!({
+            "include_instructions": false,
+            "bundled": {"enabled": false},
+            "config": disabled
+        });
         self.send(&json!({
             "method": "thread/start",
             "id": THREAD_START_ID,
-            "params": {
-                "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
-                "cwd": worktree.to_string_lossy(),
-                "model": model,
-                // Codex keeps no copy of the session under `~/.codex/sessions`.
-                "ephemeral": true,
-                "config": {"mcp_servers": mcp_servers}
-            }
+            "params": thread_params
         }))
         .await?;
         let thread = self.await_response(THREAD_START_ID).await?;
@@ -232,7 +376,8 @@ impl Session {
     }
 
     /// Answers a request from Codex, so it does not wait forever; a notification needs no
-    /// answer. The approval policy is `never`, so a request for approval is approved. A
+    /// answer. The approval policy is `never`, so a request for approval is approved. An
+    /// elicitation is accepted from Punchlist's MCP server and declined from any other. A
     /// request this runner does not handle gets a JSON-RPC error.
     async fn answer_request(&mut self, payload: &Value) -> Result<(), String> {
         let (Some(id), Some(method)) = (
@@ -248,7 +393,12 @@ impl Session {
             "execCommandApproval" | "applyPatchApproval" => {
                 json!({"id": id, "result": {"decision": "approved_for_session"}})
             }
-            "mcpServer/elicitation/request" => json!({"id": id, "result": {"action": "accept"}}),
+            "mcpServer/elicitation/request" => {
+                let server = payload.pointer("/params/serverName");
+                let ours = server.and_then(Value::as_str) == Some(MCP_SERVER);
+                let action = if ours { "accept" } else { "decline" };
+                json!({"id": id, "result": {"action": action}})
+            }
             other => json!({"id": id, "error": {
                 "code": -32601,
                 "message": format!("the Punchlist runner does not handle {other}")
@@ -258,14 +408,15 @@ impl Session {
     }
 }
 
-/// Runs one Codex turn in `worktree` with `prompt`. The app-server's messages go to `lines`
-/// as they arrive, without the streaming deltas; its stderr lines go there prefixed with
-/// `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
+/// Runs one Codex turn in `worktree` with `prompt`, with `home` (a `CodexHome`) as its
+/// `CODEX_HOME` and `thread_params` (from `thread_params`) for its thread. The app-server's
+/// messages go to `lines` as they arrive, without the streaming deltas; its stderr lines go
+/// there prefixed with `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
 /// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
 pub(crate) async fn run_codex(
     codex_command: &Path,
-    model: Option<&str>,
-    mcp_servers: Value,
+    home: &Path,
+    thread_params: Value,
     worktree: &Path,
     prompt: &str,
     lines: mpsc::Sender<String>,
@@ -273,6 +424,15 @@ pub(crate) async fn run_codex(
 ) -> AgentExit {
     let spawned = Command::new(codex_command)
         .arg("app-server")
+        // The account's apps (connectors) and plugins bring MCP servers of their own, even
+        // into an empty home; hooks run the person's or the repository's commands.
+        .args(["-c", "features.apps=false"])
+        .args(["-c", "features.plugins=false"])
+        .args(["-c", "features.hooks=false"])
+        .args(["-c", "features.skill_mcp_dependency_install=false"])
+        .env("CODEX_HOME", home)
+        // It would put Codex's state databases somewhere runs and the person share.
+        .env_remove("CODEX_SQLITE_HOME")
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
@@ -312,7 +472,7 @@ pub(crate) async fn run_codex(
 
     let turn = tokio::select! {
         turn = async {
-            let thread_id = session.start_thread(worktree, model, mcp_servers).await?;
+            let thread_id = session.start_thread(thread_params).await?;
             session.run_turn(&thread_id, worktree, prompt).await
         } => Some(turn),
         _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
@@ -351,14 +511,18 @@ mod tests {
     /// deltas of every message but the first. The answer to `thread/start` and its
     /// `thread/started` were recorded again, from the same version without a turn, once the
     /// adapter asked for an ephemeral thread; the turn's messages carry the id of the thread
-    /// they were recorded in.
+    /// they were recorded in. `skills_list.jsonl` is not a recording: it is an answer in
+    /// the shape 0.162.1 gives, with one skill of the person's and one of the repository's.
     fn replay() -> String {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
         format!(
             r#"[ "$1" = app-server ] || exit 64
+echo "$*" > args.txt
+echo "$CODEX_HOME" > codex-home.txt
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) cat {fixtures}/initialize.jsonl ;;
+    *'"method":"skills/list"'*) echo "$line" > skills-list.json; cat {fixtures}/skills_list.jsonl ;;
     *'"method":"thread/start"'*) echo "$line" > thread-start.json; cat {fixtures}/thread_start.jsonl ;;
     *'"method":"turn/start"'*) echo "$line" > turn-start.json; cat {fixtures}/turn_start.jsonl ;;
   esac
@@ -372,10 +536,11 @@ done"#
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let mcp = json!({"punchlist": {"command": "pl", "args": ["mcp"]}});
+        let home = temp.path().join("codex-home");
         let exit = run_codex(
             &command,
-            Some("gpt-6-luna"),
-            mcp,
+            &home,
+            thread_params(Some("gpt-6-luna"), "low", mcp, temp.path()),
             temp.path(),
             "Review the pull request.",
             tx,
@@ -423,6 +588,10 @@ done"#
         let deltas = recorded.iter().filter(is_delta).count();
         assert!(deltas > 0, "the recording has streaming deltas");
         let kept: Vec<&String> = recorded.iter().filter(|l| !is_delta(l)).collect();
+        // The answer to `skills/list` is not a log line: the runner says how many instead.
+        let mut lines = lines;
+        assert_eq!(lines.remove(1), "disabled the 2 skills Codex found");
+        assert!(!lines.iter().any(|line| line.contains("/home/person")));
         assert_eq!(lines.iter().collect::<Vec<_>>(), kept);
         assert_eq!(lines.len(), RECORDED_LOG_LINES);
         assert!(lines[0].starts_with(r#"{"id":1,"result":{"userAgent":"punchlist-runner/"#));
@@ -433,13 +602,53 @@ done"#
                 .starts_with(r#"{"method":"turn/completed","#)
         );
 
-        // What the adapter asked for: the model, no sandbox or approvals, Punchlist's MCP
-        // server, and the prompt as the turn's input.
-        let sent = |file: &str| -> Value {
-            serde_json::from_str(&std::fs::read_to_string(temp.path().join(file)).unwrap()).unwrap()
-        };
+        // What Codex was started with: the home it was given, and apps, plugins, hooks and
+        // skill installs off.
+        let seen = |file: &str| std::fs::read_to_string(temp.path().join(file)).unwrap();
+        let home = temp.path().join("codex-home");
+        assert_eq!(seen("codex-home.txt").trim(), home.to_str().unwrap());
+        assert_eq!(
+            seen("args.txt").trim(),
+            "app-server -c features.apps=false -c features.plugins=false -c features.hooks=false \
+             -c features.skill_mcp_dependency_install=false"
+        );
+
+        // What the adapter asked for: the model and effort, no sandbox or approvals,
+        // Punchlist's MCP server and no other, the worktree as an untrusted project, every
+        // skill Codex listed for the worktree disabled, and the prompt as the turn's input.
+        let sent = |file: &str| -> Value { serde_json::from_str(&seen(file)).unwrap() };
         let thread = sent("thread-start.json");
         assert_eq!(thread["params"]["model"], "gpt-6-luna");
+        let config = thread["params"]["config"].as_object().unwrap();
+        assert_eq!(config["model_reasoning_effort"], "low");
+        assert_eq!(
+            config["mcp_servers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["punchlist"]
+        );
+        let worktree = temp.path().to_str().unwrap();
+        assert_eq!(config["projects"][worktree]["trust_level"], "untrusted");
+        assert_eq!(
+            sent("skills-list.json")["params"],
+            json!({"cwds": [worktree], "forceReload": true})
+        );
+        assert_eq!(
+            config["skills"],
+            json!({
+                "include_instructions": false,
+                "bundled": {"enabled": false},
+                "config": [
+                    {"path": "/home/person/.agents/skills/deploy/SKILL.md", "enabled": false},
+                    {
+                        "path": "/w/worktrees/acme/widgets/PL-1/.agents/skills/planted/SKILL.md",
+                        "enabled": false
+                    }
+                ]
+            })
+        );
         assert_eq!(thread["params"]["approvalPolicy"], "never");
         assert_eq!(thread["params"]["sandbox"], "danger-full-access");
         assert_eq!(thread["params"]["ephemeral"], true);
@@ -461,6 +670,95 @@ done"#
         assert_eq!(turn["params"]["threadId"], RECORDED_THREAD_ID);
     }
 
+    #[test]
+    fn a_runs_home_holds_a_link_to_the_persons_sign_in_and_is_removed_when_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let person = temp.path().join("person");
+        let home = temp.path().join("root/codex-home/run-1");
+
+        // No sign-in, stored or in the environment: refused, naming both, and nothing is made.
+        std::fs::create_dir(&person).unwrap();
+        let refused = CodexHome::linked_to(&person, &home, false).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "no Codex sign-in at {}/auth.json and no CODEX_ACCESS_TOKEN: run `codex login` \
+                 as the person who runs the runner (a sign-in kept in the keyring is not \
+                 supported)",
+                person.display()
+            )
+        );
+        assert!(!home.exists());
+
+        // A sign-in in the environment alone: an empty home, with no link.
+        let entries = |home: &Path| -> Vec<_> {
+            let entries = std::fs::read_dir(home).unwrap();
+            entries.map(|entry| entry.unwrap().file_name()).collect()
+        };
+        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        assert_eq!(entries(&home), Vec::<OsString>::new());
+        drop(made);
+        assert!(!home.exists());
+
+        // A home left by a killed run is replaced: only the link is in the new one.
+        std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
+        std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
+        std::fs::create_dir_all(home.join("shell_snapshots")).unwrap();
+        let made = CodexHome::linked_to(&person, &home, false).unwrap();
+        assert_eq!(made.path(), home);
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(entries(&home), ["auth.json"]);
+        assert_eq!(
+            std::fs::read_link(home.join("auth.json")).unwrap(),
+            person.join("auth.json")
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("auth.json")).unwrap(),
+            "the sign-in"
+        );
+
+        // Dropping it removes the home and leaves the person's sign-in.
+        drop(made);
+        assert!(!home.exists());
+
+        // With both, the stored sign-in is still linked.
+        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        assert_eq!(entries(&home), ["auth.json"]);
+        drop(made);
+        assert_eq!(
+            std::fs::read_to_string(person.join("auth.json")).unwrap(),
+            "the sign-in"
+        );
+    }
+
+    #[test]
+    fn the_persons_codex_home_is_codex_home_when_set_else_dot_codex_and_always_absolute() {
+        let home = || Some(PathBuf::from("/home/p"));
+        let found =
+            |codex_home: Option<&str>| person_home(codex_home.map(OsString::from), home()).unwrap();
+        assert_eq!(found(None), PathBuf::from("/home/p/.codex"));
+        assert_eq!(found(Some("")), PathBuf::from("/home/p/.codex"));
+        assert_eq!(found(Some("/srv/codex")), PathBuf::from("/srv/codex"));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(found(Some("rel/codex")), cwd.join("rel/codex"));
+
+        // A run's home is absolute too, whatever the worktree root is.
+        assert_eq!(
+            run_home(Path::new("rel/root"), "run-1").unwrap(),
+            cwd.join("rel/root/codex-home/run-1")
+        );
+        assert_eq!(
+            run_home(Path::new("/w"), "run-1").unwrap(),
+            PathBuf::from("/w/codex-home/run-1")
+        );
+        assert_eq!(
+            person_home(None, None).unwrap_err().to_string(),
+            "HOME is not set"
+        );
+    }
+
     const RECORDED_THREAD_ID: &str = "01a1311f-a14d-7052-9470-5458b555231a";
     const RECORDED_INPUT_TOKENS: i64 = 299_517;
     const RECORDED_OUTPUT_TOKENS: i64 = 2810;
@@ -471,6 +769,7 @@ done"#
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"t1"}}}' ;;
     *'"method":"turn/start"'*)
       echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
@@ -490,8 +789,8 @@ done"#;
                 output_tokens: Some(9),
             })
         );
-        assert_eq!(lines.len(), 7);
-        assert_eq!(lines[3], "not json");
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[4], "not json");
     }
 
     #[tokio::test]
@@ -501,6 +800,7 @@ done"#;
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"result":{"thread":{"id":"t1"}}}' ;;
     *'"method":"turn/start"'*)
       echo '{"id":3,"method":"item/commandExecution/requestApproval","params":{}}' ;;
@@ -508,6 +808,10 @@ done"#;
       echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
       echo '{"id":1,"method":"account/chatgptAuthTokens/refresh","params":{}}' ;;
     *'does not handle account/chatgptAuthTokens/refresh'*)
+      echo '{"id":2,"method":"mcpServer/elicitation/request","params":{"serverName":"other"}}' ;;
+    *'"id":2,"result":{"action":"decline"}'*)
+      echo '{"id":4,"method":"mcpServer/elicitation/request","params":{"serverName":"punchlist"}}' ;;
+    *'"id":4,"result":{"action":"accept"}'*)
       echo '{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed"}}}' ;;
   esac
 done"#;
@@ -523,6 +827,7 @@ done"#;
         let script = r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"id":1,"result":{}}' ;;
+    *'"method":"skills/list"'*) echo '{"id":4,"result":{"data":[]}}' ;;
     *'"method":"thread/start"'*) echo '{"id":2,"error":{"code":-32600,"message":"no such model"}}'; exit 0 ;;
   esac
 done"#;
@@ -542,7 +847,7 @@ done"#;
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let run = tokio::spawn(async move {
-            run_codex(&command, None, json!({}), &dir, "p", tx, stop_rx).await
+            run_codex(&command, &dir, json!({}), &dir, "p", tx, stop_rx).await
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop_tx.send(true).unwrap();
