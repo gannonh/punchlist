@@ -543,19 +543,20 @@ impl ErrorBody {
         }
     }
 
-    /// One indented line per gate result, as `pl` and the MCP server print them.
+    /// One indented line per gate result, as `pl` prints them.
     pub fn gate_lines(&self) -> Vec<String> {
         gate_lines(&self.gates)
     }
 }
 
-/// One indented line per gate result: `  ci_green: pass (3 of 3 checks passed on 9c1e77a)`.
+/// One indented line per gate result, for people: `  ci_green: pass (3 of 3 checks passed on
+/// 9c1e77a)`. The line holds the names GitHub's users wrote, so it is not for an agent.
 pub fn gate_lines(gates: &[GateResult]) -> Vec<String> {
     gates
         .iter()
         .map(|g| {
             let result = if g.passed { "pass" } else { "fail" };
-            format!("  {}: {result} ({})", g.gate, g.reason)
+            format!("  {}: {result} ({})", g.gate, g.text())
         })
         .collect()
 }

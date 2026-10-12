@@ -409,7 +409,7 @@ pub(crate) async fn check_gates(
             from: from.to_string(),
             to: transition.to.as_str().to_string(),
             gate: failed.gate.clone(),
-            reason: failed.reason.clone(),
+            reason: failed.text(),
         };
         tracing::info!(issue = id, actor = %actor_name, "refused: {refusal}");
         return Err(ApiError::GateFailed(Box::new(GateFailure {
@@ -587,7 +587,7 @@ pub(crate) async fn write_transition(
             position as i32,
             result.gate,
             if result.passed { "pass" } else { "fail" },
-            result.reason,
+            result.text(),
         )
         .execute(&mut *tx)
         .await?;

@@ -785,6 +785,7 @@ mod tests {
             gate: gate.into(),
             passed,
             reason: reason.into(),
+            outside: Vec::new(),
         };
         let gates = GateChecklist {
             from: "agent_review".into(),

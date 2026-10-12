@@ -5,6 +5,7 @@
 #   control-punchlist doctor RUN_ID       read-only health check
 #   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
 #   control-punchlist get-issue RUN_ID ISSUE  call the MCP tool `get_issue` through `pl mcp`, with no model; record it
+#   control-punchlist request-transition RUN_ID ISSUE TO  call the MCP tool `request_transition` the same way, as PUNCHLIST_AGENT_TOKEN
 #   control-punchlist sql RUN_ID QUERY    run a query on the run's database; record it
 #   control-punchlist curl RUN_ID ARGS... curl with the run's token (e.g. "$SERVER_URL/api/issues")
 #   control-punchlist webhook RUN_ID EVENT PAYLOAD_FILE [DELIVERY_ID]  post a signed GitHub webhook delivery
@@ -144,8 +145,21 @@ cmd_pl() {
 cmd_get_issue() {
   load "${1:-}"; local issue="${2:-}"
   [ -n "$issue" ] || die "usage: get-issue RUN_ID ISSUE"
-  PUNCHLIST_TOKEN="$(token)" PUNCHLIST_SERVER_URL="$SERVER_URL" PUNCHLIST_ISSUE="$issue" \
-    record "$EVIDENCE/transcript.txt" "get_issue $issue (pl mcp)" python3 -c '
+  mcp_tool "$issue" get_issue '{}'
+}
+
+# What an agent's `request_transition` prints. A person cannot make an agent's transition, so
+# the caller claims the issue through the API (features/github.md) and passes the claim's
+# `agent_token` in PUNCHLIST_AGENT_TOKEN; without it the run's person token is used.
+cmd_request_transition() {
+  load "${1:-}"; local issue="${2:-}" to="${3:-}"
+  [ -n "$issue" ] && [[ "$to" =~ ^[a-z_]+$ ]] || die "usage: request-transition RUN_ID ISSUE TO"
+  mcp_tool "$issue" request_transition "{\"to\": \"$to\"}"
+}
+
+mcp_tool() { # mcp_tool ISSUE TOOL ARGUMENTS_JSON
+  PUNCHLIST_TOKEN="${PUNCHLIST_AGENT_TOKEN:-$(token)}" PUNCHLIST_SERVER_URL="$SERVER_URL" PUNCHLIST_ISSUE="$1" \
+    record "$EVIDENCE/transcript.txt" "$2 $1 $3 (pl mcp)" python3 -c '
 import json, subprocess, sys
 mcp = subprocess.Popen([sys.argv[1], "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=subprocess.DEVNULL, text=True)
@@ -157,11 +171,12 @@ for line in mcp.stdout:
     answer = json.loads(line)
     if answer.get("id") == 1:
         send({"method": "notifications/initialized"})
-        send({"id": 2, "method": "tools/call", "params": {"name": "get_issue", "arguments": {}}})
+        send({"id": 2, "method": "tools/call",
+              "params": {"name": sys.argv[2], "arguments": json.loads(sys.argv[3])}})
     elif answer.get("id") == 2:
         print(answer["result"]["content"][0]["text"], end="")
         sys.exit(1 if answer["result"].get("isError") else 0)
-sys.exit("pl mcp ended without answering")' "$REPO/target/debug/pl"
+sys.exit("pl mcp ended without answering")' "$REPO/target/debug/pl" "$2" "$3"
 }
 
 cmd_sql() {
@@ -269,10 +284,11 @@ case "${1:-}" in
   pl) shift; cmd_pl "$@" ;;
   curl) shift; cmd_curl "$@" ;;
   get-issue) shift; cmd_get_issue "$@" ;;
+  request-transition) shift; cmd_request_transition "$@" ;;
   sql) shift; cmd_sql "$@" ;;
   webhook) shift; cmd_webhook "$@" ;;
   runner) shift; cmd_runner "$@" ;;
   runner-stop) shift; cmd_runner_stop "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
