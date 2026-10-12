@@ -60,6 +60,10 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
     })
 }
 
+/// The variable Codex's app-server takes a sign-in from when it is set, before any stored
+/// one. It is the only one: the app-server does not read `CODEX_API_KEY` or `OPENAI_API_KEY`.
+const SIGN_IN_ENV: &str = "CODEX_ACCESS_TOKEN";
+
 /// The `CODEX_HOME` of one run: a directory only this user can read, holding a link to the
 /// person's Codex sign-in and, while the run goes on, Codex's own state (its databases and
 /// shell snapshots). A link, not a copy: Codex writes a refreshed token in place, through
@@ -72,19 +76,24 @@ impl CodexHome {
     /// person's own Codex home.
     pub(crate) fn create(root: &Path, run_id: &str) -> std::io::Result<CodexHome> {
         let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
-        CodexHome::linked_to(&person, &root.join("codex-home").join(run_id))
+        let env_sign_in = std::env::var_os(SIGN_IN_ENV).is_some_and(|token| !token.is_empty());
+        CodexHome::linked_to(&person, &root.join("codex-home").join(run_id), env_sign_in)
     }
 
-    // ponytail: only a sign-in in `auth.json` reaches the run. One kept in the keyring
-    // (`cli_auth_credentials_store`) has no file to link; have the runner pass the tokens
-    // over the app-server's `account/login/start` when someone needs that.
-    fn linked_to(person_home: &Path, home: &Path) -> std::io::Result<CodexHome> {
+    /// The link is made whenever the person has an `auth.json`. Without one the home has no
+    /// link, which is enough when `env_sign_in` says the runner's environment signs Codex
+    /// in, and is refused otherwise.
+    // ponytail: a stored sign-in reaches the run only from `auth.json`. One kept in the
+    // keyring (`cli_auth_credentials_store`) has no file to link; have the runner pass the
+    // tokens over the app-server's `account/login/start` when someone needs that.
+    fn linked_to(person_home: &Path, home: &Path, env_sign_in: bool) -> std::io::Result<CodexHome> {
         use std::os::unix::fs::DirBuilderExt;
         let sign_in = person_home.join("auth.json");
-        if !sign_in.is_file() {
+        let stored = sign_in.is_file();
+        if !stored && !env_sign_in {
             return Err(std::io::Error::other(format!(
-                "no Codex sign-in at {}: run `codex login` as the person who runs the runner \
-                 (a sign-in kept in the keyring is not supported)",
+                "no Codex sign-in at {} and no {SIGN_IN_ENV}: run `codex login` as the person \
+                 who runs the runner (a sign-in kept in the keyring is not supported)",
                 sign_in.display()
             )));
         }
@@ -96,7 +105,9 @@ impl CodexHome {
             .create(home)?;
         // From here a failure removes the directory.
         let home = CodexHome(home.to_path_buf());
-        std::os::unix::fs::symlink(sign_in, home.0.join("auth.json"))?;
+        if stored {
+            std::os::unix::fs::symlink(sign_in, home.0.join("auth.json"))?;
+        }
         Ok(home)
     }
 
@@ -187,7 +198,8 @@ impl Session {
 
     /// The next JSON message, logged; `None` when the subprocess closed its output. A line
     /// that is not JSON is logged and skipped. Streaming deltas are not logged: the item
-    /// that completes carries their text whole.
+    /// that completes carries their text whole. Nor is the answer to `skills/list`: it
+    /// names the person's own skills and where they are, and the run log is the team's.
     async fn next(&mut self, timeout: Duration) -> Result<Option<Value>, String> {
         loop {
             let read = read_record(&mut self.stdout, MAX_RECORD_BYTES);
@@ -204,7 +216,11 @@ impl Session {
             let delta = (payload.as_ref())
                 .and_then(|payload| payload.get("method")?.as_str())
                 .is_some_and(|method| method.to_ascii_lowercase().ends_with("delta"));
-            if !delta {
+            let skills = payload.as_ref().is_some_and(|payload| {
+                payload.get("method").is_none()
+                    && payload.get("id").and_then(Value::as_u64) == Some(SKILLS_LIST_ID)
+            });
+            if !delta && !skills {
                 let _ = self.lines.send(text).await;
             }
             if let Some(payload) = payload {
@@ -269,11 +285,13 @@ impl Session {
         .await?;
         let listed = self.await_response(SKILLS_LIST_ID).await?;
         let found = (listed.get("data").and_then(Value::as_array))
-            .ok_or_else(|| format!("invalid skills payload: {listed}"))?;
+            .ok_or("codex's answer to skills/list has no list of skills")?;
         let disabled: Vec<Value> = (found.iter())
             .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
             .map(|skill| json!({"path": skill["path"], "enabled": false}))
             .collect();
+        let line = format!("disabled the {} skills Codex found", disabled.len());
+        let _ = self.lines.send(line).await;
         thread_params["config"]["skills"] = json!({
             "include_instructions": false,
             "bundled": {"enabled": false},
@@ -544,7 +562,7 @@ done"#
         );
 
         // Every message of the recording is a log line, in order, except the deltas.
-        let recorded: Vec<String> = ["initialize", "skills_list", "thread_start", "turn_start"]
+        let recorded: Vec<String> = ["initialize", "thread_start", "turn_start"]
             .iter()
             .flat_map(|name| {
                 let path = format!(
@@ -563,6 +581,10 @@ done"#
         let deltas = recorded.iter().filter(is_delta).count();
         assert!(deltas > 0, "the recording has streaming deltas");
         let kept: Vec<&String> = recorded.iter().filter(|l| !is_delta(l)).collect();
+        // The answer to `skills/list` is not a log line: the runner says how many instead.
+        let mut lines = lines;
+        assert_eq!(lines.remove(1), "disabled the 2 skills Codex found");
+        assert!(!lines.iter().any(|line| line.contains("/home/person")));
         assert_eq!(lines.iter().collect::<Vec<_>>(), kept);
         assert_eq!(lines.len(), RECORDED_LOG_LINES);
         assert!(lines[0].starts_with(r#"{"id":1,"result":{"userAgent":"punchlist-runner/"#));
@@ -625,7 +647,7 @@ done"#
         assert_eq!(thread["params"]["ephemeral"], true);
         // Codex 0.162.1 honors it: the thread it answers with is ephemeral and has no
         // rollout file.
-        let answer: Value = serde_json::from_str(&lines[2]).unwrap();
+        let answer: Value = serde_json::from_str(&lines[1]).unwrap();
         assert_eq!(answer["id"], 2);
         assert_eq!(answer["result"]["thread"]["ephemeral"], true);
         assert_eq!(answer["result"]["thread"]["path"], Value::Null);
@@ -648,32 +670,39 @@ done"#
         let person = temp.path().join("person");
         let home = temp.path().join("root/codex-home/run-1");
 
-        // No sign-in: refused, naming the file, and nothing is made.
+        // No sign-in, stored or in the environment: refused, naming both, and nothing is made.
         std::fs::create_dir(&person).unwrap();
-        let refused = CodexHome::linked_to(&person, &home).err().unwrap();
+        let refused = CodexHome::linked_to(&person, &home, false).err().unwrap();
         assert_eq!(
             refused.to_string(),
             format!(
-                "no Codex sign-in at {}/auth.json: run `codex login` as the person who runs \
-                 the runner (a sign-in kept in the keyring is not supported)",
+                "no Codex sign-in at {}/auth.json and no CODEX_ACCESS_TOKEN: run `codex login` \
+                 as the person who runs the runner (a sign-in kept in the keyring is not \
+                 supported)",
                 person.display()
             )
         );
+        assert!(!home.exists());
+
+        // A sign-in in the environment alone: an empty home, with no link.
+        let entries = |home: &Path| -> Vec<_> {
+            let entries = std::fs::read_dir(home).unwrap();
+            entries.map(|entry| entry.unwrap().file_name()).collect()
+        };
+        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        assert_eq!(entries(&home), Vec::<OsString>::new());
+        drop(made);
         assert!(!home.exists());
 
         // A home left by a killed run is replaced: only the link is in the new one.
         std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
         std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
         std::fs::create_dir_all(home.join("shell_snapshots")).unwrap();
-        let made = CodexHome::linked_to(&person, &home).unwrap();
+        let made = CodexHome::linked_to(&person, &home, false).unwrap();
         assert_eq!(made.path(), home);
         let mode = std::fs::metadata(&home).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-        let entries: Vec<_> = std::fs::read_dir(&home)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(entries, ["auth.json"]);
+        assert_eq!(entries(&home), ["auth.json"]);
         assert_eq!(
             std::fs::read_link(home.join("auth.json")).unwrap(),
             person.join("auth.json")
@@ -686,6 +715,11 @@ done"#
         // Dropping it removes the home and leaves the person's sign-in.
         drop(made);
         assert!(!home.exists());
+
+        // With both, the stored sign-in is still linked.
+        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        assert_eq!(entries(&home), ["auth.json"]);
+        drop(made);
         assert_eq!(
             std::fs::read_to_string(person.join("auth.json")).unwrap(),
             "the sign-in"
@@ -711,7 +745,7 @@ done"#
     const RECORDED_THREAD_ID: &str = "01a1311f-a14d-7052-9470-5458b555231a";
     const RECORDED_INPUT_TOKENS: i64 = 299_517;
     const RECORDED_OUTPUT_TOKENS: i64 = 2810;
-    const RECORDED_LOG_LINES: usize = 97;
+    const RECORDED_LOG_LINES: usize = 96;
 
     #[tokio::test]
     async fn a_failed_turn_fails_the_run_with_codexs_message_and_keeps_the_tokens() {
