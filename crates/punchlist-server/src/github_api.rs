@@ -13,7 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github::PullRequestData;
+use crate::github::{CheckRunData, PullRequestData};
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -288,6 +288,59 @@ impl GithubClient {
             .await?
             .json()
             .await?)
+    }
+
+    /// Every check run on a commit, the superseded ones too: REST, a page of 100 at a time.
+    /// The list ends on a short page; `total_count` is not trusted, as a run created between
+    /// pages shifts the list. More than `CHECK_RUN_PAGES` pages (unless `total_count` says the last was the end) is an error, so that the
+    /// refresh, which has no deadline of its own, always ends.
+    pub(crate) async fn check_runs(
+        &self,
+        owner: &str,
+        name: &str,
+        sha: &str,
+    ) -> anyhow::Result<Vec<CheckRunData>> {
+        #[derive(Deserialize)]
+        struct Page {
+            total_count: usize,
+            check_runs: Vec<CheckRunData>,
+        }
+        const PER_PAGE: usize = 100;
+        const CHECK_RUN_PAGES: usize = 10;
+        let token = self.token(owner, name).await?;
+        let mut runs: Vec<CheckRunData> = Vec::new();
+        let mut total = None;
+        for page in 1..=CHECK_RUN_PAGES {
+            let path = format!(
+                "/repos/{owner}/{name}/commits/{sha}/check-runs?filter=all&per_page={PER_PAGE}&page={page}"
+            );
+            let answer: Page = self
+                .call(&token, reqwest::Method::GET, &path)
+                .await?
+                .json()
+                .await?;
+            // A run created between two pages shifts the list: a later page repeats the
+            // boundary run, or the count moves. The read is then not one list, and fails
+            // closed; the agent asks again.
+            anyhow::ensure!(
+                *total.get_or_insert(answer.total_count) == answer.total_count
+                    && answer
+                        .check_runs
+                        .iter()
+                        .all(|new| runs.iter().all(|seen| seen.id != new.id)),
+                "GitHub's check runs on {sha} changed between pages"
+            );
+            let short = answer.check_runs.len() < PER_PAGE;
+            runs.extend(answer.check_runs);
+            // Exactly the cap fills the last page: GitHub's count says nothing is left.
+            if short || (page == CHECK_RUN_PAGES && answer.total_count <= runs.len()) {
+                return Ok(runs);
+            }
+        }
+        anyhow::bail!(
+            "GitHub lists more than {} check runs on {sha}",
+            PER_PAGE * CHECK_RUN_PAGES
+        )
     }
 
     /// Every review thread on a pull request, resolved or not. REST has no review threads, so

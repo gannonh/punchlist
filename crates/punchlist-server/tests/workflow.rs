@@ -43,9 +43,13 @@ struct Repo {
     files: HashMap<String, String>,
     pulls: Vec<Value>,
     threads: Vec<Value>,
+    /// The check runs on any commit, as the REST list answers them.
+    check_runs: Vec<Value>,
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
+    /// Like `hold`, for the answer about check runs alone.
+    runs_hold: Option<Arc<Barrier>>,
 }
 
 /// Waits out a `hold`: once to tell the test the answer is ready, once to be let go.
@@ -101,6 +105,30 @@ async fn fake_github() -> (FakeGithub, String) {
                     };
                     held(hold).await;
                     answer
+                },
+            ),
+        )
+        // The check runs of a commit, `per_page` to a page.
+        .route(
+            "/repos/{owner}/{name}/commits/{sha}/check-runs",
+            get(
+                |State(repo): State<FakeGithub>,
+                 axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
+                    let (answer, hold) = {
+                        let repo = repo.lock().unwrap();
+                        if repo.down {
+                            return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
+                        }
+                        let per_page: usize = q["per_page"].parse().unwrap();
+                        let from = (q["page"].parse::<usize>().unwrap() - 1) * per_page;
+                        let to = repo.check_runs.len().min(from + per_page);
+                        let runs = repo.check_runs.get(from..to).unwrap_or_default();
+                        let answer =
+                            json!({"total_count": repo.check_runs.len(), "check_runs": runs});
+                        (answer, repo.runs_hold.clone())
+                    };
+                    held(hold).await;
+                    (StatusCode::OK, axum::Json(answer))
                 },
             ),
         )
@@ -2648,6 +2676,342 @@ fn check_run(id: i64, status: &str, conclusion: Option<&str>) -> String {
         v["check_run"]["status"] = json!(status);
         v["check_run"]["conclusion"] = json!(conclusion);
     })
+}
+
+/// A check run as GitHub's list reports it, on #12's head commit.
+fn listed_run(id: i64, suite: i64, name: &str, conclusion: &str) -> Value {
+    json!({"id": id, "name": name, "status": "completed", "conclusion": conclusion,
+           "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "check_suite": {"id": suite}})
+}
+
+#[sqlx::test]
+async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_not_hide_it(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // One delivered pass in suite 3112233445; GitHub also has a failing `check` in another
+    // suite .
+    deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, |_| {})).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![
+            listed_run(4021877310, 3112233445, "check", "success"),
+            listed_run(7, 8, "check", "failure"),
+            listed_run(9, 8, "lint", "success"),
+        ];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "ci_green");
+    assert_eq!(
+        body["reason"],
+        "1 of 3 checks failed on 6dcb09b: `check` (failure)"
+    );
+    let rows: Vec<(i64, Option<i64>)> =
+        sqlx::query_as("SELECT id, check_suite_id FROM check_run ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [(7, Some(8)), (9, Some(8)), (4021877310, Some(3112233445))]
+    );
+
+    // GitHub cannot be asked: the request is refused, nothing moves.
+    s.github.lock().unwrap().down = true;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        // 150 runs: the failing one is on the second page.
+        repo.check_runs = (0..150)
+            .map(|i| {
+                listed_run(
+                    i + 1,
+                    5,
+                    &format!("job{i}"),
+                    if i == 120 { "failure" } else { "success" },
+                )
+            })
+            .collect();
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 150 checks failed on 6dcb09b: `job120` (failure)"
+    );
+
+    // Exactly ten full pages is read: the last of 1000 is the end.
+    s.github.lock().unwrap().check_runs = (0..1000)
+        .map(|i| {
+            listed_run(
+                i + 1,
+                5,
+                &format!("job{i}"),
+                if i == 999 { "failure" } else { "success" },
+            )
+        })
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1000 checks failed on 6dcb09b: `job999` (failure)"
+    );
+
+    // A run created between the pages shifts the list: the second page repeats run 100.
+    s.github.lock().unwrap().check_runs = (0..150)
+        .map(|i| {
+            listed_run(
+                if i < 100 { i + 1 } else { i },
+                5,
+                &format!("job{i}"),
+                "success",
+            )
+        })
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+
+    // More than ten full pages is refused rather than read without end.
+    s.github.lock().unwrap().check_runs = (0..1001)
+        .map(|i| listed_run(i + 1, 5, &format!("job{i}"), "success"))
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+}
+
+/// A request whose first read of #12's check runs is held with `listed` (run 1 of `check`).
+/// `during_first` runs while it is held; it is let go when that returns. GitHub's list is
+/// `now_listed` for the second read, which is not held unless `second` delivers a run during it.
+async fn request_with_deliveries_during_the_reads(
+    s: &Setup,
+    token: &str,
+    listed: &str,
+    first: &str,
+    now_listed: &str,
+    second: Option<&str>,
+) -> (StatusCode, Value) {
+    let (hold, hold2) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", listed)];
+        repo.runs_hold = Some(hold.clone());
+    }
+    let (request, ()) = tokio::join!(request_human_review(s, token), async {
+        let conclusion = |c: &str| check_run(1, "completed", Some(c));
+        hold.wait().await;
+        deliver(s, "check_run", "c-first", &conclusion(first)).await;
+        {
+            // GitHub's list now: what the second read sees, held if a delivery is to land.
+            let mut repo = s.github.lock().unwrap();
+            repo.check_runs = vec![listed_run(1, 5, "check", now_listed)];
+            repo.runs_hold = second.map(|_| hold2.clone());
+        }
+        hold.wait().await;
+        if let Some(delivered) = second {
+            hold2.wait().await;
+            deliver(s, "check_run", "c-second", &conclusion(delivered)).await;
+            hold2.wait().await;
+        }
+    });
+    request
+}
+
+#[sqlx::test]
+async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: PgPool) {
+    // GitHub's list was the stale success when the first read took it; the failure delivered
+    // meanwhile is what GitHub says now, so the second read (after the delivery) lists it.
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) =
+        request_with_deliveries_during_the_reads(&s, &codex, "success", "failure", "failure", None)
+            .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+}
+
+#[sqlx::test]
+async fn a_stale_pass_delivered_during_a_read_that_saw_a_failure_is_corrected_by_a_second_read(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) =
+        request_with_deliveries_during_the_reads(&s, &codex, "failure", "success", "failure", None)
+            .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+}
+
+#[sqlx::test]
+async fn a_run_renamed_during_both_reads_refuses_the_request(pool: PgPool) {
+    // Status and conclusion are `success` throughout; only the name changes under the reads.
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (hold, hold2) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.runs_hold = Some(hold.clone());
+    }
+    let renamed = |name: &str| {
+        edited(CHECK_RUN, |v| {
+            v["check_run"]["id"] = json!(1);
+            v["check_run"]["name"] = json!(name);
+        })
+    };
+    let (request, ()) = tokio::join!(request_human_review(&s, &codex), async {
+        hold.wait().await;
+        deliver(&s, "check_run", "c-first", &renamed("lint")).await;
+        {
+            let mut repo = s.github.lock().unwrap();
+            repo.check_runs = vec![listed_run(1, 5, "lint", "success")];
+            repo.runs_hold = Some(hold2.clone());
+        }
+        hold.wait().await;
+        hold2.wait().await;
+        deliver(&s, "check_run", "c-second", &renamed("e2e")).await;
+        hold2.wait().await;
+    });
+    assert_eq!(request.0, StatusCode::SERVICE_UNAVAILABLE, "{}", request.1);
+    assert_eq!(request.1["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn a_conflicting_delivery_during_both_reads_refuses_the_request(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (status, body) = request_with_deliveries_during_the_reads(
+        &s,
+        &codex,
+        "failure",
+        "success",
+        "failure",
+        Some("success"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn an_older_read_writing_before_a_newer_one_does_not_keep_its_stale_pass(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // Run 1 is already recorded, as a delivery left it.
+    deliver(
+        &s,
+        "check_run",
+        "c-started",
+        &check_run(1, "in_progress", None),
+    )
+    .await;
+    let (hold_a, hold_b) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.runs_hold = Some(hold_a.clone());
+    }
+    let conclusion = || async {
+        sqlx::query_scalar::<_, Option<String>>("SELECT conclusion FROM check_run WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    // A's list (success) is taken first. B's (failure) is taken later. A then writes before
+    // B does: B must still replace it.
+    let (_, b, ()) = tokio::join!(
+        request_human_review(&s, &codex),
+        async {
+            hold_a.wait().await;
+            {
+                let mut repo = s.github.lock().unwrap();
+                repo.check_runs = vec![listed_run(1, 5, "check", "failure")];
+                repo.runs_hold = Some(hold_b.clone());
+            }
+            request_human_review(&s, &codex).await
+        },
+        async {
+            // Once B has its list, let A go, wait for A's write, then let B go.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            hold_b.wait().await;
+            hold_a.wait().await;
+            while conclusion().await.as_deref() != Some("success") {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            // B's pull request write is dropped behind A's, and it reads once more: held, so
+            // that what B's first read left in `check_run` can be seen.
+            let hold_c = Arc::new(Barrier::new(2));
+            s.github.lock().unwrap().runs_hold = Some(hold_c.clone());
+            hold_b.wait().await;
+            let mut waited = 0;
+            while conclusion().await.as_deref() != Some("failure") {
+                waited += 1;
+                assert!(waited < 150, "B's failure never replaced A's success");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            hold_c.wait().await;
+            hold_c.wait().await;
+        }
+    );
+    // A judged its own snapshot and may have moved the issue; what matters is what stands.
+    let _ = b;
+    assert_eq!(conclusion().await.as_deref(), Some("failure"));
+    let checks: String = sqlx::query_scalar("SELECT checks FROM pull_request")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checks, "failing");
+}
+
+#[sqlx::test]
+async fn a_rerun_with_a_suite_supersedes_a_failure_recorded_with_none(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // Run 1 failed, delivered with no check suite (as before the column existed).
+    let failed = edited(CHECK_RUN, |v| {
+        v["check_run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("check_suite");
+        v["check_run"]["id"] = json!(1);
+        v["check_run"]["conclusion"] = json!("failure");
+    });
+    deliver(&s, "check_run", "c-failed", &failed).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(2, 5, "check", "success")];
+    }
+    request_human_review(&s, &codex).await;
+    let checks: String = sqlx::query_scalar("SELECT checks FROM pull_request")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checks, "passing");
 }
 
 #[sqlx::test]

@@ -111,6 +111,14 @@ pub(crate) struct CheckRunData {
     #[serde(default)]
     pub conclusion: Option<String>,
     pub head_sha: String,
+    /// GitHub's schema allows none, and a job queued by an older binary has none.
+    #[serde(default)]
+    pub check_suite: Option<CheckSuite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CheckSuite {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -451,29 +459,8 @@ pub(crate) async fn process(
             }
         }
         GithubEvent::CheckRun(event) => {
-            let run = &event.check_run;
-            sqlx::query!(
-                "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
-                     name = EXCLUDED.name, status = EXCLUDED.status,
-                     conclusion = EXCLUDED.conclusion, updated_at = now()
-                 -- A run only moves forward (queued, in_progress, completed), so a delivery
-                 -- arriving late does not undo a newer one. A rerun gets a new id.
-                 WHERE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
-                        ELSE 0 END)
-                    <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
-                        ELSE 0 END)",
-                run.id,
-                job.repository_id,
-                run.head_sha,
-                run.name,
-                run.status,
-                run.conclusion,
-            )
-            .execute(&mut *tx)
-            .await?;
-            recompute_checks(tx, job.repository_id, &run.head_sha).await?;
+            record_check_run(tx, job.repository_id, &event.check_run, None).await?;
+            recompute_checks(tx, job.repository_id, &event.check_run.head_sha).await?;
         }
         GithubEvent::Push(event) => {
             if event.changes_workflow() {
@@ -540,6 +527,95 @@ pub(crate) async fn process(
         }
     }
     Ok(true)
+}
+
+/// Records one check run. A delivery only moves a run forward (queued, in_progress,
+/// completed), so one arriving late does not undo a newer one. A read is GitHub's list as of
+/// `read_started`, the database's clock before GitHub was asked: it overwrites the status and
+/// conclusion of a row last stamped at or before then (so a recorded `completed` can give way
+/// to GitHub's `in_progress` for a restarted run). A row stamped after it, by a delivery or by
+/// a newer read, is not overwritten, and if its state differs from what the read saw the read
+/// does not guess which is current: this returns true, the pull request is read again, and a
+/// second conflict refuses the request. A delivery carries no order from its source, so its
+/// stamp cannot say that. `updated_at` is when the row's content was current: a delivery
+/// stamps the write clock (`clock_timestamp()`, not its transaction's start), a read its
+/// `read_started`, the time of its snapshot. Nothing else reads the column. Of two overlapping
+/// reads (snapshots t1 < t2): the older writes first, stamp t1, and the newer sees t1 <= t2
+/// and overwrites; the newer writes first, stamp t2, and the older sees t2 <= t1 false and is
+/// skipped (a conflict, unless it saw the same). A rerun gets a new id, in the same suite. A
+/// suite once known is kept.
+// ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
+// one when a commit has that many.
+async fn record_check_run(
+    tx: &mut sqlx::PgConnection,
+    repository_id: Uuid,
+    run: &CheckRunData,
+    read_started: Option<DateTime<Utc>>,
+) -> sqlx::Result<bool> {
+    let written = sqlx::query_scalar!(
+        "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
+                                check_suite_id, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()))
+         ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
+             name = EXCLUDED.name, status = EXCLUDED.status,
+             conclusion = EXCLUDED.conclusion,
+             check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
+             updated_at = COALESCE($8, clock_timestamp())
+         WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
+               ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
+                      ELSE 0 END)
+                  <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
+                      ELSE 0 END) END
+         RETURNING id",
+        run.id,
+        repository_id,
+        run.head_sha,
+        run.name,
+        run.status,
+        run.conclusion,
+        run.check_suite.as_ref().map(|suite| suite.id),
+        read_started,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if written.is_some() || read_started.is_none() {
+        return Ok(false);
+    }
+    // Skipped for a read: a conflict only if the recorded state is not what the read saw.
+    let recorded = sqlx::query!(
+        "SELECT name, status, conclusion FROM check_run WHERE id = $1",
+        run.id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    // Every field the gate reads: the suite is kept once known and the head is filtered.
+    Ok(recorded.name != run.name
+        || recorded.status != run.status
+        || recorded.conclusion != run.conclusion)
+}
+
+/// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before
+/// the pull request's row is locked: a `check_run` delivery's job takes the run's row and then
+/// the pull request's, and this takes them in the same order. Runs are keyed by id and need no
+/// version ordering, so they are kept even if the pull request's write is then dropped.
+async fn record_read_check_runs(
+    pool: &sqlx::PgPool,
+    repository_id: Uuid,
+    head_sha: &str,
+    mut runs: Vec<CheckRunData>,
+    read_started: DateTime<Utc>,
+) -> sqlx::Result<bool> {
+    // The head asked for is the head judged: a run listed for another is not this commit's.
+    runs.retain(|run| run.head_sha == head_sha);
+    runs.sort_by_key(|run| run.id);
+    let mut tx = pool.begin().await?;
+    let mut conflict = false;
+    for run in &runs {
+        conflict |= record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
+    }
+    recompute_checks(&mut tx, repository_id, head_sha).await?;
+    tx.commit().await?;
+    Ok(conflict)
 }
 
 /// Locks a pull request's row for a write of what GitHub answered a reader that noted the
@@ -766,14 +842,15 @@ async fn record_pull_request(
     Ok(id)
 }
 
-/// Brings the pull requests an issue's gates read, and their review threads, up to date with
-/// GitHub. A webhook reaches the server seconds after GitHub, and an agent asks for its
+/// Brings the pull requests an issue's gates read, and their review threads and check runs, up
+/// to date with GitHub. A webhook reaches the server seconds after GitHub, and an agent asks for its
 /// transition right after it opens or readies a pull request; a gate must not read the state
 /// from before. So a read that fails refuses the request (`ApiError::GithubUnreadable`)
 /// rather than let the gates pass on rows from before a push: the list, any pull request it
-/// reads, and an open pull request's review threads, whichever gates the transition has (the
-/// workflow that decides them is read later, under the issue's lock). A closed pull
-/// request's unread threads stand as recorded: no gate reads them. A pull request GitHub
+/// reads, and an open pull request's review threads and the check runs on its head commit,
+/// whichever gates the transition has (the workflow that decides them is read later, under the
+/// issue's lock). A closed pull request's threads and check runs are not read when they could
+/// not be: no gate reads them. A pull request GitHub
 /// answers 404 or 410 for is gone, and its recorded row stands.
 ///
 /// A recorded pull request that GitHub now reports closed or merged is recorded so, and
@@ -789,12 +866,17 @@ async fn record_pull_request(
 /// request known to be merged or closed. The requester asks again; the pull requests already
 /// recorded stay recorded.
 ///
-/// A pull request whose write is dropped (`claim_read`) is read once more, alone. If that
-/// write is dropped too the request goes on, and the gates read what is recorded.
+/// A pull request whose write is dropped (`claim_read`), whose head moved, or whose check
+/// runs conflict with a row written since the read began (`record_check_run`) is read once
+/// more, alone; a conflict on that read refuses the request.
+/// If a dropped write is dropped again the request goes on, and the gates read what is
+/// recorded.
 // ponytail: the read recorded then began after this request did, but it may be half of one: a
 // thread event's job reads only the threads and a close's only the pull request, and both
 // raise the one version. So `draft` or `head_sha`, or the threads, can be from before the
-// request. A version for each thing read, or reading both every time, closes that.
+// request. A version for each thing read, or reading both every time, closes that. The check
+// runs are not under the version at all: they are keyed by run id, recorded before the pull
+// request is locked, and kept when its write is dropped.
 pub(crate) async fn refresh_pull_requests(
     github: &GithubClient,
     pool: &sqlx::PgPool,
@@ -895,6 +977,30 @@ async fn refresh_once(
                 None
             }
         };
+        // The check runs `ci_green` reads are an open pull request's alone, and have to be
+        // GitHub's too.
+        if pr.state == "open" {
+            let read_started = sqlx::query_scalar!(r#"SELECT clock_timestamp() AS "at!""#)
+                .fetch_one(pool)
+                .await?;
+            let runs = (github.check_runs(owner, name, &pr.head.sha).await)
+                .map_err(|error| unreadable("check runs", error))?;
+            let conflict =
+                record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started)
+                    .await?;
+            if conflict {
+                // A row written since the read began disagrees with it: read again, after it.
+                // The second read conflicting too refuses the request.
+                if only.is_some() {
+                    return Err(unreadable(
+                        "check runs",
+                        anyhow::anyhow!("a delivery changed a check run during both reads"),
+                    ));
+                }
+                dropped.push(pr.number);
+                continue;
+            }
+        }
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let version = recorded
             .iter()
@@ -913,6 +1019,18 @@ async fn refresh_once(
         }
         let id =
             record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        // A push recorded since GitHub answered keeps its head: the runs recorded are for
+        // another commit, so this is read again.
+        if pr.state == "open"
+            && sqlx::query_scalar!("SELECT head_sha FROM pull_request WHERE id = $1", id)
+                .fetch_one(&mut *tx)
+                .await?
+                != pr.head.sha
+        {
+            tx.rollback().await?;
+            dropped.push(pr.number);
+            continue;
+        }
         record_read(&mut tx, id).await?;
         if let Some(threads) = &threads {
             forget_other_review_threads(&mut tx, id, threads).await?;
@@ -923,8 +1041,10 @@ async fn refresh_once(
     Ok(dropped)
 }
 
-/// The check runs on a commit that count: a rerun is a new run with the same name, so the
-/// newest run of each name. What `ci_green` reads and what `pull_request.checks` summarizes.
+/// The check runs on a commit that count: a rerun is a new run with the same name in the same
+/// suite, so the newest run of each name in each suite (two workflows may name a job alike).
+/// A run with no suite (recorded before `check_suite_id`, or delivered without one) counts
+/// only while no newer run of its name is on the commit: a rerun with a suite supersedes it.
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -932,8 +1052,12 @@ pub(crate) async fn newest_check_runs(
 ) -> sqlx::Result<Vec<CheckRunEvidence>> {
     sqlx::query_as!(
         CheckRunEvidence,
-        "SELECT DISTINCT ON (name) name, status, conclusion FROM check_run
-         WHERE repository_id = $1 AND head_sha = $2 ORDER BY name, id DESC",
+        "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion
+         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
+           AND NOT (c.check_suite_id IS NULL AND EXISTS (
+               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
+                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id))
+         ORDER BY c.check_suite_id, c.name, c.id DESC",
         repository_id,
         head_sha,
     )
