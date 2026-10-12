@@ -77,7 +77,7 @@ impl CodexHome {
     pub(crate) fn create(root: &Path, run_id: &str) -> std::io::Result<CodexHome> {
         let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
         let env_sign_in = std::env::var_os(SIGN_IN_ENV).is_some_and(|token| !token.is_empty());
-        CodexHome::linked_to(&person, &root.join("codex-home").join(run_id), env_sign_in)
+        CodexHome::linked_to(&person, &run_home(root, run_id)?, env_sign_in)
     }
 
     /// The link is made whenever the person has an `auth.json`. Without one the home has no
@@ -122,6 +122,13 @@ impl Drop for CodexHome {
             tracing::warn!("cannot remove the Codex home {}: {e}", self.0.display());
         }
     }
+}
+
+/// Where one run's home goes under the runner's worktree root. Absolute: Codex gets it as
+/// `CODEX_HOME` with the worktree as its directory, and a relative root would name another
+/// place from there.
+fn run_home(root: &Path, run_id: &str) -> std::io::Result<PathBuf> {
+    Ok(std::path::absolute(root)?.join("codex-home").join(run_id))
 }
 
 /// The person's own Codex home, as Codex finds it: `CODEX_HOME` when it is set and not
@@ -736,6 +743,16 @@ done"#
         assert_eq!(found(Some("/srv/codex")), PathBuf::from("/srv/codex"));
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(found(Some("rel/codex")), cwd.join("rel/codex"));
+
+        // A run's home is absolute too, whatever the worktree root is.
+        assert_eq!(
+            run_home(Path::new("rel/root"), "run-1").unwrap(),
+            cwd.join("rel/root/codex-home/run-1")
+        );
+        assert_eq!(
+            run_home(Path::new("/w"), "run-1").unwrap(),
+            PathBuf::from("/w/codex-home/run-1")
+        );
         assert_eq!(
             person_home(None, None).unwrap_err().to_string(),
             "HOME is not set"
