@@ -235,7 +235,7 @@ pub enum Problem {
     #[error("transition {from} → {to} is listed twice")]
     DuplicateTransition { from: String, to: String },
     #[error(
-        "a required check is a check's name, or `{{ name = \"…\", app = \"…\" }}` with the slug of the GitHub App that produces it"
+        "a required check is a check's name, or `{{ name = \"…\", app = \"…\" }}` with the slug of the GitHub App that produces it; a name or slug is matched exactly, so it cannot be empty or start or end with a space"
     )]
     BadRequiredCheck,
     #[error("the dispatch rule names no agent")]
@@ -599,7 +599,11 @@ impl Workflow {
                 }
                 _ => return Err(bad),
             };
-            if name.trim().is_empty() || app.trim().is_empty() {
+            // Matched exactly: one with a space at an end could never match a run.
+            if [&name, &app]
+                .iter()
+                .any(|s| s.is_empty() || s.trim() != **s)
+            {
                 return Err(bad);
             }
             required_checks.push(RequiredCheck { name, app });
@@ -1540,10 +1544,12 @@ mod tests {
             "[\"ok\",\n { name = \"deploy\", owner = \"vercel\" }]",
             "[\"ok\",\n \"\"]",
             "[\"ok\",\n { name = \"deploy\", app = \" \" }]",
+            "[\"ok\",\n \"test \"]",
+            "[\"ok\",\n { name = \"deploy\", app = \" vercel\" }]",
         ] {
             assert_eq!(
                 Workflow::from_toml(&with(list)).unwrap_err().to_string(),
-                "line 4, `gate.ci_green.required[1]`: a required check is a check's name, or `{ name = \"…\", app = \"…\" }` with the slug of the GitHub App that produces it",
+                "line 4, `gate.ci_green.required[1]`: a required check is a check's name, or `{ name = \"…\", app = \"…\" }` with the slug of the GitHub App that produces it; a name or slug is matched exactly, so it cannot be empty or start or end with a space",
                 "{list}"
             );
         }
@@ -1559,9 +1565,27 @@ mod tests {
     #[test]
     fn the_schema_describes_required_checks() {
         let schema = serde_json::to_value(workflow_schema()).unwrap();
-        let entry = &schema["$defs"]["RawCiGreen"]["properties"]["required"]["items"];
-        assert_eq!(entry["$ref"], "#/$defs/RequiredCheckEntry");
-        let table = &schema["$defs"]["RequiredCheckTable"];
+        // The schema at a path of properties, through any `$ref` on the way.
+        let at = |path: &[&str]| {
+            let mut node = &schema;
+            for key in path {
+                node = &node["properties"][key];
+                if let Some(name) = node["$ref"].as_str() {
+                    node = &schema["$defs"][name.trim_start_matches("#/$defs/")];
+                }
+            }
+            node.clone()
+        };
+        // An entry is a string, or a table with `name`, an optional `app` and no other key.
+        let entry = at(&["gate", "ci_green", "required"])["items"].clone();
+        let name = entry["$ref"].as_str().unwrap();
+        let shapes = schema["$defs"][name.trim_start_matches("#/$defs/")]["anyOf"].clone();
+        assert_eq!(shapes[0]["type"], "string");
+        let table = shapes[1]["$ref"].as_str().unwrap();
+        let table = &schema["$defs"][table.trim_start_matches("#/$defs/")];
+        let mut keys: Vec<&String> = table["properties"].as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["app", "name"]);
         assert_eq!(table["required"], serde_json::json!(["name"]));
         assert_eq!(table["additionalProperties"], false);
     }

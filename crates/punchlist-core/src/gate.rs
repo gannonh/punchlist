@@ -18,7 +18,7 @@ pub enum Gate {
     /// a merged or closed pull request causes, "it" is that pull request.
     PrNamesIssue,
     /// Every check run on that pull request's head commit completed successfully, and each
-    /// check the workflow requires has a run there from its app.
+    /// check the workflow requires has a successful run there from its app.
     CiGreen,
     /// GitHub's merge state for it is `clean` or `has_hooks`.
     Mergeable,
@@ -333,45 +333,43 @@ fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> String {
     )
 }
 
-/// A required check with no run from its app on the commit, and where the runs of its name
-/// did come from: `` `deploy` from `vercel` (ran from `github-actions`) ``. `None` when its
-/// app has a run; whether that run passed is `ci_green`'s rule for every run.
-fn missing(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<String> {
-    let mut apps: Vec<Option<&str>> = Vec::new();
-    for run in runs.iter().filter(|run| run.name == check.name) {
-        if run.app.as_deref() == Some(check.app.as_str()) {
+/// Why a required check is not satisfied, or `None` when it is: a run of its name from its app
+/// concluded `success`. A skipped or neutral run does not satisfy it: a job whose `if:` is
+/// false reports `skipped` with nothing run.
+fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<String> {
+    let named: Vec<_> = runs.iter().filter(|run| run.name == check.name).collect();
+    let owned: Vec<_> = (named.iter())
+        .filter(|run| run.app.as_deref() == Some(check.app.as_str()))
+        .collect();
+    let why = if named.is_empty() {
+        "no run".to_string()
+    } else if let Some(run) = owned.first() {
+        if (owned.iter()).any(|run| run.conclusion.as_deref() == Some("success")) {
             return None;
         }
-        if !apps.contains(&run.app.as_deref()) {
-            apps.push(run.app.as_deref());
-        }
-    }
-    let ran: Vec<String> = (apps.iter().flatten().map(|app| quoted(app))).collect();
-    let mut found = Vec::new();
-    if !ran.is_empty() {
-        found.push(format!("ran from {}", capped(ran)));
-    }
-    // A run recorded before apps were has none, and so satisfies no required check.
-    if apps.contains(&None) {
-        found.push("a run of that name has no recorded app".to_string());
-    }
-    if found.is_empty() {
-        found.push("no run".to_string());
-    }
+        run.conclusion.clone().unwrap_or(run.status.clone())
+    } else {
+        // A run recorded before apps were has none.
+        let mut apps: Vec<String> = (named.iter())
+            .map(|run| run.app.as_deref().map_or("an unknown app".into(), quoted))
+            .collect();
+        apps.sort();
+        apps.dedup();
+        format!("ran from {}", capped(apps))
+    };
     Some(format!(
-        "{} from {} ({})",
+        "{} from {} ({why})",
         quoted(&check.name),
-        quoted(&check.app),
-        found.join("; ")
+        quoted(&check.app)
     ))
 }
 
 /// Every check run on the head commit completed with success, neutral or skipped, and each
-/// required check has a run there from its app. A commit with no check run fails: right after
-/// a push GitHub has not started them, and passing then would let the request through before
-/// CI ran. `pr.check_runs` is the newest run of each name in each suite, so two workflows with
-/// a job of one name are two runs: a required check needs one of them from its app, and the
-/// other still has to pass, as every run does.
+/// required check has a run there from its app that concluded `success`. A commit with no
+/// check run fails: right after a push GitHub has not started them, and passing then would
+/// let the request through before CI ran. `pr.check_runs` is the newest run of each name in
+/// each suite, so two workflows with a job of one name are two runs: a required check needs
+/// one of them to succeed, and the other still has to pass, as every run does.
 fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<String, String> {
     // The first seven characters of the commit, as people quote one.
     let commit = pr.head_sha.get(..7).unwrap_or(&pr.head_sha);
@@ -384,16 +382,16 @@ fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<Stri
             None => pending.push(run),
         }
     }
-    // First, so that the reason names a required check that is not there whatever else ran.
-    let absent: Vec<String> = (required.iter())
-        .filter_map(|check| missing(check, &pr.check_runs))
+    // First, so that the reason names a required check whatever else ran, and once.
+    let unsatisfied: Vec<String> = (required.iter())
+        .filter_map(|check| unsatisfied(check, &pr.check_runs))
         .collect();
-    if !absent.is_empty() {
+    if !unsatisfied.is_empty() {
         Err(format!(
-            "{} of {} required checks missing on {commit}: {}",
-            absent.len(),
+            "{} of {} required checks have no successful run on {commit}: {}",
+            unsatisfied.len(),
             required.len(),
-            capped(absent)
+            capped(unsatisfied)
         ))
     } else if total == 0 {
         Err(format!("no check run has reported on commit {commit}"))
@@ -409,13 +407,8 @@ fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<Stri
             pending.len(),
             named_runs(pending.into_iter())
         ))
-    } else if required.is_empty() {
-        Ok(format!("{total} of {total} checks passed on {commit}"))
     } else {
-        Ok(format!(
-            "{total} of {total} checks passed on {commit}, the {} required among them",
-            required.len()
-        ))
+        Ok(format!("{total} of {total} checks passed on {commit}"))
     }
 }
 
@@ -799,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn ci_green_needs_each_required_check_from_its_app() {
+    fn ci_green_needs_each_required_check_to_succeed_from_its_app() {
         let required = |name: &str, app: &str| RequiredCheck {
             name: name.into(),
             app: app.into(),
@@ -808,21 +801,23 @@ mod tests {
             let result = Gate::CiGreen.evaluate(&reviewed(runs, "clean", &[]), required);
             (result.passed, result.reason)
         };
+        let refused = |why: &str| {
+            let reason = format!(
+                "1 of 1 required checks have no successful run on 3f2a1c4: \
+                 `test` from `github-actions` ({why})"
+            );
+            (false, reason)
+        };
         let test = [required("test", "github-actions")];
+        let lint = ("lint", "completed", Some("success"));
         // Present and passing.
         assert_eq!(
-            ci(&[PASSED, ("lint", "completed", Some("success"))], &test),
-            (
-                true,
-                "2 of 2 checks passed on 3f2a1c4, the 1 required among them".into()
-            )
+            ci(&[PASSED, lint], &test),
+            (true, "2 of 2 checks passed on 3f2a1c4".into())
         );
         // Missing: the checks that ran all passed, and on a commit with none.
-        let lint = ("lint", "completed", Some("success"));
-        let no_run = "1 of 1 required checks missing on 3f2a1c4: \
-                      `test` from `github-actions` (no run)";
-        assert_eq!(ci(&[lint], &test), (false, no_run.into()));
-        assert_eq!(ci(&[], &test), (false, no_run.into()));
+        assert_eq!(ci(&[lint], &test), refused("no run"));
+        assert_eq!(ci(&[], &test), refused("no run"));
         // Present from another app: the fixture's runs are GitHub Actions'.
         assert_eq!(
             ci(
@@ -831,30 +826,28 @@ mod tests {
             ),
             (
                 false,
-                "2 of 2 required checks missing on 3f2a1c4: `test` from `vercel` \
+                "2 of 2 required checks have no successful run on 3f2a1c4: `test` from `vercel` \
                  (ran from `github-actions`), `lint` from `vercel` (no run)"
                     .into()
             )
         );
-        // A run of the name that failed or is pending is there: the rule for every run says so.
+        // From its app, but not a success: skipped and neutral pass as any run, not as a
+        // required one. It is reported once, as the required check.
+        for (status, conclusion) in [
+            ("completed", Some("skipped")),
+            ("completed", Some("neutral")),
+            ("completed", Some("failure")),
+            ("queued", None),
+        ] {
+            assert_eq!(
+                ci(&[("test", status, conclusion), lint], &test),
+                refused(conclusion.unwrap_or(status))
+            );
+        }
+        // Two workflows with a job of one name: one success satisfies the requirement, and
+        // the other still fails the gate.
         assert_eq!(
-            ci(&[("test", "completed", Some("failure"))], &test),
-            (
-                false,
-                "1 of 1 checks failed on 3f2a1c4: `test` (failure)".into()
-            )
-        );
-        assert_eq!(
-            ci(&[("test", "queued", None)], &test),
-            (
-                false,
-                "1 of 1 checks pending on 3f2a1c4: `test` (queued)".into()
-            )
-        );
-        // Two workflows with a job of one name: one passing satisfies the requirement, and the
-        // other still fails the gate.
-        assert_eq!(
-            ci(&[PASSED, ("test", "completed", Some("failure"))], &test),
+            ci(&[("test", "completed", Some("failure")), PASSED], &test),
             (
                 false,
                 "1 of 2 checks failed on 3f2a1c4: `test` (failure)".into()
@@ -877,8 +870,8 @@ mod tests {
         assert_eq!(
             result.reason,
             format!(
-                "1 of 1 required checks missing on 3f2a1c4: `test` from `github-actions` \
-                 (ran from `ab{}`; a run of that name has no recorded app)",
+                "1 of 1 required checks have no successful run on 3f2a1c4: \
+                 `test` from `github-actions` (ran from `ab{}`, an unknown app)",
                 "x".repeat(78)
             )
         );

@@ -1111,6 +1111,8 @@ async fn refresh_once(
 /// suite, so the newest run of each name in each suite (two workflows may name a job alike).
 /// A run with no suite (recorded before `check_suite_id`, or delivered without one) counts
 /// only while no newer run of its name is on the commit: a rerun with a suite supersedes it.
+/// Runs of one name from two apps are two checks, so only a run from the same app supersedes
+/// it, or any run when either's app was not recorded (a row from before `app`).
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1118,12 +1120,14 @@ pub(crate) async fn newest_check_runs(
 ) -> sqlx::Result<Vec<CheckRunEvidence>> {
     sqlx::query_as!(
         CheckRunEvidence,
-        "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion, c.app
+        "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)
+                c.name, c.status, c.conclusion, c.app
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
            AND NOT (c.check_suite_id IS NULL AND EXISTS (
                SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
-                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id))
-         ORDER BY c.check_suite_id, c.name, c.id DESC",
+                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id
+                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))
+         ORDER BY c.check_suite_id, c.app, c.name, c.id DESC",
         repository_id,
         head_sha,
     )

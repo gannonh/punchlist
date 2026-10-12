@@ -2799,8 +2799,15 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
     put_workflow(&s, "b", PRD_WORKFLOW.to_string() + required);
     deliver(&s, "push", "push-1", PUSH).await;
     assert_eq!(workflow_versions(&pool).await, 1);
-    // `check` is delivered, from GitHub Actions; GitHub's list adds `lint`, from it too.
-    deliver(&s, "check_run", "c-passed", CHECK_RUN).await;
+    // `check` is delivered, from GitHub Actions and with no suite; GitHub's list adds `lint`,
+    // from it too.
+    let no_suite = |v: &mut Value| {
+        v["check_run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("check_suite");
+    };
+    deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, no_suite)).await;
     let listed = |id: i64, suite: i64, name: &str, app: &str| {
         let mut run = listed_run(id, suite, name, "success");
         run["app"] = json!({"slug": app});
@@ -2809,17 +2816,14 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
     {
         let mut repo = s.github.lock().unwrap();
         repo.pulls = vec![ready_with_merge_state("clean")];
-        repo.check_runs = vec![
-            listed(4021877310, 3112233445, "check", "github-actions"),
-            listed(9, 3112233445, "lint", "github-actions"),
-        ];
+        repo.check_runs = vec![listed(9, 8, "lint", "github-actions")];
     }
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["gate"], "ci_green");
     assert_eq!(
         body["reason"],
-        "1 of 3 required checks missing on 6dcb09b: \
+        "1 of 3 required checks have no successful run on 6dcb09b: \
          `check` from `vercel` (ran from `github-actions`)"
     );
     let rows: Vec<(String, Option<String>)> =
@@ -2833,8 +2837,9 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
         [("lint".into(), actions.clone()), ("check".into(), actions)]
     );
 
-    // The other app's run of that name reports: every required check has its app's run.
-    (s.github.lock().unwrap().check_runs).push(listed(10, 11, "check", "vercel"));
+    // The other app's run of that name reports, newer than GitHub Actions' run with no suite:
+    // it does not stand in for that run, and every required check has its app's run.
+    (s.github.lock().unwrap().check_runs).push(listed(5021877310, 11, "check", "vercel"));
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
