@@ -6,7 +6,10 @@
 
 use chrono::{DateTime, Utc};
 use punchlist_core::display_name;
-pub use punchlist_core::{Evidence, GateResult, PullRequestEvidence, PullRequestState, Role};
+pub use punchlist_core::{
+    CheckRunEvidence, Evidence, GateResult, PullRequestEvidence, PullRequestState,
+    ReviewThreadEvidence, Role,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -177,7 +180,7 @@ pub struct RunnerList {
 /// `POST /api/runs/claim`, with a runner's token.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ClaimRequest {
-    /// Wait up to this many seconds (at most 30) for an issue to enter Start before
+    /// Wait up to this many seconds (at most 30) for an issue to become claimable before
     /// answering 204.
     #[serde(default)]
     pub wait_seconds: u32,
@@ -190,8 +193,9 @@ pub struct Repository {
     pub default_branch: String,
 }
 
-/// A claimed issue: the server moved it from Start to In Progress as the runner and leased
-/// the attempt to the runner.
+/// A claimed issue, with the attempt leased to the runner. The server either moved it from
+/// Start to In Progress as the runner, or it was waiting in a status it entered that has a
+/// dispatch rule, such as Agent Review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Claim {
     pub run_id: Uuid,
@@ -199,7 +203,7 @@ pub struct Claim {
     pub attempt: i32,
     /// The agent key from the dispatch rule, such as `claude-code`.
     pub agent: String,
-    /// The issue after the move, in In Progress.
+    /// The issue, in the status whose dispatch rule the run is for.
     pub issue: Issue,
     pub repository: Repository,
     /// The branch to work on, `feature/<id>-<slug>`, or `feature/<id>-<slug>-<n>` from the
@@ -404,6 +408,20 @@ impl PullRequest {
     }
 }
 
+/// `GET /api/issues/{id}/gates`: the gates an issue has to pass for its next gated
+/// transition, each checked against the evidence recorded now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GateChecklist {
+    /// The issue's status.
+    pub from: String,
+    pub from_name: String,
+    /// The status the gated transition moves to.
+    pub to: String,
+    pub to_name: String,
+    /// In the workflow's order.
+    pub gates: Vec<GateResult>,
+}
+
 /// `POST /api/issues/{id}/comments`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreateComment {
@@ -471,14 +489,19 @@ impl ErrorBody {
 
     /// One indented line per gate result, as `pl` and the MCP server print them.
     pub fn gate_lines(&self) -> Vec<String> {
-        self.gates
-            .iter()
-            .map(|g| {
-                let result = if g.passed { "pass" } else { "fail" };
-                format!("  {}: {result} ({})", g.gate, g.reason)
-            })
-            .collect()
+        gate_lines(&self.gates)
     }
+}
+
+/// One indented line per gate result: `  ci_green: pass (3 of 3 checks passed on 9c1e77a)`.
+pub fn gate_lines(gates: &[GateResult]) -> Vec<String> {
+    gates
+        .iter()
+        .map(|g| {
+            let result = if g.passed { "pass" } else { "fail" };
+            format!("  {}: {result} ({})", g.gate, g.reason)
+        })
+        .collect()
 }
 
 #[cfg(test)]

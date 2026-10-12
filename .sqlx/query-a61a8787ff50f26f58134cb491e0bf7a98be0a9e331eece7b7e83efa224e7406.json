@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE dispatch SET run_id = $2 WHERE issue_id = $1 AND run_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a61a8787ff50f26f58134cb491e0bf7a98be0a9e331eece7b7e83efa224e7406"
+}

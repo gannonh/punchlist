@@ -9,7 +9,10 @@ mod link;
 mod workflow;
 
 pub use agent::{FenceError, agent_display_name, branch_name, fence};
-pub use gate::{Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState};
+pub use gate::{
+    CheckRunEvidence, Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState,
+    ReviewThreadEvidence,
+};
 pub use link::linked_issue_id;
 pub use workflow::{
     Dispatch, IN_PROGRESS, LoadError, Problem, Refusal, Role, START, SYSTEM_PROMPT, Status,

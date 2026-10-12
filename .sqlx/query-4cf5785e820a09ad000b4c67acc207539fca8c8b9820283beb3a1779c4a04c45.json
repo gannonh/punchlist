@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (name) name, status, conclusion FROM check_run\n         WHERE repository_id = $1 AND head_sha = $2 ORDER BY name, id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "conclusion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "conclusion"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4cf5785e820a09ad000b4c67acc207539fca8c8b9820283beb3a1779c4a04c45"
+}

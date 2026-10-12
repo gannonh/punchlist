@@ -12,6 +12,12 @@ pub enum ApiError {
     Unauthorized,
     #[error("the GitHub webhook secret is not configured")]
     GithubNotConfigured,
+    /// A gated request's read of GitHub failed, so its gates had no current evidence to
+    /// read. Nothing was checked and nothing moved; the same request can succeed later.
+    #[error(
+        "GitHub could not be read, so the gates for {0} were not checked and it did not move; request again"
+    )]
+    GithubUnreadable(String),
     #[error("issue {0} not found")]
     IssueNotFound(String),
     #[error("{0}")]
@@ -46,7 +52,9 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::GithubNotConfigured => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::GithubNotConfigured | ApiError::GithubUnreadable(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -62,6 +70,7 @@ impl ApiError {
         match self {
             ApiError::Unauthorized => "unauthorized",
             ApiError::GithubNotConfigured => "github_not_configured",
+            ApiError::GithubUnreadable(_) => "github_unreadable",
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 "not_found"
             }

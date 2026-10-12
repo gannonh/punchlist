@@ -236,6 +236,11 @@ async fn deliver(s: &Setup, event: &str, delivery: &str, body: &str) {
 /// Creates PL-1, moves it to Start, and claims it with a runner. Returns the run's agent
 /// token.
 async fn claimed_issue(s: &Setup) -> String {
+    claimed_by_runner(s).await.0
+}
+
+/// `claimed_issue`, also returning the runner's token and the claim.
+async fn claimed_by_runner(s: &Setup) -> (String, String, Value) {
     let token = &s.person.token;
     let (status, _) = call(
         &s.app,
@@ -282,7 +287,8 @@ async fn claimed_issue(s: &Setup) -> String {
             .unwrap()
             .contains("request_transition")
     );
-    claim["agent_token"].as_str().unwrap().to_string()
+    let agent = claim["agent_token"].as_str().unwrap().to_string();
+    (agent, runner_token.to_string(), claim)
 }
 
 async fn request_agent_review(s: &Setup, token: &str) -> (StatusCode, Value) {
@@ -324,7 +330,11 @@ async fn a_failing_gate_refuses_and_writes_no_transition(pool: PgPool) {
                     "title": "Fix the thing",
                     "branch": "feature/pl-1-fix-the-thing",
                     "state": "open",
-                    "draft": true
+                    "draft": true,
+                    "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+                    "merge_state": "unknown",
+                    "check_runs": [],
+                    "review_threads": []
                 }]
             },
             "gates": [
@@ -615,15 +625,57 @@ async fn a_pull_request_closed_before_it_was_ever_recorded_moves_nothing(pool: P
 }
 
 #[sqlx::test]
-async fn recorded_pull_requests_stand_when_github_is_down(pool: PgPool) {
+async fn a_gated_request_is_refused_when_github_cannot_be_read(pool: PgPool) {
     let s = setup(&pool).await;
-    let agent = claimed_issue(&s).await;
-    deliver(&s, "pull_request", "d-opened", OPENED).await;
-    deliver(&s, "pull_request", "d-ready", READY).await;
-    s.github.lock().unwrap().down = true;
+    // Everything recorded would pass: a passed check, a clean merge state, no threads.
+    let codex = issue_in_agent_review(&s).await;
+    let passed = edited(CHECK_RUN, |_| {});
+    deliver(&s, "check_run", "c-passed", &passed).await;
+    sqlx::query("UPDATE pull_request SET merge_state = 'clean'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refusal = json!({
+        "code": "github_unreadable",
+        "message": "GitHub could not be read, so the gates for PL-1 were not checked \
+                    and it did not move; request again",
+    });
+    let gate_rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM transition_gate g JOIN transition t ON t.id = g.transition_id
+             WHERE t.to_status = 'human_review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
 
-    let (status, body) = request_agent_review(&s, &agent).await;
+    // GitHub answers 500 to the pull request reads: the rows could be from before a push.
+    s.github.lock().unwrap().down = true;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, refusal);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    assert_eq!(gate_rows().await, 0);
+
+    // The pull request reads, but not its threads.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.down = false;
+        repo.graphql_down = true;
+        repo.pulls = vec![ready_with_merge_state("clean")];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, refusal);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    assert_eq!(gate_rows().await, 0);
+
+    // GitHub is back: the same request moves the issue.
+    s.github.lock().unwrap().graphql_down = false;
+    let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(gate_rows().await, 4);
 }
 
 /// A webhook fixture with `edit` applied to its JSON.
@@ -1158,7 +1210,9 @@ async fn a_payload_that_inserts_the_row_during_a_read_does_not_drop_the_read(poo
 }
 
 #[sqlx::test]
-async fn a_gated_request_reads_the_pull_request_when_its_threads_cannot_be_read(pool: PgPool) {
+async fn a_gated_request_is_refused_when_an_open_pull_requests_threads_cannot_be_read(
+    pool: PgPool,
+) {
     let s = setup(&pool).await;
     let agent = claimed_issue(&s).await;
     deliver(&s, "pull_request", "d-opened", OPENED).await;
@@ -1169,10 +1223,17 @@ async fn a_gated_request_reads_the_pull_request_when_its_threads_cannot_be_read(
         repo.graphql_down = true;
     }
 
-    // GitHub says ready; without that read the request is refused, "is a draft".
+    // This transition's gates read no thread, but which gates it has is decided later,
+    // under the issue's lock: the request is refused whichever they are.
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+    assert_eq!(issue_status(&pool).await, "in_progress");
+    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
+
+    s.github.lock().unwrap().graphql_down = false;
     let (status, body) = request_agent_review(&s, &agent).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
 }
 
 #[sqlx::test]
@@ -1485,14 +1546,7 @@ async fn events_by_kind(pool: &PgPool) -> Vec<(String, i64)> {
 async fn gates_on_pr_closed_unmerged_are_checked(pool: PgPool) {
     let s = setup(&pool).await;
     assert_eq!(
-        close_with_gate(
-            &s,
-            "pr_closed_unmerged",
-            "proof_attached",
-            "in_progress",
-            CLOSED
-        )
-        .await,
+        close_with_gate(&s, "pr_closed_unmerged", "mergeable", "in_progress", CLOSED).await,
         "in_progress"
     );
     // The actor is the refusal's, on the timeline.
@@ -1543,7 +1597,7 @@ async fn a_passing_gate_on_pr_closed_unmerged_moves_the_issue_once(pool: PgPool)
 async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     let s = setup(&pool).await;
     assert_eq!(
-        close_with_gate(&s, "pr_merged", "proof_attached", "merging", MERGED).await,
+        close_with_gate(&s, "pr_merged", "ci_green", "merging", MERGED).await,
         "merging"
     );
     assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
@@ -1568,11 +1622,8 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     assert_eq!(detail["kind"], "refusal");
     assert_eq!(detail["from"], "merging");
     assert_eq!(detail["to"], "done");
-    assert_eq!(detail["gate"], "proof_attached");
-    assert_eq!(
-        detail["reason"],
-        "Punchlist does not evaluate the proof_attached gate yet"
-    );
+    assert_eq!(detail["gate"], "ci_green");
+    assert_eq!(detail["reason"], MERGED_REASON);
     assert_eq!(detail["delivery_id"], "closed-1");
 
     // The PRD's way out of Merging: a person sends the issue back to Todo.
@@ -2044,4 +2095,482 @@ async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPoo
         moved["event"]["detail"]["workflow_version"],
         first["version"]
     );
+}
+
+const CHECK_RUN: &str = include_str!("fixtures/github/check_run_completed.json");
+
+/// Every dispatch of PL-1 that waits for a runner: the status its transition moved to, its
+/// agent, and whether that transition is the issue's latest.
+async fn waiting_dispatches(pool: &PgPool) -> Vec<(String, String, bool)> {
+    sqlx::query_as(
+        "SELECT t.to_status, d.agent, t.id = (SELECT id FROM transition
+             WHERE issue_id = 'PL-1' ORDER BY created_at DESC LIMIT 1)
+         FROM dispatch d JOIN transition t ON t.id = d.transition_id
+         WHERE d.issue_id = 'PL-1' AND d.run_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn register(s: &Setup, name: &str, agents: &[&str]) -> String {
+    let (status, runner) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/runners",
+        Some(json!({"name": name, "agents": agents})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    runner["token"].as_str().unwrap().to_string()
+}
+
+async fn claim(s: &Setup, runner: &str) -> (StatusCode, Value) {
+    call(&s.app, runner, "POST", "/api/runs/claim", Some(json!({}))).await
+}
+
+async fn finish(s: &Setup, runner: &str, claim: &Value) {
+    let run = claim["run_id"].as_str().unwrap();
+    let (status, body) = call(
+        &s.app,
+        runner,
+        "POST",
+        &format!("/api/runs/{run}/finish"),
+        Some(json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn each_entry_into_agent_review_enqueues_one_dispatch_and_one_runner_claims_it(pool: PgPool) {
+    let s = setup(&pool).await;
+    // A person may move the issue in and out of Agent Review, so the test can do it quickly.
+    let gated = "to = \"agent_review\"\nby = [\"agent\"]\ngates = [\"pr_open\", \"pr_ready\", \"pr_names_issue\"]";
+    let workflow = PRD_WORKFLOW
+        .replace(gated, "to = \"agent_review\"\nby = [\"agent\", \"person\"]")
+        + "\n[[transition]]\nfrom = \"agent_review\"\nto = \"in_progress\"\nby = [\"person\"]\n";
+    assert!(!workflow.contains(gated));
+    put_workflow(&s, "b", workflow);
+    let system = "Call request_transition.\n".to_string();
+    (s.github.lock().unwrap().files).insert("prompts/system.md".into(), system);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+
+    let (_, claude_runner, first) = claimed_by_runner(&s).await;
+    // The claim's own dispatch was claimed in its transaction.
+    assert_eq!(waiting_dispatches(&pool).await, []);
+    let codex = ("agent_review".to_string(), "codex".to_string(), true);
+    let claude = ("in_progress".to_string(), "claude-code".to_string(), true);
+    for (to, waiting) in [
+        ("agent_review", &codex),
+        ("in_progress", &claude),
+        ("agent_review", &codex),
+        ("in_progress", &claude),
+        ("agent_review", &codex),
+    ] {
+        let (status, body) = call(
+            &s.app,
+            &s.person.token,
+            "POST",
+            "/api/issues/PL-1/transitions",
+            Some(json!({"to": to})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // One for the transition just made, and none left from the ones before it.
+        assert_eq!(
+            waiting_dispatches(&pool).await,
+            std::slice::from_ref(waiting)
+        );
+    }
+
+    // The run that was working on the issue is still running, so the dispatch waits; and a
+    // runner that cannot run Codex is not offered it.
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    let other_codex_runner = register(&s, "r3", &["claude-code", "codex"]).await;
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    finish(&s, &claude_runner, &first).await;
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+
+    // Two runners that can run Codex ask at once: one run.
+    let (one, two) = tokio::join!(claim(&s, &codex_runner), claim(&s, &other_codex_runner));
+    let mut statuses = [one.0, two.0];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::NO_CONTENT]);
+    let second = if one.0 == StatusCode::OK {
+        one.1
+    } else {
+        two.1
+    };
+    assert_eq!(second["agent"], "codex");
+    assert_eq!(second["issue"]["status"], "agent_review");
+    assert_eq!(second["branch"], first["branch"]);
+    assert_eq!(second["branch"], "feature/pl-1-fix-the-thing");
+    assert_eq!(second["prompt"], "Call request_transition.\n\nReview it.");
+    assert_eq!(waiting_dispatches(&pool).await, []);
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        claim(&s, &other_codex_runner).await.0,
+        StatusCode::NO_CONTENT
+    );
+
+    let runs: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT status, agent, outcome FROM run ORDER BY started_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        runs,
+        [
+            (
+                "in_progress".into(),
+                "claude-code".into(),
+                "succeeded".into()
+            ),
+            ("agent_review".into(), "codex".into(), "running".into()),
+        ]
+    );
+    // The claim made no transition: the last one is still the person's move in.
+    let moves: i64 = sqlx::query_scalar("SELECT count(*) FROM transition WHERE issue_id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moves, 2 + 1 + 5);
+    let claimed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch d JOIN run r ON r.id = d.run_id AND r.agent = d.agent",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(claimed, 2);
+}
+
+#[sqlx::test]
+async fn a_long_polling_codex_runner_claims_once_the_run_before_it_ends(pool: PgPool) {
+    let s = setup(&pool).await;
+    let (agent, runner, first) = claimed_by_runner(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    deliver(&s, "pull_request", "d-ready", READY).await;
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    let waiting = {
+        let (app, token) = (s.app.clone(), codex_runner.clone());
+        let wait = Some(json!({"wait_seconds": 20}));
+        tokio::spawn(async move { call(&app, &token, "POST", "/api/runs/claim", wait).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // The issue enters Agent Review while the run that asked for the move still runs.
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished());
+
+    finish(&s, &runner, &first).await;
+    let (status, claim) = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("the waiting runner is woken when the run ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["agent"], "codex");
+    assert_eq!(claim["issue"]["status"], "agent_review");
+}
+
+/// PL-1 in Agent Review with pull request #12 open and ready, its Claude Code run ended, and
+/// its dispatch for Codex waiting.
+async fn waiting_in_agent_review(s: &Setup) {
+    let (agent, runner, first) = claimed_by_runner(s).await;
+    deliver(s, "pull_request", "d-opened", OPENED).await;
+    deliver(s, "pull_request", "d-ready", READY).await;
+    let (status, body) = request_agent_review(s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    finish(s, &runner, &first).await;
+}
+
+#[sqlx::test]
+async fn a_dispatch_keeps_the_agent_and_prompt_of_the_workflow_it_was_queued_under(pool: PgPool) {
+    let s = setup(&pool).await;
+    // Queued under the built-in workflow: Codex, with its review prompt.
+    waiting_in_agent_review(&s).await;
+    let queued_under = punchlist_core::default_workflow().prompt_for("agent_review");
+
+    // A version loads that gives Agent Review to Claude Code, with other prompts.
+    let reassigned = PRD_WORKFLOW.replace("agent = \"codex\"", "agent = \"claude-code\"");
+    assert_ne!(reassigned, PRD_WORKFLOW);
+    put_workflow(&s, "c", reassigned);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+
+    // The waiting dispatch is still Codex's, and its run gets the prompt that came with it.
+    let claude_runner = register(&s, "r2", &["claude-code"]).await;
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    let codex_runner = register(&s, "r3", &["codex"]).await;
+    let (status, claim) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["agent"], "codex");
+    assert_eq!(claim["prompt"], queued_under);
+    assert!(queued_under.contains("ready for a person to review"));
+}
+
+#[sqlx::test]
+async fn a_waiting_dispatch_on_an_older_issue_is_claimed_before_a_started_one(pool: PgPool) {
+    let s = setup(&pool).await;
+    waiting_in_agent_review(&s).await;
+    let token = &s.person.token;
+    let (status, _) = call(
+        &s.app,
+        token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Next"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for to in ["todo", "start"] {
+        let moved = Some(json!({"to": to}));
+        let (status, _) = call(&s.app, token, "POST", "/api/issues/PL-2/transitions", moved).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // A runner that can run both takes them in issue order, whichever kind each is.
+    let runner = register(&s, "r2", &["claude-code", "codex"]).await;
+    let (_, first) = claim(&s, &runner).await;
+    assert_eq!(
+        (&first["issue"]["id"], &first["agent"]),
+        (&json!("PL-1"), &json!("codex"))
+    );
+    let (_, second) = claim(&s, &runner).await;
+    assert_eq!(
+        (&second["issue"]["id"], &second["agent"]),
+        (&json!("PL-2"), &json!("claude-code"))
+    );
+    assert_eq!(second["issue"]["status"], "in_progress");
+    assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
+}
+
+/// PL-1 in Agent Review with pull request #12 open and ready, and a Codex run claimed for
+/// it. Returns that run's agent token.
+async fn issue_in_agent_review(s: &Setup) -> String {
+    waiting_in_agent_review(s).await;
+    let codex_runner = register(s, "r2", &["codex"]).await;
+    let (status, claim) = claim(s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["agent"], "codex");
+    claim["agent_token"].as_str().unwrap().to_string()
+}
+
+async fn request_human_review(s: &Setup, token: &str) -> (StatusCode, Value) {
+    call(
+        &s.app,
+        token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "human_review"})),
+    )
+    .await
+}
+
+/// What GitHub says of pull request #12 now: ready, with this merge state.
+fn ready_with_merge_state(state: &str) -> Value {
+    let mut pr = pull_request_now(READY);
+    pr["mergeable_state"] = json!(state);
+    pr
+}
+
+/// A check run delivery for #12's head commit.
+fn check_run(id: i64, status: &str, conclusion: Option<&str>) -> String {
+    edited(CHECK_RUN, |v| {
+        v["action"] = json!(if status == "completed" {
+            "completed"
+        } else {
+            "created"
+        });
+        v["check_run"]["id"] = json!(id);
+        v["check_run"]["status"] = json!(status);
+        v["check_run"]["conclusion"] = json!(conclusion);
+    })
+}
+
+#[sqlx::test]
+async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_accepted(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    s.github.lock().unwrap().pulls = vec![ready_with_merge_state("clean")];
+    let refused = |body: &Value| {
+        assert_eq!(body["code"], "gate_failed", "{body}");
+        assert_eq!(body["gates"].as_array().unwrap().len(), 4);
+        (
+            body["gate"].as_str().unwrap().to_string(),
+            body["reason"].as_str().unwrap().to_string(),
+        )
+    };
+
+    // No check run has reported on the head commit.
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused(&body),
+        (
+            "ci_green".into(),
+            "no check run has reported on commit 6dcb09b".into()
+        )
+    );
+
+    // A failed check: the refusal names it and the head commit.
+    deliver(
+        &s,
+        "check_run",
+        "c-failed",
+        &check_run(1, "completed", Some("failure")),
+    )
+    .await;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused(&body),
+        (
+            "ci_green".into(),
+            "1 of 1 checks failed on 6dcb09b: `check` (failure)".into()
+        )
+    );
+    assert_eq!(
+        body["message"],
+        "agent_review → human_review needs gate ci_green: \
+         1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+    assert_eq!(
+        body["evidence"]["pull_requests"][0]["check_runs"],
+        json!([{"name": "check", "status": "completed", "conclusion": "failure"}])
+    );
+
+    // Its rerun is the newest run of that name: pending, then passed.
+    deliver(
+        &s,
+        "check_run",
+        "c-rerun",
+        &check_run(2, "in_progress", None),
+    )
+    .await;
+    let (_, body) = request_human_review(&s, &codex).await;
+    assert_eq!(
+        refused(&body),
+        (
+            "ci_green".into(),
+            "1 of 1 checks pending on 6dcb09b: `check` (in_progress)".into()
+        )
+    );
+    deliver(
+        &s,
+        "check_run",
+        "c-passed",
+        &check_run(2, "completed", Some("success")),
+    )
+    .await;
+
+    // GitHub has not computed the merge state: the gate says so rather than guess.
+    s.github.lock().unwrap().pulls = vec![ready_with_merge_state("unknown")];
+    let (_, body) = request_human_review(&s, &codex).await;
+    assert_eq!(
+        refused(&body),
+        (
+            "mergeable".into(),
+            "GitHub has not computed pull request #12's merge state yet; request again".into()
+        )
+    );
+
+    // An unresolved thread, which GitHub sent no event for. Its file changed under it, so
+    // GitHub reports only the line it was on.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.threads = vec![json!({
+            "id": "PRRT_kwDOA1b2c84AbCdE", "isResolved": false,
+            "path": "src/lib.rs", "line": null, "originalLine": 7,
+        })];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused(&body),
+        (
+            "no_open_threads".into(),
+            "1 unresolved review thread on pull request #12: src/lib.rs:7".into()
+        )
+    );
+    let open: i64 = sqlx::query_scalar("SELECT count(*) FROM review_thread WHERE resolved = false")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(open, 1);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    // The checklist `pl issue show` prints reads the same recorded evidence.
+    let (status, checklist) = call(
+        &s.app,
+        &s.person.token,
+        "GET",
+        "/api/issues/PL-1/gates",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{checklist}");
+    assert_eq!(checklist["from"], "agent_review");
+    assert_eq!(checklist["to_name"], "Human Review");
+    let passed: Vec<(&str, bool)> = (checklist["gates"].as_array().unwrap().iter())
+        .map(|g| (g["gate"].as_str().unwrap(), g["passed"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(
+        passed,
+        [
+            ("ci_green", true),
+            ("mergeable", true),
+            ("no_open_threads", false),
+            ("proof_attached", true)
+        ]
+    );
+
+    // Resolved: the request is accepted, and the transition records the four results.
+    s.github.lock().unwrap().threads[0]["isResolved"] = json!(true);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "human_review");
+    assert_eq!(body["event"]["actor"]["name"], "Codex");
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT g.gate, g.result, g.reason FROM transition_gate g
+         JOIN transition t ON t.id = g.transition_id
+         WHERE t.to_status = 'human_review' ORDER BY g.position",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let row = |gate: &str, reason: &str| (gate.to_string(), "pass".to_string(), reason.to_string());
+    assert_eq!(
+        rows,
+        [
+            row("ci_green", "1 of 1 checks passed on 6dcb09b"),
+            row(
+                "mergeable",
+                "pull request #12 has no conflicts and GitHub's merge state is clean"
+            ),
+            row("no_open_threads", "1 review thread, all resolved"),
+            row(
+                "proof_attached",
+                "passes vacuously: Punchlist records no proof yet, so nothing was checked"
+            ),
+        ]
+    );
+    // Human Review has no dispatch rule and no gated transition.
+    assert_eq!(waiting_dispatches(&pool).await, []);
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "GET",
+        "/api/issues/PL-1/gates",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }

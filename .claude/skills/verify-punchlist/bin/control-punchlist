@@ -176,8 +176,14 @@ cmd_runner() {
   # Its own clones and worktrees, so two runners in one run never share a checkout.
   local root="$RUN_DIR/worktrees/$name"
   mkdir -p "$root"
+  # The live-check models (SKILL.md). `--codex-model` only where this checkout's `pl` has it,
+  # so the same script drives an older `main`.
+  local models=(--model haiku)
+  if "$REPO/target/debug/pl" runner start --help | grep -q -- --codex-model; then
+    models+=(--codex-model gpt-6-luna)
+  fi
   (cd "$REPO" && PUNCHLIST_CONFIG="$CONFIG" exec setsid "$REPO/target/debug/pl" runner start \
-     --name "$name" --worktree-root "$root" --model haiku "$@" </dev/null >"$log" 2>&1) &
+     --name "$name" --worktree-root "$root" "${models[@]}" "$@" </dev/null >"$log" 2>&1) &
   local pgid=$!
   echo "$pgid" >"$pidfile"
   for _ in $(seq 1 60); do

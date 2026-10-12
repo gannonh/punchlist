@@ -49,18 +49,48 @@ pub(crate) async fn stored_workflow(
     let Some(row) = row else {
         return Ok((default_workflow().clone(), None, None));
     };
+    let (workflow, invalid) = parse_stored(&row.workflow_toml, row.prompts)?;
+    Ok((workflow, Some(row.commit_sha), invalid))
+}
+
+/// A `workflow_version` row as a workflow, and why a push of it would be refused today.
+fn parse_stored(
+    workflow_toml: &str,
+    prompts: serde_json::Value,
+) -> sqlx::Result<(Workflow, Option<String>)> {
     // Only versions that loaded are stored, so one that no longer parses is corrupt data. A
     // version stored before a runtime rule (KAT-3750) comes back with that rule's problem.
     let corrupt = |e: String| sqlx::Error::Decode(format!("stored workflow: {e}").into());
     let prompts: BTreeMap<String, String> =
-        serde_json::from_value(row.prompts).map_err(|e| corrupt(e.to_string()))?;
+        serde_json::from_value(prompts).map_err(|e| corrupt(e.to_string()))?;
     let (workflow, invalid) =
-        Workflow::from_stored(&row.workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
-    Ok((
-        workflow,
-        Some(row.commit_sha),
-        invalid.map(|e| e.to_string()),
-    ))
+        Workflow::from_stored(workflow_toml, prompts).map_err(|e| corrupt(e.to_string()))?;
+    Ok((workflow, invalid.map(|e| e.to_string())))
+}
+
+/// The workflow version the issue's waiting dispatch was queued under: the one its
+/// transition recorded. The dispatch's agent is that version's, so the run's prompt is too,
+/// whatever version has loaded since.
+pub(crate) async fn dispatch_workflow(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    issue_id: &str,
+) -> sqlx::Result<Workflow> {
+    let row = sqlx::query!(
+        "SELECT v.workflow_toml, v.prompts
+         FROM dispatch d JOIN transition t ON t.id = d.transition_id
+         JOIN workflow_version v ON v.workspace_id = $1 AND v.hash = t.workflow_version
+         WHERE d.issue_id = $2 AND d.run_id IS NULL",
+        workspace_id,
+        issue_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    match row {
+        Some(row) => Ok(parse_stored(&row.workflow_toml, row.prompts)?.0),
+        // No stored version has that hash: the transition was made under the built-in one.
+        None => Ok(default_workflow().clone()),
+    }
 }
 
 /// Logs each workspace whose active version a push would be refused for today, and returns

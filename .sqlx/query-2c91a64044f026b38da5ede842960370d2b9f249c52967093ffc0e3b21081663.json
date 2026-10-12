@@ -1,0 +1,51 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.status AS \"from\",\n                  CASE WHEN i.status = $4 THEN $5 ELSE d.agent END AS \"agent!\"\n           FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL\n           WHERE i.workspace_id = $1 AND ($3::text IS NULL OR i.id = $3)\n             AND CASE WHEN i.status = $4 THEN $5::text IS NOT NULL\n                      ELSE d.agent = ANY($2)\n                           AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id\n                                           AND run.outcome = 'running')\n                 END\n           ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "from",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agent!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "2c91a64044f026b38da5ede842960370d2b9f249c52967093ffc0e3b21081663"
+}

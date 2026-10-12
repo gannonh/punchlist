@@ -8,8 +8,8 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
-    ChecksState, CreateIssue, Event, EventDetail, Issue, PullRequest, Run, RunOutcome, Runner,
-    WorkflowInfo,
+    ChecksState, CreateIssue, Event, EventDetail, GateChecklist, Issue, PullRequest, Run,
+    RunOutcome, Runner, WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -73,7 +73,7 @@ pub enum PullRequestCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum RunnerCommand {
-    /// Register this machine as a runner and work on issues in Start until stopped.
+    /// Register this machine as a runner and work on the issues it can claim until stopped.
     Start(RunnerStart),
     /// List registered runners and their last heartbeat.
     List,
@@ -94,6 +94,16 @@ pub struct RunnerStart {
     /// The `claude` executable.
     #[arg(long)]
     pub claude_command: Option<String>,
+    /// The agents this runner can run, reported to the server when it registers:
+    /// `claude-code`, `codex`. Default: `claude-code`.
+    #[arg(long, value_delimiter = ',')]
+    pub agents: Option<Vec<String>>,
+    /// The model a Codex run starts with, such as `gpt-6-luna`.
+    #[arg(long)]
+    pub codex_model: Option<String>,
+    /// The `codex` executable.
+    #[arg(long)]
+    pub codex_command: Option<String>,
     /// Issues to work on at once.
     #[arg(long)]
     pub max_concurrent: Option<usize>,
@@ -151,6 +161,8 @@ pub struct RunnerSection {
     pub worktree_root: Option<String>,
     pub claude_command: Option<String>,
     pub model: Option<String>,
+    pub codex_command: Option<String>,
+    pub codex_model: Option<String>,
     pub max_concurrent: Option<usize>,
 }
 
@@ -279,6 +291,10 @@ pub fn runner_config(
         .claude_command
         .or_else(|| table.claude_command.clone())
         .unwrap_or_else(|| "claude".to_string());
+    let codex_command = flags
+        .codex_command
+        .or_else(|| table.codex_command.clone())
+        .unwrap_or_else(|| "codex".to_string());
     punchlist_runner::RunnerConfig {
         server_url: config.server_url.clone(),
         token: config.token.clone(),
@@ -286,14 +302,16 @@ pub fn runner_config(
             .name
             .or_else(|| table.name.clone())
             .unwrap_or_else(|| hostname.to_string()),
-        agents: table
+        agents: flags
             .agents
-            .clone()
+            .or_else(|| table.agents.clone())
             .unwrap_or_else(|| vec!["claude-code".to_string()]),
         worktree_root: expand_home(&worktree_root, home),
         claude_command: expand_home(&claude_command, home),
         mcp_command: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pl")),
         model: flags.model.or_else(|| table.model.clone()),
+        codex_command: expand_home(&codex_command, home),
+        codex_model: flags.codex_model.or_else(|| table.codex_model.clone()),
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
@@ -396,11 +414,12 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         IssueCommand::Show { id } => {
             let (issue, events) = issue_with_timeline(client, &id).await?;
             let pull_requests = client.issue_pull_requests(&id).await?;
+            let gates = client.issue_gates(&id).await?;
             let runs = client.issue_runs(&id).await?;
             write!(
                 out,
                 "{}{}",
-                render_show(&issue, &pull_requests, &events),
+                render_show(&issue, &pull_requests, gates.as_ref(), &events),
                 render_runs(&runs)
             )?;
         }
@@ -484,7 +503,12 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
     }
 }
 
-fn render_show(issue: &Issue, pull_requests: &[PullRequest], events: &[Event]) -> String {
+fn render_show(
+    issue: &Issue,
+    pull_requests: &[PullRequest],
+    gates: Option<&GateChecklist>,
+    events: &[Event],
+) -> String {
     let mut text = format!(
         "{}  {}\nStatus: {}\n",
         issue.id, issue.title, issue.status_name
@@ -495,6 +519,9 @@ fn render_show(issue: &Issue, pull_requests: &[PullRequest], events: &[Event]) -
         text.push('\n');
     }
     text.push_str(&render_pull_requests(pull_requests));
+    if let Some(gates) = gates {
+        text.push_str(&render_gates(gates));
+    }
     text.push_str("\nTimeline\n");
     if events.is_empty() {
         text.push_str("  No transitions yet.\n");
@@ -583,6 +610,19 @@ fn render_pull_requests(pull_requests: &[PullRequest]) -> String {
         ));
     }
     text
+}
+
+/// The `Gates` section of `pl issue show`: the checklist for the issue's next gated
+/// transition, then how many pass.
+fn render_gates(checklist: &GateChecklist) -> String {
+    let passed = checklist.gates.iter().filter(|gate| gate.passed).count();
+    format!(
+        "\nGates for {} → {}\n{}\n  {passed} of {} gates pass\n",
+        checklist.from_name,
+        checklist.to_name,
+        gate_lines(&checklist.gates).join("\n"),
+        checklist.gates.len(),
+    )
 }
 
 /// `pl pr unlinked`.
@@ -726,6 +766,29 @@ mod tests {
         if let EventDetail::Transition { delivery_id, .. } = &mut moved {
             *delivery_id = Some("d-1".into());
         }
+        let gate = |gate: &str, passed, reason: &str| punchlist_api::GateResult {
+            gate: gate.into(),
+            passed,
+            reason: reason.into(),
+        };
+        let gates = GateChecklist {
+            from: "agent_review".into(),
+            from_name: "Agent Review".into(),
+            to: "human_review".into(),
+            to_name: "Human Review".into(),
+            gates: vec![
+                gate(
+                    "ci_green",
+                    false,
+                    "1 of 3 checks failed on 3f2a1c4: `e2e` (failure)",
+                ),
+                gate(
+                    "mergeable",
+                    true,
+                    "pull request #12 has no conflicts and GitHub's merge state is clean",
+                ),
+            ],
+        };
         let events = [
             event(punchlist_api::Role::Github, "gannonh", moved),
             event(
@@ -751,9 +814,13 @@ mod tests {
             ),
         ];
         assert_eq!(
-            render_show(&issue, &[], &events),
+            render_show(&issue, &[], Some(&gates), &events),
             "PL-7  Fix\nStatus: Agent Review\n\
              \nPull requests\n  None linked.\n\
+             \nGates for Agent Review → Human Review\n\
+             \x20 ci_green: fail (1 of 3 checks failed on 3f2a1c4: `e2e` (failure))\n\
+             \x20 mergeable: pass (pull request #12 has no conflicts and GitHub's merge state is clean)\n\
+             \x20 1 of 2 gates pass\n\
              \nTimeline\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  In Progress → Agent Review  [delivery d-1]\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  commented:\n\
@@ -845,6 +912,8 @@ mod tests {
             PathBuf::from("/h/.local/share/punchlist/worktrees")
         );
         assert_eq!(defaults.claude_command, PathBuf::from("claude"));
+        assert_eq!(defaults.codex_command, PathBuf::from("codex"));
+        assert_eq!(defaults.codex_model, None);
         assert_eq!((defaults.model, defaults.max_concurrent), (None, 1));
 
         let table = config(
@@ -853,10 +922,14 @@ mod tests {
         .unwrap();
         let flags = RunnerStart {
             name: Some("f".into()),
+            agents: Some(vec!["claude-code".into(), "codex".into()]),
+            codex_model: Some("gpt-6-luna".into()),
             ..RunnerStart::default()
         };
         let merged = runner_config(&table, flags, Some("/h"), "box");
         assert_eq!(merged.name, "f");
+        assert_eq!(merged.agents, ["claude-code", "codex"]);
+        assert_eq!(merged.codex_model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(merged.worktree_root, PathBuf::from("/h/wt"));
         assert_eq!(merged.model.as_deref(), Some("haiku"));
         assert_eq!(merged.max_concurrent, 3);

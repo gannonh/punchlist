@@ -1,6 +1,6 @@
 //! The Claude Code adapter: builds the prompt, runs `claude` in the worktree, streams its
 //! output as log lines and reads the final `result` line for the outcome and token counts.
-//! New code. The Codex adapter that ADR 0005 names comes with R9.
+//! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -145,12 +145,12 @@ struct ResultLine {
 /// The most of one output record the runner keeps. The rest of a longer record, up to its
 /// newline, is read and discarded, so one record cannot grow memory without limit. Large
 /// enough for a `result` line; the log flusher clips what it sends further.
-const MAX_RECORD_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 /// Reads one newline-terminated record, keeping at most `max` bytes of it. `None` at the end
 /// of input. A cut record ends with `… [truncated]`. A trailing `\r` is dropped, as
 /// `lines()` does.
-async fn read_record<R: AsyncBufRead + Unpin>(
+pub(crate) async fn read_record<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
 ) -> std::io::Result<Option<String>> {
@@ -364,7 +364,7 @@ pub(crate) fn kill_group(leader: Option<u32>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -409,7 +409,7 @@ mod tests {
         let script = r#"i=0
 while [ $i -lt 30 ]; do echo "line $i"; i=$((i+1)); done
 echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":5,"output_tokens":7}}'"#;
-        let command = fake_claude(temp.path(), script);
+        let command = fake_agent(temp.path(), script);
         let (tx, mut rx) = mpsc::channel(1);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let drain = tokio::spawn(async move {
@@ -462,12 +462,12 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         }
     }
 
-    /// Writes an executable fake `claude`. Another test thread that forks while the file is
+    /// Writes an executable fake agent (a fake `claude`, or a fake `codex`). Another test thread that forks while the file is
     /// open for writing holds the write handle until its child execs, and an exec of the
     /// file fails with ETXTBSY meanwhile. Probe until one exec succeeds: the handle is then
     /// gone from every process, and nothing can copy it again, so later execs are safe.
-    fn fake_claude(dir: &Path, script: &str) -> PathBuf {
-        let path = dir.join("claude");
+    pub(crate) fn fake_agent(dir: &Path, script: &str) -> PathBuf {
+        let path = dir.join("agent");
         std::fs::write(
             &path,
             format!("#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\n{script}\n"),
@@ -480,15 +480,15 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 Err(e) if e.raw_os_error() == Some(26) => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                Err(e) => panic!("cannot run the fake claude: {e}"),
+                Err(e) => panic!("cannot run the fake agent: {e}"),
             }
         }
-        panic!("the fake claude stayed busy");
+        panic!("the fake agent stayed busy");
     }
 
     async fn run_fake(script: &str, prompt: &str) -> (AgentExit, Vec<String>) {
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), script);
+        let command = fake_agent(temp.path(), script);
         // Drained only after the agent exits, so big enough for a whole run.
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
@@ -659,7 +659,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     #[tokio::test]
     async fn the_stop_signal_kills_the_agent() {
         let temp = tempfile::tempdir().unwrap();
-        let command = fake_claude(temp.path(), "sleep 30");
+        let command = fake_agent(temp.path(), "sleep 30");
         let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let handle = tokio::spawn(async move {
@@ -703,7 +703,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let temp = tempfile::tempdir().unwrap();
         let pidfile = temp.path().join("child.pid");
         let script = format!("sleep 30 &\necho $! > {}\nwait", pidfile.display());
-        let command = fake_claude(temp.path(), &script);
+        let command = fake_agent(temp.path(), &script);
         let (tx, _rx) = mpsc::channel(16);
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();

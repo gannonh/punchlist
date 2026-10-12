@@ -756,6 +756,16 @@ impl Workflow {
         }
     }
 
+    /// The gated transition an actor can request from `from`, such as `agent_review →
+    /// human_review`: the one whose gates an issue in `from` has to pass next. `None` when
+    /// no requested transition from `from` has gates. This is the only rule for which
+    /// transition a gate checklist shows: the first in the file's order, when two qualify.
+    pub fn next_gated(&self, from: &str) -> Option<&Transition> {
+        self.transitions
+            .iter()
+            .find(|t| t.on.is_none() && !t.gates.is_empty() && t.from.iter().any(|f| f.0 == from))
+    }
+
     /// The transition an event makes from `from`, such as `merging → done` on `pr_merged`.
     /// `None` when the workflow has no transition on that event from that status: the event
     /// is recorded as evidence and the issue stays where it is.
@@ -1061,6 +1071,20 @@ mod tests {
         assert_eq!(workflow.transitions().len(), 8);
         assert!(workflow.version().starts_with("sha256:"));
         assert_eq!(workflow.version().len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn next_gated_is_the_requested_transition_with_gates() {
+        let workflow = default_workflow();
+        let next = workflow.next_gated("agent_review").unwrap();
+        assert_eq!(next.to.as_str(), "human_review");
+        assert_eq!(next.gates.len(), 4);
+        assert_eq!(
+            workflow.next_gated("in_progress").unwrap().to.as_str(),
+            "agent_review"
+        );
+        assert!(workflow.next_gated("human_review").is_none());
+        assert!(workflow.next_gated("nowhere").is_none());
     }
 
     #[test]

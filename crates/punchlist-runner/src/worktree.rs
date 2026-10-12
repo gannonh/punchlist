@@ -65,7 +65,7 @@ impl Worktrees {
     }
 
     /// Makes the issue's worktree and returns its path. Reuses it when it already exists
-    /// on `branch`, and replaces it when it is on one of `merged_branches`, the issue's
+    /// on `branch`, fast-forwarded to the branch on the remote, and replaces it when it is on one of `merged_branches`, the issue's
     /// earlier branches whose pull requests merged. Dropping the future kills the git
     /// command it is running.
     pub async fn prepare(
@@ -202,6 +202,20 @@ impl Git {
     }
 }
 
+/// Whether the remote has `branch`. An error when the remote cannot be asked, which is not
+/// the same as the branch not being there.
+fn remote_has_branch(git: &Git, clone_dir: &Path, branch: &str) -> Result<bool, String> {
+    let context = "git ls-remote";
+    let args = ["ls-remote", "--exit-code", "--heads", "origin", branch];
+    let output = git.output(Some(clone_dir), &args, context)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        // With `--exit-code`: the remote answered and has no such ref.
+        Some(2) => Ok(false),
+        _ => git_output_error::<bool>(output, context).map_err(|e| e.to_string()),
+    }
+}
+
 fn prepare_blocking(
     git: &Git,
     root: &Path,
@@ -250,6 +264,24 @@ fn prepare_blocking(
             "git rev-parse",
         )?;
         if head == branch {
+            // Another runner, or a person, may have pushed to the branch since this worktree
+            // was last used: bring it up to the remote branch, when there is one. Commits
+            // made here and not yet pushed stay ahead of it. A fetch that fails is an error:
+            // merging the ref an earlier fetch left would be a stale checkout.
+            if remote_has_branch(git, &clone_dir, branch)? {
+                git.run(Some(&clone_dir), &["fetch", "origin", branch], "git fetch")?;
+                git.run(
+                    Some(&worktree),
+                    &["merge", "--ff-only", &format!("origin/{branch}")],
+                    "git merge --ff-only",
+                )
+                .map_err(|e| {
+                    format!(
+                        "worktree {} cannot fast-forward to origin/{branch}: {e}",
+                        worktree.display()
+                    )
+                })?;
+            }
             return Ok(worktree);
         }
         if merged_branches.contains(&head) {
@@ -484,6 +516,43 @@ mod tests {
             .unwrap();
         assert_eq!(run(&unmerged, &["rev-parse", "HEAD"]), branch_sha);
 
+        // The other runner pushes to the branch: the first one's worktree is reused at that
+        // commit, and one that diverged from the remote is an error, not a silent stale run.
+        let pushed_sha = commit(&unmerged, "review.txt");
+        run(&unmerged, &["push", "origin", branch]);
+        let reused = first
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap();
+        assert_eq!(reused, path);
+        assert_eq!(run(&reused, &["rev-parse", "HEAD"]), pushed_sha);
+        commit(&unmerged, "more.txt");
+        run(&unmerged, &["push", "origin", branch]);
+        run(&path, &["reset", "--hard", &branch_sha]);
+        commit(&path, "diverged.txt");
+        let err = first
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("cannot fast-forward to origin/feature/pl-1-first-issue"),
+            "{err}"
+        );
+        run(&path, &["reset", "--hard", &format!("origin/{branch}")]);
+
+        // A branch the remote does not have is fine; a remote that cannot be asked is not.
+        let git = Git {
+            cancel: Cancel::default(),
+            timeout: GIT_TIMEOUT,
+        };
+        assert_eq!(remote_has_branch(&git, &path, branch), Ok(true));
+        assert_eq!(remote_has_branch(&git, &path, "feature/absent"), Ok(false));
+        let (there, away) = (origin.join("acme"), origin.join("acme-away"));
+        std::fs::rename(&there, &away).unwrap();
+        let err = remote_has_branch(&git, &path, branch).unwrap_err();
+        assert!(err.starts_with("git ls-remote"), "{err}");
+        std::fs::rename(&away, &there).unwrap();
+
         let seed = origin.join("seed");
         run(&seed, &["fetch", "origin"]);
         run(&seed, &["merge", "--squash", &format!("origin/{branch}")]);
@@ -518,7 +587,7 @@ mod tests {
         assert_eq!(run(&again, &["rev-parse", "HEAD"]), main_sha);
         assert_eq!(
             run(&again, &["ls-files"]),
-            "README.md\nlater.txt\none.txt\nsquash.txt"
+            "README.md\nlater.txt\nmore.txt\none.txt\nreview.txt\nsquash.txt"
         );
 
         let second = Worktrees::with_remote_base(temp.path().join("second"), remote_base);

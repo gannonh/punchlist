@@ -3,8 +3,8 @@
 
 use punchlist_api::{
     AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
-    Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, RegisterRunner, RegisteredRunner,
-    Run, RunLog, Runner, RunnerList, WorkflowInfo,
+    GateChecklist, Heartbeat, Issue, IssueList, MoveIssue, Moved, PullRequest, RegisterRunner,
+    RegisteredRunner, Run, RunLog, Runner, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -89,6 +89,13 @@ impl Client {
             .await
     }
 
+    /// The gates of the issue's next gated transition, checked against the recorded
+    /// evidence. `None` when the issue's status has no gated transition.
+    pub async fn issue_gates(&self, id: &str) -> Result<Option<GateChecklist>, ClientError> {
+        self.send_optional::<(), _>(Method::GET, &["issues", id, "gates"], None)
+            .await
+    }
+
     /// Runs for an issue, newest first, each with its last 20 log lines.
     pub async fn issue_runs(&self, id: &str) -> Result<Vec<Run>, ClientError> {
         self.send::<(), _>(Method::GET, &["issues", id, "runs"], None)
@@ -135,8 +142,8 @@ impl Client {
         .await
     }
 
-    /// Claims one issue in Start, waiting up to `wait_seconds` for one. `None` when there
-    /// was nothing to claim. A lost race is `ClientError::Refused` with code `claim_taken`.
+    /// Claims one issue, in Start or waiting in a status with a dispatch rule, waiting up to
+    /// `wait_seconds` for one. `None` when there was nothing to claim. A lost race is `ClientError::Refused` with code `claim_taken`.
     pub async fn claim(&self, wait_seconds: u32) -> Result<Option<Claim>, ClientError> {
         let request = ClaimRequest { wait_seconds };
         self.send_optional(Method::POST, &["runs", "claim"], Some(&request))

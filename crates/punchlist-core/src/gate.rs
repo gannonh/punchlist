@@ -17,9 +17,13 @@ pub enum Gate {
     /// Its branch or title names the issue, and neither names another issue. On a move that
     /// a merged or closed pull request causes, "it" is that pull request.
     PrNamesIssue,
+    /// Every check run on that pull request's head commit completed successfully.
     CiGreen,
+    /// GitHub's merge state for it is `clean` or `has_hooks`.
     Mergeable,
+    /// None of its review threads is unresolved.
     NoOpenThreads,
+    /// Passes without evidence until proof exists (Slice 7), and says so in its reason.
     ProofAttached,
 }
 
@@ -64,10 +68,12 @@ impl Gate {
                 }
             }),
             Gate::PrNamesIssue => named(evidence).and_then(|pr| names_issue(evidence, pr)),
-            // Evaluated from Slice 5. Until then a transition that names one fails closed.
-            Gate::CiGreen | Gate::Mergeable | Gate::NoOpenThreads | Gate::ProofAttached => {
-                Err(format!("Punchlist does not evaluate the {self} gate yet"))
-            }
+            Gate::CiGreen => one_open(evidence).and_then(ci_green),
+            Gate::Mergeable => one_open(evidence).and_then(mergeable),
+            Gate::NoOpenThreads => one_open(evidence).and_then(no_open_threads),
+            Gate::ProofAttached => Ok(
+                "passes vacuously: Punchlist records no proof yet, so nothing was checked".into(),
+            ),
         };
         let (passed, reason) = match outcome {
             Ok(reason) => (true, reason),
@@ -126,6 +132,50 @@ pub struct PullRequestEvidence {
     pub branch: String,
     pub state: PullRequestState,
     pub draft: bool,
+    /// The head commit.
+    pub head_sha: String,
+    /// GitHub's `mergeable_state`, such as `clean` or `dirty`; `unknown` until GitHub has
+    /// computed it.
+    pub merge_state: String,
+    /// The check runs on the head commit, the newest of each name. Read for an open pull
+    /// request.
+    pub check_runs: Vec<CheckRunEvidence>,
+    /// Its review threads, resolved or not. Read for an open pull request.
+    pub review_threads: Vec<ReviewThreadEvidence>,
+}
+
+/// A check run on a pull request's head commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CheckRunEvidence {
+    pub name: String,
+    /// `queued`, `in_progress` or `completed`.
+    pub status: String,
+    /// Set once completed, such as `success` or `failure`.
+    pub conclusion: Option<String>,
+}
+
+impl CheckRunEvidence {
+    /// Whether the run passed: completed with success, neutral or skipped. `None` while it
+    /// has not completed.
+    pub fn passed(&self) -> Option<bool> {
+        let passed = matches!(
+            self.conclusion.as_deref(),
+            Some("success" | "neutral" | "skipped")
+        );
+        (self.status == "completed").then_some(passed)
+    }
+}
+
+/// A review thread on a pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ReviewThreadEvidence {
+    /// The file it is on; absent for a thread recorded before paths were.
+    pub path: Option<String>,
+    /// The line it is on, or was on before the file changed under it.
+    pub line: Option<i64>,
+    pub resolved: bool,
 }
 
 /// What the gates read for one issue.
@@ -235,6 +285,93 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
     }
 }
 
+/// Check runs named with their status or conclusion: `` `e2e` (failure) ``.
+fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> String {
+    runs.map(|run| {
+        let state = run.conclusion.as_deref().unwrap_or(&run.status);
+        format!("`{}` ({state})", run.name)
+    })
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+/// Every check run on the head commit completed with success, neutral or skipped. A commit
+/// with no check run fails: right after a push GitHub has not started them, and passing
+/// then would let the request through before CI ran.
+fn ci_green(pr: &PullRequestEvidence) -> Result<String, String> {
+    // The first seven characters of the commit, as people quote one.
+    let commit = pr.head_sha.get(..7).unwrap_or(&pr.head_sha);
+    let total = pr.check_runs.len();
+    let (mut failed, mut pending) = (Vec::new(), Vec::new());
+    for run in &pr.check_runs {
+        match run.passed() {
+            Some(true) => {}
+            Some(false) => failed.push(run),
+            None => pending.push(run),
+        }
+    }
+    if total == 0 {
+        Err(format!("no check run has reported on commit {commit}"))
+    } else if !failed.is_empty() {
+        Err(format!(
+            "{} of {total} checks failed on {commit}: {}",
+            failed.len(),
+            named_runs(failed.into_iter())
+        ))
+    } else if !pending.is_empty() {
+        Err(format!(
+            "{} of {total} checks pending on {commit}: {}",
+            pending.len(),
+            named_runs(pending.into_iter())
+        ))
+    } else {
+        Ok(format!("{total} of {total} checks passed on {commit}"))
+    }
+}
+
+/// GitHub's merge state is `clean`, or `has_hooks`. `unknown` is GitHub still computing it, which it starts
+/// when the pull request is read, so the reason says to ask again.
+fn mergeable(pr: &PullRequestEvidence) -> Result<String, String> {
+    let number = pr.number;
+    match pr.merge_state.as_str() {
+        // `has_hooks` is GitHub's `clean` on a repository with pre-receive hooks.
+        state @ ("clean" | "has_hooks") => Ok(format!(
+            "pull request #{number} has no conflicts and GitHub's merge state is {state}"
+        )),
+        "unknown" | "" => Err(format!(
+            "GitHub has not computed pull request #{number}'s merge state yet; request again"
+        )),
+        "dirty" => Err(format!(
+            "pull request #{number} conflicts with its base branch (GitHub's merge state is dirty)"
+        )),
+        other => Err(format!(
+            "GitHub's merge state for pull request #{number} is {other}, not clean"
+        )),
+    }
+}
+
+fn no_open_threads(pr: &PullRequestEvidence) -> Result<String, String> {
+    let open: Vec<String> = (pr.review_threads.iter())
+        .filter(|thread| !thread.resolved)
+        .map(|thread| match (&thread.path, thread.line) {
+            (Some(path), Some(line)) => format!("{path}:{line}"),
+            (Some(path), None) => path.clone(),
+            (None, _) => "a thread with no recorded path".to_string(),
+        })
+        .collect();
+    let threads = |n: usize| if n == 1 { "thread" } else { "threads" };
+    match (open.len(), pr.review_threads.len()) {
+        (0, 0) => Ok(format!("pull request #{} has no review threads", pr.number)),
+        (0, all) => Ok(format!("{all} review {}, all resolved", threads(all))),
+        (n, _) => Err(format!(
+            "{n} unresolved review {} on pull request #{}: {}",
+            threads(n),
+            pr.number,
+            open.join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +389,10 @@ mod tests {
             branch: branch.into(),
             state,
             draft,
+            head_sha: "3f2a1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d".into(),
+            merge_state: "clean".into(),
+            check_runs: Vec::new(),
+            review_threads: Vec::new(),
         }
     }
 
@@ -473,14 +614,166 @@ mod tests {
         );
     }
 
+    /// An open, ready pull request #12 with these check runs, merge state and threads.
+    fn reviewed(
+        runs: &[(&str, &str, Option<&str>)],
+        merge_state: &str,
+        threads: &[(&str, Option<i64>, bool)],
+    ) -> Evidence {
+        let mut pr = pr(12, "feature/pl-7-fix", "Fix", OPEN, false);
+        pr.merge_state = merge_state.into();
+        pr.check_runs = (runs.iter())
+            .map(|&(name, status, conclusion)| CheckRunEvidence {
+                name: name.into(),
+                status: status.into(),
+                conclusion: conclusion.map(String::from),
+            })
+            .collect();
+        pr.review_threads = (threads.iter())
+            .map(|&(path, line, resolved)| ReviewThreadEvidence {
+                path: Some(path.into()),
+                line,
+                resolved,
+            })
+            .collect();
+        evidence(vec![pr])
+    }
+
+    const PASSED: (&str, &str, Option<&str>) = ("test", "completed", Some("success"));
+
     #[test]
-    fn later_gates_fail_closed() {
-        let ready = evidence(vec![pr(12, "feature/pl-7-fix", "Fix", OPEN, false)]);
+    fn ci_green_needs_every_check_run_on_the_head_commit_to_pass() {
+        let skipped = ("docs", "completed", Some("skipped"));
         assert_eq!(
-            check(Gate::CiGreen, &ready),
+            check(Gate::CiGreen, &reviewed(&[PASSED, skipped], "clean", &[])),
+            (true, "2 of 2 checks passed on 3f2a1c4".into())
+        );
+        let failed = ("e2e", "completed", Some("failure"));
+        let timed_out = ("lint", "completed", Some("timed_out"));
+        let running = ("build", "in_progress", None);
+        assert_eq!(
+            check(
+                Gate::CiGreen,
+                &reviewed(&[PASSED, failed, running, timed_out], "clean", &[])
+            ),
             (
                 false,
-                "Punchlist does not evaluate the ci_green gate yet".into()
+                "2 of 4 checks failed on 3f2a1c4: `e2e` (failure), `lint` (timed_out)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn ci_green_fails_while_a_check_run_is_pending_or_none_has_reported() {
+        let running = ("e2e", "in_progress", None);
+        let queued = ("lint", "queued", None);
+        assert_eq!(
+            check(
+                Gate::CiGreen,
+                &reviewed(&[PASSED, running, queued], "clean", &[])
+            ),
+            (
+                false,
+                "2 of 3 checks pending on 3f2a1c4: `e2e` (in_progress), `lint` (queued)".into()
+            )
+        );
+        assert_eq!(
+            check(Gate::CiGreen, &reviewed(&[], "clean", &[])),
+            (false, "no check run has reported on commit 3f2a1c4".into())
+        );
+    }
+
+    #[test]
+    fn mergeable_needs_a_clean_merge_state() {
+        let state = |merge_state| check(Gate::Mergeable, &reviewed(&[PASSED], merge_state, &[]));
+        assert_eq!(
+            state("clean"),
+            (
+                true,
+                "pull request #12 has no conflicts and GitHub's merge state is clean".into()
+            )
+        );
+        assert_eq!(
+            state("has_hooks"),
+            (
+                true,
+                "pull request #12 has no conflicts and GitHub's merge state is has_hooks".into()
+            )
+        );
+        assert_eq!(
+            state("dirty"),
+            (
+                false,
+                "pull request #12 conflicts with its base branch (GitHub's merge state is dirty)"
+                    .into()
+            )
+        );
+        assert_eq!(
+            state("unknown"),
+            (
+                false,
+                "GitHub has not computed pull request #12's merge state yet; request again".into()
+            )
+        );
+        assert_eq!(
+            state("blocked"),
+            (
+                false,
+                "GitHub's merge state for pull request #12 is blocked, not clean".into()
+            )
+        );
+    }
+
+    #[test]
+    fn no_open_threads_names_each_unresolved_thread() {
+        fn threads(threads: &[(&str, Option<i64>, bool)]) -> (bool, String) {
+            check(Gate::NoOpenThreads, &reviewed(&[PASSED], "clean", threads))
+        }
+        assert_eq!(
+            threads(&[]),
+            (true, "pull request #12 has no review threads".into())
+        );
+        let resolved = ("src/gate.rs", Some(30), true);
+        assert_eq!(
+            threads(&[resolved]),
+            (true, "1 review thread, all resolved".into())
+        );
+        // Resolved, then reopened: what counts is how the thread stands now.
+        let reopened = ("src/gate.rs", Some(30), false);
+        assert_eq!(
+            threads(&[reopened]),
+            (
+                false,
+                "1 unresolved review thread on pull request #12: src/gate.rs:30".into()
+            )
+        );
+        let outdated = ("README.md", None, false);
+        assert_eq!(
+            threads(&[resolved, reopened, outdated]),
+            (
+                false,
+                "2 unresolved review threads on pull request #12: src/gate.rs:30, README.md".into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_review_gates_need_the_one_open_pull_request() {
+        for gate in [Gate::CiGreen, Gate::Mergeable, Gate::NoOpenThreads] {
+            assert_eq!(
+                check(gate, &evidence(vec![])),
+                (false, "no open pull request is linked to PL-7".into())
+            );
+        }
+    }
+
+    #[test]
+    fn proof_attached_passes_and_says_nothing_was_checked() {
+        assert_eq!(
+            check(Gate::ProofAttached, &evidence(vec![])),
+            (
+                true,
+                "passes vacuously: Punchlist records no proof yet, so nothing was checked".into()
             )
         );
     }

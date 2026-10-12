@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ee99c4ba416b738b77ddb2319e9815b5129ed70d7c4ed40311c1827b7103b750"
+}

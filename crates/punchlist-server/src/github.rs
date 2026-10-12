@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::ErrorBody;
-use punchlist_core::{Refusal, Role, linked_issue_id};
+use punchlist_core::{CheckRunEvidence, Refusal, Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
@@ -123,6 +123,18 @@ pub(crate) struct CheckRunEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ThreadData {
     pub node_id: String,
+    /// The first comment says where the thread is.
+    #[serde(default)]
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadComment {
+    pub path: String,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub original_line: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,9 +526,13 @@ pub(crate) async fn process(
                 // Without GitHub's list the event is all there is: its one thread, as the
                 // event left it, in the order it arrived.
                 None => {
+                    let place = event.thread.comments.first();
                     let thread = ReviewThread {
                         id: event.thread.node_id.clone(),
                         is_resolved: event.action == "resolved",
+                        path: place.map(|comment| comment.path.clone()),
+                        line: place.and_then(|comment| comment.line),
+                        original_line: place.and_then(|comment| comment.original_line),
                     };
                     record_review_threads(tx, pull_request_id, &[thread]).await?;
                 }
@@ -606,14 +622,23 @@ async fn record_review_threads(
         .iter()
         .map(|thread| (thread.id.clone(), thread.is_resolved))
         .unzip();
+    let paths: Vec<Option<String>> = threads.iter().map(|t| t.path.clone()).collect();
+    let lines: Vec<Option<i64>> = threads.iter().map(|t| t.line.or(t.original_line)).collect();
     sqlx::query!(
-        "INSERT INTO review_thread (node_id, pull_request_id, resolved)
-         SELECT node_id, $1, resolved FROM UNNEST($2::text[], $3::boolean[]) AS t (node_id, resolved)
+        "INSERT INTO review_thread (node_id, pull_request_id, resolved, path, line)
+         SELECT node_id, $1, resolved, path, line
+         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[])
+             AS t (node_id, resolved, path, line)
          ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
-             resolved = EXCLUDED.resolved, updated_at = now()",
+             resolved = EXCLUDED.resolved, updated_at = now(),
+             -- An event without its comments does not forget where the thread is.
+             path = coalesce(EXCLUDED.path, review_thread.path),
+             line = coalesce(EXCLUDED.line, review_thread.line)",
         pull_request_id,
         &ids,
         &resolved,
+        &paths as &[Option<String>],
+        &lines as &[Option<i64>],
     )
     .execute(&mut *tx)
     .await?;
@@ -744,9 +769,12 @@ async fn record_pull_request(
 /// Brings the pull requests an issue's gates read, and their review threads, up to date with
 /// GitHub. A webhook reaches the server seconds after GitHub, and an agent asks for its
 /// transition right after it opens or readies a pull request; a gate must not read the state
-/// from before. When GitHub cannot be reached the recorded pull requests stand, and when a
-/// pull request's threads cannot be read its recorded threads stand, so an outage does not
-/// stop moves.
+/// from before. So a read that fails refuses the request (`ApiError::GithubUnreadable`)
+/// rather than let the gates pass on rows from before a push: the list, any pull request it
+/// reads, and an open pull request's review threads, whichever gates the transition has (the
+/// workflow that decides them is read later, under the issue's lock). A closed pull
+/// request's unread threads stand as recorded: no gate reads them. A pull request GitHub
+/// answers 404 or 410 for is gone, and its recorded row stands.
 ///
 /// A recorded pull request that GitHub now reports closed or merged is recorded so, and
 /// moves the issue as its webhook would have: recording a merge stops that webhook from
@@ -756,10 +784,10 @@ async fn record_pull_request(
 /// before the caller locks the issue: a job holds the pull request's row and waits for the
 /// issue's, so taking the issue's lock first deadlocks.
 ///
-/// A failure to record one fails the request, unlike a failure to read GitHub. What GitHub
-/// said is then known and could not be stored, so letting the gates read the older rows
-/// could pass a request on a pull request known to be merged or closed. The requester asks
-/// again; the pull requests already recorded stay recorded.
+/// A failure to record one fails the request too. What GitHub said is then known and could
+/// not be stored, so letting the gates read the older rows could pass a request on a pull
+/// request known to be merged or closed. The requester asks again; the pull requests already
+/// recorded stay recorded.
 ///
 /// A pull request whose write is dropped (`claim_read`) is read once more, alone. If that
 /// write is dropped too the request goes on, and the gates read what is recorded.
@@ -818,9 +846,12 @@ async fn refresh_once(
         .filter(|row| row.issue_id.as_deref() == Some(issue_id))
         .map(|row| row.number)
         .collect();
+    // Of the pull requests not recorded for the issue, only an open one is read: a closed
+    // one is history (below), and reading it would be one more read that can fail.
     let names_issue = |pr: &PullRequestData| {
-        linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
-            == Some(issue_id)
+        pr.state == "open"
+            && linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
+                == Some(issue_id)
     };
     let (owner, name) = (&repository.owner, &repository.name);
     let read = async {
@@ -829,20 +860,17 @@ async fn refresh_once(
         };
         let mut fresh = Vec::new();
         for &number in numbers {
-            fresh.push(github.pull_request(owner, name, number).await?);
+            fresh.extend(unless_gone(github.pull_request(owner, name, number).await)?);
         }
         Ok(fresh)
     };
-    let fresh = match read.await {
-        Ok(fresh) => fresh,
-        Err(error) => {
-            tracing::warn!(
-                issue_id,
-                "cannot read pull requests from GitHub, the gates read the recorded ones: {error:#}"
-            );
-            return Ok(Vec::new());
-        }
+    let unreadable = |what: &str, error: anyhow::Error| {
+        tracing::warn!(issue_id, "cannot read {what} from GitHub: {error:#}");
+        ApiError::GithubUnreadable(issue_id.to_string())
     };
+    let fresh = read
+        .await
+        .map_err(|error| unreadable("pull requests", error))?;
     let mut dropped = Vec::new();
     for pr in &fresh {
         // A closed or merged pull request that was never recorded for this issue is history,
@@ -851,17 +879,22 @@ async fn refresh_once(
         if pr.state != "open" && !known.contains(&pr.number) {
             continue;
         }
-        let threads = github
-            .review_threads(&repository.owner, &repository.name, pr.number)
-            .await
-            .inspect_err(|error| {
+        // An open pull request's threads are what `no_open_threads` reads, so they have to
+        // be GitHub's. A closed one's stand as recorded when they cannot be read.
+        let threads = match github.review_threads(owner, name, pr.number).await {
+            Ok(threads) => Some(threads),
+            Err(error) if pr.state == "open" => {
+                return Err(unreadable("review threads", error));
+            }
+            Err(error) => {
                 tracing::warn!(
                     issue_id,
                     number = pr.number,
                     "cannot read review threads from GitHub, the recorded ones stand: {error:#}"
                 );
-            })
-            .ok();
+                None
+            }
+        };
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let version = recorded
             .iter()
@@ -890,32 +923,47 @@ async fn refresh_once(
     Ok(dropped)
 }
 
-/// Summarizes the check runs on a commit onto every pull request whose head it is. A rerun
-/// is a new run with the same name, so only the newest run of each name counts.
+/// The check runs on a commit that count: a rerun is a new run with the same name, so the
+/// newest run of each name. What `ci_green` reads and what `pull_request.checks` summarizes.
+pub(crate) async fn newest_check_runs(
+    tx: &mut sqlx::PgConnection,
+    repository_id: Uuid,
+    head_sha: &str,
+) -> sqlx::Result<Vec<CheckRunEvidence>> {
+    sqlx::query_as!(
+        CheckRunEvidence,
+        "SELECT DISTINCT ON (name) name, status, conclusion FROM check_run
+         WHERE repository_id = $1 AND head_sha = $2 ORDER BY name, id DESC",
+        repository_id,
+        head_sha,
+    )
+    .fetch_all(&mut *tx)
+    .await
+}
+
+/// Summarizes the check runs on a commit onto every pull request whose head it is.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     head_sha: &str,
 ) -> sqlx::Result<()> {
+    let runs = newest_check_runs(tx, repository_id, head_sha).await?;
+    let count = |state: Option<bool>| runs.iter().filter(|run| run.passed() == state).count();
+    let (passed, failed, pending) = (count(Some(true)), count(Some(false)), count(None));
+    let checks = match (runs.len(), failed, pending) {
+        (0, _, _) => "none",
+        (_, 1.., _) => "failing",
+        (_, _, 1..) => "pending",
+        _ => "passing",
+    };
     sqlx::query!(
-        "UPDATE pull_request p SET
-             checks = CASE WHEN c.total = 0 THEN 'none'
-                           WHEN c.failed > 0 THEN 'failing'
-                           WHEN c.pending > 0 THEN 'pending'
-                           ELSE 'passing' END,
-             checks_total = c.total, checks_passed = c.passed
-         FROM (SELECT count(*)::int AS total,
-                      (count(*) FILTER (WHERE status = 'completed'
-                           AND conclusion IN ('success', 'neutral', 'skipped')))::int AS passed,
-                      (count(*) FILTER (WHERE status = 'completed'
-                           AND coalesce(conclusion, '') NOT IN ('success', 'neutral', 'skipped')))::int AS failed,
-                      (count(*) FILTER (WHERE status <> 'completed'))::int AS pending
-               FROM (SELECT DISTINCT ON (name) status, conclusion FROM check_run
-                     WHERE repository_id = $1 AND head_sha = $2
-                     ORDER BY name, id DESC) latest) c
-         WHERE p.repository_id = $1 AND p.head_sha = $2",
+        "UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
+         WHERE repository_id = $1 AND head_sha = $2",
         repository_id,
         head_sha,
+        checks,
+        runs.len() as i32,
+        passed as i32,
     )
     .execute(&mut *tx)
     .await?;
@@ -1004,14 +1052,14 @@ async fn close_issue_on_pull_request(
         }
         Err(error) => return Err(error),
     };
-    let (_, transition_id) = write_transition(
+    let (_, transition_id, _) = write_transition(
         tx,
         &actor,
         issue_id,
         status,
         transition.to.as_str(),
         delivery_id,
-        workflow.version(),
+        &workflow,
         &gates,
     )
     .await?;

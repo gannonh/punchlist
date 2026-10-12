@@ -3,13 +3,15 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    CreateComment, CreateIssue, ErrorBody, Event, EventDetail, Issue, IssueList, MoveIssue, Moved,
+    CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
+    MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, Role, START, Transition,
-    Workflow, display_name,
+    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence,
+    Role, START, Transition, Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -17,7 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
-use crate::github::refresh_pull_requests;
+use crate::github::{newest_check_runs, refresh_pull_requests};
 use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -27,16 +29,17 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(get_issue))
         .routes(routes!(move_issue))
         .routes(routes!(issue_events))
+        .routes(routes!(issue_gates))
         .routes(routes!(add_comment))
 }
 
-struct IssueRow {
-    id: String,
-    title: String,
-    body: String,
-    status: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+pub(crate) struct IssueRow {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl From<IssueRow> for Issue {
@@ -288,20 +291,22 @@ async fn move_issue(
     }
     let (workflow, _, invalid) = stored_workflow(&mut tx, actor.workspace_id).await?;
     let gates = check_move(&mut tx, &workflow, &actor, &id, &from, &request.to).await?;
-    let mut moved = record_transition(
+    let (mut moved, _, dispatched) = write_transition(
         &mut tx,
         &actor,
         &id,
         from,
         &request.to,
         None,
-        workflow.version(),
+        &workflow,
         &gates,
     )
     .await?;
     tx.commit().await?;
     if request.to == START {
         moved.warning = invalid;
+    }
+    if request.to == START || dispatched {
         // Wake runners that are long-polling for work. No receivers is fine.
         let _ = state.starts.send((actor.workspace_id, id));
     }
@@ -312,7 +317,9 @@ async fn move_issue(
 /// GitHub so they decide, not the webhooks still on their way. A pull request that GitHub
 /// closed moves the issue here and ends its run, as its webhook would have, so `move_issue`
 /// then answers as it would after that webhook. An issue the actor cannot move, or that does
-/// not exist, is left for `move_issue` to refuse.
+/// not exist, is left for `move_issue` to refuse. A read that fails refuses the request
+/// (`GithubUnreadable`): the recorded rows may be from before a push. Without a GitHub App
+/// nothing is read, and the gates judge what the webhooks recorded.
 async fn refresh_evidence(
     state: &AppState,
     actor: &Actor,
@@ -373,12 +380,7 @@ pub(crate) async fn check_gates(
     if transition.gates.is_empty() {
         return Ok(Vec::new());
     }
-    let evidence = evidence(tx, id, closed_pull_request).await?;
-    let gates: Vec<GateResult> = transition
-        .gates
-        .iter()
-        .map(|gate| gate.evaluate(&evidence))
-        .collect();
+    let (evidence, gates) = evaluate_gates(tx, transition, id, closed_pull_request).await?;
     if let Some(failed) = gates.iter().find(|result| !result.passed) {
         let refusal = Refusal::GateFailed {
             from: from.to_string(),
@@ -396,35 +398,66 @@ pub(crate) async fn check_gates(
     Ok(gates)
 }
 
-/// What the gates read: the pull requests linked to the issue, and the one a GitHub event
-/// merged or closed when that event is causing the move.
+/// Each of a transition's gates, checked against the issue's recorded evidence, with that
+/// evidence. The one evaluation behind a move and behind the checklist `pl issue show`
+/// prints, so the two cannot disagree on the same rows.
+async fn evaluate_gates(
+    tx: &mut sqlx::PgConnection,
+    transition: &Transition,
+    id: &str,
+    closed_pull_request: Option<i64>,
+) -> sqlx::Result<(Evidence, Vec<GateResult>)> {
+    let evidence = evidence(tx, id, closed_pull_request).await?;
+    let gates = (transition.gates.iter())
+        .map(|gate| gate.evaluate(&evidence))
+        .collect();
+    Ok((evidence, gates))
+}
+
+/// What the gates read: the pull requests linked to the issue, each open one with the check
+/// runs on its head commit and its review threads, and the one a GitHub event merged or
+/// closed when that event is causing the move.
 async fn evidence(
     tx: &mut sqlx::PgConnection,
     id: &str,
     closed_pull_request: Option<i64>,
 ) -> sqlx::Result<Evidence> {
     let rows = sqlx::query!(
-        "SELECT number, title, branch, state, draft FROM pull_request
-         WHERE issue_id = $1 ORDER BY number DESC",
+        "SELECT id, repository_id, number, title, branch, state, draft, head_sha, merge_state
+         FROM pull_request WHERE issue_id = $1 ORDER BY number DESC",
         id,
     )
     .fetch_all(&mut *tx)
     .await?;
-    let pull_requests = rows
-        .into_iter()
-        .map(|row| {
-            let state = PullRequestState::parse(&row.state).ok_or_else(|| {
-                sqlx::Error::Decode(format!("unknown pull request state `{}`", row.state).into())
-            })?;
-            Ok(PullRequestEvidence {
-                number: row.number,
-                title: row.title,
-                branch: row.branch,
-                state,
-                draft: row.draft,
-            })
-        })
-        .collect::<sqlx::Result<_>>()?;
+    let mut pull_requests = Vec::with_capacity(rows.len());
+    for row in rows {
+        let state = PullRequestState::parse(&row.state).ok_or_else(|| {
+            sqlx::Error::Decode(format!("unknown pull request state `{}`", row.state).into())
+        })?;
+        let (mut check_runs, mut review_threads) = (Vec::new(), Vec::new());
+        if state == PullRequestState::Open {
+            check_runs = newest_check_runs(tx, row.repository_id, &row.head_sha).await?;
+            review_threads = sqlx::query_as!(
+                ReviewThreadEvidence,
+                "SELECT path, line, resolved FROM review_thread
+                 WHERE pull_request_id = $1 ORDER BY path, line, node_id",
+                row.id,
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+        }
+        pull_requests.push(PullRequestEvidence {
+            number: row.number,
+            title: row.title,
+            branch: row.branch,
+            state,
+            draft: row.draft,
+            head_sha: row.head_sha,
+            merge_state: row.merge_state,
+            check_runs,
+            review_threads,
+        });
+    }
     Ok(Evidence {
         issue_id: id.to_string(),
         pull_requests,
@@ -433,9 +466,10 @@ async fn evidence(
 }
 
 /// Writes a transition that the caller has already checked and whose issue row it has
-/// locked: the new status, the transition with the workflow version and gate results, and
-/// its event. Shared by `move_issue`, claims and GitHub events, which pass the webhook
-/// delivery that caused the move.
+/// locked: the new status, the transition with the workflow version and gate results, its
+/// event, and the dispatch that waits for a runner when `to` has a dispatch rule. Shared by
+/// `move_issue`, claims and GitHub events, which pass the webhook delivery that caused the
+/// move.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_transition(
     tx: &mut sqlx::PgConnection,
@@ -444,24 +478,50 @@ pub(crate) async fn record_transition(
     from: String,
     to: &str,
     delivery_id: Option<&str>,
-    workflow_version: &str,
+    workflow: &Workflow,
     gates: &[GateResult],
 ) -> Result<Moved, ApiError> {
-    write_transition(
-        tx,
-        actor,
-        id,
-        from,
-        to,
-        delivery_id,
-        workflow_version,
-        gates,
-    )
-    .await
-    .map(|(moved, _)| moved)
+    write_transition(tx, actor, id, from, to, delivery_id, workflow, gates)
+        .await
+        .map(|(moved, _, _)| moved)
 }
 
-/// `record_transition`, also returning the new transition's id.
+/// Dispatch on entry. The issue has left the status a dispatch still waiting was for, so
+/// that one goes; `to` gets its own, for this transition, when it has a dispatch rule and
+/// the workflow does not lock agents or runners out of it. True when one was queued.
+async fn queue_dispatch(
+    tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
+    id: &str,
+    to: &str,
+    transition_id: Uuid,
+) -> sqlx::Result<bool> {
+    sqlx::query!(
+        "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+    let unlocked = |role| workflow.check_unlocked(to, role).is_ok();
+    let Some(dispatch) = workflow
+        .dispatch_for(to)
+        .filter(|_| unlocked(Role::Agent) && unlocked(Role::Runner))
+    else {
+        return Ok(false);
+    };
+    sqlx::query!(
+        "INSERT INTO dispatch (issue_id, transition_id, agent) VALUES ($1, $2, $3)",
+        id,
+        transition_id,
+        dispatch.agent,
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(true)
+}
+
+/// `record_transition`, also returning the new transition's id and whether a dispatch was
+/// queued for the new status.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_transition(
     tx: &mut sqlx::PgConnection,
@@ -470,9 +530,10 @@ pub(crate) async fn write_transition(
     from: String,
     to: &str,
     delivery_id: Option<&str>,
-    workflow_version: &str,
+    workflow: &Workflow,
     gates: &[GateResult],
-) -> Result<(Moved, Uuid), ApiError> {
+) -> Result<(Moved, Uuid, bool), ApiError> {
+    let workflow_version = workflow.version();
     let issue = sqlx::query_as!(
         IssueRow,
         "UPDATE issue SET status = $2, updated_at = now() WHERE id = $1
@@ -508,6 +569,7 @@ pub(crate) async fn write_transition(
         .execute(&mut *tx)
         .await?;
     }
+    let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
     let seq = sqlx::query_scalar!(
         "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
          RETURNING last_event_seq",
@@ -545,7 +607,7 @@ pub(crate) async fn write_transition(
         },
         warning: None,
     };
-    Ok((moved, transition_id))
+    Ok((moved, transition_id, dispatched))
 }
 
 /// An issue's timeline, oldest first.
@@ -602,6 +664,51 @@ async fn issue_events(
         .map(Event::try_from)
         .collect::<Result<_, _>>()?;
     Ok(Json(events))
+}
+
+/// The gates of the issue's next gated transition, each checked against the evidence
+/// recorded now. Nothing is read from GitHub and nothing is written: a request for the
+/// transition reads GitHub first, so it can answer differently. 204 when no transition an
+/// actor can request from the issue's status has gates.
+#[utoipa::path(
+    get,
+    path = "/api/issues/{id}/gates",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = GateChecklist),
+        (status = 204, description = "The issue's status has no gated transition."),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn issue_gates(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let status = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let Some(transition) = workflow.next_gated(&status) else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let (_, gates) = evaluate_gates(&mut conn, transition, &id, None).await?;
+    let to = transition.to.as_str().to_string();
+    Ok(Json(GateChecklist {
+        from_name: display_name(&status),
+        from: status,
+        to_name: display_name(&to),
+        to,
+        gates,
+    })
+    .into_response())
 }
 
 /// Writes a comment and its event.
