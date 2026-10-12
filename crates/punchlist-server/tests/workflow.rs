@@ -2607,6 +2607,41 @@ async fn a_stale_pass_delivered_during_a_read_that_saw_a_failure_is_corrected_by
 }
 
 #[sqlx::test]
+async fn a_run_renamed_during_both_reads_refuses_the_request(pool: PgPool) {
+    // Status and conclusion are `success` throughout; only the name changes under the reads.
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let (hold, hold2) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.runs_hold = Some(hold.clone());
+    }
+    let renamed = |name: &str| {
+        edited(CHECK_RUN, |v| {
+            v["check_run"]["id"] = json!(1);
+            v["check_run"]["name"] = json!(name);
+        })
+    };
+    let (request, ()) = tokio::join!(request_human_review(&s, &codex), async {
+        hold.wait().await;
+        deliver(&s, "check_run", "c-first", &renamed("lint")).await;
+        {
+            let mut repo = s.github.lock().unwrap();
+            repo.check_runs = vec![listed_run(1, 5, "lint", "success")];
+            repo.runs_hold = Some(hold2.clone());
+        }
+        hold.wait().await;
+        hold2.wait().await;
+        deliver(&s, "check_run", "c-second", &renamed("e2e")).await;
+        hold2.wait().await;
+    });
+    assert_eq!(request.0, StatusCode::SERVICE_UNAVAILABLE, "{}", request.1);
+    assert_eq!(request.1["code"], "github_unreadable");
+}
+
+#[sqlx::test]
 async fn a_conflicting_delivery_during_both_reads_refuses_the_request(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;

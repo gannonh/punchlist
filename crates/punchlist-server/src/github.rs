@@ -583,12 +583,15 @@ async fn record_check_run(
     }
     // Skipped for a read: a conflict only if the recorded state is not what the read saw.
     let recorded = sqlx::query!(
-        "SELECT status, conclusion FROM check_run WHERE id = $1",
+        "SELECT name, status, conclusion FROM check_run WHERE id = $1",
         run.id
     )
     .fetch_one(&mut *tx)
     .await?;
-    Ok(recorded.status != run.status || recorded.conclusion != run.conclusion)
+    // Every field the gate reads: the suite is kept once known and the head is filtered.
+    Ok(recorded.name != run.name
+        || recorded.status != run.status
+        || recorded.conclusion != run.conclusion)
 }
 
 /// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before

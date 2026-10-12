@@ -1,10 +1,21 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT status, conclusion FROM check_run WHERE id = $1",
+  "query": "SELECT name, status, conclusion FROM check_run WHERE id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
         "name": "status",
         "type_info": "Text",
         "origin": {
@@ -15,7 +26,7 @@
         }
       },
       {
-        "ordinal": 1,
+        "ordinal": 2,
         "name": "conclusion",
         "type_info": "Text",
         "origin": {
@@ -33,8 +44,9 @@
     },
     "nullable": [
       false,
+      false,
       true
     ]
   },
-  "hash": "0a5af0a077053a3ef58acf03fd4d4a34825b2986063416fcf6b415f4a3acf828"
+  "hash": "b182c689e0e856df9028b886feed22aedbe2523990f245c86ebd280405c21b94"
 }
