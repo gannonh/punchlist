@@ -31,7 +31,7 @@ const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
 const TURN_START_ID: u64 = 3;
 
-/// How long a response in the handshake may take. `thread/start` starts the MCP servers.
+/// How long a response in the handshake may take.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// The longest a turn may go without a message.
 const TURN_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -414,8 +414,12 @@ mod tests {
     use super::*;
     use crate::agent::tests::fake_claude;
 
-    /// A fake `codex app-server` that answers each request with the lines a real one sent:
-    /// a session recorded from codex-cli 0.162.1, in `tests/fixtures/codex/`.
+    /// A fake `codex app-server` that answers each request with the lines a real one sent
+    /// after it. `tests/fixtures/codex/` is the stdout of codex-cli 0.162.1 on `gpt-6-luna`
+    /// in a live check of this adapter: a run that fixed a failing check, answered a review
+    /// thread and requested Human Review. It is cut where each request was answered, and
+    /// trimmed: hook, account and rate-limit notifications are dropped, and so are the
+    /// deltas of every message but the first.
     fn replay() -> String {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
         format!(
@@ -518,10 +522,10 @@ done"#
         assert_eq!(turn["params"]["threadId"], RECORDED_THREAD_ID);
     }
 
-    const RECORDED_THREAD_ID: &str = "01a130e5-c758-7ef1-9e0d-764b36f9c588";
-    const RECORDED_INPUT_TOKENS: i64 = 10;
-    const RECORDED_OUTPUT_TOKENS: i64 = 2;
-    const RECORDED_LOG_LINES: usize = 14;
+    const RECORDED_THREAD_ID: &str = "01a130f2-f3d8-7083-8649-3af6cd58bb7c";
+    const RECORDED_INPUT_TOKENS: i64 = 299_517;
+    const RECORDED_OUTPUT_TOKENS: i64 = 2810;
+    const RECORDED_LOG_LINES: usize = 96;
 
     #[tokio::test]
     async fn a_failed_turn_fails_the_run_with_codexs_message_and_keeps_the_tokens() {
