@@ -53,7 +53,7 @@ Fixture deliveries prove the server's handling. Real events need more, and a che
 
 The App is **Punchlist (gannonh)** (`punchlist-gannonh`, App id 5254938), installed on `gannonh/punchlist-sandbox` only. The Punchlist 1Password Environment holds `GITHUB_WEBHOOK_SECRET` (the App's webhook secret) and `GITHUB_APP_PRIVATE_KEY` (on one line; `bin/github-app` rebuilds the PEM).
 
-Then open a branch named `feature/pl-1-...` and a pull request in the sandbox repository (`gh api` to create the ref and a file, `gh pr create -R gannonh/punchlist-sandbox --draft`), and read the same rows as above. The sandbox's `ci` workflow gives every pull request one check run named `ok`. It fails on demand: on a branch with a file named `ci-fail` at the repository root. Delete the file on the branch and the new commit's `ok` passes.
+Then open a branch named `feature/pl-1-...` and a pull request in the sandbox repository (`gh api` to create the ref and a file, `gh pr create -R gannonh/punchlist-sandbox --draft`), and read the same rows as above. The sandbox's `ci` workflow gives every pull request one check run named `ok`. It fails on demand: on a branch with a file named `ci-fail` at the repository root. Delete the file on the branch and the new commit's `ok` passes. A second workflow, `ci2.yml`, also has a job named `ok` (another check suite) and fails on a file named `ci2-fail` at the root; a pull request therefore has two `ok` check runs, and `SELECT name, check_suite_id, conclusion FROM check_run` shows both. A rerun of a run (`gh run rerun`) is a new run id in the same suite.
 
 GitHub's delivery log is the first place to look when nothing arrives, and redelivery is how a check repeats a delivery (the same as the Redeliver button on the App's Advanced page):
 

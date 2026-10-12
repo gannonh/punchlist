@@ -285,14 +285,30 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
     }
 }
 
-/// Check runs named with their status or conclusion: `` `e2e` (failure) ``.
+/// Check runs named with their status or conclusion: `` `e2e` (failure) ``. A check's name is
+/// its author's text: at most five are named, each cut to 80 characters, without backticks or
+/// control characters, so a name cannot close the quotes or flood the reason.
 fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> String {
-    runs.map(|run| {
-        let state = run.conclusion.as_deref().unwrap_or(&run.status);
-        format!("`{}` ({state})", run.name)
-    })
-    .collect::<Vec<_>>()
-    .join(", ")
+    const NAMED: usize = 5;
+    let runs: Vec<_> = runs.collect();
+    let mut named: Vec<String> = runs
+        .iter()
+        .take(NAMED)
+        .map(|run| {
+            let state = run.conclusion.as_deref().unwrap_or(&run.status);
+            let name: String = run
+                .name
+                .chars()
+                .filter(|c| *c != '`' && !c.is_control())
+                .take(80)
+                .collect();
+            format!("`{name}` ({state})")
+        })
+        .collect();
+    if runs.len() > NAMED {
+        named.push(format!("and {} more", runs.len() - NAMED));
+    }
+    named.join(", ")
 }
 
 /// Every check run on the head commit completed with success, neutral or skipped. A commit
@@ -640,6 +656,30 @@ mod tests {
     }
 
     const PASSED: (&str, &str, Option<&str>) = ("test", "completed", Some("success"));
+
+    #[test]
+    fn a_check_name_cannot_close_the_quotes_or_flood_the_reason() {
+        let long = "x".repeat(100);
+        let runs: Vec<(&str, &str, Option<&str>)> = vec![
+            ("a`b\nc", "completed", Some("failure")),
+            (&long, "completed", Some("failure")),
+            ("c", "completed", Some("failure")),
+            ("d", "completed", Some("failure")),
+            ("e", "completed", Some("failure")),
+            ("f", "completed", Some("failure")),
+            ("g", "completed", Some("failure")),
+        ];
+        let (passed, reason) = check(Gate::CiGreen, &reviewed(&runs, "clean", &[]));
+        assert!(!passed);
+        assert_eq!(
+            reason,
+            format!(
+                "7 of 7 checks failed on 3f2a1c4: `abc` (failure), `{}` (failure), \
+                 `c` (failure), `d` (failure), `e` (failure), and 2 more",
+                "x".repeat(80)
+            )
+        );
+    }
 
     #[test]
     fn ci_green_needs_every_check_run_on_the_head_commit_to_pass() {
