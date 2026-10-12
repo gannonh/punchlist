@@ -318,7 +318,14 @@ impl GithubClient {
                 return Ok(threads);
             }
             let cursor = page.page_info.end_cursor;
-            after = Some(cursor.context("GitHub GraphQL named no cursor for the next page")?);
+            let cursor = cursor.context("GitHub GraphQL named no cursor for the next page")?;
+            // The gated-request refresh has no deadline of its own, so a page that names the
+            // cursor it was asked for must not loop.
+            anyhow::ensure!(
+                after.as_deref() != Some(cursor.as_str()),
+                "GitHub GraphQL repeated the cursor {cursor}"
+            );
+            after = Some(cursor);
         }
     }
 }
