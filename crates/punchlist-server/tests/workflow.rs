@@ -3128,6 +3128,12 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
         "agent_review → human_review needs gate ci_green: \
          1 of 1 checks failed on 6dcb09b: `check` (failure)"
     );
+    // The gate's own result keeps Punchlist's sentence apart from the check's name.
+    assert_eq!(
+        body["gates"][0],
+        json!({"gate": "ci_green", "passed": false,
+               "reason": "1 of 1 checks failed on 6dcb09b", "outside": ["`check` (failure)"]})
+    );
     assert_eq!(
         body["evidence"]["pull_requests"][0]["check_runs"],
         json!([{"name": "check", "status": "completed", "conclusion": "failure"}])
@@ -3186,6 +3192,12 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
             "no_open_threads".into(),
             "1 unresolved review thread on pull request #12: src/lib.rs:7".into()
         )
+    );
+    assert_eq!(
+        body["gates"][2],
+        json!({"gate": "no_open_threads", "passed": false,
+               "reason": "1 unresolved review thread on pull request #12",
+               "outside": ["src/lib.rs:7"]})
     );
     let open: i64 = sqlx::query_scalar("SELECT count(*) FROM review_thread WHERE resolved = false")
         .fetch_one(&pool)

@@ -145,7 +145,7 @@ cmd_pl() {
 cmd_get_issue() {
   load "${1:-}"; local issue="${2:-}"
   [ -n "$issue" ] || die "usage: get-issue RUN_ID ISSUE"
-  mcp_tool "$issue" get_issue '{}'
+  mcp_tool "$(token)" "$issue" get_issue '{}'
 }
 
 # What an agent's `request_transition` prints. A person cannot make an agent's transition, so
@@ -154,12 +154,12 @@ cmd_get_issue() {
 cmd_request_transition() {
   load "${1:-}"; local issue="${2:-}" to="${3:-}"
   [ -n "$issue" ] && [[ "$to" =~ ^[a-z_]+$ ]] || die "usage: request-transition RUN_ID ISSUE TO"
-  mcp_tool "$issue" request_transition "{\"to\": \"$to\"}"
+  mcp_tool "${PUNCHLIST_AGENT_TOKEN:-$(token)}" "$issue" request_transition "{\"to\": \"$to\"}"
 }
 
-mcp_tool() { # mcp_tool ISSUE TOOL ARGUMENTS_JSON
-  PUNCHLIST_TOKEN="${PUNCHLIST_AGENT_TOKEN:-$(token)}" PUNCHLIST_SERVER_URL="$SERVER_URL" PUNCHLIST_ISSUE="$1" \
-    record "$EVIDENCE/transcript.txt" "$2 $1 $3 (pl mcp)" python3 -c '
+mcp_tool() { # mcp_tool TOKEN ISSUE TOOL ARGUMENTS_JSON
+  PUNCHLIST_TOKEN="$1" PUNCHLIST_SERVER_URL="$SERVER_URL" PUNCHLIST_ISSUE="$2" \
+    record "$EVIDENCE/transcript.txt" "$3 $2 $4 (pl mcp)" python3 -c '
 import json, subprocess, sys
 mcp = subprocess.Popen([sys.argv[1], "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                        stderr=subprocess.DEVNULL, text=True)
@@ -176,7 +176,7 @@ for line in mcp.stdout:
     elif answer.get("id") == 2:
         print(answer["result"]["content"][0]["text"], end="")
         sys.exit(1 if answer["result"].get("isError") else 0)
-sys.exit("pl mcp ended without answering")' "$REPO/target/debug/pl" "$2" "$3"
+sys.exit("pl mcp ended without answering")' "$REPO/target/debug/pl" "$3" "$4"
 }
 
 cmd_sql() {

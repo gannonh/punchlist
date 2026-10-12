@@ -677,7 +677,7 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
     assert!(is_error);
     assert_eq!(
         text.lines().next().unwrap(),
-        "Refused (gate_failed): in_progress → agent_review needs gate pr_open: no open pull request is linked to PL-1"
+        "Refused (gate_failed): gate pr_open failed: no open pull request is linked to PL-1"
     );
     assert_eq!(result(&lines[1]), (false, "Commented on PL-1.".to_string()));
     let show = pl.run(&["issue", "show", "PL-1"]).await;

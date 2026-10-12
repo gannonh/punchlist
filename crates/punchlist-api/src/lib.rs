@@ -520,7 +520,9 @@ pub struct ErrorBody {
     /// For `gate_failed`: the first gate that failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<String>,
-    /// For `gate_failed`: why that gate failed.
+    /// For `gate_failed`: why that gate failed, as people read it: the gate result's `reason`
+    /// joined with the names in its `outside` (`GateResult::text()`), where the result's own
+    /// `reason` is the sentence only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// For `gate_failed`: what the gates read.
@@ -552,13 +554,14 @@ impl ErrorBody {
 /// One indented line per gate result, for people: `  ci_green: pass (3 of 3 checks passed on
 /// 9c1e77a)`. The line holds the names GitHub's users wrote, so it is not for an agent.
 pub fn gate_lines(gates: &[GateResult]) -> Vec<String> {
-    gates
-        .iter()
-        .map(|g| {
-            let result = if g.passed { "pass" } else { "fail" };
-            format!("  {}: {result} ({})", g.gate, g.text())
-        })
-        .collect()
+    gates.iter().map(|g| gate_line(g, &g.text())).collect()
+}
+
+/// A gate result's line with `reason` in the brackets: the result's `text()` for people, its
+/// `reason` alone for an agent.
+pub fn gate_line(gate: &GateResult, reason: &str) -> String {
+    let result = if gate.passed { "pass" } else { "fail" };
+    format!("  {}: {result} ({reason})", gate.gate)
 }
 
 #[cfg(test)]
