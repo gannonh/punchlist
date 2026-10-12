@@ -106,7 +106,7 @@ async fn fake_github() -> (FakeGithub, String) {
                 },
             ),
         )
-        // The check runs of a commit, two to a page.
+        // The check runs of a commit, `per_page` to a page.
         .route(
             "/repos/{owner}/{name}/commits/{sha}/check-runs",
             get(
@@ -116,8 +116,9 @@ async fn fake_github() -> (FakeGithub, String) {
                     if repo.down {
                         return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
                     }
-                    let from = (q["page"].parse::<usize>().unwrap() - 1) * 2;
-                    let to = repo.check_runs.len().min(from + 2);
+                    let per_page: usize = q["per_page"].parse().unwrap();
+                    let from = (q["page"].parse::<usize>().unwrap() - 1) * per_page;
+                    let to = repo.check_runs.len().min(from + per_page);
                     let runs = repo.check_runs.get(from..to).unwrap_or_default();
                     let answer = json!({"total_count": repo.check_runs.len(), "check_runs": runs});
                     (StatusCode::OK, axum::Json(answer))
@@ -2425,7 +2426,7 @@ async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_n
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;
     // One delivered pass in suite 3112233445; GitHub also has a failing `check` in another
-    // suite (three runs, so the list takes two pages).
+    // suite .
     deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, |_| {})).await;
     {
         let mut repo = s.github.lock().unwrap();
@@ -2458,6 +2459,68 @@ async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_n
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        // 150 runs: the failing one is on the second page.
+        repo.check_runs = (0..150)
+            .map(|i| {
+                listed_run(
+                    i + 1,
+                    5,
+                    &format!("job{i}"),
+                    if i == 120 { "failure" } else { "success" },
+                )
+            })
+            .collect();
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 150 checks failed on 6dcb09b: `job120` (failure)"
+    );
+
+    // More than ten full pages is refused rather than read without end.
+    s.github.lock().unwrap().check_runs = (0..1001)
+        .map(|i| listed_run(i + 1, 5, &format!("job{i}"), "success"))
+        .collect();
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn a_rerun_with_a_suite_supersedes_a_failure_recorded_with_none(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // Run 1 failed, delivered with no check suite (as before the column existed).
+    let failed = edited(CHECK_RUN, |v| {
+        v["check_run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("check_suite");
+        v["check_run"]["id"] = json!(1);
+        v["check_run"]["conclusion"] = json!("failure");
+    });
+    deliver(&s, "check_run", "c-failed", &failed).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(2, 5, "check", "success")];
+    }
+    request_human_review(&s, &codex).await;
+    let checks: String = sqlx::query_scalar("SELECT checks FROM pull_request")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checks, "passing");
 }
 
 #[sqlx::test]
