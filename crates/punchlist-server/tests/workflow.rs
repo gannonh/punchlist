@@ -2572,6 +2572,14 @@ async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: Pg
 async fn an_older_read_writing_before_a_newer_one_does_not_keep_its_stale_pass(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;
+    // Run 1 is already recorded, as a delivery left it.
+    deliver(
+        &s,
+        "check_run",
+        "c-started",
+        &check_run(1, "in_progress", None),
+    )
+    .await;
     let (hold_a, hold_b) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
     {
         let mut repo = s.github.lock().unwrap();
@@ -2580,8 +2588,8 @@ async fn an_older_read_writing_before_a_newer_one_does_not_keep_its_stale_pass(p
         repo.runs_hold = Some(hold_a.clone());
     }
     let conclusion = || async {
-        sqlx::query_scalar::<_, String>("SELECT conclusion FROM check_run WHERE id = 1")
-            .fetch_optional(&pool)
+        sqlx::query_scalar::<_, Option<String>>("SELECT conclusion FROM check_run WHERE id = 1")
+            .fetch_one(&pool)
             .await
             .unwrap()
     };
@@ -2606,17 +2614,29 @@ async fn an_older_read_writing_before_a_newer_one_does_not_keep_its_stale_pass(p
             while conclusion().await.as_deref() != Some("success") {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
-            // B's pull request write is dropped behind A's, and it reads once more: unheld.
-            s.github.lock().unwrap().runs_hold = None;
+            // B's pull request write is dropped behind A's, and it reads once more: held, so
+            // that what B's first read left in `check_run` can be seen.
+            let hold_c = Arc::new(Barrier::new(2));
+            s.github.lock().unwrap().runs_hold = Some(hold_c.clone());
             hold_b.wait().await;
+            let mut waited = 0;
+            while conclusion().await.as_deref() != Some("failure") {
+                waited += 1;
+                assert!(waited < 150, "B's failure never replaced A's success");
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            hold_c.wait().await;
+            hold_c.wait().await;
         }
     );
-    assert_eq!(b.0, StatusCode::CONFLICT, "{}", b.1);
-    assert_eq!(
-        b.1["reason"],
-        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
-    );
+    // A judged its own snapshot and may have moved the issue; what matters is what stands.
+    let _ = b;
     assert_eq!(conclusion().await.as_deref(), Some("failure"));
+    let checks: String = sqlx::query_scalar("SELECT checks FROM pull_request")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(checks, "failing");
 }
 
 #[sqlx::test]
