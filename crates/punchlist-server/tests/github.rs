@@ -500,6 +500,33 @@ async fn review_threads_count_toward_open_threads(pool: PgPool) {
 
     deliver(&s, "pull_request_review_thread", "d4", THREAD).await;
     assert_eq!(open_threads().await, 1);
+
+    // Where a thread is comes from its first comment. A line is there when GitHub sends one.
+    let on_line = edited(THREAD, |v| {
+        v["thread"]["node_id"] = json!("PRRT_kwDOA1b2c84ZyXwV");
+        v["thread"]["comments"][0]["original_line"] = json!(41);
+    });
+    deliver(&s, "pull_request_review_thread", "d5", &on_line).await;
+    let places: Vec<(String, Option<String>, Option<i64>)> =
+        sqlx::query_as("SELECT node_id, path, line FROM review_thread ORDER BY node_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        places,
+        [
+            (
+                "PRRT_kwDOA1b2c84AbCdE".into(),
+                Some("src/lib.rs".into()),
+                None
+            ),
+            (
+                "PRRT_kwDOA1b2c84ZyXwV".into(),
+                Some("src/lib.rs".into()),
+                Some(41)
+            ),
+        ]
+    );
 }
 
 #[sqlx::test]

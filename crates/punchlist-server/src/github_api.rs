@@ -57,6 +57,14 @@ pub(crate) struct ReviewThread {
     /// The thread's node id: `thread.node_id` in a webhook.
     pub id: String,
     pub is_resolved: bool,
+    /// The file the thread is on. A webhook's thread has it on its first comment.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<i64>,
+    /// The line before the file changed under the thread, when `line` is gone.
+    #[serde(default)]
+    pub original_line: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -77,7 +85,7 @@ const REVIEW_THREADS: &str =
     "query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) { pullRequest(number: $number) {
     reviewThreads(first: 100, after: $after) {
-      nodes { id isResolved }
+      nodes { id isResolved path line originalLine }
       pageInfo { hasNextPage endCursor }
     }
   } }

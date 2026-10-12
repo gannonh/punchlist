@@ -287,6 +287,7 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/issues/{id}",
             "/api/issues/{id}/comments",
             "/api/issues/{id}/events",
+            "/api/issues/{id}/gates",
             "/api/issues/{id}/pull-requests",
             "/api/issues/{id}/runs",
             "/api/issues/{id}/transitions",

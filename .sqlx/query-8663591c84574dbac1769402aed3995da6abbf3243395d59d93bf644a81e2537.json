@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT path, line, resolved FROM review_thread\n                 WHERE pull_request_id = $1 ORDER BY path, line, node_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "line",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "line"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "resolved",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "resolved"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "8663591c84574dbac1769402aed3995da6abbf3243395d59d93bf644a81e2537"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO run (workspace_id, issue_id, status, agent, branch)\n         VALUES ($1, $2, 'in_progress', $3, $4) RETURNING id",
+  "query": "INSERT INTO run (workspace_id, issue_id, status, agent, branch)\n         VALUES ($1, $2, $3, $4, $5) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -20,6 +20,7 @@
         "Uuid",
         "Text",
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -27,5 +28,5 @@
       false
     ]
   },
-  "hash": "9c1460deb420257508e67f56f99eef9d25e584ef4c0ed03b1f6da747d092f23b"
+  "hash": "63aac13cc1d2e8418e6f56f837479dcf6e3bf374eaee0f98c17d715cf5c6dfbb"
 }

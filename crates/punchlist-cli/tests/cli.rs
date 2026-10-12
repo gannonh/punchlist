@@ -254,6 +254,12 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         Pull requests
           None linked.
 
+        Gates for In Progress → Agent Review
+          pr_open: fail (no open pull request is linked to PL-1)
+          pr_ready: fail (no open pull request is linked to PL-1)
+          pr_names_issue: fail (no open pull request is linked to PL-1)
+          0 of 3 gates pass
+
         Timeline
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
@@ -289,6 +295,12 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
 
         Pull requests
           None linked.
+
+        Gates for In Progress → Agent Review
+          pr_open: fail (no open pull request is linked to PL-1)
+          pr_ready: fail (no open pull request is linked to PL-1)
+          pr_names_issue: fail (no open pull request is linked to PL-1)
+          0 of 3 gates pass
 
         Timeline
           [time]  Gannon (person)  Backlog → Todo
@@ -507,6 +519,9 @@ fn runner_start_help_lists_the_flags() {
         "--worktree-root",
         "--model",
         "--claude-command",
+        "--agents",
+        "--codex-model",
+        "--codex-command",
         "--max-concurrent",
     ] {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");

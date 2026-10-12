@@ -123,6 +123,18 @@ pub(crate) struct CheckRunEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ThreadData {
     pub node_id: String,
+    /// The first comment says where the thread is.
+    #[serde(default)]
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ThreadComment {
+    pub path: String,
+    #[serde(default)]
+    pub line: Option<i64>,
+    #[serde(default)]
+    pub original_line: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,9 +526,13 @@ pub(crate) async fn process(
                 // Without GitHub's list the event is all there is: its one thread, as the
                 // event left it, in the order it arrived.
                 None => {
+                    let place = event.thread.comments.first();
                     let thread = ReviewThread {
                         id: event.thread.node_id.clone(),
                         is_resolved: event.action == "resolved",
+                        path: place.map(|comment| comment.path.clone()),
+                        line: place.and_then(|comment| comment.line),
+                        original_line: place.and_then(|comment| comment.original_line),
                     };
                     record_review_threads(tx, pull_request_id, &[thread]).await?;
                 }
@@ -606,14 +622,23 @@ async fn record_review_threads(
         .iter()
         .map(|thread| (thread.id.clone(), thread.is_resolved))
         .unzip();
+    let paths: Vec<Option<String>> = threads.iter().map(|t| t.path.clone()).collect();
+    let lines: Vec<Option<i64>> = threads.iter().map(|t| t.line.or(t.original_line)).collect();
     sqlx::query!(
-        "INSERT INTO review_thread (node_id, pull_request_id, resolved)
-         SELECT node_id, $1, resolved FROM UNNEST($2::text[], $3::boolean[]) AS t (node_id, resolved)
+        "INSERT INTO review_thread (node_id, pull_request_id, resolved, path, line)
+         SELECT node_id, $1, resolved, path, line
+         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[])
+             AS t (node_id, resolved, path, line)
          ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
-             resolved = EXCLUDED.resolved, updated_at = now()",
+             resolved = EXCLUDED.resolved, updated_at = now(),
+             -- An event without its comments does not forget where the thread is.
+             path = coalesce(EXCLUDED.path, review_thread.path),
+             line = coalesce(EXCLUDED.line, review_thread.line)",
         pull_request_id,
         &ids,
         &resolved,
+        &paths as &[Option<String>],
+        &lines as &[Option<i64>],
     )
     .execute(&mut *tx)
     .await?;
@@ -1011,7 +1036,7 @@ async fn close_issue_on_pull_request(
         status,
         transition.to.as_str(),
         delivery_id,
-        workflow.version(),
+        &workflow,
         &gates,
     )
     .await?;

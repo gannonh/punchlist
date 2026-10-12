@@ -1,4 +1,4 @@
-//! `/api/runs`: claim a started issue, append logs, finish an attempt, and read runs.
+//! `/api/runs`: claim an issue, append logs, finish an attempt, and read runs.
 
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
-use crate::issues::{check_move, record_transition};
+use crate::issues::{IssueRow, check_move, record_transition};
 use crate::runners::{RunnerRow, runner_of};
 use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
@@ -40,9 +40,10 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 
 enum Target {
-    /// The lowest-numbered issue in Start that no other claim has locked.
+    /// The lowest-numbered claimable issue that no other claim has locked.
     Any,
-    /// The issue a "moved to Start" notification named.
+    /// The issue a notification named: it entered Start or a status with a dispatch rule, or
+    /// the run it waited behind ended.
     Issue(String),
 }
 
@@ -52,9 +53,30 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .is_some_and(|e| e.is_unique_violation())
 }
 
-/// Claims one issue for the runner in one transaction: moves it Start to In Progress as the
-/// runner, creates the run, attempt 1 and the agent actor the run acts as, and leases the
-/// attempt.
+/// An issue's dispatch that waits for a runner: the agent to run, and whether a run of the
+/// issue is still running, such as the run whose agent requested the move here. One run works
+/// on an issue at a time, so the dispatch waits for that run to end.
+async fn waiting_dispatch(
+    tx: &mut sqlx::PgConnection,
+    id: &str,
+    status: &str,
+) -> sqlx::Result<Option<(String, bool)>> {
+    let waiting = sqlx::query!(
+        r#"SELECT agent, EXISTS (SELECT 1 FROM run WHERE run.issue_id = dispatch.issue_id
+                                 AND run.outcome = 'running') AS "busy!"
+           FROM dispatch WHERE issue_id = $1 AND status = $2 AND run_id IS NULL"#,
+        id,
+        status,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    Ok(waiting.map(|row| (row.agent, row.busy)))
+}
+
+/// Claims one issue for the runner in one transaction: an issue in Start, which it moves to
+/// In Progress as the runner, or an issue whose dispatch waits in the status it entered. It
+/// creates the run, attempt 1 and the agent actor the run acts as, leases the attempt, and
+/// marks the issue's dispatch claimed.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
@@ -65,24 +87,49 @@ async fn try_claim(
     // Before the workflow is read, so a claim waiting behind a load uses the new one.
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
-    let Some(dispatch) = workflow.dispatch_for(IN_PROGRESS) else {
-        return Ok(None);
-    };
-    if !runner.agents.contains(&dispatch.agent) {
-        return Ok(None);
-    }
-    let id = match target {
+    // The agent a claim from Start runs, if this runner can run it.
+    let start_agent = workflow
+        .dispatch_for(IN_PROGRESS)
+        .map(|dispatch| &dispatch.agent)
+        .filter(|agent| runner.agents.contains(agent));
+    // The issue, locked, the status it is in, and the agent to run on it.
+    let (id, from, agent) = match target {
         Target::Any => {
-            let id = sqlx::query_scalar!(
-                "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2
-                 ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
-                actor.workspace_id,
-                START,
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(id) = id else { return Ok(None) };
-            id
+            let started = match start_agent {
+                Some(_) => {
+                    sqlx::query_scalar!(
+                        "SELECT id FROM issue WHERE workspace_id = $1 AND status = $2
+                         ORDER BY number LIMIT 1 FOR UPDATE SKIP LOCKED",
+                        actor.workspace_id,
+                        START,
+                    )
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+                None => None,
+            };
+            match (started, start_agent) {
+                (Some(id), Some(agent)) => (id, START.to_string(), agent.clone()),
+                _ => {
+                    let waiting = sqlx::query!(
+                        "SELECT i.id, i.status, d.agent
+                         FROM dispatch d JOIN issue i ON i.id = d.issue_id
+                         WHERE i.workspace_id = $1 AND d.run_id IS NULL AND d.status = i.status
+                           AND d.agent = ANY($2)
+                           AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
+                                           AND run.outcome = 'running')
+                         ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED",
+                        actor.workspace_id,
+                        &runner.agents,
+                    )
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    let Some(waiting) = waiting else {
+                        return Ok(None);
+                    };
+                    (waiting.id, waiting.status, waiting.agent)
+                }
+            }
         }
         Target::Issue(id) => {
             let status = sqlx::query_scalar!(
@@ -92,39 +139,69 @@ async fn try_claim(
             )
             .fetch_optional(&mut *tx)
             .await?;
-            if status.as_deref() != Some(START) {
-                tx.rollback().await?;
-                let holder = sqlx::query_scalar!(
-                    "SELECT r.name FROM attempt a JOIN runner r ON r.id = a.runner_id
-                     JOIN run ON run.id = a.run_id
-                     WHERE a.issue_id = $1 ORDER BY run.started_at DESC, a.attempt DESC LIMIT 1",
-                    id,
-                )
-                .fetch_optional(&state.pool)
-                .await?
-                .unwrap_or_else(|| "another runner".to_string());
-                return Err(ApiError::ClaimTaken(format!(
-                    "{id} was claimed by runner {holder}"
-                )));
+            let waiting = match &status {
+                Some(status) if status != START => waiting_dispatch(&mut tx, id, status).await?,
+                _ => None,
+            };
+            match (status, waiting) {
+                (Some(status), _) if status == START => match start_agent {
+                    Some(agent) => (id.clone(), status, agent.clone()),
+                    None => return Ok(None),
+                },
+                (Some(status), Some((agent, busy))) => {
+                    if busy || !runner.agents.contains(&agent) {
+                        return Ok(None);
+                    }
+                    (id.clone(), status, agent)
+                }
+                _ => {
+                    tx.rollback().await?;
+                    let holder = sqlx::query_scalar!(
+                        "SELECT r.name FROM attempt a JOIN runner r ON r.id = a.runner_id
+                         JOIN run ON run.id = a.run_id
+                         WHERE a.issue_id = $1 ORDER BY run.started_at DESC, a.attempt DESC LIMIT 1",
+                        id,
+                    )
+                    .fetch_optional(&state.pool)
+                    .await?
+                    .unwrap_or_else(|| "another runner".to_string());
+                    return Err(ApiError::ClaimTaken(format!(
+                        "{id} was claimed by runner {holder}"
+                    )));
+                }
             }
-            id.clone()
         }
     };
-    let gates = check_move(&mut tx, &workflow, actor, &id, START, IN_PROGRESS).await?;
-    let moved = record_transition(
-        &mut tx,
-        actor,
-        &id,
-        START.into(),
-        IN_PROGRESS,
-        None,
-        workflow.version(),
-        &gates,
-    )
-    .await?;
+    // The status the run is for, and the issue in that status.
+    let (status, issue) = if from == START {
+        let gates = check_move(&mut tx, &workflow, actor, &id, START, IN_PROGRESS).await?;
+        let moved = record_transition(
+            &mut tx,
+            actor,
+            &id,
+            from,
+            IN_PROGRESS,
+            None,
+            &workflow,
+            &gates,
+        )
+        .await?;
+        (IN_PROGRESS.to_string(), moved.issue)
+    } else {
+        let issue = sqlx::query_as!(
+            IssueRow,
+            "SELECT id, title, body, status, created_at, updated_at FROM issue WHERE id = $1",
+            id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        (from, issue.into())
+    };
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
-    // a retry, because nothing has merged on the branch it was given.
+    // a retry, because nothing has merged on the branch it was given. A run dispatched in a
+    // later status of the same lifecycle, such as Agent Review, gets the same branch for
+    // the same reason, and the runner that has its worktree reuses it.
     // ponytail: "merged" is judged by head branch name alone, so a pull request merged into
     // a non-default base, or from a fork with the same branch name, also finishes the
     // branch. Upgrade path: record the base ref and head repository on `pull_request`.
@@ -136,7 +213,7 @@ async fn try_claim(
     )
     .fetch_all(&mut *tx)
     .await?;
-    let base = branch_name(&id, &moved.issue.title);
+    let base = branch_name(&id, &issue.title);
     let mut branch = base.clone();
     let mut lifecycle = 1;
     while merged_branches.contains(&branch) {
@@ -145,10 +222,11 @@ async fn try_claim(
     }
     let run_id = sqlx::query_scalar!(
         "INSERT INTO run (workspace_id, issue_id, status, agent, branch)
-         VALUES ($1, $2, 'in_progress', $3, $4) RETURNING id",
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
         actor.workspace_id,
         id,
-        dispatch.agent,
+        status,
+        agent,
         branch,
     )
     .fetch_one(&mut *tx)
@@ -160,12 +238,21 @@ async fn try_claim(
             error.into()
         }
     })?;
+    // Exactly one run per dispatch: the issue's lock is held, and `dispatch.run_id` is set
+    // once. The move from Start wrote the dispatch this claims in the same transaction.
+    sqlx::query!(
+        "UPDATE dispatch SET run_id = $2 WHERE issue_id = $1 AND run_id IS NULL",
+        id,
+        run_id,
+    )
+    .execute(&mut *tx)
+    .await?;
     let agent_token = new_token();
     sqlx::query!(
         "INSERT INTO actor (workspace_id, name, role, token_hash, run_id)
          VALUES ($1, $2, 'agent', $3, $4)",
         actor.workspace_id,
-        agent_display_name(&dispatch.agent),
+        agent_display_name(&agent),
         hash_token(&agent_token),
         run_id,
     )
@@ -193,20 +280,21 @@ async fn try_claim(
     Ok(Some(Claim {
         run_id,
         attempt: 1,
-        agent: dispatch.agent.clone(),
-        issue: moved.issue,
+        agent,
+        issue,
         repository,
         branch,
         merged_branches,
         lease_expires_at,
-        prompt: workflow.prompt_for(IN_PROGRESS),
+        prompt: workflow.prompt_for(&status),
         agent_token,
     }))
 }
 
-/// Claim a started issue. Runner token. 204 when nothing is claimable; with `wait_seconds`
-/// the request waits for an issue to enter Start. When several runners wait, each issue
-/// goes to one of them and the others get 409 `claim_taken`.
+/// Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
+/// names an agent the runner can run. Runner token. 204 when nothing is claimable; with
+/// `wait_seconds` the request waits for one. When several runners wait, each issue goes to
+/// one of them and the others get 409 `claim_taken`.
 #[utoipa::path(
     post,
     path = "/api/runs/claim",
@@ -231,7 +319,7 @@ async fn claim(
             .min(MAX_WAIT_SECONDS),
     ));
     let runner = runner_of(&state, &actor).await?;
-    // Subscribe before the first attempt so a move to Start in between is not missed.
+    // Subscribe before the first attempt so a move in between is not missed.
     let mut starts = state.starts.subscribe();
     if let Some(claim) = try_claim(&state, &actor, &runner, &Target::Any).await? {
         return Ok(Json(claim).into_response());
@@ -485,6 +573,19 @@ async fn finish_run(
         .into_iter()
         .next()
         .ok_or(ApiError::RunNotFound(id))?;
+    // A dispatch that waited for this run to end can be claimed now: wake the runners.
+    let waiting = sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM dispatch WHERE issue_id = $1 AND run_id IS NULL)
+           AS "waiting!""#,
+        run.issue_id,
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    if waiting {
+        let _ = state
+            .starts
+            .send((actor.workspace_id, run.issue_id.clone()));
+    }
     Ok(Json(run))
 }
 

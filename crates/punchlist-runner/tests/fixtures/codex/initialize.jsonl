@@ -1,0 +1,3 @@
+{"id":1,"result":{"userAgent":"punchlist-runner/0.162.1 (Linux Unknown; x86_64) unknown (punchlist-runner; 0.1.0)","codexHome":"/home/gannonh/.codex","platformFamily":"unix","platformOs":"linux"}}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"sartre","installationId":"8b79e3aa-954f-4bbe-ab5c-bf411bdde604","environmentId":null},"emittedAtMs":1791821726682}
+{"method":"account/updated","params":{"authMode":"chatgpt","planType":"plus"},"emittedAtMs":1791821727073}

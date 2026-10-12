@@ -1,0 +1,4 @@
+{"id":3,"result":{"turn":{"id":"u1","status":"inProgress"}}}
+{"method":"item/agentMessage/delta","params":{"delta":"Do"}}
+{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":10,"outputTokens":2}}}}
+{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed"}}}

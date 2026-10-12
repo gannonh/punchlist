@@ -1,6 +1,6 @@
 //! The Claude Code adapter: builds the prompt, runs `claude` in the worktree, streams its
 //! output as log lines and reads the final `result` line for the outcome and token counts.
-//! New code. The Codex adapter that ADR 0005 names comes with R9.
+//! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -145,12 +145,12 @@ struct ResultLine {
 /// The most of one output record the runner keeps. The rest of a longer record, up to its
 /// newline, is read and discarded, so one record cannot grow memory without limit. Large
 /// enough for a `result` line; the log flusher clips what it sends further.
-const MAX_RECORD_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 /// Reads one newline-terminated record, keeping at most `max` bytes of it. `None` at the end
 /// of input. A cut record ends with `… [truncated]`. A trailing `\r` is dropped, as
 /// `lines()` does.
-async fn read_record<R: AsyncBufRead + Unpin>(
+pub(crate) async fn read_record<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
 ) -> std::io::Result<Option<String>> {
@@ -364,7 +364,7 @@ pub(crate) fn kill_group(leader: Option<u32>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -462,11 +462,11 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         }
     }
 
-    /// Writes an executable fake `claude`. Another test thread that forks while the file is
+    /// Writes an executable fake agent, named `claude`. Another test thread that forks while the file is
     /// open for writing holds the write handle until its child execs, and an exec of the
     /// file fails with ETXTBSY meanwhile. Probe until one exec succeeds: the handle is then
     /// gone from every process, and nothing can copy it again, so later execs are safe.
-    fn fake_claude(dir: &Path, script: &str) -> PathBuf {
+    pub(crate) fn fake_claude(dir: &Path, script: &str) -> PathBuf {
         let path = dir.join("claude");
         std::fs::write(
             &path,
