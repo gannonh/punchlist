@@ -74,7 +74,7 @@ pub enum PullRequestCommand {
 #[derive(Debug, Subcommand)]
 pub enum RunnerCommand {
     /// Register this machine as a runner and work on the issues it can claim until stopped.
-    Start(RunnerStart),
+    Start(Box<RunnerStart>),
     /// List registered runners and their last heartbeat.
     List,
 }
@@ -101,6 +101,10 @@ pub struct RunnerStart {
     /// The model a Codex run starts with, such as `gpt-6-luna`.
     #[arg(long)]
     pub codex_model: Option<String>,
+    /// The reasoning effort a Codex run starts with, one the model offers, such as `low`
+    /// or `high`. Default: `medium`.
+    #[arg(long)]
+    pub codex_effort: Option<String>,
     /// The `codex` executable.
     #[arg(long)]
     pub codex_command: Option<String>,
@@ -163,6 +167,7 @@ pub struct RunnerSection {
     pub model: Option<String>,
     pub codex_command: Option<String>,
     pub codex_model: Option<String>,
+    pub codex_effort: Option<String>,
     pub max_concurrent: Option<usize>,
 }
 
@@ -207,7 +212,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::Runner(RunnerCommand::Start(flags)) => {
             init_logging();
             let home = std::env::var("HOME").ok();
-            let runner = runner_config(&config, flags, home.as_deref(), &hostname());
+            let runner = runner_config(&config, *flags, home.as_deref(), &hostname());
             punchlist_runner::run(runner, shutdown_signal()).await
         }
         Command::PullRequest(PullRequestCommand::Unlinked) => {
@@ -312,6 +317,10 @@ pub fn runner_config(
         model: flags.model.or_else(|| table.model.clone()),
         codex_command: expand_home(&codex_command, home),
         codex_model: flags.codex_model.or_else(|| table.codex_model.clone()),
+        codex_effort: flags
+            .codex_effort
+            .or_else(|| table.codex_effort.clone())
+            .unwrap_or_else(|| "medium".to_string()),
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
@@ -914,6 +923,7 @@ mod tests {
         assert_eq!(defaults.claude_command, PathBuf::from("claude"));
         assert_eq!(defaults.codex_command, PathBuf::from("codex"));
         assert_eq!(defaults.codex_model, None);
+        assert_eq!(defaults.codex_effort, "medium");
         assert_eq!((defaults.model, defaults.max_concurrent), (None, 1));
 
         let table = config(
@@ -924,12 +934,14 @@ mod tests {
             name: Some("f".into()),
             agents: Some(vec!["claude-code".into(), "codex".into()]),
             codex_model: Some("gpt-6-luna".into()),
+            codex_effort: Some("low".into()),
             ..RunnerStart::default()
         };
         let merged = runner_config(&table, flags, Some("/h"), "box");
         assert_eq!(merged.name, "f");
         assert_eq!(merged.agents, ["claude-code", "codex"]);
         assert_eq!(merged.codex_model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(merged.codex_effort, "low");
         assert_eq!(merged.worktree_root, PathBuf::from("/h/wt"));
         assert_eq!(merged.model.as_deref(), Some("haiku"));
         assert_eq!(merged.max_concurrent, 3);

@@ -17,7 +17,7 @@
 
 ## How to get to it (user POV)
 
-- `pl runner start [--name N] [--worktree-root DIR] [--agents claude-code,codex] [--model M] [--codex-model M] [--codex-command PATH] [--max-concurrent K]`, `pl runner list`.
+- `pl runner start [--name N] [--worktree-root DIR] [--agents claude-code,codex] [--model M] [--codex-model M] [--codex-effort E] [--codex-command PATH] [--max-concurrent K]`, `pl runner list`.
 - `pl issue move <id> start`, then `pl issue show <id>` and `pl run log <run-id>`.
 - `POST /api/runners`, `POST /api/runners/{id}/heartbeat`, `POST /api/runs/claim`, `POST /api/runs/{id}/log`, `POST /api/runs/{id}/finish`, `GET /api/issues/{id}/runs`, `GET /api/runs/{id}/log`.
 
@@ -48,7 +48,8 @@ Preconditions:
 - Once the branch's pull request has merged and none is open on it, such as after a person moved the issue `merging → todo` following a refused merge, the claim names `feature/<id>-<slug>-2` (then `-3`) and lists the issue's merged branches in `merged_branches`. The runner starts that branch from the default branch and replaces a clean worktree left on a merged branch; one with uncommitted or untracked files fails the run with `has uncommitted work on the merged branch`. The run opens a second pull request that lists only its own changes; `pl issue show` lists both, and the gates read the open one.
 - The claim reads the recorded pull requests: a claim made before the merge's webhook arrives continues on the merged branch.
 - A dispatch waits while the issue has a running run: the Claude Code run that requested Agent Review still has to exit. The claim follows its `finish` by milliseconds; measure from the run's `finished_at`, not only from the transition.
-- Codex loads the person's `~/.codex/config.toml` too: its reasoning effort and its other MCP servers come along. Only the model, the sandbox (`danger-full-access`, no approvals) and Punchlist's MCP server are set by the runner.
+- A Codex run gets nothing from the person's `~/.codex` but the sign-in. The runner starts `codex app-server` with `CODEX_HOME` set to `<worktree root>/codex-home/<run id>`, a directory it makes for the run and removes after it, holding only a link to the person's `auth.json` (from `$CODEX_HOME`, else `~/.codex`); with apps, plugins and hooks off (`-c features.apps=false -c features.plugins=false -c features.hooks=false`); and with the worktree as an untrusted project, so a `.codex/config.toml` in the repository is not loaded either. The model, the reasoning effort (`--codex-effort`, default `medium`), the sandbox (`danger-full-access`, no approvals) and Punchlist's MCP server are the runner's. In the run log, `grep -o '"method":"mcpServer/startupStatus/updated","params":{[^}]*' | grep -o '"name":"[^"]*"' | sort -u` lists the MCP servers the thread started, which is `"name":"punchlist"` alone, and the answer to `thread/start` (`{"id":2,"result":…`) carries `"reasoningEffort"`. A Claude Code run's `system` `init` line lists its servers in `mcp_servers`.
+- A runner that is killed leaves its running Codex runs' `codex-home/<run id>` behind: the link and Codex's own state files, no copy of the sign-in. A sign-in kept in the keyring instead of `auth.json` does not reach the run.
 - A runner that still has the issue's worktree fast-forwards it to the branch on the remote before the agent starts, so a push by another runner or a person is there; a worktree that diverged from the remote fails the run with `cannot fast-forward to origin/<branch>`, and so does a remote that cannot be asked for the branch (`git ls-remote: …`); a branch the remote does not have yet is fine.
-- A Codex thread is started `ephemeral`: Codex keeps no rollout of it under `~/.codex/sessions`.
+- A Codex thread is started `ephemeral`: Codex keeps no rollout of it under its home's `sessions`.
 - A runner holds its token in memory only. Restarting it registers a new runner; the old one's leases expire after 30 s and their attempts fail.

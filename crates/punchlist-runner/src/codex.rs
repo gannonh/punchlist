@@ -1,9 +1,14 @@
-// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes, auto-approval and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle, the input-required heuristics and the workspace check (worktree.rs checks the path). Token accounting is not Symphony's `token_accounting.rs`: the app-server reports the thread's running totals, which is all a one-turn thread needs. Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, and the model and MCP server sent in `thread/start`.
+// Copied from kata-symphony apps/symphony/src/codex/app_server.rs at e7c160f5; trimmed: kept the handshake (`initialize`, `initialized`, `thread/start`), `turn/start`, the receive loop with its turn outcomes, auto-approval and the message helpers; dropped the docker and ssh workers, dynamic tools, the `AgentEvent` stream, rate limits, the triage handle, the input-required heuristics and the workspace check (worktree.rs checks the path). Token accounting is not Symphony's `token_accounting.rs`: the app-server reports the thread's running totals, which is all a one-turn thread needs. Written for Punchlist: the process group and stop signal, the run log lines, the answer to requests it does not handle, the per-run `CODEX_HOME`, and the model, effort and MCP server sent in `thread/start`.
 //! The Codex adapter: runs `codex app-server` in the worktree, starts a thread and one turn
 //! with the prompt over JSON-RPC on its stdio, streams its messages as log lines, and reads
 //! the turn's outcome and token counts.
 //!
-//! 1. Spawn `<codex> app-server` with the worktree as cwd.
+//! Codex has no `--strict-mcp-config`. The run gets only what the runner gives it because
+//! `CODEX_HOME` is a directory made for the run, holding nothing but a link to the person's
+//! sign-in; apps, plugins and hooks are off; and the worktree is an untrusted project, so
+//! Codex loads no `.codex/` from the repository either.
+//!
+//! 1. Spawn `<codex> app-server` with the worktree as cwd and the run's `CODEX_HOME`.
 //! 2. Handshake: `initialize(id=1)` → await response → `initialized` → `thread/start(id=2)`
 //!    → await response.
 //! 3. Turn: `turn/start(id=3)` → await response → stream events until `turn/completed`,
@@ -45,6 +50,64 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
                 "PUNCHLIST_TOKEN": claim.agent_token,
                 "PUNCHLIST_ISSUE": claim.issue.id,
             }
+        }
+    })
+}
+
+/// Makes `home`, the `CODEX_HOME` of one run: an empty directory only this user can read,
+/// with a link to the sign-in in `person_home`, the person's own Codex home. A link, not a
+/// copy: Codex writes a refreshed token through it, so the person's sign-in stays current
+/// and removing `home` leaves no credential behind. The caller removes `home` after the run.
+// ponytail: a sign-in kept in the keyring (`cli_auth_credentials_store`) has no `auth.json`
+// to link, and the run fails as not signed in; have the runner pass the tokens over the
+// app-server's `account/login/start` when someone needs that.
+pub(crate) fn write_home(home: &Path, person_home: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    // What a run killed with its runner left behind.
+    let _ = std::fs::remove_dir_all(home);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home)?;
+    std::os::unix::fs::symlink(person_home.join("auth.json"), home.join("auth.json"))
+}
+
+/// The `thread/start` parameters of one run: the runner's model and reasoning effort, no
+/// sandbox or approvals, and `mcp_servers` as the only MCP servers.
+// ponytail: `danger-full-access` and no approvals, as the Claude adapter's
+// `bypassPermissions`: the agent has to reach git's directory in the clone, the network
+// and `gh`. Codex's own `workspace-write` sandbox allows none of the three; give the
+// run a container or a sandbox policy with those holes when untrusted issue text needs
+// a tighter box.
+pub(crate) fn thread_params(
+    model: Option<&str>,
+    effort: &str,
+    mcp_servers: Value,
+    worktree: &Path,
+) -> Value {
+    // Codex trusts a project it starts with full access, and a trusted project's
+    // `.codex/config.toml` adds MCP servers and hooks. Say first that this one is not.
+    let untrusted: serde_json::Map<String, Value> = [
+        worktree.to_path_buf(),
+        worktree.canonicalize().unwrap_or(worktree.to_path_buf()),
+    ]
+    .iter()
+    .map(|path| {
+        let path = path.to_string_lossy().into_owned();
+        (path, json!({"trust_level": "untrusted"}))
+    })
+    .collect();
+    json!({
+        "approvalPolicy": "never",
+        "sandbox": "danger-full-access",
+        "cwd": worktree.to_string_lossy(),
+        "model": model,
+        // Codex keeps no copy of the session under its home's `sessions`.
+        "ephemeral": true,
+        "config": {
+            "model_reasoning_effort": effort,
+            "mcp_servers": mcp_servers,
+            "projects": untrusted
         }
     })
 }
@@ -125,17 +188,7 @@ impl Session {
     /// Perform the startup handshake and return the `thread_id`.
     ///
     /// Order: `initialize(id=1)` → await → `initialized` (no id) → `thread/start(id=2)` → await.
-    // ponytail: `danger-full-access` and no approvals, as the Claude adapter's
-    // `bypassPermissions`: the agent has to reach git's directory in the clone, the network
-    // and `gh`. Codex's own `workspace-write` sandbox allows none of the three; give the
-    // run a container or a sandbox policy with those holes when untrusted issue text needs
-    // a tighter box.
-    async fn start_thread(
-        &mut self,
-        worktree: &Path,
-        model: Option<&str>,
-        mcp_servers: Value,
-    ) -> Result<String, String> {
+    async fn start_thread(&mut self, thread_params: Value) -> Result<String, String> {
         self.send(&json!({
             "method": "initialize",
             "id": INITIALIZE_ID,
@@ -155,15 +208,7 @@ impl Session {
         self.send(&json!({
             "method": "thread/start",
             "id": THREAD_START_ID,
-            "params": {
-                "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
-                "cwd": worktree.to_string_lossy(),
-                "model": model,
-                // Codex keeps no copy of the session under `~/.codex/sessions`.
-                "ephemeral": true,
-                "config": {"mcp_servers": mcp_servers}
-            }
+            "params": thread_params
         }))
         .await?;
         let thread = self.await_response(THREAD_START_ID).await?;
@@ -232,7 +277,8 @@ impl Session {
     }
 
     /// Answers a request from Codex, so it does not wait forever; a notification needs no
-    /// answer. The approval policy is `never`, so a request for approval is approved. A
+    /// answer. The approval policy is `never`, so a request for approval is approved. An
+    /// elicitation is accepted from Punchlist's MCP server and declined from any other. A
     /// request this runner does not handle gets a JSON-RPC error.
     async fn answer_request(&mut self, payload: &Value) -> Result<(), String> {
         let (Some(id), Some(method)) = (
@@ -248,7 +294,12 @@ impl Session {
             "execCommandApproval" | "applyPatchApproval" => {
                 json!({"id": id, "result": {"decision": "approved_for_session"}})
             }
-            "mcpServer/elicitation/request" => json!({"id": id, "result": {"action": "accept"}}),
+            "mcpServer/elicitation/request" => {
+                let server = payload.pointer("/params/serverName");
+                let ours = server.and_then(Value::as_str) == Some("punchlist");
+                let action = if ours { "accept" } else { "decline" };
+                json!({"id": id, "result": {"action": action}})
+            }
             other => json!({"id": id, "error": {
                 "code": -32601,
                 "message": format!("the Punchlist runner does not handle {other}")
@@ -258,14 +309,15 @@ impl Session {
     }
 }
 
-/// Runs one Codex turn in `worktree` with `prompt`. The app-server's messages go to `lines`
+/// Runs one Codex turn in `worktree` with `prompt`, with `home` (see `write_home`) as its
+/// `CODEX_HOME` and `thread_params` (see `thread_params`) for its thread. The app-server's messages go to `lines`
 /// as they arrive, without the streaming deltas; its stderr lines go there prefixed with
 /// `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
 /// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
 pub(crate) async fn run_codex(
     codex_command: &Path,
-    model: Option<&str>,
-    mcp_servers: Value,
+    home: &Path,
+    thread_params: Value,
     worktree: &Path,
     prompt: &str,
     lines: mpsc::Sender<String>,
@@ -273,6 +325,12 @@ pub(crate) async fn run_codex(
 ) -> AgentExit {
     let spawned = Command::new(codex_command)
         .arg("app-server")
+        // The account's apps (connectors) and plugins bring MCP servers of their own, even
+        // into an empty home; hooks run the person's or the repository's commands.
+        .args(["-c", "features.apps=false"])
+        .args(["-c", "features.plugins=false"])
+        .args(["-c", "features.hooks=false"])
+        .env("CODEX_HOME", home)
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
@@ -312,7 +370,7 @@ pub(crate) async fn run_codex(
 
     let turn = tokio::select! {
         turn = async {
-            let thread_id = session.start_thread(worktree, model, mcp_servers).await?;
+            let thread_id = session.start_thread(thread_params).await?;
             session.run_turn(&thread_id, worktree, prompt).await
         } => Some(turn),
         _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
@@ -356,6 +414,10 @@ mod tests {
         let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex");
         format!(
             r#"[ "$1" = app-server ] || exit 64
+echo "$*" > args.txt
+echo "$CODEX_HOME" > codex-home.txt
+ls -A "$CODEX_HOME" > codex-home-entries.txt
+cat "$CODEX_HOME/auth.json" > sign-in.txt
 while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) cat {fixtures}/initialize.jsonl ;;
@@ -372,10 +434,17 @@ done"#
         let (tx, mut rx) = mpsc::channel(10_000);
         let (_stop_tx, stop_rx) = watch::channel(false);
         let mcp = json!({"punchlist": {"command": "pl", "args": ["mcp"]}});
+        // The person's Codex home: a sign-in, and a configuration the run must not get.
+        let person = temp.path().join("person");
+        std::fs::create_dir(&person).unwrap();
+        std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
+        std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
+        let home = temp.path().join("codex-home/run-1");
+        write_home(&home, &person).unwrap();
         let exit = run_codex(
             &command,
-            Some("gpt-6-luna"),
-            mcp,
+            &home,
+            thread_params(Some("gpt-6-luna"), "low", mcp, temp.path()),
             temp.path(),
             "Review the pull request.",
             tx,
@@ -433,13 +502,40 @@ done"#
                 .starts_with(r#"{"method":"turn/completed","#)
         );
 
-        // What the adapter asked for: the model, no sandbox or approvals, Punchlist's MCP
-        // server, and the prompt as the turn's input.
-        let sent = |file: &str| -> Value {
-            serde_json::from_str(&std::fs::read_to_string(temp.path().join(file)).unwrap()).unwrap()
-        };
+        // What Codex was started with: a home of its own that holds the person's sign-in
+        // and nothing else of theirs, and apps, plugins and hooks off.
+        let seen = |file: &str| std::fs::read_to_string(temp.path().join(file)).unwrap();
+        let home = temp.path().join("codex-home/run-1");
+        assert_eq!(seen("codex-home.txt").trim(), home.to_str().unwrap());
+        assert_eq!(seen("codex-home-entries.txt"), "auth.json\n");
+        assert_eq!(seen("sign-in.txt"), "the sign-in");
+        assert_eq!(
+            seen("args.txt").trim(),
+            "app-server -c features.apps=false -c features.plugins=false -c features.hooks=false"
+        );
+        // The home is a link to the sign-in, not a copy: removing it removes no sign-in.
+        assert!(home.join("auth.json").is_symlink());
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(seen("person/auth.json"), "the sign-in");
+
+        // What the adapter asked for: the model and effort, no sandbox or approvals,
+        // Punchlist's MCP server and no other, the worktree as an untrusted project, and
+        // the prompt as the turn's input.
+        let sent = |file: &str| -> Value { serde_json::from_str(&seen(file)).unwrap() };
         let thread = sent("thread-start.json");
         assert_eq!(thread["params"]["model"], "gpt-6-luna");
+        let config = thread["params"]["config"].as_object().unwrap();
+        assert_eq!(config["model_reasoning_effort"], "low");
+        assert_eq!(
+            config["mcp_servers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["punchlist"]
+        );
+        let worktree = temp.path().to_str().unwrap();
+        assert_eq!(config["projects"][worktree]["trust_level"], "untrusted");
         assert_eq!(thread["params"]["approvalPolicy"], "never");
         assert_eq!(thread["params"]["sandbox"], "danger-full-access");
         assert_eq!(thread["params"]["ephemeral"], true);
@@ -508,6 +604,10 @@ done"#;
       echo '{"id":3,"result":{"turn":{"id":"u1"}}}'
       echo '{"id":1,"method":"account/chatgptAuthTokens/refresh","params":{}}' ;;
     *'does not handle account/chatgptAuthTokens/refresh'*)
+      echo '{"id":2,"method":"mcpServer/elicitation/request","params":{"serverName":"other"}}' ;;
+    *'"id":2,"result":{"action":"decline"}'*)
+      echo '{"id":4,"method":"mcpServer/elicitation/request","params":{"serverName":"punchlist"}}' ;;
+    *'"id":4,"result":{"action":"accept"}'*)
       echo '{"method":"turn/completed","params":{"turn":{"id":"u1","status":"completed"}}}' ;;
   esac
 done"#;
@@ -542,7 +642,7 @@ done"#;
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let run = tokio::spawn(async move {
-            run_codex(&command, None, json!({}), &dir, "p", tx, stop_rx).await
+            run_codex(&command, &dir, json!({}), &dir, "p", tx, stop_rx).await
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop_tx.send(true).unwrap();
