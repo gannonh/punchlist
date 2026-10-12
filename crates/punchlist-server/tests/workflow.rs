@@ -2501,6 +2501,25 @@ async fn a_run_that_ends_in_a_status_the_active_workflow_no_longer_dispatches_is
 }
 
 #[sqlx::test]
+async fn a_run_ends_when_the_active_workflow_cannot_be_read(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, runner, first) = claimed_by_runner(&s).await;
+    sqlx::query("UPDATE workflow_version SET workflow_toml = 'not a workflow ['")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    finish(&s, &runner, &first).await;
+    let outcome: String = sqlx::query_scalar("SELECT outcome FROM run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "succeeded");
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, false)]);
+}
+
+#[sqlx::test]
 async fn a_run_claimed_from_start_that_ends_without_a_request_is_dispatched_again(pool: PgPool) {
     let s = setup(&pool).await;
     let (_, runner, first) = claimed_by_runner(&s).await;

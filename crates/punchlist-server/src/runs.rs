@@ -591,7 +591,8 @@ async fn finish_run(
 /// gives its run the prompt of the transition's workflow version. Nothing is queued for a
 /// run without a dispatch, an issue that moved, a status the active workflow now locks to
 /// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
-/// run `RUNS_PER_ENTRY` of the entry: that issue waits on a person. `get_issue` reads the
+/// run `RUNS_PER_ENTRY` of the entry: that issue waits on a person. Nor when the active
+/// workflow cannot be read, which is logged. `get_issue` reads the
 /// same two rules, the latest transition and the limit, to say so; change them together.
 ///
 /// Once per run: an attempt leaves `running` once, under its row lock, so one transaction
@@ -604,7 +605,15 @@ async fn queue_redispatch(
     let status = sqlx::query_scalar!("SELECT status FROM run WHERE id = $1", run_id)
         .fetch_one(&mut *tx)
         .await?;
-    let (active, _) = active_workflow(tx, workspace_id).await?;
+    // Ending the run must commit whatever the stored workflow looks like: one this server
+    // cannot read queues nothing, and the run still ends.
+    let active = match active_workflow(tx, workspace_id).await {
+        Ok((active, _)) => active,
+        Err(error) => {
+            tracing::error!(run = %run_id, %error, "not dispatched again: the active workflow cannot be read");
+            return Ok(());
+        }
+    };
     let unlocked = |role| active.check_unlocked(&status, role).is_ok();
     if active.dispatch_for(&status).is_none() || !unlocked(Role::Agent) || !unlocked(Role::Runner) {
         return Ok(());
