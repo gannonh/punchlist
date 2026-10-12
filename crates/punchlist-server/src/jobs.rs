@@ -4,6 +4,8 @@
 
 use std::time::Duration;
 
+use anyhow::Context;
+
 use crate::AppState;
 
 /// How long a claimed job is leased before another worker may take it.
@@ -59,19 +61,29 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
     // The work and the completion commit together. The completion only matches while this
     // attempt still holds the job, so a worker whose lease expired rolls back.
     let result = async {
-        // A GitHub event reads GitHub before its transaction begins, so it holds no lock and
-        // no connection across the network.
-        let delivery = match job.kind.as_str() {
-            "github_event" => Some(crate::github::read_current(state, &job.payload).await?),
-            _ => None,
-        };
-        let mut tx = state.pool.begin().await?;
-        match (job.kind.as_str(), delivery) {
-            (_, Some((job, current))) => crate::github::process(&mut tx, &job, current).await?,
+        let mut tx;
+        match job.kind.as_str() {
+            "github_event" => {
+                // GitHub is read before the transaction begins, so no lock or connection is
+                // held across the network, and within half the lease, so a slow GitHub
+                // fails the job instead of outliving it.
+                let read = crate::github::read_current(state, &job.payload);
+                let (event, current) = tokio::time::timeout(
+                    Duration::from_secs_f64(f64::from(LEASE_SECONDS) / 2.0),
+                    read,
+                )
+                .await
+                .context("GitHub did not answer in time")??;
+                tx = state.pool.begin().await?;
+                crate::github::process(&mut tx, &event, current).await?;
+            }
             // ponytail: the GitHub reads run inside the transaction, holding a connection
             // for their few seconds; fine at one load per push to `.punchlist/`.
-            ("workflow_load", _) => crate::workflow::load(state, &mut tx, job.payload).await?,
-            (other, _) => anyhow::bail!("unknown job kind `{other}`"),
+            "workflow_load" => {
+                tx = state.pool.begin().await?;
+                crate::workflow::load(state, &mut tx, job.payload).await?;
+            }
+            other => anyhow::bail!("unknown job kind `{other}`"),
         }
         let done = sqlx::query!(
             "UPDATE job SET state = 'done', lease_expires_at = NULL, last_error = NULL,

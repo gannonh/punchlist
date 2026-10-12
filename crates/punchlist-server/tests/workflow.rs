@@ -32,7 +32,8 @@ const PRD_WORKFLOW: &str = include_str!("../../punchlist-core/src/default/workfl
 
 /// The default branch's head commit, the files under `.punchlist/` there, and the pull
 /// requests and review threads GitHub currently reports; every pull request has the same
-/// threads. `down` makes the pull request and review thread endpoints fail.
+/// threads. `down` makes the pull request and review thread endpoints fail, `graphql_down` the
+/// review threads alone. A pull request GitHub does not have is a 404.
 #[derive(Default)]
 struct Repo {
     sha: String,
@@ -40,6 +41,7 @@ struct Repo {
     pulls: Vec<Value>,
     threads: Vec<Value>,
     down: bool,
+    graphql_down: bool,
 }
 
 type FakeGithub = Arc<Mutex<Repo>>;
@@ -76,8 +78,11 @@ async fn fake_github() -> (FakeGithub, String) {
                  Path((_, _, number)): Path<(String, String, i64)>| async move {
                     let repo = repo.lock().unwrap();
                     match repo.pulls.iter().find(|pr| pr["number"] == number) {
-                        Some(pr) if !repo.down => (StatusCode::OK, axum::Json(pr.clone())),
-                        _ => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                        _ if repo.down => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({})))
+                        }
+                        Some(pr) => (StatusCode::OK, axum::Json(pr.clone())),
+                        None => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
                     }
                 },
             ),
@@ -88,7 +93,7 @@ async fn fake_github() -> (FakeGithub, String) {
             post(
                 |State(repo): State<FakeGithub>, axum::Json(query): axum::Json<Value>| async move {
                     let repo = repo.lock().unwrap();
-                    if repo.down {
+                    if repo.down || repo.graphql_down {
                         return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
                     }
                     let after = &query["variables"]["after"];
@@ -657,36 +662,42 @@ async fn a_closed_delivered_after_the_reopened_of_the_same_second_leaves_it_open
 }
 
 #[sqlx::test]
-async fn a_closed_delivery_is_retried_not_recorded_while_github_is_down(pool: PgPool) {
+async fn deliveries_are_retried_not_recorded_while_github_is_down(pool: PgPool) {
     let s = setup(&pool).await;
     issue_with_a_ready_pull_request(&s).await;
     {
         let mut repo = s.github.lock().unwrap();
         repo.pulls = vec![pull_request_now(CLOSED)];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
         repo.down = true;
     }
 
     deliver(&s, "pull_request", "d-closed", CLOSED).await;
-    let job: (String, i32, Option<String>) = sqlx::query_as(
-        "SELECT state, attempts, last_error FROM job WHERE idempotency_key = 'd-closed'",
+    deliver(&s, "pull_request_review_thread", "d-resolved", THREAD).await;
+    let jobs: Vec<(String, i32, String)> = sqlx::query_as(
+        "SELECT state, attempts, split_part(last_error, ':', 1) FROM job
+         WHERE idempotency_key IN ('d-closed', 'd-resolved') ORDER BY id",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
+    let closed = "GitHub /repos/gannonh/punchlist/pulls/12 answered 500 Internal Server Error";
+    let resolved = "GitHub /graphql answered 502 Bad Gateway";
     assert_eq!(
-        job,
-        (
-            "queued".into(),
-            1,
-            Some("GitHub /repos/gannonh/punchlist/pulls/12 answered 404 Not Found".into())
-        )
+        jobs,
+        [
+            ("queued".into(), 1, closed.into()),
+            ("queued".into(), 1, resolved.into())
+        ]
     );
     assert_eq!(
         pull_request_and_issue(&pool).await,
         ("open".into(), "in_progress".into())
     );
+    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
 
-    // GitHub answers again, and the retry records the close and moves the issue.
+    // GitHub answers again, and the retries record the close, move the issue and record the
+    // thread.
     s.github.lock().unwrap().down = false;
     sqlx::query("UPDATE job SET run_after = now()")
         .execute(&pool)
@@ -701,6 +712,38 @@ async fn a_closed_delivery_is_retried_not_recorded_while_github_is_down(pool: Pg
         event_transitions(&pool).await,
         [moved("in_progress", "todo", "octocat", Some("d-closed"))]
     );
+    assert_eq!(
+        recorded_threads(&pool).await,
+        (vec![("PRRT_kwDOA1b2c84AbCdE".into(), true)], 0)
+    );
+}
+
+#[sqlx::test]
+async fn a_closed_delivery_for_a_pull_request_github_no_longer_has_is_recorded(pool: PgPool) {
+    let s = setup(&pool).await;
+    issue_with_a_ready_pull_request(&s).await;
+    // GitHub answers 404 for #12: there is nothing newer to read, so the payload stands.
+    assert!(s.github.lock().unwrap().pulls.is_empty());
+
+    deliver(&s, "pull_request", "d-closed", CLOSED).await;
+    let once = [moved("in_progress", "todo", "octocat", Some("d-closed"))];
+    assert_eq!(event_transitions(&pool).await, once);
+    assert_eq!(
+        pull_request_and_issue(&pool).await,
+        ("closed".into(), "todo".into())
+    );
+
+    // It is recorded closed, so the same payload again closes nothing and reads nothing:
+    // its job is done though GitHub is down.
+    s.github.lock().unwrap().down = true;
+    deliver(&s, "pull_request", "d-closed-again", CLOSED).await;
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM job WHERE idempotency_key = 'd-closed-again'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "done");
+    assert_eq!(event_transitions(&pool).await, once);
 }
 
 #[sqlx::test]
@@ -803,30 +846,6 @@ async fn a_thread_event_records_every_thread_github_has(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_thread_event_is_retried_not_recorded_while_github_is_down(pool: PgPool) {
-    let s = setup(&pool).await;
-    issue_with_a_ready_pull_request(&s).await;
-    s.github.lock().unwrap().down = true;
-
-    deliver(&s, "pull_request_review_thread", "d-resolved", THREAD).await;
-    let job: (String, i32, Option<String>) = sqlx::query_as(
-        "SELECT state, attempts, last_error FROM job WHERE idempotency_key = 'd-resolved'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        job,
-        (
-            "queued".into(),
-            1,
-            Some("GitHub /graphql answered 502 Bad Gateway".into())
-        )
-    );
-    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
-}
-
-#[sqlx::test]
 async fn a_gated_request_reads_a_new_review_thread_from_github(pool: PgPool) {
     let s = setup(&pool).await;
     let agent = issue_with_a_ready_pull_request(&s).await;
@@ -843,6 +862,24 @@ async fn a_gated_request_reads_a_new_review_thread_from_github(pool: PgPool) {
         recorded_threads(&pool).await,
         (vec![("PRRT_kwDOA1b2c84AbCdE".into(), false)], 1)
     );
+}
+
+#[sqlx::test]
+async fn a_gated_request_reads_the_pull_request_when_its_threads_cannot_be_read(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![pull_request_now(READY)];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", false)];
+        repo.graphql_down = true;
+    }
+
+    // GitHub says ready; without that read the request is refused, "is a draft".
+    let (status, body) = request_agent_review(&s, &agent).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(recorded_threads(&pool).await, (vec![], 0));
 }
 
 #[sqlx::test]
@@ -1095,8 +1132,6 @@ async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed:
     assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
     {
         let mut repo = s.github.lock().unwrap();
-        // A `closed` payload is checked against GitHub, which agrees.
-        repo.pulls = vec![pull_request_now(closed)];
         repo.sha = "a".repeat(40);
         repo.files.insert("workflow.toml".into(), gated);
         for prompt in ["system", "in_progress", "agent_review"] {
