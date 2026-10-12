@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM review_thread WHERE pull_request_id = $1 AND node_id <> ALL($2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32340a45eff451a682af93b8b2a8a274cb6909587f2a25a895f6011c19ec57c3"
+}

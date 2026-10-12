@@ -59,13 +59,19 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
     // The work and the completion commit together. The completion only matches while this
     // attempt still holds the job, so a worker whose lease expired rolls back.
     let result = async {
+        // A GitHub event reads GitHub before its transaction begins, so it holds no lock and
+        // no connection across the network.
+        let delivery = match job.kind.as_str() {
+            "github_event" => Some(crate::github::read_current(state, &job.payload).await?),
+            _ => None,
+        };
         let mut tx = state.pool.begin().await?;
-        match job.kind.as_str() {
-            "github_event" => crate::github::process(&mut tx, job.payload).await?,
+        match (job.kind.as_str(), delivery) {
+            (_, Some((job, current))) => crate::github::process(&mut tx, &job, current).await?,
             // ponytail: the GitHub reads run inside the transaction, holding a connection
             // for their few seconds; fine at one load per push to `.punchlist/`.
-            "workflow_load" => crate::workflow::load(state, &mut tx, job.payload).await?,
-            other => anyhow::bail!("unknown job kind `{other}`"),
+            ("workflow_load", _) => crate::workflow::load(state, &mut tx, job.payload).await?,
+            (other, _) => anyhow::bail!("unknown job kind `{other}`"),
         }
         let done = sqlx::query!(
             "UPDATE job SET state = 'done', lease_expires_at = NULL, last_error = NULL,

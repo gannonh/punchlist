@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
+use crate::github_api::ReviewThread;
 use crate::issues::{check_gates, record_comment, record_refusal, write_transition};
 use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
@@ -342,23 +343,72 @@ async fn webhook(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// What GitHub says now about the pull request a delivery names, where the payload cannot be
+/// trusted to be the latest word. GitHub does not deliver in order, and neither case below
+/// can be ordered from the payloads.
+#[derive(Default)]
+pub(crate) struct Current {
+    /// Read when the payload says closed without a merge. `updated_at` is in whole seconds,
+    /// so a `closed` arriving after the `reopened` of the same second looks as new as it.
+    /// Merged needs no read: it is final.
+    pull_request: Option<PullRequestData>,
+    /// Read for a review thread event, which carries no time for the resolution and is
+    /// never sent for a new thread.
+    threads: Option<Vec<ReviewThread>>,
+}
+
+/// Parses a `github_event` job and reads from GitHub what `Current` holds for it. Runs
+/// before the job's transaction. A failed read fails the job, which is retried as any job
+/// is: recording the payload instead would be falling back to delivery order. A server with
+/// no GitHub App configured reads nothing and records payloads in the order they arrive.
+// ponytail: nothing orders two reads either. The one worker runs jobs one at a time, so a
+// later job reads later; a gated request's refresh running beside a job could still write the
+// older answer last. Lock the pull request's row across the read if that bites.
+pub(crate) async fn read_current(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> anyhow::Result<(GithubJob, Current)> {
+    let job = GithubJob::deserialize(payload)?;
+    let mut current = Current::default();
+    let (pr, thread_event) = match &job.event {
+        GithubEvent::PullRequest(event) => (&event.pull_request, false),
+        GithubEvent::PullRequestReviewThread(event) => (&event.pull_request, true),
+        GithubEvent::CheckRun(_) | GithubEvent::Push(_) => return Ok((job, current)),
+    };
+    if let Some(github) = &state.github {
+        let repository = job.event.repository();
+        let (owner, name) = (&repository.owner.login, &repository.name);
+        if pr.state != "open" && !pr.is_merged() {
+            current.pull_request = Some(github.pull_request(owner, name, pr.number).await?);
+        }
+        if thread_event {
+            current.threads = Some(github.review_threads(owner, name, pr.number).await?);
+        }
+    }
+    Ok((job, current))
+}
+
 /// Records one delivery. Runs inside the job's transaction, and is safe to run again.
 pub(crate) async fn process(
     tx: &mut sqlx::PgConnection,
-    payload: serde_json::Value,
+    job: &GithubJob,
+    current: Current,
 ) -> anyhow::Result<()> {
-    let job: GithubJob = serde_json::from_value(payload)?;
     match &job.event {
         GithubEvent::PullRequest(event) => {
             // Only a `closed` event's sender closed it; another event may still be the first
-            // to carry the closed state.
-            let closed_by = (event.action == "closed").then_some(event.sender.login.as_str());
+            // to carry the closed state. If GitHub says it has been merged since, whoever
+            // merged it did.
+            let closed_by = match &current.pull_request {
+                Some(now) if now.is_merged() => now.merged_by.as_ref(),
+                _ => (event.action == "closed").then_some(&event.sender),
+            };
             record_pull_request(
                 tx,
                 job.workspace_id,
                 job.repository_id,
-                &event.pull_request,
-                closed_by,
+                current.pull_request.as_ref().unwrap_or(&event.pull_request),
+                closed_by.map(|account| account.login.as_str()),
                 Some(&job.delivery_id),
             )
             .await?;
@@ -413,35 +463,69 @@ pub(crate) async fn process(
                         tx,
                         job.workspace_id,
                         job.repository_id,
-                        &event.pull_request,
+                        current.pull_request.as_ref().unwrap_or(&event.pull_request),
                         None,
                         Some(&job.delivery_id),
                     )
                     .await?
                 }
             };
-            sqlx::query!(
-                "INSERT INTO review_thread (node_id, pull_request_id, resolved)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
-                     resolved = EXCLUDED.resolved, updated_at = now()",
-                event.thread.node_id,
-                pull_request_id,
-                event.action == "resolved",
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
-                "UPDATE pull_request SET open_threads =
-                    (SELECT count(*) FROM review_thread
-                     WHERE pull_request_id = $1 AND NOT resolved)::int
-                 WHERE id = $1",
-                pull_request_id,
-            )
-            .execute(&mut *tx)
-            .await?;
+            // Without a GitHub App the event is all there is: its one thread, as the event
+            // left it, in the order it arrived.
+            let all = current.threads.is_some();
+            let threads = current.threads.unwrap_or_else(|| {
+                vec![ReviewThread {
+                    id: event.thread.node_id.clone(),
+                    is_resolved: event.action == "resolved",
+                }]
+            });
+            record_review_threads(tx, pull_request_id, &threads, all).await?;
         }
     }
+    Ok(())
+}
+
+/// Records review threads on a pull request and recounts its open ones. `all` says they are
+/// every thread GitHub has for it, so a recorded thread that is not among them is gone.
+async fn record_review_threads(
+    tx: &mut sqlx::PgConnection,
+    pull_request_id: Uuid,
+    threads: &[ReviewThread],
+    all: bool,
+) -> sqlx::Result<()> {
+    let (ids, resolved): (Vec<String>, Vec<bool>) = threads
+        .iter()
+        .map(|thread| (thread.id.clone(), thread.is_resolved))
+        .unzip();
+    if all {
+        sqlx::query!(
+            "DELETE FROM review_thread WHERE pull_request_id = $1 AND node_id <> ALL($2)",
+            pull_request_id,
+            &ids,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query!(
+        "INSERT INTO review_thread (node_id, pull_request_id, resolved)
+         SELECT node_id, $1, resolved FROM UNNEST($2::text[], $3::boolean[]) AS t (node_id, resolved)
+         ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
+             resolved = EXCLUDED.resolved, updated_at = now()",
+        pull_request_id,
+        &ids,
+        &resolved,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE pull_request SET open_threads =
+            (SELECT count(*) FROM review_thread
+             WHERE pull_request_id = $1 AND NOT resolved)::int
+         WHERE id = $1",
+        pull_request_id,
+    )
+    .execute(&mut *tx)
+    .await?;
     Ok(())
 }
 
@@ -537,7 +621,8 @@ async fn record_pull_request(
     let Some(id) = applied else {
         // A payload older than the stored state changes nothing, and nothing changes a merged
         // pull request: it cannot reopen. GitHub's `updated_at` is in whole seconds, so two
-        // actions in one second still apply in delivery order.
+        // actions in one second still apply in delivery order; `read_current` covers the one
+        // that would close it.
         let id = sqlx::query_scalar!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
             repository_id,
@@ -556,10 +641,11 @@ async fn record_pull_request(
     Ok(id)
 }
 
-/// Brings the pull requests an issue's gates read up to date with GitHub. A webhook reaches
-/// the server seconds after GitHub, and an agent asks for its transition right after it
-/// opens or readies a pull request; a gate must not read the state from before. When GitHub
-/// cannot be reached the recorded pull requests stand, so an outage does not stop moves.
+/// Brings the pull requests an issue's gates read, and their review threads, up to date with
+/// GitHub. A webhook reaches the server seconds after GitHub, and an agent asks for its
+/// transition right after it opens or readies a pull request; a gate must not read the state
+/// from before. When GitHub cannot be reached the recorded pull requests and threads stand,
+/// so an outage does not stop moves.
 ///
 /// A recorded pull request that GitHub now reports closed or merged is recorded so, and
 /// moves the issue as its webhook would have: recording a merge stops that webhook from
@@ -615,7 +701,7 @@ pub(crate) async fn refresh_pull_requests(
             return Ok(());
         }
     };
-    for pr in &fresh {
+    for (pr, threads) in &fresh {
         // A closed or merged pull request that was never recorded for this issue is history,
         // such as one closed while the server was down. It is not what the agent is working
         // on now, so it is left to its webhook and moves nothing here.
@@ -624,7 +710,9 @@ pub(crate) async fn refresh_pull_requests(
         }
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let mut tx = pool.begin().await?;
-        record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        let id =
+            record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        record_review_threads(&mut tx, id, threads, true).await?;
         tx.commit().await?;
     }
     Ok(())
