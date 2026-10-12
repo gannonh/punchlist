@@ -54,15 +54,14 @@ impl Tools {
     )]
     async fn get_issue(&self) -> Result<CallToolResult, ErrorData> {
         let id = &self.issue_id;
-        let read = tokio::try_join!(
-            self.client.get_issue(id),
-            self.client.fresh_issue_pull_requests(id),
-            self.client.issue_events(id),
-        );
-        text(match read {
-            Ok((issue, pull_requests, events)) => Ok(render_issue(&issue, &pull_requests, &events)),
-            Err(error) => Err(error.to_string()),
-        })
+        // The pull requests first: reading GitHub can move the issue, when one was closed.
+        let read = async {
+            let pull_requests = self.client.fresh_issue_pull_requests(id).await?;
+            let (issue, events) =
+                tokio::try_join!(self.client.get_issue(id), self.client.issue_events(id))?;
+            Ok::<_, ClientError>(render_issue(&issue, &pull_requests, &events))
+        };
+        text(read.await.map_err(|error| error.to_string()))
     }
 
     #[tool(description = "Comment on your issue, in Markdown.")]
