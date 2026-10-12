@@ -459,7 +459,7 @@ pub(crate) async fn process(
             }
         }
         GithubEvent::CheckRun(event) => {
-            record_check_run(tx, job.repository_id, &event.check_run, false).await?;
+            record_check_run(tx, job.repository_id, &event.check_run, None).await?;
             recompute_checks(tx, job.repository_id, &event.check_run.head_sha).await?;
         }
         GithubEvent::Push(event) => {
@@ -530,32 +530,35 @@ pub(crate) async fn process(
 }
 
 /// Records one check run. A delivery only moves a run forward (queued, in_progress,
-/// completed), so one arriving late does not undo a newer one. A `read` is GitHub's list now,
-/// so it overwrites the status and conclusion: otherwise a recorded `completed` could never
-/// give way to GitHub's `in_progress` for a run it restarted, a stale pass. A stale read landing
-/// after a newer delivery fails closed, and the next request reads again. A rerun gets a new
-/// id, in the same suite. A suite once known is kept.
+/// completed), so one arriving late does not undo a newer one. A read is GitHub's list as of
+/// `read_started`, the database's clock before GitHub was asked: it overwrites the status and
+/// conclusion of any row last written at or before then (so a recorded `completed` can give
+/// way to GitHub's `in_progress` for a restarted run), and leaves a row a delivery wrote since,
+/// which is newer than the list. Every write sets `updated_at` from `clock_timestamp()`, the
+/// moment of the write, not of its transaction's start. A rerun gets a new id, in the same
+/// suite. A suite once known is kept.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     run: &CheckRunData,
-    read: bool,
+    read_started: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
-                                check_suite_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                check_suite_id, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
-             updated_at = now()
-         WHERE $8 OR (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
+             updated_at = clock_timestamp()
+         WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
+               ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
                       ELSE 0 END)
                   <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
-                      ELSE 0 END)",
+                      ELSE 0 END) END",
         run.id,
         repository_id,
         run.head_sha,
@@ -563,7 +566,7 @@ async fn record_check_run(
         run.status,
         run.conclusion,
         run.check_suite.as_ref().map(|suite| suite.id),
-        read,
+        read_started,
     )
     .execute(&mut *tx)
     .await?;
@@ -579,13 +582,14 @@ async fn record_read_check_runs(
     repository_id: Uuid,
     head_sha: &str,
     mut runs: Vec<CheckRunData>,
+    read_started: DateTime<Utc>,
 ) -> sqlx::Result<()> {
     // The head asked for is the head judged: a run listed for another is not this commit's.
     runs.retain(|run| run.head_sha == head_sha);
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
     for run in &runs {
-        record_check_run(&mut tx, repository_id, run, true).await?;
+        record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
     }
     recompute_checks(&mut tx, repository_id, head_sha).await?;
     tx.commit().await
@@ -950,9 +954,12 @@ async fn refresh_once(
         // The check runs `ci_green` reads are an open pull request's alone, and have to be
         // GitHub's too.
         if pr.state == "open" {
+            let read_started = sqlx::query_scalar!(r#"SELECT clock_timestamp() AS "at!""#)
+                .fetch_one(pool)
+                .await?;
             let runs = (github.check_runs(owner, name, &pr.head.sha).await)
                 .map_err(|error| unreadable("check runs", error))?;
-            record_read_check_runs(pool, repository.id, &pr.head.sha, runs).await?;
+            record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started).await?;
         }
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let version = recorded

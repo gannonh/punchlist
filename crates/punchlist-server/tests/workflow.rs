@@ -48,6 +48,8 @@ struct Repo {
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
+    /// Like `hold`, for the answer about check runs alone.
+    runs_hold: Option<Arc<Barrier>>,
 }
 
 /// Waits out a `hold`: once to tell the test the answer is ready, once to be let go.
@@ -112,15 +114,20 @@ async fn fake_github() -> (FakeGithub, String) {
             get(
                 |State(repo): State<FakeGithub>,
                  axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
-                    let repo = repo.lock().unwrap();
-                    if repo.down {
-                        return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
-                    }
-                    let per_page: usize = q["per_page"].parse().unwrap();
-                    let from = (q["page"].parse::<usize>().unwrap() - 1) * per_page;
-                    let to = repo.check_runs.len().min(from + per_page);
-                    let runs = repo.check_runs.get(from..to).unwrap_or_default();
-                    let answer = json!({"total_count": repo.check_runs.len(), "check_runs": runs});
+                    let (answer, hold) = {
+                        let repo = repo.lock().unwrap();
+                        if repo.down {
+                            return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
+                        }
+                        let per_page: usize = q["per_page"].parse().unwrap();
+                        let from = (q["page"].parse::<usize>().unwrap() - 1) * per_page;
+                        let to = repo.check_runs.len().min(from + per_page);
+                        let runs = repo.check_runs.get(from..to).unwrap_or_default();
+                        let answer =
+                            json!({"total_count": repo.check_runs.len(), "check_runs": runs});
+                        (answer, repo.runs_hold.clone())
+                    };
+                    held(hold).await;
                     (StatusCode::OK, axum::Json(answer))
                 },
             ),
@@ -2527,6 +2534,38 @@ async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(p
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn a_delivery_recorded_after_the_read_began_is_not_replaced_by_it(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let hold = Arc::new(Barrier::new(2));
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        // GitHub's list still has run 1 as passed when the answer is taken.
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.runs_hold = Some(hold.clone());
+    }
+    // The request reads the list, which is held; the failure is delivered meanwhile.
+    let (request, ()) = tokio::join!(request_human_review(&s, &codex), async {
+        hold.wait().await;
+        deliver(
+            &s,
+            "check_run",
+            "c-failed",
+            &check_run(1, "completed", Some("failure")),
+        )
+        .await;
+        hold.wait().await;
+    });
+    let (status, body) = request;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
 }
 
 #[sqlx::test]
