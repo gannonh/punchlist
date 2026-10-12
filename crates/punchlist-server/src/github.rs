@@ -769,9 +769,11 @@ async fn record_pull_request(
 /// Brings the pull requests an issue's gates read, and their review threads, up to date with
 /// GitHub. A webhook reaches the server seconds after GitHub, and an agent asks for its
 /// transition right after it opens or readies a pull request; a gate must not read the state
-/// from before. When GitHub cannot be reached the recorded pull requests stand, and when a
-/// pull request's threads cannot be read its recorded threads stand, so an outage does not
-/// stop moves.
+/// from before. So a read that fails refuses the request (`ApiError::GithubUnreadable`)
+/// rather than let the gates pass on rows from before a push: the list, any pull request it
+/// reads, and, when `threads_gate` says the transition has `no_open_threads`, an open pull
+/// request's review threads. Otherwise unread threads stand as recorded. A pull request
+/// GitHub answers 404 or 410 for is gone, and its recorded row stands.
 ///
 /// A recorded pull request that GitHub now reports closed or merged is recorded so, and
 /// moves the issue as its webhook would have: recording a merge stops that webhook from
@@ -781,10 +783,10 @@ async fn record_pull_request(
 /// before the caller locks the issue: a job holds the pull request's row and waits for the
 /// issue's, so taking the issue's lock first deadlocks.
 ///
-/// A failure to record one fails the request, unlike a failure to read GitHub. What GitHub
-/// said is then known and could not be stored, so letting the gates read the older rows
-/// could pass a request on a pull request known to be merged or closed. The requester asks
-/// again; the pull requests already recorded stay recorded.
+/// A failure to record one fails the request too. What GitHub said is then known and could
+/// not be stored, so letting the gates read the older rows could pass a request on a pull
+/// request known to be merged or closed. The requester asks again; the pull requests already
+/// recorded stay recorded.
 ///
 /// A pull request whose write is dropped (`claim_read`) is read once more, alone. If that
 /// write is dropped too the request goes on, and the gates read what is recorded.
@@ -797,10 +799,12 @@ pub(crate) async fn refresh_pull_requests(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
+    threads_gate: bool,
 ) -> Result<(), ApiError> {
-    let dropped = refresh_once(github, pool, workspace_id, issue_id, None).await?;
+    let dropped = refresh_once(github, pool, workspace_id, issue_id, threads_gate, None).await?;
     if !dropped.is_empty() {
-        refresh_once(github, pool, workspace_id, issue_id, Some(&dropped)).await?;
+        let only = Some(dropped.as_slice());
+        refresh_once(github, pool, workspace_id, issue_id, threads_gate, only).await?;
     }
     Ok(())
 }
@@ -814,6 +818,7 @@ async fn refresh_once(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
     issue_id: &str,
+    threads_gate: bool,
     only: Option<&[i64]>,
 ) -> Result<Vec<i64>, ApiError> {
     let Some(repository) = sqlx::query!(
@@ -843,9 +848,12 @@ async fn refresh_once(
         .filter(|row| row.issue_id.as_deref() == Some(issue_id))
         .map(|row| row.number)
         .collect();
+    // Of the pull requests not recorded for the issue, only an open one is read: a closed
+    // one is history (below), and reading it would be one more read that can fail.
     let names_issue = |pr: &PullRequestData| {
-        linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
-            == Some(issue_id)
+        pr.state == "open"
+            && linked_issue_id(&repository.issue_prefix, &pr.head.branch, &pr.title).as_deref()
+                == Some(issue_id)
     };
     let (owner, name) = (&repository.owner, &repository.name);
     let read = async {
@@ -854,20 +862,17 @@ async fn refresh_once(
         };
         let mut fresh = Vec::new();
         for &number in numbers {
-            fresh.push(github.pull_request(owner, name, number).await?);
+            fresh.extend(unless_gone(github.pull_request(owner, name, number).await)?);
         }
         Ok(fresh)
     };
-    let fresh = match read.await {
-        Ok(fresh) => fresh,
-        Err(error) => {
-            tracing::warn!(
-                issue_id,
-                "cannot read pull requests from GitHub, the gates read the recorded ones: {error:#}"
-            );
-            return Ok(Vec::new());
-        }
+    let unreadable = |what: &str, error: anyhow::Error| {
+        tracing::warn!(issue_id, "cannot read {what} from GitHub: {error:#}");
+        ApiError::GithubUnreadable(issue_id.to_string())
     };
+    let fresh = read
+        .await
+        .map_err(|error| unreadable("pull requests", error))?;
     let mut dropped = Vec::new();
     for pr in &fresh {
         // A closed or merged pull request that was never recorded for this issue is history,
@@ -876,17 +881,22 @@ async fn refresh_once(
         if pr.state != "open" && !known.contains(&pr.number) {
             continue;
         }
-        let threads = github
-            .review_threads(&repository.owner, &repository.name, pr.number)
-            .await
-            .inspect_err(|error| {
+        // The threads `no_open_threads` reads have to be GitHub's. Any others stand as
+        // recorded when they cannot be read.
+        let threads = match github.review_threads(owner, name, pr.number).await {
+            Ok(threads) => Some(threads),
+            Err(error) if threads_gate && pr.state == "open" => {
+                return Err(unreadable("review threads", error));
+            }
+            Err(error) => {
                 tracing::warn!(
                     issue_id,
                     number = pr.number,
                     "cannot read review threads from GitHub, the recorded ones stand: {error:#}"
                 );
-            })
-            .ok();
+                None
+            }
+        };
         let merged_by = pr.merged_by.as_ref().map(|account| account.login.as_str());
         let version = recorded
             .iter()

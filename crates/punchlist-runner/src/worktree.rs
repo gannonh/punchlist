@@ -202,6 +202,20 @@ impl Git {
     }
 }
 
+/// Whether the remote has `branch`. An error when the remote cannot be asked, which is not
+/// the same as the branch not being there.
+fn remote_has_branch(git: &Git, clone_dir: &Path, branch: &str) -> Result<bool, String> {
+    let context = "git ls-remote";
+    let args = ["ls-remote", "--exit-code", "--heads", "origin", branch];
+    let output = git.output(Some(clone_dir), &args, context)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        // With `--exit-code`: the remote answered and has no such ref.
+        Some(2) => Ok(false),
+        _ => git_output_error::<bool>(output, context).map_err(|e| e.to_string()),
+    }
+}
+
 fn prepare_blocking(
     git: &Git,
     root: &Path,
@@ -252,14 +266,10 @@ fn prepare_blocking(
         if head == branch {
             // Another runner, or a person, may have pushed to the branch since this worktree
             // was last used: bring it up to the remote branch, when there is one. Commits
-            // made here and not yet pushed stay ahead of it.
-            git.ok(&clone_dir, &["fetch", "origin", branch], "git fetch")?;
-            let remote_ref = format!("refs/remotes/origin/{branch}");
-            if git.ok(
-                &clone_dir,
-                &["rev-parse", "--verify", "--quiet", &remote_ref],
-                "git rev-parse",
-            )? {
+            // made here and not yet pushed stay ahead of it. A fetch that fails is an error:
+            // merging the ref an earlier fetch left would be a stale checkout.
+            if remote_has_branch(git, &clone_dir, branch)? {
+                git.run(Some(&clone_dir), &["fetch", "origin", branch], "git fetch")?;
                 git.run(
                     Some(&worktree),
                     &["merge", "--ff-only", &format!("origin/{branch}")],
@@ -529,6 +539,19 @@ mod tests {
             "{err}"
         );
         run(&path, &["reset", "--hard", &format!("origin/{branch}")]);
+
+        // A branch the remote does not have is fine; a remote that cannot be asked is not.
+        let git = Git {
+            cancel: Cancel::default(),
+            timeout: GIT_TIMEOUT,
+        };
+        assert_eq!(remote_has_branch(&git, &path, branch), Ok(true));
+        assert_eq!(remote_has_branch(&git, &path, "feature/absent"), Ok(false));
+        let (there, away) = (origin.join("acme"), origin.join("acme-away"));
+        std::fs::rename(&there, &away).unwrap();
+        let err = remote_has_branch(&git, &path, branch).unwrap_err();
+        assert!(err.starts_with("git ls-remote"), "{err}");
+        std::fs::rename(&away, &there).unwrap();
 
         let seed = origin.join("seed");
         run(&seed, &["fetch", "origin"]);

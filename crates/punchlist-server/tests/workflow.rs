@@ -625,15 +625,57 @@ async fn a_pull_request_closed_before_it_was_ever_recorded_moves_nothing(pool: P
 }
 
 #[sqlx::test]
-async fn recorded_pull_requests_stand_when_github_is_down(pool: PgPool) {
+async fn a_gated_request_is_refused_when_github_cannot_be_read(pool: PgPool) {
     let s = setup(&pool).await;
-    let agent = claimed_issue(&s).await;
-    deliver(&s, "pull_request", "d-opened", OPENED).await;
-    deliver(&s, "pull_request", "d-ready", READY).await;
-    s.github.lock().unwrap().down = true;
+    // Everything recorded would pass: a passed check, a clean merge state, no threads.
+    let codex = issue_in_agent_review(&s).await;
+    let passed = edited(CHECK_RUN, |_| {});
+    deliver(&s, "check_run", "c-passed", &passed).await;
+    sqlx::query("UPDATE pull_request SET merge_state = 'clean'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refusal = json!({
+        "code": "github_unreadable",
+        "message": "GitHub could not be read, so the gates for PL-1 were not checked \
+                    and it did not move; request again",
+    });
+    let gate_rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM transition_gate g JOIN transition t ON t.id = g.transition_id
+             WHERE t.to_status = 'human_review'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
 
-    let (status, body) = request_agent_review(&s, &agent).await;
+    // GitHub answers 500 to the pull request reads: the rows could be from before a push.
+    s.github.lock().unwrap().down = true;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, refusal);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    assert_eq!(gate_rows().await, 0);
+
+    // The pull request reads, but not its threads, which `no_open_threads` needs.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.down = false;
+        repo.graphql_down = true;
+        repo.pulls = vec![ready_with_merge_state("clean")];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, refusal);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+    assert_eq!(gate_rows().await, 0);
+
+    // GitHub is back: the same request moves the issue.
+    s.github.lock().unwrap().graphql_down = false;
+    let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(gate_rows().await, 4);
 }
 
 /// A webhook fixture with `edit` applied to its JSON.

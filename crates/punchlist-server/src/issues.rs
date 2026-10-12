@@ -10,8 +10,8 @@ use punchlist_api::{
     MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence,
-    Role, START, Transition, Workflow, display_name,
+    Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState, Refusal,
+    ReviewThreadEvidence, Role, START, Transition, Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -317,7 +317,9 @@ async fn move_issue(
 /// GitHub so they decide, not the webhooks still on their way. A pull request that GitHub
 /// closed moves the issue here and ends its run, as its webhook would have, so `move_issue`
 /// then answers as it would after that webhook. An issue the actor cannot move, or that does
-/// not exist, is left for `move_issue` to refuse.
+/// not exist, is left for `move_issue` to refuse. A read that fails refuses the request
+/// (`GithubUnreadable`): the recorded rows may be from before a push. Without a GitHub App
+/// nothing is read, and the gates judge what the webhooks recorded.
 async fn refresh_evidence(
     state: &AppState,
     actor: &Actor,
@@ -340,11 +342,11 @@ async fn refresh_evidence(
     let mut conn = state.pool.acquire().await?;
     let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
     drop(conn);
-    if workflow
-        .check_transition(&from, to, actor.role)
-        .is_ok_and(|transition| !transition.gates.is_empty())
+    if let Ok(transition) = workflow.check_transition(&from, to, actor.role)
+        && !transition.gates.is_empty()
     {
-        refresh_pull_requests(github, &state.pool, actor.workspace_id, id).await?;
+        let threads = transition.gates.contains(&Gate::NoOpenThreads);
+        refresh_pull_requests(github, &state.pool, actor.workspace_id, id, threads).await?;
     }
     Ok(())
 }

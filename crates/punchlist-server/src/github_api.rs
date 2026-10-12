@@ -266,9 +266,10 @@ impl GithubClient {
             .copied()
             .chain(recent.iter().filter(|pr| wanted(pr)).map(|pr| pr.number))
             .collect();
+        // One GitHub no longer has is left out; any other failure fails the read.
         let mut pull_requests = Vec::new();
         for number in numbers {
-            pull_requests.push(self.pull_request(owner, name, number).await?);
+            pull_requests.extend(unless_gone(self.pull_request(owner, name, number).await)?);
         }
         Ok(pull_requests)
     }

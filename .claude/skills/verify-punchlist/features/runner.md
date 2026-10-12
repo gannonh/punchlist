@@ -49,6 +49,6 @@ Preconditions:
 - The claim reads the recorded pull requests: a claim made before the merge's webhook arrives continues on the merged branch.
 - A dispatch waits while the issue has a running run: the Claude Code run that requested Agent Review still has to exit. The claim follows its `finish` by milliseconds; measure from the run's `finished_at`, not only from the transition.
 - Codex loads the person's `~/.codex/config.toml` too: its reasoning effort and its other MCP servers come along. Only the model, the sandbox (`danger-full-access`, no approvals) and Punchlist's MCP server are set by the runner.
-- A runner that still has the issue's worktree fast-forwards it to the branch on the remote before the agent starts, so a push by another runner or a person is there; a worktree that diverged from the remote fails the run with `cannot fast-forward to origin/<branch>`.
+- A runner that still has the issue's worktree fast-forwards it to the branch on the remote before the agent starts, so a push by another runner or a person is there; a worktree that diverged from the remote fails the run with `cannot fast-forward to origin/<branch>`, and so does a remote that cannot be asked for the branch (`git ls-remote: …`); a branch the remote does not have yet is fine.
 - A Codex thread is started `ephemeral`: Codex keeps no rollout of it under `~/.codex/sessions`.
 - A runner holds its token in memory only. Restarting it registers a new runner; the old one's leases expire after 30 s and their attempts fail.
