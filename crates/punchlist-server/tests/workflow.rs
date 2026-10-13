@@ -3061,6 +3061,29 @@ async fn a_required_actions_check_needs_a_runner_and_the_default_branchs_workflo
 }
 
 #[sqlx::test]
+async fn the_newest_run_counts_in_a_suite_with_no_workflow_job_recorded(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // No check is required, so no job is read. An older run of `check` is still pending and
+    // a newer one in its suite succeeded: the newer is the one judged.
+    {
+        let mut pending = listed_run(1, 5, "check", "success");
+        (pending["status"], pending["conclusion"]) = (json!("in_progress"), json!(null));
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![pending, listed_run(2, 5, "check", "success")];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reason: String =
+        sqlx::query_scalar("SELECT reason FROM transition_gate WHERE gate = 'ci_green'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason, "1 of 1 checks passed on 6dcb09b");
+}
+
+#[sqlx::test]
 async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;

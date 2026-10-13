@@ -1379,7 +1379,9 @@ async fn refresh_once(
 /// the others, whatever their ids: a check run created through the API with `checks: write`
 /// joins the suite of the real run of its name with a higher id, and must not hide it. Only
 /// a completed one: a rerun still waiting for a runner has no job either, and is the newest.
-/// (`workflow_path` is recorded only for the suites of the checks the workflow requires.)
+/// And only in a suite where a read recorded a workflow job: jobs are read for the suites of
+/// the checks the workflow requires alone, so in any other suite (another app's, too) no run
+/// has a job recorded, and the newest id counts, as it did before jobs were read.
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1397,7 +1399,11 @@ pub(crate) async fn newest_check_runs(
                  AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id
                  AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))
          ORDER BY c.check_suite_id, c.app, c.name,
-                  (c.workflow_path IS NULL AND c.status = 'completed'), c.id DESC",
+                  (c.workflow_path IS NULL AND c.status = 'completed' AND EXISTS (
+                      SELECT 1 FROM check_run w WHERE w.repository_id = c.repository_id
+                        AND w.head_sha = c.head_sha AND w.check_suite_id = c.check_suite_id
+                        AND w.workflow_path IS NOT NULL)),
+                  c.id DESC",
         repository_id,
         head_sha,
     )
