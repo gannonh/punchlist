@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml::Spanned;
 
-use crate::gate::Gate;
+use crate::gate::{Gate, RequiredCheck};
 
 const DEFAULT_WORKFLOW_TOML: &str = include_str!("default/workflow.toml");
 const DEFAULT_PROMPTS: [(&str, &str); 3] = [
@@ -38,6 +38,8 @@ pub const IN_PROGRESS: &str = "in_progress";
 const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
 /// What a transition's `require` may ask a move to carry.
 const REQUIREMENTS: [&str; 1] = ["comment"];
+/// The app that owns a required check named without one: GitHub Actions' slug.
+const GITHUB_ACTIONS: &str = "github-actions";
 /// The roles a workflow names. GitHub acts only through `on`.
 const ROLES: [Role; 3] = [Role::Person, Role::Agent, Role::Runner];
 
@@ -176,6 +178,8 @@ pub struct Workflow {
     /// Each locked status and the roles that may not act on an issue in it.
     locks: Vec<(Status, Vec<Role>)>,
     dispatch: Vec<Dispatch>,
+    /// The checks `ci_green` requires, from `[gate.ci_green]`. Empty when the file has none.
+    required_checks: Vec<RequiredCheck>,
     prompts: BTreeMap<String, String>,
 }
 
@@ -230,6 +234,10 @@ pub enum Problem {
     RequireWithoutEvent,
     #[error("transition {from} → {to} is listed twice")]
     DuplicateTransition { from: String, to: String },
+    #[error(
+        "a required check is a check's name, or `{{ name = \"…\", app = \"…\" }}` with the slug of the GitHub App that produces it; a name or slug is matched exactly, so it cannot be empty or start or end with a space"
+    )]
+    BadRequiredCheck,
     #[error("the dispatch rule names no agent")]
     NoAgent,
     #[error("`max_concurrent` must be at least 1")]
@@ -572,6 +580,35 @@ impl Workflow {
             });
         }
 
+        let mut required_checks = Vec::new();
+        for (i, entry) in raw.gate.ci_green.required.into_iter().enumerate() {
+            use toml::Value::String as Text;
+            let bad = errors.at(
+                entry.span(),
+                format!("gate.ci_green.required[{i}]"),
+                Problem::BadRequiredCheck,
+            );
+            let (name, app) = match entry.into_inner() {
+                Text(name) => (name, GITHUB_ACTIONS.to_string()),
+                toml::Value::Table(mut table) => {
+                    match (table.remove("name"), table.remove("app"), table.is_empty()) {
+                        (Some(Text(name)), None, true) => (name, GITHUB_ACTIONS.to_string()),
+                        (Some(Text(name)), Some(Text(app)), true) => (name, app),
+                        _ => return Err(bad),
+                    }
+                }
+                _ => return Err(bad),
+            };
+            // Matched exactly: one with a space at an end could never match a run.
+            if [&name, &app]
+                .iter()
+                .any(|s| s.is_empty() || s.trim() != **s)
+            {
+                return Err(bad);
+            }
+            required_checks.push(RequiredCheck { name, app });
+        }
+
         let workflow = Workflow {
             version: content_hash(text, &BTreeMap::new()),
             source: text.to_string(),
@@ -579,6 +616,7 @@ impl Workflow {
             transitions,
             locks,
             dispatch,
+            required_checks,
             prompts: BTreeMap::new(),
         };
         let unclaimable = workflow
@@ -683,6 +721,13 @@ impl Workflow {
 
     pub fn locks(&self) -> &[(Status, Vec<Role>)] {
         &self.locks
+    }
+
+    /// The checks `ci_green` requires on a pull request's head commit, each with the app that
+    /// must have produced it. Empty for a file with no `[gate.ci_green]`, as every version
+    /// stored before the table existed is.
+    pub fn required_checks(&self) -> &[RequiredCheck] {
+        &self.required_checks
     }
 
     /// The dispatch rule for a status, if a runner starts an agent there.
@@ -829,6 +874,27 @@ struct RawWorkflow {
     lock: BTreeMap<String, Spanned<Vec<Spanned<String>>>>,
     #[serde(default)]
     dispatch: RawDispatch,
+    /// Settings for the gates that take any.
+    #[serde(default)]
+    gate: RawGates,
+}
+
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawGates {
+    #[serde(default)]
+    ci_green: RawCiGreen,
+}
+
+/// What `ci_green` needs beyond every check run on the head commit passing.
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawCiGreen {
+    /// The checks that must have a passing run on the head commit, each from the GitHub App
+    /// that owns it. Without the list, the gate judges whichever checks ran.
+    #[serde(default)]
+    #[schemars(with = "Vec<RequiredCheckEntry>")]
+    required: Vec<Spanned<toml::Value>>,
 }
 
 /// One allowed move: who may make it (`by`) or which event makes it (`on`), and what it needs.
@@ -890,6 +956,27 @@ struct RawDispatchRule {
 enum FromStatuses {
     One(String),
     Many(Vec<String>),
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(untagged)]
+enum RequiredCheckEntry {
+    /// A check that GitHub Actions produces, by name.
+    Name(String),
+    Owned(RequiredCheckTable),
+}
+
+/// A check and the GitHub App that produces it.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RequiredCheckTable {
+    /// The check run's name, such as a workflow job's.
+    name: String,
+    /// The app's slug, such as `vercel`. GitHub Actions (`github-actions`) when absent.
+    #[serde(default)]
+    app: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -1434,6 +1521,73 @@ mod tests {
             Workflow::from_toml(PRD_TEMPLATE).unwrap().statuses().len(),
             9
         );
+    }
+
+    #[test]
+    fn required_checks_parse_and_a_malformed_one_names_its_line_and_key() {
+        let with = |list: &str| runnable(&format!("[gate.ci_green]\nrequired = {list}"));
+        let workflow =
+            Workflow::from_toml(&with("[\"ok\", { name = \"deploy\", app = \"vercel\" }]"))
+                .unwrap();
+        let checks: Vec<(&str, &str)> = (workflow.required_checks().iter())
+            .map(|check| (check.name.as_str(), check.app.as_str()))
+            .collect();
+        assert_eq!(checks, [("ok", "github-actions"), ("deploy", "vercel")]);
+        // No table, as in every version stored before it existed: no names set.
+        let (stored, _) = Workflow::from_stored(&runnable(""), BTreeMap::new()).unwrap();
+        assert_eq!(stored.required_checks(), []);
+        assert_eq!(default_workflow().required_checks(), []);
+        for list in [
+            "[\"ok\",\n 7]",
+            "[\"ok\",\n { app = \"vercel\" }]",
+            "[\"ok\",\n { name = \"deploy\", app = 7 }]",
+            "[\"ok\",\n { name = \"deploy\", owner = \"vercel\" }]",
+            "[\"ok\",\n \"\"]",
+            "[\"ok\",\n { name = \"deploy\", app = \" \" }]",
+            "[\"ok\",\n \"test \"]",
+            "[\"ok\",\n { name = \"deploy\", app = \" vercel\" }]",
+        ] {
+            assert_eq!(
+                Workflow::from_toml(&with(list)).unwrap_err().to_string(),
+                "line 4, `gate.ci_green.required[1]`: a required check is a check's name, or `{ name = \"…\", app = \"…\" }` with the slug of the GitHub App that produces it; a name or slug is matched exactly, so it cannot be empty or start or end with a space",
+                "{list}"
+            );
+        }
+        // A list that is not one, and a misspelt key, are TOML's errors, with the line.
+        let (line, _, problem) = error(&with("\"ok\""));
+        assert_eq!(line, Some(3));
+        assert!(matches!(problem, Problem::Toml(_)));
+        let (line, _, problem) = error(&runnable("[gate.ci_green]\nrequire = [\"ok\"]"));
+        assert_eq!(line, Some(3));
+        assert!(matches!(problem, Problem::Toml(m) if m.starts_with("unknown field `require`")));
+    }
+
+    #[test]
+    fn the_schema_describes_required_checks() {
+        let schema = serde_json::to_value(workflow_schema()).unwrap();
+        // The schema at a path of properties, through any `$ref` on the way.
+        let at = |path: &[&str]| {
+            let mut node = &schema;
+            for key in path {
+                node = &node["properties"][key];
+                if let Some(name) = node["$ref"].as_str() {
+                    node = &schema["$defs"][name.trim_start_matches("#/$defs/")];
+                }
+            }
+            node.clone()
+        };
+        // An entry is a string, or a table with `name`, an optional `app` and no other key.
+        let entry = at(&["gate", "ci_green", "required"])["items"].clone();
+        let name = entry["$ref"].as_str().unwrap();
+        let shapes = schema["$defs"][name.trim_start_matches("#/$defs/")]["anyOf"].clone();
+        assert_eq!(shapes[0]["type"], "string");
+        let table = shapes[1]["$ref"].as_str().unwrap();
+        let table = &schema["$defs"][table.trim_start_matches("#/$defs/")];
+        let mut keys: Vec<&String> = table["properties"].as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["app", "name"]);
+        assert_eq!(table["required"], serde_json::json!(["name"]));
+        assert_eq!(table["additionalProperties"], false);
     }
 
     #[test]

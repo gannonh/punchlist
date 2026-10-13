@@ -116,6 +116,17 @@ pub(crate) struct CheckRunData {
     /// GitHub's schema allows none, and a job queued by an older binary has none.
     #[serde(default)]
     pub check_suite: Option<CheckSuite>,
+    /// The GitHub App that created the run. GitHub's schema allows none, and a job queued by
+    /// an older binary has none.
+    #[serde(default)]
+    pub app: Option<CheckApp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CheckApp {
+    /// Such as `github-actions`.
+    #[serde(default)]
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -558,9 +569,10 @@ pub(crate) async fn process(
 /// column too. Of two overlapping reads (snapshots t1 < t2): the older writes first, stamp t1,
 /// and the newer sees t1 <= t2 and overwrites; the newer writes first, stamp t2, and the older
 /// sees t2 <= t1 false and is skipped. A rerun gets a new id, in the same suite. A suite once
-/// known is kept. A delivery that changes nothing the gates read (a redelivery, one of a burst
-/// as a matrix finishes) writes nothing, so it does not look like a write to a request in
-/// flight; a read always stamps, which is what orders it against the next read.
+/// known is kept, and so is the app that owns the run. A delivery that changes nothing the
+/// gates read (a redelivery, one of a burst as a matrix finishes) writes nothing, so it does
+/// not look like a write to a request in flight; a read always stamps, which is what orders
+/// it against the next read.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -569,14 +581,16 @@ async fn record_check_run(
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
+    let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
-                                check_suite_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()))
+                                check_suite_id, updated_at, app)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9)
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
+             app = COALESCE(EXCLUDED.app, check_run.app),
              updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
@@ -584,10 +598,11 @@ async fn record_check_run(
                   <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
                       ELSE 0 END)
                   AND (check_run.head_sha, check_run.name, check_run.status,
-                       check_run.conclusion, check_run.check_suite_id)
+                       check_run.conclusion, check_run.check_suite_id, check_run.app)
                       IS DISTINCT FROM
                       (EXCLUDED.head_sha, EXCLUDED.name, EXCLUDED.status, EXCLUDED.conclusion,
-                       COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id)) END",
+                       COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
+                       COALESCE(EXCLUDED.app, check_run.app)) END",
         run.id,
         repository_id,
         run.head_sha,
@@ -596,6 +611,7 @@ async fn record_check_run(
         run.conclusion,
         run.check_suite.as_ref().map(|suite| suite.id),
         read_started,
+        app,
     )
     .execute(&mut *tx)
     .await?;
@@ -1281,6 +1297,8 @@ async fn refresh_once(
 /// suite, so the newest run of each name in each suite (two workflows may name a job alike).
 /// A run with no suite (recorded before `check_suite_id`, or delivered without one) counts
 /// only while no newer run of its name is on the commit: a rerun with a suite supersedes it.
+/// Runs of one name from two apps are two checks, so only a run from the same app supersedes
+/// it, or any run when either's app was not recorded (a row from before `app`).
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1288,12 +1306,14 @@ pub(crate) async fn newest_check_runs(
 ) -> sqlx::Result<Vec<CheckRunEvidence>> {
     sqlx::query_as!(
         CheckRunEvidence,
-        "SELECT DISTINCT ON (c.check_suite_id, c.name) c.name, c.status, c.conclusion
+        "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)
+                c.name, c.status, c.conclusion, c.app
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
            AND NOT (c.check_suite_id IS NULL AND EXISTS (
                SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
-                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id))
-         ORDER BY c.check_suite_id, c.name, c.id DESC",
+                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id
+                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))
+         ORDER BY c.check_suite_id, c.app, c.name, c.id DESC",
         repository_id,
         head_sha,
     )
@@ -1388,7 +1408,16 @@ async fn close_issue_on_pull_request(
         name: name.to_string(),
         role: Role::Github,
     };
-    let gates = match check_gates(tx, transition, name, issue_id, &status, Some(pr.number)).await {
+    let checked = check_gates(
+        tx,
+        &workflow,
+        transition,
+        name,
+        issue_id,
+        &status,
+        Some(pr.number),
+    );
+    let gates = match checked.await {
         Ok(gates) => gates,
         // `check_gates` logged it too. The event is not tried again, so the timeline is
         // where a person learns why the issue did not move.

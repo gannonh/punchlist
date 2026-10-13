@@ -428,7 +428,7 @@ pub(crate) async fn check_move(
     to: &str,
 ) -> Result<Vec<GateResult>, ApiError> {
     let transition = workflow.check_transition(from, to, actor.role)?;
-    check_gates(tx, transition, &actor.name, id, from, None).await
+    check_gates(tx, workflow, transition, &actor.name, id, from, None).await
 }
 
 /// Evaluates a transition's gates over the issue's recorded evidence, for a requested move
@@ -436,6 +436,7 @@ pub(crate) async fn check_move(
 /// merged or closed. Returns the results, all passed, or `ApiError::GateFailed`.
 pub(crate) async fn check_gates(
     tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
     transition: &Transition,
     actor_name: &str,
     id: &str,
@@ -445,13 +446,14 @@ pub(crate) async fn check_gates(
     if transition.gates.is_empty() {
         return Ok(Vec::new());
     }
-    let (evidence, gates) = evaluate_gates(tx, transition, id, closed_pull_request).await?;
+    let (evidence, gates) =
+        evaluate_gates(tx, workflow, transition, id, closed_pull_request).await?;
     if let Some(failed) = gates.iter().find(|result| !result.passed) {
         let refusal = Refusal::GateFailed {
             from: from.to_string(),
             to: transition.to.as_str().to_string(),
             gate: failed.gate.clone(),
-            reason: failed.reason.clone(),
+            reason: failed.text(),
         };
         tracing::info!(issue = id, actor = %actor_name, "refused: {refusal}");
         return Err(ApiError::GateFailed(Box::new(GateFailure {
@@ -468,13 +470,14 @@ pub(crate) async fn check_gates(
 /// prints, so the two cannot disagree on the same rows.
 async fn evaluate_gates(
     tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
     transition: &Transition,
     id: &str,
     closed_pull_request: Option<i64>,
 ) -> sqlx::Result<(Evidence, Vec<GateResult>)> {
     let evidence = evidence(tx, id, closed_pull_request).await?;
     let gates = (transition.gates.iter())
-        .map(|gate| gate.evaluate(&evidence))
+        .map(|gate| gate.evaluate(&evidence, workflow.required_checks()))
         .collect();
     Ok((evidence, gates))
 }
@@ -632,7 +635,7 @@ pub(crate) async fn write_transition(
             position as i32,
             result.gate,
             if result.passed { "pass" } else { "fail" },
-            result.reason,
+            result.text(),
         )
         .execute(&mut *tx)
         .await?;
@@ -767,7 +770,7 @@ async fn issue_gates(
     let Some(transition) = workflow.next_gated(&status) else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let (_, gates) = evaluate_gates(&mut conn, transition, &id, None).await?;
+    let (_, gates) = evaluate_gates(&mut conn, &workflow, transition, &id, None).await?;
     let to = transition.to.as_str().to_string();
     Ok(Json(GateChecklist {
         from_name: display_name(&status),
