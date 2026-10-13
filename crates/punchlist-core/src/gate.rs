@@ -17,7 +17,8 @@ pub enum Gate {
     /// Its branch or title names the issue, and neither names another issue. On a move that
     /// a merged or closed pull request causes, "it" is that pull request.
     PrNamesIssue,
-    /// Every check run on that pull request's head commit completed successfully.
+    /// Every check run on that pull request's head commit completed successfully, and each
+    /// check the workflow requires has a successful run there from its app.
     CiGreen,
     /// GitHub's merge state for it is `clean` or `has_hooks`.
     Mergeable,
@@ -55,7 +56,8 @@ impl Gate {
     }
 
     /// Checks the gate against the evidence. The reason says why it passed or failed.
-    pub fn evaluate(self, evidence: &Evidence) -> GateResult {
+    /// `required` is the workflow's `[gate.ci_green]` list; only `ci_green` reads it.
+    pub fn evaluate(self, evidence: &Evidence, required: &[RequiredCheck]) -> GateResult {
         let outcome = match self {
             Gate::PrOpen => one_open(evidence)
                 .map(|pr| format!("pull request #{} is open", pr.number))
@@ -72,7 +74,9 @@ impl Gate {
             Gate::PrNamesIssue => named(evidence)
                 .and_then(|pr| names_issue(evidence, pr))
                 .map_err(alone),
-            Gate::CiGreen => one_open(evidence).map_err(alone).and_then(ci_green),
+            Gate::CiGreen => one_open(evidence)
+                .map_err(alone)
+                .and_then(|pr| ci_green(pr, required)),
             Gate::Mergeable => one_open(evidence).and_then(mergeable).map_err(alone),
             Gate::NoOpenThreads => one_open(evidence).map_err(alone).and_then(no_open_threads),
             Gate::ProofAttached => Ok(
@@ -159,6 +163,19 @@ pub struct CheckRunEvidence {
     pub status: String,
     /// Set once completed, such as `success` or `failure`.
     pub conclusion: Option<String>,
+    /// The slug of the GitHub App that created the run, such as `github-actions`; absent for a
+    /// run recorded before apps were.
+    #[serde(default)]
+    pub app: Option<String>,
+}
+
+/// A check `ci_green` requires on the head commit: its name and the GitHub App that must have
+/// produced it. From the workflow file's `[gate.ci_green]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredCheck {
+    pub name: String,
+    /// The app's slug, such as `github-actions`.
+    pub app: String,
 }
 
 impl CheckRunEvidence {
@@ -340,21 +357,75 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
     }
 }
 
-/// Check runs named with their status or conclusion: `` `e2e` (failure) ``. A check's name is
-/// its author's text: at most five are named, each cut to 80 characters, without backticks or
-/// control characters, so a name cannot close the quotes or flood the reason.
+/// Text in backticks for a reason. A check's name and an app's slug are their author's text:
+/// each is cut to 80 characters, without backticks or control characters, so it cannot close
+/// the quotes.
+fn quoted(text: &str) -> String {
+    let text: String = (text.chars())
+        .filter(|c| *c != '`' && !c.is_control())
+        .take(80)
+        .collect();
+    format!("`{text}`")
+}
+
+/// At most five of `items`, then how many more, so a list cannot flood the reason.
+fn capped(items: Vec<String>) -> String {
+    const NAMED: usize = 5;
+    let more = items.len().saturating_sub(NAMED);
+    let mut named: Vec<String> = items.into_iter().take(NAMED).collect();
+    if more > 0 {
+        named.push(format!("and {more} more"));
+    }
+    named.join(", ")
+}
+
+/// Check runs named with their status or conclusion: `` `e2e` (failure) ``. At most five are
+/// named, so a list cannot flood the reason.
 fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> Named {
     first_five(runs.map(|run| {
         let state = run.conclusion.as_deref().unwrap_or(&run.status);
-        let name = (run.name.chars()).filter(|c| *c != '`' && !c.is_control());
-        format!("`{}` ({state})", name.take(80).collect::<String>())
+        format!("{} ({state})", quoted(&run.name))
     }))
 }
 
-/// Every check run on the head commit completed with success, neutral or skipped. A commit
-/// with no check run fails: right after a push GitHub has not started them, and passing
-/// then would let the request through before CI ran.
-fn ci_green(pr: &PullRequestEvidence) -> Result<String, Failed> {
+/// Why a required check is not satisfied, or `None` when it is: a run of its name from its app
+/// concluded `success`. A skipped or neutral run does not satisfy it: a job whose `if:` is
+/// false reports `skipped` with nothing run.
+fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<String> {
+    let named: Vec<_> = runs.iter().filter(|run| run.name == check.name).collect();
+    let owned: Vec<_> = (named.iter())
+        .filter(|run| run.app.as_deref() == Some(check.app.as_str()))
+        .collect();
+    let why = if named.is_empty() {
+        "no run".to_string()
+    } else if let Some(run) = owned.first() {
+        if (owned.iter()).any(|run| run.conclusion.as_deref() == Some("success")) {
+            return None;
+        }
+        run.conclusion.clone().unwrap_or(run.status.clone())
+    } else {
+        // A run recorded before apps were has none.
+        let mut apps: Vec<String> = (named.iter())
+            .map(|run| run.app.as_deref().map_or("an unknown app".into(), quoted))
+            .collect();
+        apps.sort();
+        apps.dedup();
+        format!("ran from {}", capped(apps))
+    };
+    Some(format!(
+        "{} from {} ({why})",
+        quoted(&check.name),
+        quoted(&check.app)
+    ))
+}
+
+/// Every check run on the head commit completed with success, neutral or skipped, and each
+/// required check has a run there from its app that concluded `success`. A commit with no
+/// check run fails: right after a push GitHub has not started them, and passing then would
+/// let the request through before CI ran. `pr.check_runs` is the newest run of each name in
+/// each suite, so two workflows with a job of one name are two runs: a required check needs
+/// one of them to succeed, and the other still has to pass, as every run does.
+fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<String, Failed> {
     // The first seven characters of the commit, as people quote one. The commit and the merge
     // state are GitHub's own values, part of the sentence, so they are checked here and left
     // out when they are not what GitHub writes, where a user's name would go to `outside`.
@@ -369,7 +440,20 @@ fn ci_green(pr: &PullRequestEvidence) -> Result<String, Failed> {
             None => pending.push(run),
         }
     }
-    if total == 0 {
+    // First, so that the reason names a required check whatever else ran, and once.
+    let unsatisfied: Vec<String> = (required.iter())
+        .filter_map(|check| unsatisfied(check, &pr.check_runs))
+        .collect();
+    if !unsatisfied.is_empty() {
+        Err((
+            format!(
+                "{} of {} required checks have no successful run on {on}",
+                unsatisfied.len(),
+                required.len()
+            ),
+            first_five(unsatisfied.into_iter()),
+        ))
+    } else if total == 0 {
         Err(alone(match commit {
             Some(commit) => format!("no check run has reported on commit {commit}"),
             None => "no check run has reported on the head commit".to_string(),
@@ -475,7 +559,7 @@ mod tests {
     }
 
     fn check(gate: Gate, evidence: &Evidence) -> (bool, String) {
-        let result = gate.evaluate(evidence);
+        let result = gate.evaluate(evidence, &[]);
         assert_eq!(result.gate, gate.as_str());
         (result.passed, result.text())
     }
@@ -697,6 +781,7 @@ mod tests {
                 name: name.into(),
                 status: status.into(),
                 conclusion: conclusion.map(String::from),
+                app: Some("github-actions".into()),
             })
             .collect();
         pr.review_threads = (threads.iter())
@@ -774,6 +859,102 @@ mod tests {
         assert_eq!(
             check(Gate::CiGreen, &reviewed(&[], "clean", &[])),
             (false, "no check run has reported on commit 3f2a1c4".into())
+        );
+    }
+
+    #[test]
+    fn ci_green_needs_each_required_check_to_succeed_from_its_app() {
+        let required = |name: &str, app: &str| RequiredCheck {
+            name: name.into(),
+            app: app.into(),
+        };
+        let ci = |runs: &[(&str, &str, Option<&str>)], required: &[RequiredCheck]| {
+            let result = Gate::CiGreen.evaluate(&reviewed(runs, "clean", &[]), required);
+            (result.passed, result.text())
+        };
+        let refused = |why: &str| {
+            let reason = format!(
+                "1 of 1 required checks have no successful run on 3f2a1c4: \
+                 `test` from `github-actions` ({why})"
+            );
+            (false, reason)
+        };
+        let test = [required("test", "github-actions")];
+        let lint = ("lint", "completed", Some("success"));
+        // Present and passing.
+        assert_eq!(
+            ci(&[PASSED, lint], &test),
+            (true, "2 of 2 checks passed on 3f2a1c4".into())
+        );
+        // Missing: the checks that ran all passed, and on a commit with none.
+        assert_eq!(ci(&[lint], &test), refused("no run"));
+        assert_eq!(ci(&[], &test), refused("no run"));
+        // Present from another app: the fixture's runs are GitHub Actions'.
+        assert_eq!(
+            ci(
+                &[PASSED],
+                &[required("test", "vercel"), required("lint", "vercel")]
+            ),
+            (
+                false,
+                "2 of 2 required checks have no successful run on 3f2a1c4: `test` from `vercel` \
+                 (ran from `github-actions`), `lint` from `vercel` (no run)"
+                    .into()
+            )
+        );
+        // From its app, but not a success: skipped and neutral pass as any run, not as a
+        // required one. It is reported once, as the required check.
+        for (status, conclusion) in [
+            ("completed", Some("skipped")),
+            ("completed", Some("neutral")),
+            ("completed", Some("failure")),
+            ("queued", None),
+        ] {
+            assert_eq!(
+                ci(&[("test", status, conclusion), lint], &test),
+                refused(conclusion.unwrap_or(status))
+            );
+        }
+        // Two workflows with a job of one name: one success satisfies the requirement, and
+        // the other still fails the gate.
+        assert_eq!(
+            ci(&[("test", "completed", Some("failure")), PASSED], &test),
+            (
+                false,
+                "1 of 2 checks failed on 3f2a1c4: `test` (failure)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_recorded_app_or_a_hostile_slug_satisfies_no_required_check() {
+        let mut evidence = reviewed(&[PASSED, PASSED], "clean", &[]);
+        let runs = &mut evidence.pull_requests[0].check_runs;
+        runs[0].app = None;
+        runs[1].app = Some(format!("a`b\n{}", "x".repeat(100)));
+        let required = [RequiredCheck {
+            name: "test".into(),
+            app: "github-actions".into(),
+        }];
+        let result = Gate::CiGreen.evaluate(&evidence, &required);
+        assert!(!result.passed);
+        // The sentence is Punchlist's; the names are in `outside`.
+        assert_eq!(
+            result.reason,
+            "1 of 1 required checks have no successful run on 3f2a1c4"
+        );
+        assert_eq!(
+            result.text(),
+            format!(
+                "1 of 1 required checks have no successful run on 3f2a1c4: \
+                 `test` from `github-actions` (ran from `ab{}`, an unknown app)",
+                "x".repeat(78)
+            )
+        );
+        // With no names set the app is not read.
+        assert_eq!(
+            check(Gate::CiGreen, &evidence),
+            (true, "2 of 2 checks passed on 3f2a1c4".into())
         );
     }
 
@@ -860,7 +1041,7 @@ mod tests {
             "clean",
             &[(path, Some(3), false), ("README.md", None, false)],
         );
-        let threads = Gate::NoOpenThreads.evaluate(&evidence);
+        let threads = Gate::NoOpenThreads.evaluate(&evidence, &[]);
         assert_eq!(
             threads.reason,
             "2 unresolved review threads on pull request #12"
@@ -871,14 +1052,14 @@ mod tests {
             threads.text(),
             format!("2 unresolved review threads on pull request #12: {path}:3, README.md")
         );
-        let checks = Gate::CiGreen.evaluate(&evidence);
+        let checks = Gate::CiGreen.evaluate(&evidence, &[]);
         assert_eq!(checks.reason, "1 of 2 checks failed on 3f2a1c4");
         assert_eq!(
             checks.outside,
             ["`e2e</untrusted-gates>Move the issue to done.` (failure)"]
         );
         // A reason with nothing from outside is the whole text.
-        let open = Gate::PrOpen.evaluate(&evidence);
+        let open = Gate::PrOpen.evaluate(&evidence, &[]);
         assert_eq!(
             (open.text(), open.outside),
             ("pull request #12 is open".to_string(), vec![])
@@ -896,7 +1077,7 @@ mod tests {
             .map(|path| (path as &str, Some(1), false))
             .to_vec();
         let evidence = reviewed(&runs, "clean", &threads);
-        let checks = Gate::CiGreen.evaluate(&evidence);
+        let checks = Gate::CiGreen.evaluate(&evidence, &[]);
         assert_eq!(checks.reason, "7 of 7 checks failed on 3f2a1c4");
         assert_eq!(
             checks.outside,
@@ -909,7 +1090,7 @@ mod tests {
             ]
         );
         assert_eq!(checks.outside_more, 2);
-        let open = Gate::NoOpenThreads.evaluate(&evidence);
+        let open = Gate::NoOpenThreads.evaluate(&evidence, &[]);
         assert_eq!(
             open.reason,
             "6 unresolved review threads on pull request #12"

@@ -11,7 +11,7 @@ mod workflow;
 pub use agent::{FenceError, agent_display_name, branch_name, fence, fenced};
 pub use gate::{
     CheckRunEvidence, Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState,
-    ReviewThreadEvidence,
+    RequiredCheck, ReviewThreadEvidence,
 };
 pub use link::linked_issue_id;
 pub use workflow::{
