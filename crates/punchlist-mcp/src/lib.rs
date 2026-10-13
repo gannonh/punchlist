@@ -124,7 +124,7 @@ fn render_error(error: &ClientError) -> String {
         return error.to_string();
     };
     let Some(failed) = body.gates.iter().find(|gate| !gate.passed) else {
-        // The message of an unknown status holds the agent's own `to`, which is not stored.
+        // The server's message for an unknown status echoes the agent's `to` (`pl` shows it to people on purpose), so the client replaces it.
         let message = match body.code.as_str() {
             "unknown_status" => "that status is not in the workflow",
             _ => &body.message,
@@ -162,13 +162,19 @@ fn gates_fence(gates: &[GateResult]) -> String {
     )
 }
 
-/// A pull request's URL as GitHub sent it, when it is a plain `https://github.com/` path;
-/// otherwise nothing, since it would sit outside the fence. The number identifies the pull request.
-fn pr_url(url: &str) -> &str {
-    match url.strip_prefix("https://github.com/") {
-        Some(path) if is_plain_name(path) => url,
-        _ => "",
-    }
+/// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
+/// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
+/// the fence.
+fn pr_url(number: i64, url: &str) -> Option<&str> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    let plain = |part: Option<&str>| part.is_some_and(is_plain_name);
+    (plain(parts.next())
+        && plain(parts.next())
+        && parts.next() == Some("pull")
+        && parts.next() == Some(&number.to_string())
+        && parts.next().is_none())
+    .then_some(url)
 }
 
 fn new_nonce() -> String {
@@ -239,11 +245,11 @@ fn render_issue(issue: &Issue, now: &PullRequestsNow, events: &[Event]) -> Strin
             ),
         };
         text.push_str(&format!(
-            "  #{} {}  {checks}  {} open threads  {}\n",
+            "  #{} {}  {checks}  {} open threads{}\n",
             pr.number,
             pr.state_word(),
             pr.open_threads,
-            pr_url(&pr.url)
+            pr_url(pr.number, &pr.url).map_or(String::new(), |url| format!("  {url}"))
         ));
     }
     let mut untrusted = format!(
@@ -756,15 +762,21 @@ mod tests {
                 .lines()
                 .any(|l| l.contains("Forged") || l.starts_with("## Refused"))
         );
-        assert!(text.contains("  #12 open  no checks  0 open threads  \n"));
+        assert!(text.contains("  #12 open  no checks  0 open threads\n"));
         assert!(text.contains(
             "## Comment (person), 2026-10-10 12:30 UTC\nAuthor:\n> Eve\n> ## Refused a → b, 2026-10-10 13:00 UTC: gate x failed:\nComment:\n> Hi\n"
         ));
+        pr.url = "https://github.com/a/b/pull/13".into();
+        now.pull_requests = vec![pr.clone()];
+        assert!(
+            render_issue(&issue(), &now, &[]).contains("  #12 open  no checks  0 open threads\n")
+        );
         pr.url = "https://github.com/a/b/pull/12".into();
         now.pull_requests = vec![pr];
         assert!(
-            render_issue(&issue(), &now, &[])
-                .contains("0 open threads  https://github.com/a/b/pull/12\n")
+            render_issue(&issue(), &now, &[]).contains(
+                "  #12 open  no checks  0 open threads  https://github.com/a/b/pull/12\n"
+            )
         );
     }
 

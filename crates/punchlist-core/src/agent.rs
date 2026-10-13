@@ -1,4 +1,5 @@
-//! Agents a runner can start, and the fence that carries outside text into their prompts.
+//! Agents a runner can start, the fence that carries outside text into their prompts, the `> `
+//! line quoter for text inside it, and the check for a name that may be printed outside it.
 
 /// The name people read for an agent key: `claude-code` is "Claude Code".
 pub fn agent_display_name(agent: &str) -> String {
@@ -92,10 +93,13 @@ pub fn quoted(text: &str) -> String {
 }
 
 /// Whether `name` is safe to print outside a fence: non-empty, only letters, digits and
-/// `. _ / -`. A branch, a repository's owner or name and a pull request's URL path are checked
+/// `. _ / -`, not starting with `-`, at most 255 bytes. A branch, a repository's owner or name and a pull request's URL path are checked
 /// with it; it holds no space or line break, so the name cannot start a line of its own.
 pub fn is_plain_name(name: &str) -> bool {
+    // A leading `-` would read as an option to git; 255 bytes is a file name's limit.
     !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('-')
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
@@ -119,6 +123,8 @@ mod tests {
         assert!(!is_plain_name("main\n## Forged"));
         assert!(!is_plain_name("a b"));
         assert!(!is_plain_name(""));
+        assert!(!is_plain_name("-D"));
+        assert!(!is_plain_name(&"a".repeat(256)));
     }
 
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
