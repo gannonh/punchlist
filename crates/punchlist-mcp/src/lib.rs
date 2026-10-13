@@ -168,7 +168,9 @@ fn gates_fence(gates: &[GateResult]) -> String {
 fn pr_url(number: i64, url: &str) -> Option<&str> {
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.split('/');
-    let plain = |part: Option<&str>| part.is_some_and(is_plain_name);
+    // `.` and `..` are plain names and not an owner or a repository.
+    let plain =
+        |part: Option<&str>| part.is_some_and(|p| is_plain_name(p) && p != "." && p != "..");
     (plain(parts.next())
         && plain(parts.next())
         && parts.next() == Some("pull")
@@ -335,6 +337,15 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             waiting_on_person: None,
         }
+    }
+
+    #[test]
+    fn a_pull_request_url_is_printed_only_as_the_plain_github_path() {
+        let url = "https://github.com/gannonh/punchlist-sandbox/pull/12";
+        assert_eq!(pr_url(12, url), Some(url));
+        assert_eq!(pr_url(13, url), None);
+        assert_eq!(pr_url(12, "https://github.com/../x/pull/12"), None);
+        assert_eq!(pr_url(12, "https://github.com/a/b/pull/12/files"), None);
     }
 
     #[test]

@@ -93,8 +93,9 @@ pub fn quoted(text: &str) -> String {
 }
 
 /// Whether `name` is safe to print outside a fence: non-empty, only letters, digits and
-/// `. _ / -`, not starting with `-`, at most 255 bytes. A branch, a repository's owner or name and a pull request's URL path are checked
-/// with it; it holds no space or line break, so the name cannot start a line of its own.
+/// `. _ / -`, not starting with `-`, at most 255 bytes. A branch, a repository's owner or name
+/// and a pull request's URL path are checked with it; it holds no space or line break, so the
+/// name cannot start a line of its own.
 pub fn is_plain_name(name: &str) -> bool {
     // A leading `-` would read as an option to git; 255 bytes is a file name's limit.
     !name.is_empty()

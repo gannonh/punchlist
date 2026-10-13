@@ -375,8 +375,9 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
     let start = Instant::now();
     let run_id = claim.run_id.to_string();
     let attempt = claim.attempt;
+    // The branch is not checked yet, so it is logged escaped.
     tracing::info!(
-        "claimed {} for {} (run {run_id}, attempt {attempt}) on branch {}",
+        "claimed {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
         claim.issue.id,
         claim.agent,
         claim.branch
