@@ -8,7 +8,9 @@ mod gate;
 mod link;
 mod workflow;
 
-pub use agent::{FenceError, agent_display_name, branch_name, fence, fenced};
+pub use agent::{
+    FenceError, agent_display_name, branch_name, fence, fenced, is_plain_name, quoted,
+};
 pub use gate::{
     CheckRunEvidence, Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState,
     RequiredCheck, ReviewThreadEvidence,

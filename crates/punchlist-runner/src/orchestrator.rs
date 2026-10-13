@@ -423,13 +423,25 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
                         claim.branch
                     ))
                     .await;
-                let prompt = build_prompt(
+                match build_prompt(
                     &claim.issue,
                     &claim.repository,
                     &claim.branch,
                     &claim.prompt,
-                );
-                run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
+                ) {
+                    Ok(prompt) => {
+                        run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
+                    }
+                    Err(reason) => {
+                        let _ = lines_tx.send(reason.clone()).await;
+                        AgentExit::Finished(AgentResult {
+                            outcome: RunOutcome::Failed,
+                            reason: Some(reason),
+                            input_tokens: None,
+                            output_tokens: None,
+                        })
+                    }
+                }
             }
             Err(reason) => {
                 let _ = lines_tx
