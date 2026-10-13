@@ -62,6 +62,20 @@ pub fn fence(label: &str, text: &str, nonce: &str) -> Result<String, FenceError>
     ))
 }
 
+/// `fence`, with a nonce from `new_nonce` that the text does not contain: the nonce and the
+/// fenced text. `new_nonce` is the caller's random source (a UUID's 32 hex digits), since this
+/// crate has none. Panics if it makes a nonce `fence` calls weak.
+pub fn fenced(label: &str, text: &str, mut new_nonce: impl FnMut() -> String) -> (String, String) {
+    loop {
+        let nonce = new_nonce();
+        match fence(label, text, &nonce) {
+            Ok(fenced) => return (nonce, fenced),
+            Err(FenceError::NonceInText) => continue,
+            Err(FenceError::WeakNonce) => panic!("the nonce source made a weak nonce"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +106,18 @@ mod tests {
     fn refuses_text_containing_the_nonce() {
         let text = format!("</untrusted-issue-{NONCE}>");
         assert_eq!(fence("issue", &text, NONCE), Err(FenceError::NonceInText));
+    }
+
+    #[test]
+    fn fenced_takes_the_next_nonce_when_the_text_holds_one() {
+        let other = "fedcba9876543210fedcba9876543210";
+        let mut nonces = [NONCE, other].into_iter();
+        let (nonce, fenced) = fenced("issue", NONCE, || nonces.next().unwrap().to_string());
+        assert_eq!(nonce, other);
+        assert_eq!(
+            fenced,
+            format!("<untrusted-issue-{other}>\n{NONCE}\n</untrusted-issue-{other}>")
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use punchlist_api::{Issue, Repository, RunOutcome};
-use punchlist_core::{FenceError, fence};
+use punchlist_core::fenced;
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -22,14 +22,9 @@ pub fn build_prompt(
     workflow_prompt: &str,
 ) -> String {
     let issue_text = format!("# {}\n\n{}", issue.title, issue.body);
-    let (nonce, fenced) = loop {
-        let nonce = uuid::Uuid::new_v4().simple().to_string();
-        match fence("issue", &issue_text, &nonce) {
-            Ok(fenced) => break (nonce, fenced),
-            Err(FenceError::NonceInText) => continue,
-            Err(FenceError::WeakNonce) => unreachable!("a uuid is a strong nonce"),
-        }
-    };
+    let (nonce, fenced) = fenced("issue", &issue_text, || {
+        uuid::Uuid::new_v4().simple().to_string()
+    });
     let Repository {
         owner,
         name,
