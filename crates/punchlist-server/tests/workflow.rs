@@ -2792,6 +2792,59 @@ async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_n
 }
 
 #[sqlx::test]
+async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: PgPool) {
+    let s = setup(&pool).await;
+    let required = "\n[gate.ci_green]\nrequired = [\"check\", \"lint\", { name = \"check\", app = \"vercel\" }]\n";
+    let codex = issue_in_agent_review(&s).await;
+    put_workflow(&s, "b", PRD_WORKFLOW.to_string() + required);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    // `check` is delivered, from GitHub Actions and with no suite; GitHub's list adds `lint`,
+    // from it too.
+    let no_suite = |v: &mut Value| {
+        v["check_run"]
+            .as_object_mut()
+            .unwrap()
+            .remove("check_suite");
+    };
+    deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, no_suite)).await;
+    let listed = |id: i64, suite: i64, name: &str, app: &str| {
+        let mut run = listed_run(id, suite, name, "success");
+        run["app"] = json!({"slug": app});
+        run
+    };
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed(9, 8, "lint", "github-actions")];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "ci_green");
+    assert_eq!(
+        body["reason"],
+        "1 of 3 required checks have no successful run on 6dcb09b: \
+         `check` from `vercel` (ran from `github-actions`)"
+    );
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, app FROM check_run ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let actions = Some("github-actions".to_string());
+    assert_eq!(
+        rows,
+        [("lint".into(), actions.clone()), ("check".into(), actions)]
+    );
+
+    // The other app's run of that name reports, newer than GitHub Actions' run with no suite:
+    // it does not stand in for that run, and every required check has its app's run.
+    (s.github.lock().unwrap().check_runs).push(listed(5021877310, 11, "check", "vercel"));
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
 async fn the_check_runs_list_is_read_to_its_short_page_and_capped_at_ten_pages(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;
@@ -3130,7 +3183,8 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
     );
     assert_eq!(
         body["evidence"]["pull_requests"][0]["check_runs"],
-        json!([{"name": "check", "status": "completed", "conclusion": "failure"}])
+        json!([{"name": "check", "status": "completed", "conclusion": "failure",
+                "app": "github-actions"}])
     );
 
     // Its rerun is the newest run of that name: pending, then passed.
