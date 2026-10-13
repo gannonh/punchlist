@@ -15,6 +15,6 @@ pub use gate::{
 };
 pub use link::linked_issue_id;
 pub use workflow::{
-    Dispatch, IN_PROGRESS, LoadError, Problem, Refusal, Role, START, SYSTEM_PROMPT, Status,
-    Transition, Workflow, default_workflow, display_name, workflow_schema,
+    Dispatch, GITHUB_ACTIONS, IN_PROGRESS, LoadError, Problem, Refusal, Role, START, SYSTEM_PROMPT,
+    Status, Transition, Workflow, default_workflow, display_name, workflow_schema,
 };

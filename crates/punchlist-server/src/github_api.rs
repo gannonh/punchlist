@@ -2,7 +2,7 @@
 //! `.punchlist/` (ADR 0010), and the current state of pull requests and their review threads,
 //! which webhooks alone cannot order.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -277,7 +277,7 @@ impl GithubClient {
             .await?
             .json()
             .await?;
-        let commit: Commit = self
+        let commit: Object = self
             .call(
                 &token,
                 reqwest::Method::GET,
@@ -354,115 +354,76 @@ impl GithubClient {
             .await?)
     }
 
-    /// Every check run on a commit, the superseded ones too: REST, a page of 100 at a time.
-    /// The list ends on a short page; `total_count` is not trusted, as a run created between
-    /// pages shifts the list. More than `CHECK_RUN_PAGES` pages (unless `total_count` says the last was the end) is an error, so that the
-    /// refresh, which has no deadline of its own, always ends.
+    /// Every check run on a commit, the superseded ones too (`pages`).
     pub(crate) async fn check_runs(
         &self,
         owner: &str,
         name: &str,
         sha: &str,
     ) -> anyhow::Result<Vec<CheckRunData>> {
-        #[derive(Deserialize)]
-        struct Page {
-            total_count: usize,
-            check_runs: Vec<CheckRunData>,
-        }
-        const PER_PAGE: usize = 100;
-        const CHECK_RUN_PAGES: usize = 10;
         let token = self.token(owner, name).await?;
-        let mut runs: Vec<CheckRunData> = Vec::new();
-        let mut total = None;
-        for page in 1..=CHECK_RUN_PAGES {
-            let path = format!(
-                "/repos/{owner}/{name}/commits/{sha}/check-runs?filter=all&per_page={PER_PAGE}&page={page}"
-            );
-            let answer: Page = self
-                .call(&token, reqwest::Method::GET, &path)
-                .await?
-                .json()
-                .await?;
-            // A run created between two pages shifts the list: a later page repeats the
-            // boundary run, or the count moves. The read is then not one list, and fails
-            // closed; the agent asks again.
-            anyhow::ensure!(
-                *total.get_or_insert(answer.total_count) == answer.total_count
-                    && answer
-                        .check_runs
-                        .iter()
-                        .all(|new| runs.iter().all(|seen| seen.id != new.id)),
-                "GitHub's check runs on {sha} changed between pages"
-            );
-            let short = answer.check_runs.len() < PER_PAGE;
-            runs.extend(answer.check_runs);
-            // Exactly the cap fills the last page: GitHub's count says nothing is left.
-            if short || (page == CHECK_RUN_PAGES && answer.total_count <= runs.len()) {
-                return Ok(runs);
-            }
-        }
-        anyhow::bail!(
-            "GitHub lists more than {} check runs on {sha}",
-            PER_PAGE * CHECK_RUN_PAGES
-        )
+        let path = format!("/repos/{owner}/{name}/commits/{sha}/check-runs?filter=all");
+        self.pages(&token, &path, "check_runs").await
     }
 
     /// The GitHub Actions jobs on a commit that a runner took, by check run id (a job's id is
     /// its check run's), each with its run's workflow file and that file's blob at the commit
-    /// and on the default branch now. Needs the App's Actions: read permission.
+    /// and on the default branch now. Only the workflow runs whose check suite is in `suites`
+    /// are read. Needs the App's Actions: read permission.
     ///
     /// A check run that anything with `checks: write` created is listed as a job too, of the
     /// workflow run whose suite it joined, so being listed proves nothing. What its creator
     /// cannot set is a runner: such a job has `runner_id: null`, no labels and no steps. This
     /// is GitHub's behaviour as observed, not as documented; if GitHub ever lists such a job
-    /// with a runner, a forged check counts again.
+    /// with a runner, a forged check counts again. Nor can a workflow rewrite a real job's
+    /// check run: GitHub answers a `PATCH` of its `name` 200 and changes nothing, and one of
+    /// its status or conclusion 403 (observed too). The caller still counts a job only for a
+    /// check run of its name, conclusion and commit.
     ///
     /// The jobs are each run's latest attempt (GitHub's default filter), so while a rerun waits
     /// for a runner no job stands behind the commit's runs of that name, and none counts.
-    // ponytail: one request for the runs, one per run for its jobs and two per workflow file,
-    // a page of 100 each and `PAGES` pages at most; past that the read fails and the request
-    // is refused. Read only the required checks' runs if a commit has that many.
+    // ponytail: one request for the runs, one per run in `suites` for its jobs and two per
+    // workflow file, each list within `pages`' cap. Cache the default branch's blobs per
+    // request if a refresh over many pull requests makes this cost.
     pub(crate) async fn workflow_jobs(
         &self,
         owner: &str,
         name: &str,
         sha: &str,
+        suites: &HashSet<i64>,
     ) -> anyhow::Result<HashMap<i64, WorkflowJob>> {
         #[derive(Deserialize)]
         struct Run {
             id: i64,
             path: String,
+            #[serde(default)]
+            check_suite_id: Option<i64>,
         }
         #[derive(Deserialize)]
         struct Job {
             id: i64,
+            name: String,
+            #[serde(default)]
+            conclusion: Option<String>,
+            head_sha: String,
             #[serde(default)]
             runner_id: Option<i64>,
         }
         let token = self.token(owner, name).await?;
-        let runs: Vec<Run> = self
-            .pages(
-                &token,
-                &format!("/repos/{owner}/{name}/actions/runs?head_sha={sha}"),
-                "workflow_runs",
-            )
-            .await?;
+        let runs = format!("/repos/{owner}/{name}/actions/runs?head_sha={sha}");
+        let runs: Vec<Run> = self.pages(&token, &runs, "workflow_runs").await?;
         let mut jobs = HashMap::new();
         let mut blobs: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        for run in runs {
-            let listed: Vec<Job> = self
-                .pages(
-                    &token,
-                    &format!(
-                        "/repos/{owner}/{name}/actions/runs/{}/jobs?filter=latest",
-                        run.id
-                    ),
-                    "jobs",
-                )
-                .await?;
+        let in_suites = |run: &Run| run.check_suite_id.is_some_and(|id| suites.contains(&id));
+        for run in runs.into_iter().filter(in_suites) {
+            let listed = format!(
+                "/repos/{owner}/{name}/actions/runs/{}/jobs?filter=latest",
+                run.id
+            );
+            let listed: Vec<Job> = self.pages(&token, &listed, "jobs").await?;
             // A hosted runner's id is a large number; 0 is not one.
-            let ran = listed.iter().filter(|job| job.runner_id.unwrap_or(0) != 0);
-            for job in ran {
+            let ran = |job: &Job| job.runner_id.unwrap_or(0) != 0;
+            for job in listed.into_iter().filter(ran) {
                 let blob = match blobs.get(&run.path) {
                     Some(blob) => blob.clone(),
                     None => {
@@ -476,6 +437,9 @@ impl GithubClient {
                 jobs.insert(
                     job.id,
                     WorkflowJob {
+                        name: job.name,
+                        conclusion: job.conclusion,
+                        head_sha: job.head_sha,
                         path: run.path.clone(),
                         sha: blob.0,
                         default_sha: blob.1,
@@ -487,39 +451,59 @@ impl GithubClient {
     }
 
     /// Every item of a REST list that answers `{"total_count": n, "<key>": [...]}`, a page of
-    /// 100 at a time to the first short page. More than `PAGES` pages is an error: a list cut
-    /// short would leave out what the gates then judge as absent.
+    /// 100 at a time. The list ends on a short page; `total_count` is not trusted for that, as
+    /// an item created between pages shifts the list. More than `PAGES` pages (unless
+    /// `total_count` says the last was the end) is an error, so that the refresh, which has no
+    /// deadline of its own, always ends, and no list is cut short: what is left out, the gates
+    /// would judge as absent.
     async fn pages<T: serde::de::DeserializeOwned>(
         &self,
         token: &str,
         path: &str,
         key: &str,
     ) -> anyhow::Result<Vec<T>> {
+        const PER_PAGE: usize = 100;
         const PAGES: usize = 10;
-        let mut items = Vec::new();
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        let mut total = None;
         for page in 1..=PAGES {
+            let paged = format!("{path}&per_page={PER_PAGE}&page={page}");
             let mut answer: serde_json::Value = self
-                .call(
-                    token,
-                    reqwest::Method::GET,
-                    &format!("{path}&per_page=100&page={page}"),
-                )
+                .call(token, reqwest::Method::GET, &paged)
                 .await?
                 .json()
                 .await?;
-            let listed: Vec<T> = serde_json::from_value(answer[key].take())
-                .with_context(|| format!("GitHub {path} has no list `{key}`"))?;
-            let short = listed.len() < 100;
+            let listed: Option<Vec<serde_json::Value>> =
+                serde_json::from_value(answer[key].take()).ok();
+            let (Some(count), Some(listed)) = (answer["total_count"].as_u64(), listed) else {
+                anyhow::bail!("GitHub {path:?} has no `total_count` and list `{key}`");
+            };
+            // An item created between two pages shifts the list: a later page repeats the
+            // boundary item, or the count moves. The read is then not one list, and fails
+            // closed; the agent asks again.
+            anyhow::ensure!(
+                *total.get_or_insert(count) == count
+                    && (listed.iter()).all(|new| items.iter().all(|seen| seen["id"] != new["id"])),
+                "GitHub's `{key}` at {path:?} changed between pages"
+            );
+            let short = listed.len() < PER_PAGE;
             items.extend(listed);
-            if short {
-                return Ok(items);
+            // Exactly the cap fills the last page: GitHub's count says nothing is left.
+            if short || (page == PAGES && count as usize <= items.len()) {
+                return Ok((items.into_iter())
+                    .map(serde_json::from_value)
+                    .collect::<Result<_, _>>()?);
             }
         }
-        anyhow::bail!("GitHub {path} lists more than {} `{key}`", PAGES * 100)
+        anyhow::bail!(
+            "GitHub lists more than {} `{key}` at {path:?}",
+            PER_PAGE * PAGES
+        )
     }
 
     /// The blob (or, for a directory, tree) at `path` in a commit, or on the default branch
-    /// with no `git_ref`; `None` when there is nothing at the path.
+    /// with no `git_ref`; `None` when there is nothing at the path. `path` is a workflow
+    /// run's, so its author's text: it is logged quoted.
     async fn blob(
         &self,
         token: &str,
@@ -537,11 +521,11 @@ impl GithubClient {
             .header("x-github-api-version", "2022-11-28")
             .send()
             .await
-            .with_context(|| format!("GitHub {path}"))?;
+            .with_context(|| format!("GitHub contents of {path:?}"))?;
         match response.status() {
             StatusCode::NOT_FOUND => Ok(None),
-            status if status.is_success() => Ok(Some(response.json::<Commit>().await?.sha)),
-            status => anyhow::bail!("GitHub {path} answered {status}"),
+            status if status.is_success() => Ok(Some(response.json::<Object>().await?.sha)),
+            status => anyhow::bail!("GitHub contents of {path:?} answered {status}"),
         }
     }
 
@@ -618,8 +602,9 @@ pub(crate) fn unless_gone<T>(read: anyhow::Result<T>) -> anyhow::Result<Option<T
     }
 }
 
+/// A commit, blob or tree, as far as its sha.
 #[derive(Deserialize)]
-struct Commit {
+struct Object {
     sha: String,
 }
 

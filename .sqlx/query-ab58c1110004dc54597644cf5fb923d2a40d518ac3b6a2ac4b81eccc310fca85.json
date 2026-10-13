@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)\n                c.name, c.status, c.conclusion, c.app,\n                c.workflow_path, c.workflow_sha, c.workflow_default_sha\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id\n                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))\n         ORDER BY c.check_suite_id, c.app, c.name, c.workflow_path IS NULL, c.id DESC",
+  "query": "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)\n                c.name, c.status, c.conclusion, c.app,\n                c.workflow_path, c.workflow_sha, c.workflow_default_sha\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           -- Whatever `workflow_path` either has: a run with no suite has no job read for it.\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id\n                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))\n         ORDER BY c.check_suite_id, c.app, c.name,\n                  (c.workflow_path IS NULL AND c.status = 'completed'), c.id DESC",
   "describe": {
     "columns": [
       {
@@ -97,5 +97,5 @@
       true
     ]
   },
-  "hash": "08af174a880d9d5f8ea1d9985c7d53ca3fb7cd398e01ec8a10658f531e0973aa"
+  "hash": "ab58c1110004dc54597644cf5fb923d2a40d518ac3b6a2ac4b81eccc310fca85"
 }
