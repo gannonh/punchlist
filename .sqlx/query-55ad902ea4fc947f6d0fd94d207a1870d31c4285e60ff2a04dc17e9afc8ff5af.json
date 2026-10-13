@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT head_sha, github_updated_at FROM pull_request WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "head_sha",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "head_sha"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "github_updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "github_updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "55ad902ea4fc947f6d0fd94d207a1870d31c4285e60ff2a04dc17e9afc8ff5af"
+}

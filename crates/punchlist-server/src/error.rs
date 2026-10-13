@@ -18,6 +18,13 @@ pub enum ApiError {
         "GitHub could not be read, so the gates for {0} were not checked and it did not move; request again"
     )]
     GithubUnreadable(String),
+    /// What a gated request read from GitHub was written again before its gates were judged,
+    /// or the request lost a deadlock to such a write. The result is discarded and nothing
+    /// moved; the same request can succeed later.
+    #[error(
+        "what GitHub has for {0} changed while its gates were being checked, so nothing was decided and it did not move; request again"
+    )]
+    EvidenceChanged(String),
     #[error("issue {0} not found")]
     IssueNotFound(String),
     #[error("{0}")]
@@ -52,9 +59,9 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::GithubNotConfigured | ApiError::GithubUnreadable(_) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            ApiError::GithubNotConfigured
+            | ApiError::GithubUnreadable(_)
+            | ApiError::EvidenceChanged(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -71,6 +78,7 @@ impl ApiError {
             ApiError::Unauthorized => "unauthorized",
             ApiError::GithubNotConfigured => "github_not_configured",
             ApiError::GithubUnreadable(_) => "github_unreadable",
+            ApiError::EvidenceChanged(_) => "evidence_changed",
             ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
                 "not_found"
             }

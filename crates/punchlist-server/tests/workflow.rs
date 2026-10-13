@@ -1237,7 +1237,7 @@ async fn a_gated_request_whose_write_is_dropped_reads_again(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_gated_request_dropped_twice_is_judged_on_what_is_recorded(pool: PgPool) {
+async fn a_gated_request_dropped_twice_is_refused(pool: PgPool) {
     let s = setup(&pool).await;
     let agent = issue_with_a_ready_pull_request(&s).await;
     {
@@ -1266,9 +1266,11 @@ async fn a_gated_request_dropped_twice_is_judged_on_what_is_recorded(pool: PgPoo
         let_go(&hold).await;
     });
 
-    // The request's second write was dropped too. It is answered, not failed, and the rows
-    // are the second job's.
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // The request's second write was dropped too: the rows are the second job's, not what
+    // the request read, so it is not judged on them.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "evidence_changed");
+    assert_eq!(issue_status(&pool).await, "in_progress");
     assert_eq!(recorded_threads(&pool).await, resolved);
     assert_eq!(pull_request_version(&pool).await, 2);
 }
@@ -3014,11 +3016,11 @@ async fn a_run_renamed_during_both_reads_refuses_the_request(pool: PgPool) {
         hold2.wait().await;
     });
     assert_eq!(request.0, StatusCode::SERVICE_UNAVAILABLE, "{}", request.1);
-    assert_eq!(request.1["code"], "github_unreadable");
+    assert_eq!(request.1["code"], "evidence_changed");
 }
 
 #[sqlx::test]
-async fn a_conflicting_delivery_during_both_reads_refuses_the_request(pool: PgPool) {
+async fn a_stale_pass_redelivered_during_the_second_read_changes_nothing(pool: PgPool) {
     let s = setup(&pool).await;
     let codex = issue_in_agent_review(&s).await;
     let (status, body) = request_with_deliveries_during_the_reads(
@@ -3030,8 +3032,13 @@ async fn a_conflicting_delivery_during_both_reads_refuses_the_request(pool: PgPo
         Some("success"),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["code"], "github_unreadable");
+    // The second delivery says what the first recorded, so it writes nothing: the second read
+    // replaces the stale pass, as it would had that delivery not come.
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        "1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
 }
 
 #[sqlx::test]
@@ -3326,4 +3333,232 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// A request for Human Review with `during` run after its refresh has committed and before
+/// its gates are evaluated. The test holds the workspace's row, the evaluation's first lock,
+/// which neither the refresh of an open pull request nor a delivery's job takes.
+async fn request_held_before_the_evaluation(
+    s: &Setup,
+    pool: &PgPool,
+    token: &str,
+    during: impl Future<Output = ()>,
+) -> (StatusCode, Value) {
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let (request, ()) = tokio::join!(request_human_review(s, token), async {
+        wait_for_lock_waiter(pool).await;
+        during.await;
+        lock.commit().await.unwrap();
+    });
+    request
+}
+
+/// `request_held_before_the_evaluation` with one delivery, whose job is done before the gates
+/// are evaluated.
+async fn request_with_a_delivery_before_the_evaluation(
+    s: &Setup,
+    pool: &PgPool,
+    token: &str,
+    event: &str,
+    body: &str,
+) -> (StatusCode, Value) {
+    request_held_before_the_evaluation(s, pool, token, async {
+        deliver(s, event, "d-late", body).await;
+        assert_eq!(job(pool, "d-late").await, ("done".into(), 1, None));
+    })
+    .await
+}
+
+const EVIDENCE_CHANGED: &str = "what GitHub has for PL-1 changed while its gates were being \
+     checked, so nothing was decided and it did not move; request again";
+
+fn assert_evidence_changed(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "evidence_changed");
+    assert_eq!(body["message"], EVIDENCE_CHANGED);
+}
+
+#[sqlx::test]
+async fn a_stale_pass_delivered_after_the_read_and_before_the_gates_refuses_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "failure")];
+    }
+    let conclusion = || async {
+        sqlx::query_scalar::<_, Option<String>>("SELECT conclusion FROM check_run WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+
+    // The request read the failure. A delayed, older `success` for the same run is recorded
+    // before its gates are evaluated: `ci_green` would pass on it.
+    let stale = check_run(1, "completed", Some("success"));
+    let (status, body) =
+        request_with_a_delivery_before_the_evaluation(&s, &pool, &codex, "check_run", &stale).await;
+    assert_eq!(conclusion().await.as_deref(), Some("success"));
+    assert_evidence_changed(status, &body);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    // Requested again, GitHub's failure is read over the stale row and the gate names it.
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["message"],
+        "agent_review → human_review needs gate ci_green: \
+         1 of 1 checks failed on 6dcb09b: `check` (failure)"
+    );
+    assert_eq!(conclusion().await.as_deref(), Some("failure"));
+}
+
+#[sqlx::test]
+async fn a_delivery_that_changes_nothing_before_the_gates_does_not_refuse_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    let passed = check_run(1, "completed", Some("success"));
+    deliver(&s, "check_run", "c-passed", &passed).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 3112233445, "check", "success")];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+    }
+    // The run's delivery again, and a thread event that finds the thread as recorded: both
+    // are processed between the read and the gates, and neither changes what the gates read.
+    let (status, body) = request_held_before_the_evaluation(&s, &pool, &codex, async {
+        deliver(&s, "check_run", "c-again", &passed).await;
+        deliver(&s, "pull_request_review_thread", "t-again", THREAD).await;
+        assert_eq!(job(&pool, "c-again").await, ("done".into(), 1, None));
+        assert_eq!(job(&pool, "t-again").await, ("done".into(), 1, None));
+    })
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "human_review");
+}
+
+#[sqlx::test]
+async fn a_thread_event_recorded_after_the_read_and_before_the_gates_refuses_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+        repo.threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", true)];
+    }
+
+    // The request read the thread resolved. It is opened again, and a thread event's job
+    // records that before the gates are evaluated: the request passes or fails on neither.
+    let (status, body) = request_held_before_the_evaluation(&s, &pool, &codex, async {
+        s.github.lock().unwrap().threads = vec![thread("PRRT_kwDOA1b2c84AbCdE", false)];
+        deliver(&s, "pull_request_review_thread", "d-late", THREAD).await;
+        assert_eq!(job(&pool, "d-late").await, ("done".into(), 1, None));
+    })
+    .await;
+    assert_evidence_changed(status, &body);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "no_open_threads");
+
+    // A thread GitHub no longer has is forgotten in the window: no row is left to say so,
+    // and the one that stays is as recorded.
+    let other = thread("PRRT_kwDOA1b2c84ZyXwV", false);
+    s.github.lock().unwrap().threads.push(other);
+    let (status, body) = request_held_before_the_evaluation(&s, &pool, &codex, async {
+        s.github.lock().unwrap().threads.pop();
+        deliver(&s, "pull_request_review_thread", "d-forgotten", THREAD).await;
+        assert_eq!(job(&pool, "d-forgotten").await, ("done".into(), 1, None));
+    })
+    .await;
+    assert_evidence_changed(status, &body);
+    assert_eq!(
+        recorded_threads(&pool).await,
+        (vec![("PRRT_kwDOA1b2c84AbCdE".into(), false)], 1)
+    );
+}
+
+#[sqlx::test]
+async fn a_pull_request_payload_recorded_before_the_gates_refuses_the_request(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+    }
+    // The request read it ready. It is made a draft again, and that payload is recorded first.
+    let draft = edited(READY, |v| {
+        v["action"] = json!("converted_to_draft");
+        v["pull_request"]["draft"] = json!(true);
+        v["pull_request"]["updated_at"] = json!("2026-10-09T18:06:00Z");
+    });
+    let (status, body) =
+        request_with_a_delivery_before_the_evaluation(&s, &pool, &codex, "pull_request", &draft)
+            .await;
+    assert_evidence_changed(status, &body);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+}
+
+#[sqlx::test]
+async fn a_pull_request_linked_after_the_read_and_before_the_gates_refuses_the_request(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed_run(1, 5, "check", "success")];
+    }
+    // A second pull request that names the issue is opened: the request never read it.
+    let second = numbered(OPENED, 13);
+    let (status, body) =
+        request_with_a_delivery_before_the_evaluation(&s, &pool, &codex, "pull_request", &second)
+            .await;
+    assert_evidence_changed(status, &body);
+    assert_eq!(issue_status(&pool).await, "agent_review");
+}
+
+#[sqlx::test]
+async fn a_newer_payload_recorded_during_the_read_is_not_taken_for_what_was_read(pool: PgPool) {
+    let s = setup(&pool).await;
+    let agent = issue_with_a_ready_pull_request(&s).await;
+    // GitHub answers closed, as of 18:30, on both of the request's reads.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(CLOSED)];
+    let hold = hold(&s);
+    let reopened = edited(READY, |v| {
+        v["action"] = json!("reopened");
+        v["pull_request"]["updated_at"] = json!("2026-10-09T18:31:00Z");
+    });
+
+    let ((status, body), ()) = tokio::join!(request_agent_review(&s, &agent), async {
+        // The answer is on the way when a newer `reopened` payload is recorded. The row is
+        // then open, and newer than what the request read: its gates would pass on it.
+        caught(&s, &hold).await;
+        deliver(&s, "pull_request", "d-reopened", &reopened).await;
+        let_go(&hold).await;
+    });
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["code"], "evidence_changed");
+    assert_eq!(
+        pull_request_and_issue(&pool).await,
+        ("open".into(), "in_progress".into())
+    );
+    assert_eq!(event_transitions(&pool).await, []);
 }

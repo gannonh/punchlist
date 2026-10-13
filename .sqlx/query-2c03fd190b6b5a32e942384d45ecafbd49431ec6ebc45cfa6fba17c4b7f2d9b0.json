@@ -1,28 +1,29 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT head_sha FROM pull_request WHERE id = $1",
+  "query": "SELECT id FROM pull_request WHERE issue_id = $1 OR id = ANY($2) ORDER BY id FOR UPDATE",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "head_sha",
-        "type_info": "Text",
+        "name": "id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
             "table": "pull_request",
-            "name": "head_sha"
+            "name": "id"
           }
         }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Text",
+        "UuidArray"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "50f5b06913f4876cab8050ed4893e3ad292691133eab55582e8aa6287cb2fe97"
+  "hash": "2c03fd190b6b5a32e942384d45ecafbd49431ec6ebc45cfa6fba17c4b7f2d9b0"
 }

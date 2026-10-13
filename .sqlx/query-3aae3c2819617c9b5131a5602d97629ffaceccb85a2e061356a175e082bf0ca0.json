@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM pull_request p\n               LEFT JOIN UNNEST($2::uuid[], $3::timestamptz[]) AS r (id, at) ON r.id = p.id\n               WHERE (p.issue_id = $1 OR r.id IS NOT NULL)\n                 AND (r.id IS NULL OR p.updated_at > r.at\n                      OR (p.state = 'open' AND (\n                          EXISTS (SELECT 1 FROM review_thread t\n                                  WHERE t.pull_request_id = p.id AND t.updated_at > r.at)\n                          -- Two of the issue's pull requests can have one head commit: the\n                          -- last read of it is the one its runs are stamped with.\n                          OR EXISTS (SELECT 1 FROM check_run c\n                                     WHERE c.repository_id = p.repository_id\n                                       AND c.head_sha = p.head_sha\n                                       AND c.updated_at > coalesce(\n                                           (SELECT max(h.checks_read)\n                                            FROM UNNEST($4::text[], $5::timestamptz[])\n                                                AS h (sha, checks_read)\n                                            WHERE h.sha = p.head_sha),\n                                           r.at)))))\n           ) AS \"written!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "written!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "UuidArray",
+        "TimestamptzArray",
+        "TextArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3aae3c2819617c9b5131a5602d97629ffaceccb85a2e061356a175e082bf0ca0"
+}
