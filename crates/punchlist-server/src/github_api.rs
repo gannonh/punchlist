@@ -2,7 +2,7 @@
 //! `.punchlist/` (ADR 0010), and the current state of pull requests and their review threads,
 //! which webhooks alone cannot order.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -13,7 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::github::{Account, CheckRunData, PullRequestData};
+use crate::github::{Account, CheckRunData, PullRequestData, WorkflowJob};
 
 /// How the server authenticates to GitHub.
 #[derive(Clone)]
@@ -407,6 +407,144 @@ impl GithubClient {
         )
     }
 
+    /// The GitHub Actions jobs on a commit that a runner took, by check run id (a job's id is
+    /// its check run's), each with its run's workflow file and that file's blob at the commit
+    /// and on the default branch now. Needs the App's Actions: read permission.
+    ///
+    /// A check run that anything with `checks: write` created is listed as a job too, of the
+    /// workflow run whose suite it joined, so being listed proves nothing. What its creator
+    /// cannot set is a runner: such a job has `runner_id: null`, no labels and no steps. This
+    /// is GitHub's behaviour as observed, not as documented; if GitHub ever lists such a job
+    /// with a runner, a forged check counts again.
+    ///
+    /// The jobs are each run's latest attempt (GitHub's default filter), so while a rerun waits
+    /// for a runner no job stands behind the commit's runs of that name, and none counts.
+    // ponytail: one request for the runs, one per run for its jobs and two per workflow file,
+    // a page of 100 each and `PAGES` pages at most; past that the read fails and the request
+    // is refused. Read only the required checks' runs if a commit has that many.
+    pub(crate) async fn workflow_jobs(
+        &self,
+        owner: &str,
+        name: &str,
+        sha: &str,
+    ) -> anyhow::Result<HashMap<i64, WorkflowJob>> {
+        #[derive(Deserialize)]
+        struct Run {
+            id: i64,
+            path: String,
+        }
+        #[derive(Deserialize)]
+        struct Job {
+            id: i64,
+            #[serde(default)]
+            runner_id: Option<i64>,
+        }
+        let token = self.token(owner, name).await?;
+        let runs: Vec<Run> = self
+            .pages(
+                &token,
+                &format!("/repos/{owner}/{name}/actions/runs?head_sha={sha}"),
+                "workflow_runs",
+            )
+            .await?;
+        let mut jobs = HashMap::new();
+        let mut blobs: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        for run in runs {
+            let listed: Vec<Job> = self
+                .pages(
+                    &token,
+                    &format!(
+                        "/repos/{owner}/{name}/actions/runs/{}/jobs?filter=latest",
+                        run.id
+                    ),
+                    "jobs",
+                )
+                .await?;
+            // A hosted runner's id is a large number; 0 is not one.
+            let ran = listed.iter().filter(|job| job.runner_id.unwrap_or(0) != 0);
+            for job in ran {
+                let blob = match blobs.get(&run.path) {
+                    Some(blob) => blob.clone(),
+                    None => {
+                        let repository = format!("{owner}/{name}");
+                        let at = |r| self.blob(&token, &repository, &run.path, r);
+                        let blob = (at(Some(sha)).await?, at(None).await?);
+                        blobs.insert(run.path.clone(), blob.clone());
+                        blob
+                    }
+                };
+                jobs.insert(
+                    job.id,
+                    WorkflowJob {
+                        path: run.path.clone(),
+                        sha: blob.0,
+                        default_sha: blob.1,
+                    },
+                );
+            }
+        }
+        Ok(jobs)
+    }
+
+    /// Every item of a REST list that answers `{"total_count": n, "<key>": [...]}`, a page of
+    /// 100 at a time to the first short page. More than `PAGES` pages is an error: a list cut
+    /// short would leave out what the gates then judge as absent.
+    async fn pages<T: serde::de::DeserializeOwned>(
+        &self,
+        token: &str,
+        path: &str,
+        key: &str,
+    ) -> anyhow::Result<Vec<T>> {
+        const PAGES: usize = 10;
+        let mut items = Vec::new();
+        for page in 1..=PAGES {
+            let mut answer: serde_json::Value = self
+                .call(
+                    token,
+                    reqwest::Method::GET,
+                    &format!("{path}&per_page=100&page={page}"),
+                )
+                .await?
+                .json()
+                .await?;
+            let listed: Vec<T> = serde_json::from_value(answer[key].take())
+                .with_context(|| format!("GitHub {path} has no list `{key}`"))?;
+            let short = listed.len() < 100;
+            items.extend(listed);
+            if short {
+                return Ok(items);
+            }
+        }
+        anyhow::bail!("GitHub {path} lists more than {} `{key}`", PAGES * 100)
+    }
+
+    /// The blob (or, for a directory, tree) at `path` in a commit, or on the default branch
+    /// with no `git_ref`; `None` when there is nothing at the path.
+    async fn blob(
+        &self,
+        token: &str,
+        repository: &str,
+        path: &str,
+        git_ref: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let url = contents_url(&self.base_url, repository, path, git_ref)?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            // An object for a directory too, where the plain JSON is a list.
+            .header("accept", "application/vnd.github.object+json")
+            .header("x-github-api-version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("GitHub {path}"))?;
+        match response.status() {
+            StatusCode::NOT_FOUND => Ok(None),
+            status if status.is_success() => Ok(Some(response.json::<Commit>().await?.sha)),
+            status => anyhow::bail!("GitHub {path} answered {status}"),
+        }
+    }
+
     /// Every review thread on a pull request, resolved or not. REST has no review threads, so
     /// this is GraphQL, a page of 100 at a time. GraphQL answers 200 with `errors` and no
     /// data when it refuses, so a missing list is an error. So is a pull request with more
@@ -499,8 +637,8 @@ impl Files {
         let url = contents_url(
             &self.client.base_url,
             &self.repository,
-            path,
-            &self.head.sha,
+            &format!(".punchlist/{path}"),
+            Some(&self.head.sha),
         )?;
         let response = self
             .client
@@ -520,13 +658,14 @@ impl Files {
     }
 }
 
-/// The URL of `.punchlist/<path>` at `sha`. Each path segment and the query are escaped, so
-/// a prompt named `a?b.md` is that file, not a query that swallows `ref`.
+/// The URL of the file at `path`, at `sha` or on the default branch without one. Each path
+/// segment and the query are escaped, so a prompt named `a?b.md` is that file, not a query
+/// that swallows `ref`.
 fn contents_url(
     base_url: &str,
     repository: &str,
     path: &str,
-    sha: &str,
+    sha: Option<&str>,
 ) -> anyhow::Result<reqwest::Url> {
     let mut url = reqwest::Url::parse(base_url)?;
     url.path_segments_mut()
@@ -534,9 +673,11 @@ fn contents_url(
         .pop_if_empty()
         .extend(["repos"])
         .extend(repository.split('/'))
-        .extend(["contents", ".punchlist"])
+        .extend(["contents"])
         .extend(path.split('/'));
-    url.query_pairs_mut().append_pair("ref", sha);
+    if let Some(sha) = sha {
+        url.query_pairs_mut().append_pair("ref", sha);
+    }
     Ok(url)
 }
 
@@ -588,10 +729,21 @@ mod tests {
     #[test]
     fn a_prompt_path_cannot_leave_its_place_in_the_url() {
         assert_eq!(
-            contents_url("http://x", "o/n", "prompts/a?b#c d%.md", "abc")
+            contents_url(
+                "http://x",
+                "o/n",
+                ".punchlist/prompts/a?b#c d%.md",
+                Some("abc")
+            )
+            .unwrap()
+            .as_str(),
+            "http://x/repos/o/n/contents/.punchlist/prompts/a%3Fb%23c%20d%25.md?ref=abc"
+        );
+        assert_eq!(
+            contents_url("http://x", "o/n", ".github/workflows/ci.yml", None)
                 .unwrap()
                 .as_str(),
-            "http://x/repos/o/n/contents/.punchlist/prompts/a%3Fb%23c%20d%25.md?ref=abc"
+            "http://x/repos/o/n/contents/.github/workflows/ci.yml"
         );
     }
 

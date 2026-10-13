@@ -2,6 +2,8 @@
 //! and the job that records each one as evidence on pull requests and issues, or queues a
 //! workflow load for a push that changes `.punchlist/` on the default branch.
 
+use std::collections::HashMap;
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -120,6 +122,17 @@ pub(crate) struct CheckRunData {
     /// an older binary has none.
     #[serde(default)]
     pub app: Option<CheckApp>,
+}
+
+/// The GitHub Actions job behind a check run, which only a read of GitHub has
+/// (`GithubClient::workflow_jobs`): a job that a runner took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowJob {
+    /// Its run's workflow file, such as `.github/workflows/ci.yml`.
+    pub path: String,
+    /// That file's blob at the head commit, and on the default branch at the read.
+    pub sha: Option<String>,
+    pub default_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -572,25 +585,37 @@ pub(crate) async fn process(
 /// known is kept, and so is the app that owns the run. A delivery that changes nothing the
 /// gates read (a redelivery, one of a burst as a matrix finishes) writes nothing, so it does
 /// not look like a write to a request in flight; a read always stamps, which is what orders
-/// it against the next read.
+/// it against the next read. A read also records the workflow job behind the run, or that
+/// there is none (`read` is `read_started` and that job); a delivery knows neither and leaves
+/// the three columns alone.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     run: &CheckRunData,
-    read_started: Option<DateTime<Utc>>,
+    read: Option<(DateTime<Utc>, Option<&WorkflowJob>)>,
 ) -> sqlx::Result<()> {
     let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
+    let read_started = read.map(|(started, _)| started);
+    let job = read.and_then(|(_, job)| job);
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
-                                check_suite_id, updated_at, app)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9)
+                                check_suite_id, updated_at, app,
+                                workflow_path, workflow_sha, workflow_default_sha)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9, $10, $11, $12)
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
              app = COALESCE(EXCLUDED.app, check_run.app),
+             workflow_path = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_path
+                                  ELSE EXCLUDED.workflow_path END,
+             workflow_sha = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_sha
+                                 ELSE EXCLUDED.workflow_sha END,
+             workflow_default_sha = CASE WHEN $8::timestamptz IS NULL
+                                         THEN check_run.workflow_default_sha
+                                         ELSE EXCLUDED.workflow_default_sha END,
              updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
@@ -612,6 +637,9 @@ async fn record_check_run(
         run.check_suite.as_ref().map(|suite| suite.id),
         read_started,
         app,
+        job.map(|job| job.path.as_str()),
+        job.and_then(|job| job.sha.as_deref()),
+        job.and_then(|job| job.default_sha.as_deref()),
     )
     .execute(&mut *tx)
     .await?;
@@ -631,6 +659,7 @@ async fn record_read_check_runs(
     repository_id: Uuid,
     head_sha: &str,
     mut runs: Vec<CheckRunData>,
+    jobs: &HashMap<i64, WorkflowJob>,
     read_started: DateTime<Utc>,
 ) -> sqlx::Result<bool> {
     // The head asked for is the head judged: a run listed for another is not this commit's.
@@ -638,7 +667,8 @@ async fn record_read_check_runs(
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
     for run in &runs {
-        record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
+        let read = Some((read_started, jobs.get(&run.id)));
+        record_check_run(&mut tx, repository_id, run, read).await?;
     }
     recompute_checks(&mut tx, repository_id, head_sha).await?;
     let conflict = sqlx::query_scalar!(
@@ -1220,9 +1250,19 @@ async fn refresh_once(
                 .await?;
             let runs = (github.check_runs(owner, name, &pr.head.sha).await)
                 .map_err(|error| unreadable("check runs", error))?;
-            let conflict =
-                record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started)
-                    .await?;
+            // After the check runs: a job read later has a runner no earlier than its check
+            // run could have succeeded, and a check run created in between has no row here.
+            let jobs = (github.workflow_jobs(owner, name, &pr.head.sha).await)
+                .map_err(|error| unreadable("workflow runs", error))?;
+            let conflict = record_read_check_runs(
+                pool,
+                repository.id,
+                &pr.head.sha,
+                runs,
+                &jobs,
+                read_started,
+            )
+            .await?;
             if conflict {
                 // A run was written since the read began: read again, after it.
                 dropped.push(pr.number);
@@ -1299,6 +1339,10 @@ async fn refresh_once(
 /// only while no newer run of its name is on the commit: a rerun with a suite supersedes it.
 /// Runs of one name from two apps are two checks, so only a run from the same app supersedes
 /// it, or any run when either's app was not recorded (a row from before `app`).
+///
+/// Of the runs of one name in one suite, one a workflow job ran on a runner comes before one
+/// no job ran, whatever their ids: a check run created through the API with `checks: write`
+/// joins the suite of the real run of its name with a higher id, and must not hide it.
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1307,13 +1351,14 @@ pub(crate) async fn newest_check_runs(
     sqlx::query_as!(
         CheckRunEvidence,
         "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)
-                c.name, c.status, c.conclusion, c.app
+                c.name, c.status, c.conclusion, c.app,
+                c.workflow_path, c.workflow_sha, c.workflow_default_sha
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
            AND NOT (c.check_suite_id IS NULL AND EXISTS (
                SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
                  AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id
                  AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))
-         ORDER BY c.check_suite_id, c.app, c.name, c.id DESC",
+         ORDER BY c.check_suite_id, c.app, c.name, c.workflow_path IS NULL, c.id DESC",
         repository_id,
         head_sha,
     )

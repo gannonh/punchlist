@@ -6,6 +6,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::link::{branch_issue_id, title_issue_id, title_issue_ids};
+use crate::workflow::GITHUB_ACTIONS;
 
 /// The gates v1 knows (PRD R4). A workflow that names another gate does not load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -167,6 +168,20 @@ pub struct CheckRunEvidence {
     /// run recorded before apps were.
     #[serde(default)]
     pub app: Option<String>,
+    /// The workflow file of the GitHub Actions job behind the run, such as
+    /// `.github/workflows/ci.yml`, when a gated request's read of GitHub found one that a runner
+    /// took. Absent for another app's run, for a check run that no job ran (anything with
+    /// `checks: write` can create one of any name on any commit), for a job still waiting for
+    /// a runner, and for a run that only a delivery recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_path: Option<String>,
+    /// That file's blob at the head commit; absent when the commit has no such file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_sha: Option<String>,
+    /// The same path's blob on the default branch when the run was read; absent when the
+    /// default branch has no such file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_default_sha: Option<String>,
 }
 
 /// A check `ci_green` requires on the head commit: its name and the GitHub App that must have
@@ -181,6 +196,14 @@ pub struct RequiredCheck {
 impl CheckRunEvidence {
     /// Whether the run passed: completed with success, neutral or skipped. `None` while it
     /// has not completed.
+    /// Whether a runner ran the job from the default branch's copy of its workflow file. A
+    /// file the default branch does not have is a changed one.
+    fn default_workflow_ran(&self) -> bool {
+        self.workflow_path.is_some()
+            && self.workflow_sha.is_some()
+            && self.workflow_sha == self.workflow_default_sha
+    }
+
     pub fn passed(&self) -> Option<bool> {
         let passed = matches!(
             self.conclusion.as_deref(),
@@ -388,21 +411,51 @@ fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> Named {
     }))
 }
 
+/// Appended to `ci_green`'s sentence when a required check's workflow file is not the default
+/// branch's. Fixed text: nothing waives this, so it says what a person does.
+const WORKFLOW_CHANGED: &str = "a check from a workflow file that differs from the default \
+     branch's does not count: a person merges the workflow change into the default branch first, \
+     and this branch then takes it from there";
+
 /// Why a required check is not satisfied, or `None` when it is: a run of its name from its app
 /// concluded `success`. A skipped or neutral run does not satisfy it: a job whose `if:` is
 /// false reports `skipped` with nothing run.
-fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<String> {
+///
+/// A GitHub Actions check needs more, as an agent that can push decides what Actions runs on
+/// its branch: the successful run is a job a runner took (`workflow_path`), and that job's
+/// workflow file at the head commit is the default branch's. Every successful run of the name
+/// has to be one: two workflows may each have a job of it, and the unchanged one's run does
+/// not stand in for the changed one's. The flag says the file is what failed, for
+/// `WORKFLOW_CHANGED`.
+fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<(String, bool)> {
     let named: Vec<_> = runs.iter().filter(|run| run.name == check.name).collect();
     let owned: Vec<_> = (named.iter())
         .filter(|run| run.app.as_deref() == Some(check.app.as_str()))
         .collect();
+    let succeeded: Vec<_> = (owned.iter())
+        .filter(|run| run.conclusion.as_deref() == Some("success"))
+        .collect();
+    let mut changed = false;
     let why = if named.is_empty() {
         "no run".to_string()
     } else if let Some(run) = owned.first() {
-        if (owned.iter()).any(|run| run.conclusion.as_deref() == Some("success")) {
+        if succeeded.is_empty() {
+            run.conclusion.clone().unwrap_or(run.status.clone())
+        } else if check.app != GITHUB_ACTIONS {
             return None;
+        } else {
+            let other = (succeeded.iter()).find(|run| !run.default_workflow_ran())?;
+            match &other.workflow_path {
+                Some(path) => {
+                    changed = true;
+                    format!(
+                        "its workflow file {} differs from the default branch's",
+                        quoted(path)
+                    )
+                }
+                None => "no workflow job ran it".to_string(),
+            }
         }
-        run.conclusion.clone().unwrap_or(run.status.clone())
     } else {
         // A run recorded before apps were has none.
         let mut apps: Vec<String> = (named.iter())
@@ -412,15 +465,17 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Strin
         apps.dedup();
         format!("ran from {}", capped(apps))
     };
-    Some(format!(
+    let named = format!(
         "{} from {} ({why})",
         quoted(&check.name),
         quoted(&check.app)
-    ))
+    );
+    Some((named, changed))
 }
 
 /// Every check run on the head commit completed with success, neutral or skipped, and each
-/// required check has a run there from its app that concluded `success`. A commit with no
+/// required check has a run there from its app that concluded `success` (for GitHub Actions,
+/// see `unsatisfied`). A commit with no
 /// check run fails: right after a push GitHub has not started them, and passing then would
 /// let the request through before CI ran. `pr.check_runs` is the newest run of each name in
 /// each suite, so two workflows with a job of one name are two runs: a required check needs
@@ -441,17 +496,21 @@ fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<Stri
         }
     }
     // First, so that the reason names a required check whatever else ran, and once.
-    let unsatisfied: Vec<String> = (required.iter())
+    let unsatisfied: Vec<(String, bool)> = (required.iter())
         .filter_map(|check| unsatisfied(check, &pr.check_runs))
         .collect();
     if !unsatisfied.is_empty() {
+        let mut reason = format!(
+            "{} of {} required checks have no successful run on {on}",
+            unsatisfied.len(),
+            required.len()
+        );
+        if unsatisfied.iter().any(|(_, changed)| *changed) {
+            reason = format!("{reason}; {WORKFLOW_CHANGED}");
+        }
         Err((
-            format!(
-                "{} of {} required checks have no successful run on {on}",
-                unsatisfied.len(),
-                required.len()
-            ),
-            first_five(unsatisfied.into_iter()),
+            reason,
+            first_five(unsatisfied.into_iter().map(|(named, _)| named)),
         ))
     } else if total == 0 {
         Err(alone(match commit {
@@ -782,6 +841,10 @@ mod tests {
                 status: status.into(),
                 conclusion: conclusion.map(String::from),
                 app: Some("github-actions".into()),
+                // A job a runner took, from the default branch's copy of `ci.yml`.
+                workflow_path: Some(".github/workflows/ci.yml".into()),
+                workflow_sha: Some("13de2e3".into()),
+                workflow_default_sha: Some("13de2e3".into()),
             })
             .collect();
         pr.review_threads = (threads.iter())
@@ -924,6 +987,80 @@ mod tests {
                 "1 of 2 checks failed on 3f2a1c4: `test` (failure)".into()
             )
         );
+    }
+
+    #[test]
+    fn a_required_actions_check_counts_only_from_a_runner_and_the_default_branchs_workflow() {
+        let required = [RequiredCheck {
+            name: "test".into(),
+            app: "github-actions".into(),
+        }];
+        let judged = |edit: &dyn Fn(&mut CheckRunEvidence)| {
+            let mut evidence = reviewed(&[PASSED], "clean", &[]);
+            edit(&mut evidence.pull_requests[0].check_runs[0]);
+            let result = Gate::CiGreen.evaluate(&evidence, &required);
+            (result.passed, result.reason.clone(), result.outside)
+        };
+        let none = "1 of 1 required checks have no successful run on 3f2a1c4";
+        assert_eq!(
+            judged(&|_| {}),
+            (true, "1 of 1 checks passed on 3f2a1c4".into(), vec![])
+        );
+        // A check run no workflow job ran: created through the API with `checks: write`.
+        assert_eq!(
+            judged(&|run| run.workflow_path = None),
+            (
+                false,
+                none.into(),
+                vec!["`test` from `github-actions` (no workflow job ran it)".into()]
+            )
+        );
+        // The branch changed the workflow file, or added it; the path is its author's text.
+        let changed = format!(
+            "{none}; a check from a workflow file that differs from the default branch's does \
+             not count: a person merges the workflow change into the default branch first, and \
+             this branch then takes it from there"
+        );
+        let differs = |path: &str| {
+            vec![format!(
+                "`test` from `github-actions` (its workflow file `{path}` differs from the \
+                 default branch's)"
+            )]
+        };
+        assert_eq!(
+            judged(&|run| run.workflow_sha = Some("0000000".into())),
+            (false, changed.clone(), differs(".github/workflows/ci.yml"))
+        );
+        assert_eq!(
+            judged(&|run| run.workflow_default_sha = None),
+            (false, changed.clone(), differs(".github/workflows/ci.yml"))
+        );
+        assert_eq!(
+            judged(&|run| {
+                run.workflow_path = Some("a`b\nc.yml".into());
+                (run.workflow_sha, run.workflow_default_sha) = (None, None);
+            }),
+            (false, changed, differs("abc.yml"))
+        );
+        // A second workflow's job of that name, from an unchanged file, does not stand in.
+        let mut evidence = reviewed(&[PASSED, PASSED], "clean", &[]);
+        evidence.pull_requests[0].check_runs[1].workflow_sha = Some("0000000".into());
+        let result = Gate::CiGreen.evaluate(&evidence, &required);
+        assert_eq!(
+            (result.passed, result.outside),
+            (false, differs(".github/workflows/ci.yml"))
+        );
+        // Another app's required check is judged as before: no job is behind it.
+        let vercel = [RequiredCheck {
+            name: "test".into(),
+            app: "vercel".into(),
+        }];
+        let mut evidence = reviewed(&[PASSED], "clean", &[]);
+        let run = &mut evidence.pull_requests[0].check_runs[0];
+        (run.app, run.workflow_path) = (Some("vercel".into()), None);
+        assert!(Gate::CiGreen.evaluate(&evidence, &vercel).passed);
+        // An unrequired check is too.
+        assert!(Gate::CiGreen.evaluate(&evidence, &[]).passed);
     }
 
     #[test]

@@ -1,0 +1,101 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)\n                c.name, c.status, c.conclusion, c.app,\n                c.workflow_path, c.workflow_sha, c.workflow_default_sha\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id\n                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))\n         ORDER BY c.check_suite_id, c.app, c.name, c.workflow_path IS NULL, c.id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "conclusion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "conclusion"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "app",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "app"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "workflow_path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "workflow_path"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "workflow_sha",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "workflow_sha"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "workflow_default_sha",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "workflow_default_sha"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "08af174a880d9d5f8ea1d9985c7d53ca3fb7cd398e01ec8a10658f531e0973aa"
+}
