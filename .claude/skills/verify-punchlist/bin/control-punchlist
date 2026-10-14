@@ -153,8 +153,8 @@ cmd_get_issue() {
 # `agent_token` in PUNCHLIST_AGENT_TOKEN; without it the run's person token is used.
 cmd_request_transition() {
   load "${1:-}"; local issue="${2:-}" to="${3:-}"
-  [ -n "$issue" ] && [[ "$to" =~ ^[a-z_]+$ ]] || die "usage: request-transition RUN_ID ISSUE TO"
-  mcp_tool "${PUNCHLIST_AGENT_TOKEN:-$(token)}" "$issue" request_transition "{\"to\": \"$to\"}"
+  [ -n "$issue" ] && [ -n "$to" ] || die "usage: request-transition RUN_ID ISSUE TO"
+  mcp_tool "${PUNCHLIST_AGENT_TOKEN:-$(token)}" "$issue" request_transition "$(python3 -c 'import json,sys; print(json.dumps({"to": sys.argv[1]}))' "$to")"
 }
 
 mcp_tool() { # mcp_tool TOKEN ISSUE TOOL ARGUMENTS_JSON

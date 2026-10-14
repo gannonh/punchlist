@@ -383,7 +383,7 @@ fn names_issue(evidence: &Evidence, pr: &PullRequestEvidence) -> Result<String, 
 /// Text in backticks for a reason. A check's name and an app's slug are their author's text:
 /// each is cut to 80 characters, without backticks or control characters, so it cannot close
 /// the quotes.
-fn quoted(text: &str) -> String {
+fn backticked(text: &str) -> String {
     let text: String = (text.chars())
         .filter(|c| *c != '`' && !c.is_control())
         .take(80)
@@ -407,7 +407,7 @@ fn capped(items: Vec<String>) -> String {
 fn named_runs<'a>(runs: impl Iterator<Item = &'a CheckRunEvidence>) -> Named {
     first_five(runs.map(|run| {
         let state = run.conclusion.as_deref().unwrap_or(&run.status);
-        format!("{} ({state})", quoted(&run.name))
+        format!("{} ({state})", backticked(&run.name))
     }))
 }
 
@@ -452,7 +452,11 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
         (None, _, _) => {
             // A run recorded before apps were has none.
             let mut apps: Vec<String> = (named.iter())
-                .map(|run| run.app.as_deref().map_or("an unknown app".into(), quoted))
+                .map(|run| {
+                    run.app
+                        .as_deref()
+                        .map_or("an unknown app".into(), backticked)
+                })
                 .collect();
             apps.sort();
             apps.dedup();
@@ -466,7 +470,7 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
                 workflow_differs = true;
                 format!(
                     "its workflow file {} differs from the default branch's",
-                    quoted(path)
+                    backticked(path)
                 )
             }
         },
@@ -474,8 +478,8 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
     Some(Unsatisfied {
         named: format!(
             "{} from {} ({why})",
-            quoted(&check.name),
-            quoted(&check.app)
+            backticked(&check.name),
+            backticked(&check.app)
         ),
         workflow_differs,
     })
