@@ -375,8 +375,9 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
     let start = Instant::now();
     let run_id = claim.run_id.to_string();
     let attempt = claim.attempt;
+    // The branch is not checked yet, so it is logged escaped.
     tracing::info!(
-        "claimed {} for {} (run {run_id}, attempt {attempt}) on branch {}",
+        "claimed {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
         claim.issue.id,
         claim.agent,
         claim.branch
@@ -403,46 +404,55 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
         })
     };
 
-    // Stopping the runner drops the preparation, which kills the git command it is running.
-    let prepared = {
-        let mut stop = stop_rx.clone();
-        tokio::select! {
-            prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.merged_branches, &claim.issue.id) => Some(prepared),
-            _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
-        }
+    // The names the prompt prints are checked before git sees any of them.
+    let prompt = build_prompt(
+        &claim.issue,
+        &claim.repository,
+        &claim.branch,
+        &claim.prompt,
+    );
+    let failed = |reason: String| {
+        AgentExit::Finished(AgentResult {
+            outcome: RunOutcome::Failed,
+            reason: Some(reason),
+            input_tokens: None,
+            output_tokens: None,
+        })
     };
-    let exit = match prepared {
-        None => AgentExit::Stopped,
-        Some(prepared) => match prepared {
-            Ok(path) => {
-                tracing::info!("worktree ready: {}", path.display());
-                let _ = lines_tx
-                    .send(format!(
-                        "worktree {} on branch {}",
-                        path.display(),
-                        claim.branch
-                    ))
-                    .await;
-                let prompt = build_prompt(
-                    &claim.issue,
-                    &claim.repository,
-                    &claim.branch,
-                    &claim.prompt,
-                );
-                run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
+    // Stopping the runner drops the preparation, which kills the git command it is running.
+    let exit = match prompt {
+        Err(reason) => {
+            let _ = lines_tx.send(reason.clone()).await;
+            failed(reason)
+        }
+        Ok(prompt) => {
+            let prepared = {
+                let mut stop = stop_rx.clone();
+                tokio::select! {
+                    prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.merged_branches, &claim.issue.id) => Some(prepared),
+                    _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
+                }
+            };
+            match prepared {
+                None => AgentExit::Stopped,
+                Some(Ok(path)) => {
+                    tracing::info!("worktree ready: {}", path.display());
+                    let _ = lines_tx
+                        .send(format!(
+                            "worktree {} on branch {}",
+                            path.display(),
+                            claim.branch
+                        ))
+                        .await;
+                    run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
+                }
+                Some(Err(reason)) => {
+                    let reason = format!("worktree preparation failed: {reason}");
+                    let _ = lines_tx.send(reason.clone()).await;
+                    failed(reason)
+                }
             }
-            Err(reason) => {
-                let _ = lines_tx
-                    .send(format!("worktree preparation failed: {reason}"))
-                    .await;
-                AgentExit::Finished(AgentResult {
-                    outcome: RunOutcome::Failed,
-                    reason: Some(format!("worktree preparation failed: {reason}")),
-                    input_tokens: None,
-                    output_tokens: None,
-                })
-            }
-        },
+        }
     };
     drop(lines_tx);
     forward.abort();

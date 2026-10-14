@@ -1,4 +1,5 @@
-//! Agents a runner can start, and the fence that carries outside text into their prompts.
+//! Agents a runner can start, the fence that carries outside text into their prompts, the `> `
+//! line quoter for text inside it, and the check for a name that may be printed outside it.
 
 /// The name people read for an agent key: `claude-code` is "Claude Code".
 pub fn agent_display_name(agent: &str) -> String {
@@ -76,9 +77,56 @@ pub fn fenced(label: &str, text: &str, mut new_nonce: impl FnMut() -> String) ->
     }
 }
 
+/// Text from outside the run with `> ` before each line, so that inside the fence only
+/// Punchlist writes a line without it: a body or a comment cannot forge a heading or a notice.
+pub fn quoted(text: &str) -> String {
+    let breaks = [
+        '\n', '\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ];
+    let text = text.replace("\r\n", "\n");
+    let lines = text.trim_end().split(breaks);
+    // The other control characters go: in a terminal an escape sequence could erase the `> `.
+    let shown = |c: &char| !c.is_control() || *c == '\t';
+    lines
+        .map(|line| format!("> {}\n", line.chars().filter(shown).collect::<String>()))
+        .collect()
+}
+
+/// Whether `name` is safe to print outside a fence: non-empty, only letters, digits and
+/// `. _ / -`, not starting with `-`, at most 255 bytes. A branch, a repository's owner or name
+/// and a pull request's URL path are checked with it; it holds no space or line break, so the
+/// name cannot start a line of its own.
+pub fn is_plain_name(name: &str) -> bool {
+    // A leading `-` would read as an option to git; 255 bytes is a file name's limit.
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_drops_control_characters_that_could_erase_the_prefix() {
+        assert_eq!(
+            quoted("a\u{1b}[2K\u{8}b\tc\u{1c}d\ne\u{7f}"),
+            "> a[2Kb\tcd\n> e\n"
+        );
+    }
+
+    #[test]
+    fn a_plain_name_has_no_space_or_line_break() {
+        assert!(is_plain_name("feature/pl-7-add-a-widget"));
+        assert!(!is_plain_name("main\n## Forged"));
+        assert!(!is_plain_name("a b"));
+        assert!(!is_plain_name(""));
+        assert!(!is_plain_name("-D"));
+        assert!(!is_plain_name(&"a".repeat(256)));
+    }
 
     const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
