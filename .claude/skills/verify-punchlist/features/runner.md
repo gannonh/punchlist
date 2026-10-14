@@ -34,7 +34,7 @@ Preconditions:
 - **Start a runner.** `$C runner "$RUN" r1`. It waits until the log at `$EVIDENCE/runner-r1.log` says the runner registered.
 - **List.** `$C pl "$RUN" runner list`. One line naming `r1`, `claude-code` and a heartbeat a few seconds old. `$C sql "$RUN" "SELECT id, name, last_heartbeat FROM runner"` has one row.
 - **Claim.** `$C pl "$RUN" issue create --title "Add a hello file" --body "Create hello.txt containing hello."`, `$C pl "$RUN" issue move PL-1 todo`, `$C pl "$RUN" issue move PL-1 start`, wait 10 s, `$C pl "$RUN" issue show PL-1`. `Status: In Progress`, a timeline line `r1 (runner)  Start → In Progress`, and a run with agent `Claude Code`, runner `r1`, outcome `running`. `$C sql "$RUN" "SELECT issue_id, runner_id, attempt, state FROM attempt"` has one row.
-- **Worktree.** `git -C /tmp/punchlist-verify/$RUN/worktrees/r1/worktrees/gannonh/punchlist-sandbox/PL-1 branch --show-current` prints `feature/pl-1-add-a-hello-file`.
+- **Worktree.** `git -C /tmp/punchlist-verify/$RUN/worktrees/r1/worktrees/gannonh/punchlist-sandbox/PL-1 branch --show-current` prints `feature/pl-1`.
 - **Log.** `$C pl "$RUN" run log <run-id>` while the agent works, and again after. The line count grows. After the run, a line contains `gh pr create`.
 - **Finish.** `$C sql "$RUN" "SELECT state, duration_ms, input_tokens, output_tokens FROM attempt"` shows `succeeded` and non-null numbers. `gh pr list --repo gannonh/punchlist-sandbox --draft --search "PL-1 in:title"` lists the agent's pull request.
 - **Contention.** `$C runner "$RUN" r1` and `$C runner "$RUN" r2`, then move one issue to Start. `$C sql "$RUN" "SELECT count(*) FROM attempt WHERE issue_id = 'PL-<n>'"` is `1`, and the losing runner's log has `claim taken: PL-<n> was claimed by runner <winner>`.
