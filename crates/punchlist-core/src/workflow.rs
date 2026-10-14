@@ -39,7 +39,7 @@ const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
 /// What a transition's `require` may ask a move to carry.
 const REQUIREMENTS: [&str; 1] = ["comment"];
 /// The app that owns a required check named without one: GitHub Actions' slug.
-const GITHUB_ACTIONS: &str = "github-actions";
+pub const GITHUB_ACTIONS: &str = "github-actions";
 /// The roles a workflow names. GitHub acts only through `on`.
 const ROLES: [Role; 3] = [Role::Person, Role::Agent, Role::Runner];
 

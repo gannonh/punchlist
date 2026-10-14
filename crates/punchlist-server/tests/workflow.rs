@@ -45,6 +45,14 @@ struct Repo {
     threads: Vec<Value>,
     /// The check runs on any commit, as the REST list answers them.
     check_runs: Vec<Value>,
+    /// The jobs of the workflow runs on any commit, as the Actions API lists them. Each check
+    /// suite of `check_runs` has one run, of `.github/workflows/ci.yml`, and every run lists
+    /// all of these; with none, there is no workflow run.
+    jobs: Vec<Value>,
+    /// How many times the workflow runs were listed.
+    actions_reads: usize,
+    /// That file's blob at any commit, and on the default branch.
+    workflow_blobs: (Option<&'static str>, Option<&'static str>),
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
@@ -129,6 +137,49 @@ async fn fake_github() -> (FakeGithub, String) {
                     };
                     held(hold).await;
                     (StatusCode::OK, axum::Json(answer))
+                },
+            ),
+        )
+        .route(
+            "/repos/{owner}/{name}/actions/runs",
+            get(|State(repo): State<FakeGithub>| async move {
+                let mut repo = repo.lock().unwrap();
+                if repo.down {
+                    return (StatusCode::BAD_GATEWAY, axum::Json(json!({})));
+                }
+                repo.actions_reads += 1;
+                let mut suites: Vec<&Value> = (repo.check_runs.iter())
+                    .map(|run| &run["check_suite"]["id"])
+                    .filter(|suite| !suite.is_null() && !repo.jobs.is_empty())
+                    .collect();
+                suites.dedup();
+                let runs: Vec<Value> = (suites.iter())
+                    .map(|suite| {
+                        json!({"id": suite, "path": ".github/workflows/ci.yml",
+                               "check_suite_id": suite})
+                    })
+                    .collect();
+                let answer = json!({"total_count": runs.len(), "workflow_runs": runs});
+                (StatusCode::OK, axum::Json(answer))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/actions/runs/{run}/jobs",
+            get(|State(repo): State<FakeGithub>| async move {
+                let jobs = repo.lock().unwrap().jobs.clone();
+                axum::Json(json!({"total_count": jobs.len(), "jobs": jobs}))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/contents/.github/workflows/ci.yml",
+            get(
+                |State(repo): State<FakeGithub>,
+                 axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
+                    let (head, default) = repo.lock().unwrap().workflow_blobs;
+                    match if q.contains_key("ref") { head } else { default } {
+                        Some(sha) => (StatusCode::OK, axum::Json(json!({"sha": sha}))),
+                        None => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                    }
                 },
             ),
         )
@@ -2745,6 +2796,14 @@ fn check_run(id: i64, status: &str, conclusion: Option<&str>) -> String {
     })
 }
 
+/// A workflow job as the Actions API lists it, on #12's head commit: one a runner took,
+/// unless `runner` is false, as for a check run created through the API.
+fn listed_job(id: i64, name: &str, conclusion: Option<&str>, runner: bool) -> Value {
+    json!({"id": id, "name": name, "conclusion": conclusion,
+           "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+           "runner_id": runner.then_some(1000039190)})
+}
+
 /// A check run as GitHub's list reports it, on #12's head commit.
 fn listed_run(id: i64, suite: i64, name: &str, conclusion: &str) -> Value {
     json!({"id": id, "name": name, "status": "completed", "conclusion": conclusion,
@@ -2785,6 +2844,8 @@ async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_n
         rows,
         [(7, Some(8)), (9, Some(8)), (4021877310, Some(3112233445))]
     );
+    // The workflow requires no GitHub Actions check: the Actions API was not asked.
+    assert_eq!(s.github.lock().unwrap().actions_reads, 0);
 
     // GitHub cannot be asked: the request is refused, nothing moves.
     s.github.lock().unwrap().down = true;
@@ -2802,7 +2863,7 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
     deliver(&s, "push", "push-1", PUSH).await;
     assert_eq!(workflow_versions(&pool).await, 1);
     // `check` is delivered, from GitHub Actions and with no suite; GitHub's list adds `lint`,
-    // from it too.
+    // from it too. A runner ran both from the default branch's workflow file.
     let no_suite = |v: &mut Value| {
         v["check_run"]
             .as_object_mut()
@@ -2818,7 +2879,14 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
     {
         let mut repo = s.github.lock().unwrap();
         repo.pulls = vec![ready_with_merge_state("clean")];
-        repo.check_runs = vec![listed(9, 8, "lint", "github-actions")];
+        let mut check = listed(4021877310, 0, "check", "github-actions");
+        check.as_object_mut().unwrap().remove("check_suite");
+        repo.check_runs = vec![listed(9, 8, "lint", "github-actions"), check];
+        repo.jobs = vec![
+            listed_job(9, "lint", Some("success"), true),
+            listed_job(4021877310, "check", Some("success"), true),
+        ];
+        repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
     }
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -2844,6 +2912,175 @@ async fn ci_green_requires_the_checks_the_workflow_names_from_their_apps(pool: P
     (s.github.lock().unwrap().check_runs).push(listed(5021877310, 11, "check", "vercel"));
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_needs_a_runner_and_the_default_branchs_workflow(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    put_workflow(
+        &s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(&s, "push", "push-1", PUSH).await;
+    // The fixture delivery's suite, for the deliveries below.
+    let listed = |id: i64, conclusion: &str| {
+        let mut run = listed_run(id, 3112233445, "check", conclusion);
+        run["app"] = json!({"slug": "github-actions"});
+        run
+    };
+    let refused = |body: &Value| body["reason"].as_str().unwrap().to_string();
+    let none = "1 of 1 required checks have no successful run on 6dcb09b";
+    let no_job = format!("{none}: `check` from `github-actions` (no workflow job ran it)");
+    let recorded = || async {
+        let rows: Vec<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, workflow_path, workflow_sha || ' ' || workflow_default_sha
+             FROM check_run ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        rows
+    };
+    let path = Some(".github/workflows/ci.yml".to_string());
+    // A successful check run of the required name, created through the API: GitHub lists it as
+    // a job, with no runner. No workflow job ran it.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![listed(2, "success")];
+        repo.jobs = vec![listed_job(2, "check", Some("success"), false)];
+        repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(refused(&body), no_job);
+    assert_eq!(s.github.lock().unwrap().actions_reads, 1);
+
+    // A job a runner took, of that id but another name, conclusion or commit, is not behind it.
+    for other in [
+        listed_job(2, "lint", Some("success"), true),
+        listed_job(2, "check", Some("failure"), true),
+        edited(
+            &listed_job(2, "check", Some("success"), true).to_string(),
+            |v| v["head_sha"] = json!("0000000"),
+        )
+        .parse()
+        .unwrap(),
+    ] {
+        s.github.lock().unwrap().jobs = vec![other];
+        let (status, body) = request_human_review(&s, &codex).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(refused(&body), no_job);
+    }
+
+    // The real job, older in the same suite, failed on a runner: the created one does not
+    // hide it.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.check_runs.push(listed(1, "failure"));
+        repo.jobs = vec![
+            listed_job(1, "check", Some("failure"), true),
+            listed_job(2, "check", Some("success"), false),
+        ];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        refused(&body),
+        format!("{none}: `check` from `github-actions` (failure)")
+    );
+    let blobs = Some("13de2e3 13de2e3".to_string());
+    assert_eq!(
+        recorded().await,
+        [(1, path.clone(), blobs), (2, None, None)]
+    );
+
+    // A job that passed on a runner, from a workflow file that is not the default branch's:
+    // refused, with what to do about it.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.check_runs = vec![listed(3, "success")];
+        repo.jobs = vec![listed_job(3, "check", Some("success"), true)];
+        repo.workflow_blobs = (Some("0000000"), Some("13de2e3"));
+    }
+    let changed = format!(
+        "{none}; a check counts only when its workflow file is the default branch's: bring this \
+         branch's copy up to date with the default branch, and a person merges a real workflow \
+         change there first: `check` from `github-actions` (its workflow file \
+         `.github/workflows/ci.yml` differs from the default branch's)"
+    );
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(refused(&body), changed);
+    assert_eq!(
+        body["evidence"]["pull_requests"][0]["check_runs"],
+        json!([{"name": "check", "status": "completed", "conclusion": "success",
+                "app": "github-actions", "workflow_path": ".github/workflows/ci.yml",
+                "workflow_sha": "0000000", "workflow_default_sha": "13de2e3"}])
+    );
+    // A delivery of the run leaves what the read recorded.
+    let differ = Some("0000000 13de2e3".to_string());
+    deliver(
+        &s,
+        "check_run",
+        "c-3",
+        &check_run(3, "completed", Some("success")),
+    )
+    .await;
+    assert_eq!(recorded().await[2], (3, path.clone(), differ));
+    // A workflow file the default branch does not have differs too.
+    s.github.lock().unwrap().workflow_blobs = (Some("0000000"), None);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(refused(&body), changed);
+
+    // The branch has the default branch's file, and the run counts. Its rerun is delivered,
+    // queued, before GitHub's lists have it: newer in the suite and waiting for a runner, it
+    // is the one judged, not the success a runner is recorded for.
+    s.github.lock().unwrap().workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    deliver(&s, "check_run", "c-4", &check_run(4, "queued", None)).await;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        refused(&body),
+        format!("{none}: `check` from `github-actions` (queued)")
+    );
+    let same = Some("13de2e3 13de2e3".to_string());
+    assert_eq!(recorded().await[2..], [(3, path, same), (4, None, None)]);
+
+    // The rerun passes on a runner: accepted.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.check_runs.push(listed(4, "success"));
+        repo.jobs = vec![listed_job(4, "check", Some("success"), true)];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn the_newest_run_counts_in_a_suite_with_no_workflow_job_recorded(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    // No check is required, so no job is read. An older run of `check` is still pending and
+    // a newer one in its suite succeeded: the newer is the one judged.
+    {
+        let mut pending = listed_run(1, 5, "check", "success");
+        (pending["status"], pending["conclusion"]) = (json!("in_progress"), json!(null));
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![pending, listed_run(2, 5, "check", "success")];
+    }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let reason: String =
+        sqlx::query_scalar("SELECT reason FROM transition_gate WHERE gate = 'ci_green'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reason, "1 of 1 checks passed on 6dcb09b");
 }
 
 #[sqlx::test]

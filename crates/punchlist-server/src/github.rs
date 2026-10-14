@@ -2,13 +2,15 @@
 //! and the job that records each one as evidence on pull requests and issues, or queues a
 //! workflow load for a push that changes `.punchlist/` on the default branch.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::{ErrorBody, ReviewComment};
-use punchlist_core::{CheckRunEvidence, Refusal, Role, linked_issue_id};
+use punchlist_core::{CheckRunEvidence, GITHUB_ACTIONS, Refusal, Role, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
@@ -120,6 +122,34 @@ pub(crate) struct CheckRunData {
     /// an older binary has none.
     #[serde(default)]
     pub app: Option<CheckApp>,
+}
+
+/// The GitHub Actions job behind a check run, which only a read of GitHub has
+/// (`GithubClient::workflow_jobs`): a job that a runner took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowJob {
+    /// The job's name, conclusion and commit, as the jobs listing has them: the job counts
+    /// for a check run only when they are the check run's (`is_behind`).
+    pub name: String,
+    pub conclusion: Option<String>,
+    pub head_sha: String,
+    /// Its run's workflow file, such as `.github/workflows/ci.yml`.
+    pub path: String,
+    /// The git blob sha of that file at the head commit; `None` when the commit has no file
+    /// at the path.
+    pub sha: Option<String>,
+    /// The git blob sha of the same path on the default branch when the job was read; `None`
+    /// when the default branch has no file there.
+    pub default_sha: Option<String>,
+}
+
+impl WorkflowJob {
+    /// Whether this job is the one behind `run`. Its id already is the run's; the rest is
+    /// belt and braces against a check run edited after its job ran.
+    fn is_behind(&self, run: &CheckRunData) -> bool {
+        (&self.name, &self.conclusion, &self.head_sha)
+            == (&run.name, &run.conclusion, &run.head_sha)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,7 +506,7 @@ pub(crate) async fn process(
             }
         }
         GithubEvent::CheckRun(event) => {
-            record_check_run(tx, job.repository_id, &event.check_run, None).await?;
+            record_check_run(tx, job.repository_id, &event.check_run, None, None).await?;
             recompute_checks(tx, job.repository_id, &event.check_run.head_sha).await?;
         }
         GithubEvent::Push(event) => {
@@ -572,7 +602,8 @@ pub(crate) async fn process(
 /// known is kept, and so is the app that owns the run. A delivery that changes nothing the
 /// gates read (a redelivery, one of a burst as a matrix finishes) writes nothing, so it does
 /// not look like a write to a request in flight; a read always stamps, which is what orders
-/// it against the next read.
+/// it against the next read. A read also records the workflow job behind the run (`job`), or
+/// that it found none; a delivery knows neither and leaves the three columns alone.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -580,17 +611,26 @@ async fn record_check_run(
     repository_id: Uuid,
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
+    job: Option<&WorkflowJob>,
 ) -> sqlx::Result<()> {
     let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
-                                check_suite_id, updated_at, app)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9)
+                                check_suite_id, updated_at, app,
+                                workflow_path, workflow_sha, workflow_default_sha)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9, $10, $11, $12)
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
              check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
              app = COALESCE(EXCLUDED.app, check_run.app),
+             workflow_path = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_path
+                                  ELSE EXCLUDED.workflow_path END,
+             workflow_sha = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_sha
+                                 ELSE EXCLUDED.workflow_sha END,
+             workflow_default_sha = CASE WHEN $8::timestamptz IS NULL
+                                         THEN check_run.workflow_default_sha
+                                         ELSE EXCLUDED.workflow_default_sha END,
              updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
@@ -612,6 +652,9 @@ async fn record_check_run(
         run.check_suite.as_ref().map(|suite| suite.id),
         read_started,
         app,
+        job.map(|job| job.path.as_str()),
+        job.and_then(|job| job.sha.as_deref()),
+        job.and_then(|job| job.default_sha.as_deref()),
     )
     .execute(&mut *tx)
     .await?;
@@ -631,6 +674,7 @@ async fn record_read_check_runs(
     repository_id: Uuid,
     head_sha: &str,
     mut runs: Vec<CheckRunData>,
+    jobs: &HashMap<i64, WorkflowJob>,
     read_started: DateTime<Utc>,
 ) -> sqlx::Result<bool> {
     // The head asked for is the head judged: a run listed for another is not this commit's.
@@ -638,7 +682,8 @@ async fn record_read_check_runs(
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
     for run in &runs {
-        record_check_run(&mut tx, repository_id, run, Some(read_started)).await?;
+        let job = jobs.get(&run.id).filter(|job| job.is_behind(run));
+        record_check_run(&mut tx, repository_id, run, Some(read_started), job).await?;
     }
     recompute_checks(&mut tx, repository_id, head_sha).await?;
     let conflict = sqlx::query_scalar!(
@@ -1145,6 +1190,14 @@ async fn refresh_once(
     else {
         return Ok(Vec::new());
     };
+    // The names of the GitHub Actions checks the active workflow requires. The gates read the
+    // workflow again under the issue's lock: one that has come to require a check since has
+    // no job recorded for it, and refuses.
+    let (workflow, _) = active_workflow(&mut *pool.acquire().await?, workspace_id).await?;
+    let required: HashSet<String> = (workflow.required_checks().iter())
+        .filter(|check| check.app == GITHUB_ACTIONS)
+        .map(|check| check.name.clone())
+        .collect();
     // Each version is noted here, before GitHub is read, for `claim_read`.
     // ponytail: every pull request of the repository, since GitHub's list can name one that
     // is recorded for another issue. Note only the 30 most recently updated and the issue's
@@ -1220,9 +1273,31 @@ async fn refresh_once(
                 .await?;
             let runs = (github.check_runs(owner, name, &pr.head.sha).await)
                 .map_err(|error| unreadable("check runs", error))?;
-            let conflict =
-                record_read_check_runs(pool, repository.id, &pr.head.sha, runs, read_started)
-                    .await?;
+            // The workflow jobs behind them, which only a required GitHub Actions check is
+            // judged on: read for the suites that hold a run of such a check's name, so a
+            // workspace that requires none asks GitHub nothing more (and needs no Actions
+            // permission). Read after the check runs: a job that has since moved on no
+            // longer matches its check run, and does not count.
+            let suites: HashSet<i64> = (runs.iter())
+                .filter(|run| required.contains(&run.name))
+                .filter_map(|run| run.check_suite.as_ref().map(|suite| suite.id))
+                .collect();
+            let jobs = match suites.is_empty() {
+                true => HashMap::new(),
+                false => (github
+                    .workflow_jobs(owner, name, &pr.head.sha, &suites)
+                    .await)
+                    .map_err(|error| unreadable("workflow runs", error))?,
+            };
+            let conflict = record_read_check_runs(
+                pool,
+                repository.id,
+                &pr.head.sha,
+                runs,
+                &jobs,
+                read_started,
+            )
+            .await?;
             if conflict {
                 // A run was written since the read began: read again, after it.
                 dropped.push(pr.number);
@@ -1299,6 +1374,14 @@ async fn refresh_once(
 /// only while no newer run of its name is on the commit: a rerun with a suite supersedes it.
 /// Runs of one name from two apps are two checks, so only a run from the same app supersedes
 /// it, or any run when either's app was not recorded (a row from before `app`).
+///
+/// Of the runs of one name in one suite, a completed one that no workflow job ran comes after
+/// the others, whatever their ids: a check run created through the API with `checks: write`
+/// joins the suite of the real run of its name with a higher id, and must not hide it. Only
+/// a completed one: a rerun still waiting for a runner has no job either, and is the newest.
+/// And only in a suite where a read recorded a workflow job: jobs are read for the suites of
+/// the checks the workflow requires alone, so in any other suite (another app's, too) no run
+/// has a job recorded, and the newest id counts, as it did before jobs were read.
 pub(crate) async fn newest_check_runs(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1307,13 +1390,20 @@ pub(crate) async fn newest_check_runs(
     sqlx::query_as!(
         CheckRunEvidence,
         "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)
-                c.name, c.status, c.conclusion, c.app
+                c.name, c.status, c.conclusion, c.app,
+                c.workflow_path, c.workflow_sha, c.workflow_default_sha
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
+           -- Whatever `workflow_path` either has: a run with no suite has no job read for it.
            AND NOT (c.check_suite_id IS NULL AND EXISTS (
                SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id
                  AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id
                  AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))
-         ORDER BY c.check_suite_id, c.app, c.name, c.id DESC",
+         ORDER BY c.check_suite_id, c.app, c.name,
+                  (c.workflow_path IS NULL AND c.status = 'completed' AND EXISTS (
+                      SELECT 1 FROM check_run w WHERE w.repository_id = c.repository_id
+                        AND w.head_sha = c.head_sha AND w.check_suite_id = c.check_suite_id
+                        AND w.workflow_path IS NOT NULL)),
+                  c.id DESC",
         repository_id,
         head_sha,
     )
