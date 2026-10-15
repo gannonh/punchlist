@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreatedAgent, Event, EventDetail,
-    GateChecklist, Issue, PullRequest, Run, RunOutcome, Runner, WorkflowInfo, gate_lines,
+    GateChecklist, Issue, Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, WorkflowInfo,
+    gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -39,6 +40,9 @@ pub enum Command {
     /// Work with runs.
     #[command(subcommand)]
     Run(RunCommand),
+    /// Attach and list proof: screenshots, videos and reports of an issue's work.
+    #[command(subcommand)]
+    Proof(ProofCommand),
     /// Work with pull requests.
     #[command(name = "pr", subcommand)]
     PullRequest(PullRequestCommand),
@@ -66,6 +70,27 @@ pub struct McpArgs {
     /// The issue the tools act on.
     #[arg(long, env = "PUNCHLIST_ISSUE")]
     pub issue: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProofCommand {
+    /// Upload a file as proof for an issue. Its type comes from its extension.
+    Attach {
+        id: String,
+        path: PathBuf,
+        /// What the file shows.
+        #[arg(long)]
+        title: String,
+        /// image, video or report; checked against the file's type.
+        #[arg(long, value_parser = parse_kind)]
+        kind: Option<ProofKind>,
+    },
+    /// List an issue's proof, oldest first.
+    List { id: String },
+}
+
+fn parse_kind(s: &str) -> Result<ProofKind, String> {
+    ProofKind::parse(s).ok_or_else(|| format!("`{s}` is not image, video or report"))
 }
 
 #[derive(Debug, Subcommand)]
@@ -262,6 +287,35 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             let home = std::env::var("HOME").ok();
             let runner = runner_config(&config, *flags, home.as_deref(), &hostname());
             punchlist_runner::run(runner, shutdown_signal()).await
+        }
+        Command::Proof(ProofCommand::Attach {
+            id,
+            path,
+            title,
+            kind,
+        }) => {
+            let proof = client.attach_proof(&id, &path, &title, kind).await?;
+            writeln!(
+                out,
+                "Attached {}: {} {:?} ({}) to {} for attempt {}",
+                proof.id,
+                proof.kind.as_str(),
+                proof.title,
+                format_size(proof.size),
+                proof.issue_id,
+                proof.attempt
+            )?;
+            Ok(())
+        }
+        Command::Proof(ProofCommand::List { id }) => {
+            let proof = client.list_proof(&id).await?;
+            if proof.is_empty() {
+                writeln!(out, "No proof attached to {id}.")?;
+            }
+            for proof in &proof {
+                writeln!(out, "{}", proof_line(proof))?;
+            }
+            Ok(())
         }
         Command::PullRequest(PullRequestCommand::Unlinked) => {
             let pull_requests = client.unlinked_pull_requests().await?;
@@ -461,6 +515,46 @@ fn render_runners(runners: &[Runner], now: DateTime<Utc>) -> String {
         .collect()
 }
 
+/// `512 B`, `12.3 kB` or `4.0 MB`, in powers of 1000.
+fn format_size(bytes: i64) -> String {
+    let size = bytes as f64;
+    if bytes < 1_000 {
+        format!("{bytes} B")
+    } else if bytes < 1_000_000 {
+        format!("{:.1} kB", size / 1e3)
+    } else if bytes < 1_000_000_000 {
+        format!("{:.1} MB", size / 1e6)
+    } else {
+        format!("{:.1} GB", size / 1e9)
+    }
+}
+
+/// One proof record: when, kind, title, size, uploader and id. The title is its uploader's
+/// text, quoted so it stays on the line.
+fn proof_line(proof: &Proof) -> String {
+    format!(
+        "{}  {}  {:?}  {}  {}  {}",
+        proof.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        proof.kind.as_str(),
+        proof.title,
+        format_size(proof.size),
+        actor_marking(&proof.actor),
+        proof.id
+    )
+}
+
+/// The `Proof` section of `pl issue show`.
+fn render_proof(proof: &[Proof]) -> String {
+    let mut text = String::from("\nProof\n");
+    if proof.is_empty() {
+        text.push_str("  None attached.\n");
+    }
+    for proof in proof {
+        text.push_str(&format!("  {}\n", proof_line(proof)));
+    }
+    text
+}
+
 /// `4s`, `3m` or `2h`.
 fn format_age(seconds: i64) -> String {
     let seconds = seconds.max(0);
@@ -536,12 +630,13 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         IssueCommand::Show { id } => {
             let (issue, events) = issue_with_timeline(client, &id).await?;
             let pull_requests = client.issue_pull_requests(&id).await?;
+            let proof = client.list_proof(&id).await?;
             let gates = client.issue_gates(&id).await?;
             let runs = client.issue_runs(&id).await?;
             write!(
                 out,
                 "{}{}",
-                render_show(&issue, &pull_requests, gates.as_ref(), &events),
+                render_show(&issue, &pull_requests, &proof, gates.as_ref(), &events),
                 render_runs(&runs)
             )?;
         }
@@ -628,6 +723,7 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
 fn render_show(
     issue: &Issue,
     pull_requests: &[PullRequest],
+    proof: &[Proof],
     gates: Option<&GateChecklist>,
     events: &[Event],
 ) -> String {
@@ -644,6 +740,7 @@ fn render_show(
         text.push('\n');
     }
     text.push_str(&render_pull_requests(pull_requests));
+    text.push_str(&render_proof(proof));
     if let Some(gates) = gates {
         text.push_str(&render_gates(gates));
     }
@@ -942,10 +1039,11 @@ mod tests {
             ),
         ];
         assert_eq!(
-            render_show(&issue, &[], Some(&gates), &events),
+            render_show(&issue, &[], &[], Some(&gates), &events),
             "PL-7  Fix\nStatus: Agent Review\n\
              waiting on a person: 3 runs in Agent Review ended without moving it\n\
              \nPull requests\n  None linked.\n\
+             \nProof\n  None attached.\n\
              \nGates for Agent Review → Human Review\n\
              \x20 ci_green: fail (1 of 3 checks failed on 3f2a1c4: `e2e` (failure))\n\
              \x20 mergeable: pass (pull request #12 has no conflicts and GitHub's merge state is clean)\n\
@@ -981,7 +1079,7 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             waiting_on_person: None,
         };
-        let text = render_show(&issue, &[], None, &events);
+        let text = render_show(&issue, &[], &[], None, &events);
         let who: Vec<&str> = text
             .lines()
             .filter_map(|line| line.strip_prefix("  2026-10-10 12:30:45 UTC  "))
@@ -1069,6 +1167,14 @@ mod tests {
              in force until a valid .punchlist/workflow.toml is pushed\n\
              Commit    built-in\nStatuses  backlog, todo\nRefused   abc: line 4, `statuses`: bad\n"
         );
+    }
+
+    #[test]
+    fn formats_sizes() {
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(12_345), "12.3 kB");
+        assert_eq!(format_size(4_000_000), "4.0 MB");
+        assert_eq!(format_size(2_500_000_000), "2.5 GB");
     }
 
     #[test]
