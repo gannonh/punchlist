@@ -1,6 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use percent_encoding::percent_decode_str;
 use punchlist_core::Role;
 use sha2::{Digest, Sha256};
 use utoipa::Modify;
@@ -16,6 +17,8 @@ pub struct Actor {
     pub workspace_id: Uuid,
     pub name: String,
     pub role: Role,
+    /// The agent key, such as `codex`. Only agents have one.
+    pub kind: Option<String>,
 }
 
 impl From<&Actor> for punchlist_api::Actor {
@@ -24,6 +27,7 @@ impl From<&Actor> for punchlist_api::Actor {
             id: actor.id,
             name: actor.name.clone(),
             role: actor.role,
+            kind: actor.kind.clone(),
         }
     }
 }
@@ -58,32 +62,66 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
+        // The issue a path names: `/api/issues/<id>` and below. Decoded as the route's `Path`
+        // decodes it, so `PL%2D1` is checked as the `PL-1` the handler acts on.
+        let issue_id = parts
+            .uri
+            .path()
+            .strip_prefix("/api/issues/")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|id| percent_decode_str(id).decode_utf8().ok())
+            .filter(|id| !id.is_empty());
+        let issue_id = issue_id.as_deref();
         let row = sqlx::query!(
-            r#"SELECT a.id, a.workspace_id, a.name, a.role,
-                      r.issue_id AS "issue_id?", r.outcome AS "outcome?"
+            r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
+                      r.issue_id AS "issue_id?", r.outcome AS "outcome?",
+                      (SELECT workspace_id FROM issue WHERE id = $2) AS "issue_workspace_id?"
                FROM actor a LEFT JOIN run r ON r.id = a.run_id
                WHERE a.token_hash = $1"#,
-            hash_token(token)
+            hash_token(token),
+            issue_id,
         )
         .fetch_optional(&state.pool)
         .await?
         .ok_or(ApiError::Unauthorized)?;
         let role = parse_role(&row.role)?;
-        // An agent's token works only while its run is running.
-        if role == Role::Agent && row.outcome.as_deref() != Some("running") {
+        // A run's agent's token works only while its run is running.
+        if role == Role::Agent && row.run_id.is_some() && row.outcome.as_deref() != Some("running")
+        {
             return Err(ApiError::Unauthorized);
         }
-        // An agent's token reaches only its run's issue: `/api/issues/<id>` and below. Every
-        // other endpoint, such as creating issues or reading the rest of the workspace, is
-        // for people and runners.
+        // No token reaches another workspace's issue. An issue that does not exist anywhere
+        // is the handler's 404.
+        if let Some(issue_workspace_id) = row.issue_workspace_id
+            && issue_workspace_id != row.workspace_id
+        {
+            tracing::warn!(
+                actor = %row.id,
+                actor_workspace = %row.workspace_id,
+                issue_workspace = %issue_workspace_id,
+                issue = issue_id.unwrap_or_default(),
+                "workspace mismatch: refused a request for another workspace's issue"
+            );
+            return Err(ApiError::Forbidden(format!(
+                "issue {} is in another workspace",
+                issue_id.unwrap_or_default()
+            )));
+        }
+        // An agent reaches only issues: a run's agent its run's issue, `/api/issues/<id>` and
+        // below, and a standalone agent any issue of its workspace. Every other endpoint, such
+        // as creating issues or reading the rest of the workspace, is for people and runners.
         if role == Role::Agent {
-            let own = row.issue_id.as_deref();
-            let path = parts.uri.path().strip_prefix("/api/issues/");
-            if own.is_none() || path.and_then(|rest| rest.split('/').next()) != own {
-                return Err(ApiError::Forbidden(format!(
-                    "an agent acts only on its run's issue, {}",
-                    own.unwrap_or("none")
-                )));
+            match (row.run_id, row.issue_id.as_deref()) {
+                (Some(_), own) if issue_id.is_none() || issue_id != own => {
+                    return Err(ApiError::Forbidden(format!(
+                        "an agent acts only on its run's issue, {}",
+                        own.unwrap_or("none")
+                    )));
+                }
+                (None, _) if issue_id.is_none() => {
+                    return Err(ApiError::Forbidden("an agent acts only on issues".into()));
+                }
+                _ => {}
             }
         }
         Ok(Actor {
@@ -91,6 +129,7 @@ impl FromRequestParts<AppState> for Actor {
             workspace_id: row.workspace_id,
             role,
             name: row.name,
+            kind: row.kind,
         })
     }
 }

@@ -69,7 +69,9 @@ struct Claimable {
 /// dispatches, or whose dispatch waits in the status it entered, names an agent the runner
 /// can run, and is not behind a run of the issue that is still running (one run works on an
 /// issue at a time; `finish_run` wakes the runners when that run ends). The two kinds are
-/// ordered together, so started issues do not hold back a dispatch on an older one.
+/// ordered together, so started issues do not hold back a dispatch on an older one. An issue
+/// in a status the workflow locks to agents or runners is never claimed, even with a dispatch
+/// waiting there from an older workflow.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -82,6 +84,12 @@ async fn select_claimable(
         .dispatch_for(IN_PROGRESS)
         .map(|dispatch| dispatch.agent.as_str())
         .filter(|agent| runner.agents.iter().any(|a| a == agent));
+    let locked: Vec<&str> = workflow
+        .locks()
+        .iter()
+        .filter(|(_, roles)| roles.contains(&Role::Agent) || roles.contains(&Role::Runner))
+        .map(|(status, _)| status.as_str())
+        .collect();
     let only = match target {
         Target::Any => None,
         Target::Issue(id) => {
@@ -103,6 +111,7 @@ async fn select_claimable(
                   CASE WHEN i.status = $4 THEN $5 ELSE d.agent END AS "agent!"
            FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL
            WHERE i.workspace_id = $1 AND ($3::text IS NULL OR i.id = $3)
+             AND NOT i.status = ANY($6)
              AND CASE WHEN i.status = $4 THEN $5::text IS NOT NULL
                       ELSE d.agent = ANY($2)
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
@@ -114,6 +123,7 @@ async fn select_claimable(
         only,
         START,
         start_agent,
+        &locked as &[&str],
     )
     .fetch_optional(&mut *tx)
     .await
@@ -240,12 +250,15 @@ async fn try_claim(
     .await?;
     let agent_token = new_token();
     sqlx::query!(
-        "INSERT INTO actor (workspace_id, name, role, token_hash, run_id)
-         VALUES ($1, $2, 'agent', $3, $4)",
+        "INSERT INTO actor (workspace_id, name, role, token_hash, run_id, kind, owner_id)
+         VALUES ($1, $2, 'agent', $3, $4, $5,
+                 (SELECT registered_by FROM runner WHERE id = $6))",
         actor.workspace_id,
         agent_display_name(&agent),
         hash_token(&agent_token),
         run_id,
+        agent,
+        runner.id,
     )
     .execute(&mut *tx)
     .await?;

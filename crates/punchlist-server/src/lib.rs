@@ -1,5 +1,6 @@
 //! The Punchlist server: the HTTP API over Postgres.
 
+mod actors;
 mod auth;
 mod bootstrap;
 mod error;
@@ -89,6 +90,7 @@ struct ApiDoc;
 /// The API router and the OpenAPI document built from the same routes (ADR 0008).
 pub fn router(state: AppState) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .merge(actors::routes())
         .merge(github::routes())
         .merge(issues::routes())
         .merge(pull_requests::routes())

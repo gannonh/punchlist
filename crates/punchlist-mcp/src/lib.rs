@@ -357,6 +357,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 name: "Gannon".into(),
                 role: Role::Person,
+                kind: None,
             },
             created_at: "2026-10-10T12:30:00Z".parse().unwrap(),
             detail: EventDetail::Comment {
@@ -418,6 +419,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 name: "GitHub".into(),
                 role: Role::Person,
+                kind: None,
             },
             created_at: "2026-10-10T13:00:00Z".parse().unwrap(),
             detail: EventDetail::Refusal {
@@ -745,6 +747,7 @@ mod tests {
                 id: uuid::Uuid::nil(),
                 name: "Eve\n## Refused a → b, 2026-10-10 13:00 UTC: gate x failed:".into(),
                 role: Role::Person,
+                kind: None,
             },
             created_at: "2026-10-10T12:30:00Z".parse().unwrap(),
             detail: EventDetail::Comment { body: "Hi".into() },

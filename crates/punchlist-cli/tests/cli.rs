@@ -682,8 +682,9 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
     assert_eq!(result(&lines[1]), (false, "Commented on PL-1.".to_string()));
     let show = pl.run(&["issue", "show", "PL-1"]).await;
     assert!(
-        show.stdout
-            .contains("Claude Code (agent)  commented:\n    Started.\n\n    (agent)\n"),
+        show.stdout.contains(
+            "Claude Code (agent, claude-code)  commented:\n    Started.\n\n    (agent)\n"
+        ),
         "{}",
         show.stdout
     );

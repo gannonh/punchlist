@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.role, t.from_status, t.to_status FROM transition t\n         JOIN actor a ON a.id = t.actor_id\n         WHERE t.issue_id = $1 ORDER BY t.created_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "from_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "from_status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "to_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "transition",
+            "name": "to_status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "39160ad63d36da1416f2224060cbbb175deba80fc9768393448bb54886014fd4"
+}

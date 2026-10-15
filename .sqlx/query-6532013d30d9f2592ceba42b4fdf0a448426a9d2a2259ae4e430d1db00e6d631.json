@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT token_hash, run_id, owner_id FROM actor WHERE id = $1::text::uuid",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "token_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "run_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "owner_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "owner_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6532013d30d9f2592ceba42b4fdf0a448426a9d2a2259ae4e430d1db00e6d631"
+}

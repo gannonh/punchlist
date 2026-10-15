@@ -1,11 +1,18 @@
 //! Agents a runner can start, the fence that carries outside text into their prompts, the `> `
 //! line quoter for text inside it, and the check for a name that may be printed outside it.
 
+/// The agent keys a person can mint an agent actor for. A runner starts only some of them,
+/// but an agent of any kind can act through its own token.
+pub const AGENT_KINDS: [&str; 5] = ["claude-code", "codex", "opencode", "pi", "cursor"];
+
 /// The name people read for an agent key: `claude-code` is "Claude Code".
 pub fn agent_display_name(agent: &str) -> String {
     match agent {
         "claude-code" => "Claude Code".to_string(),
         "codex" => "Codex".to_string(),
+        "opencode" => "OpenCode".to_string(),
+        "pi" => "Pi".to_string(),
+        "cursor" => "Cursor".to_string(),
         other => other.to_string(),
     }
 }
@@ -169,6 +176,9 @@ mod tests {
     fn agent_names() {
         assert_eq!(agent_display_name("claude-code"), "Claude Code");
         assert_eq!(agent_display_name("codex"), "Codex");
-        assert_eq!(agent_display_name("pi"), "pi");
+        assert_eq!(agent_display_name("opencode"), "OpenCode");
+        assert_eq!(agent_display_name("pi"), "Pi");
+        assert_eq!(agent_display_name("cursor"), "Cursor");
+        assert_eq!(agent_display_name("aider"), "aider");
     }
 }

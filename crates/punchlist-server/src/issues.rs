@@ -67,6 +67,7 @@ struct EventRow {
     actor_id: Uuid,
     actor_name: String,
     actor_role: String,
+    actor_kind: Option<String>,
     kind: String,
     from_status: Option<String>,
     to_status: Option<String>,
@@ -126,6 +127,7 @@ impl TryFrom<EventRow> for Event {
                 id: row.actor_id,
                 name: row.actor_name,
                 role: parse_role(&row.actor_role)?,
+                kind: row.actor_kind,
             },
             detail,
         })
@@ -327,11 +329,14 @@ async fn request_move(
     .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
     // The token was checked before the refresh, which ends the agent's run when it closes
     // the issue's pull request, as a webhook job may have meanwhile. Either holds the issue's
-    // lock to do it, so under that lock the run is known to be running or not.
+    // lock to do it, so under that lock the run is known to be running or not. A standalone
+    // agent has no run to end.
     if actor.role == Role::Agent {
         let running = sqlx::query_scalar!(
-            r#"SELECT EXISTS (SELECT 1 FROM actor a JOIN run r ON r.id = a.run_id
-                              WHERE a.id = $1 AND r.outcome = 'running') AS "running!""#,
+            r#"SELECT a.run_id IS NULL OR EXISTS (SELECT 1 FROM run r
+                                                 WHERE r.id = a.run_id AND r.outcome = 'running')
+                   AS "running!"
+               FROM actor a WHERE a.id = $1"#,
             actor.id,
         )
         .fetch_one(&mut *tx)
@@ -712,7 +717,7 @@ async fn issue_events(
         EventRow,
         r#"SELECT e.seq, e.issue_id, e.created_at,
                 a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,
-                e.kind,
+                a.kind AS actor_kind, e.kind,
                 coalesce(t.from_status, r.from_status) AS "from_status?",
                 coalesce(t.to_status, r.to_status) AS "to_status?",
                 coalesce(t.workflow_version, r.workflow_version) AS "workflow_version?",

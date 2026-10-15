@@ -23,6 +23,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
 hmac = "0.13"
+percent-encoding = "2.3"
 regex = "1"
 schemars = "1"
 rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io"] }
