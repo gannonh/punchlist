@@ -211,8 +211,8 @@ pub struct Claim {
     /// The issue, in the status whose dispatch rule the run is for.
     pub issue: Issue,
     pub repository: Repository,
-    /// The branch to work on, `feature/<id>-<slug>`, or `feature/<id>-<slug>-<n>` from the
-    /// issue's second lifecycle on.
+    /// The branch to work on, `feature/<id>`, or `feature/<id>-<n>` from the issue's second
+    /// lifecycle on.
     pub branch: String,
     /// The issue's branches with a merged pull request and no open one, sorted. The runner
     /// replaces a worktree it still has on one of them. Empty when no earlier branch of the

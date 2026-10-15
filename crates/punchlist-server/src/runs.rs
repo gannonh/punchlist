@@ -204,7 +204,7 @@ async fn try_claim(
     )
     .fetch_all(&mut *tx)
     .await?;
-    let base = branch_name(&id, &issue.title);
+    let base = branch_name(&id);
     let mut branch = base.clone();
     let mut lifecycle = 1;
     while merged_branches.contains(&branch) {

@@ -52,8 +52,6 @@ pub fn build_prompt(
     } else {
         format!("{workflow_prompt}\n\n")
     };
-    // ponytail: the branch's slug is up to 50 characters of the issue title in `[a-z0-9-]`, so
-    // author text sits on this line, pattern-checked. Upgrade path: `feature/<id>` with no slug.
     Ok(format!(
         "- Issue: {id}\n\
 - Repository: {owner}/{name}\n\

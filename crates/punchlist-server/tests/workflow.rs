@@ -2353,7 +2353,7 @@ async fn each_entry_into_agent_review_enqueues_one_dispatch_and_one_runner_claim
     assert_eq!(second["agent"], "codex");
     assert_eq!(second["issue"]["status"], "agent_review");
     assert_eq!(second["branch"], first["branch"]);
-    assert_eq!(second["branch"], "feature/pl-1-fix-the-thing");
+    assert_eq!(second["branch"], "feature/pl-1");
     assert_eq!(second["prompt"], "Call request_transition.\n\nReview it.");
     assert_eq!(waiting_dispatches(&pool).await, []);
     assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);

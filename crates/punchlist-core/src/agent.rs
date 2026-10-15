@@ -10,27 +10,10 @@ pub fn agent_display_name(agent: &str) -> String {
     }
 }
 
-/// The branch an agent works on for an issue: `feature/<id>-<slug>`, lowercase, with the
-/// slug cut from the title at 50 characters.
-pub fn branch_name(issue_id: &str, title: &str) -> String {
-    let mut slug = String::new();
-    for c in title.chars().flat_map(char::to_lowercase) {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c);
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-        if slug.len() >= 50 {
-            break;
-        }
-    }
-    let slug = slug.trim_end_matches('-');
-    let id = issue_id.to_lowercase();
-    if slug.is_empty() {
-        format!("feature/{id}")
-    } else {
-        format!("feature/{id}-{slug}")
-    }
+/// The branch an agent works on for an issue: `feature/<id>`, lowercase. It carries no word
+/// of the title, because the prompt prints it outside the fence.
+pub fn branch_name(issue_id: &str) -> String {
+    format!("feature/{}", issue_id.to_lowercase())
 }
 
 /// Why text could not be fenced.
@@ -179,15 +162,7 @@ mod tests {
 
     #[test]
     fn branch_names() {
-        assert_eq!(
-            branch_name("PL-12", "Add a README, then ship it!"),
-            "feature/pl-12-add-a-readme-then-ship-it"
-        );
-        assert_eq!(branch_name("PL-3", "¿¿??"), "feature/pl-3");
-        assert_eq!(
-            branch_name("PL-1", &"word ".repeat(30)),
-            "feature/pl-1-word-word-word-word-word-word-word-word-word-word"
-        );
+        assert_eq!(branch_name("PL-12"), "feature/pl-12");
     }
 
     #[test]
