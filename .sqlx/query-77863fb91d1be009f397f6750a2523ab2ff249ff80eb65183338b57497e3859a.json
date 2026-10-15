@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dispatch (issue_id, transition_id, agent)\n         SELECT issue_id, id, 'codex' FROM transition WHERE issue_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "77863fb91d1be009f397f6750a2523ab2ff249ff80eb65183338b57497e3859a"
+}

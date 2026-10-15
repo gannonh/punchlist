@@ -75,6 +75,9 @@ pub struct Actor {
     pub id: Uuid,
     pub name: String,
     pub role: Role,
+    /// The agent key, such as `codex`. Only agents have one. Absent from an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// One entry in an issue's timeline.
@@ -174,6 +177,48 @@ pub struct RegisteredRunner {
     pub token: String,
     /// How long a lease lasts without a heartbeat.
     pub lease_seconds: u32,
+}
+
+/// `POST /api/actors`, with a person's token. Mints an agent actor that acts through its own
+/// token, with no run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateAgent {
+    /// The agent key, such as `codex`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The name of the person in the workspace the agent acts for. The requesting person by
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// An actor in the workspace: a person, an agent or a runner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ActorInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub role: Role,
+    /// The agent key. Only agents have one.
+    pub kind: Option<String>,
+    pub model: Option<String>,
+    /// The name of the person an agent acts for. Only agents have one.
+    pub owner: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The response to `POST /api/actors`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreatedAgent {
+    pub actor: ActorInfo,
+    /// The agent's bearer token. Shown once; only its hash is stored.
+    pub token: String,
+}
+
+/// `GET /api/actors`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ActorList {
+    pub actors: Vec<ActorInfo>,
 }
 
 /// `GET /api/runners`.

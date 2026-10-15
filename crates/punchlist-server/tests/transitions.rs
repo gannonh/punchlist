@@ -282,6 +282,7 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
     assert_eq!(
         paths,
         [
+            "/api/actors",
             "/api/github/webhook",
             "/api/issues",
             "/api/issues/{id}",

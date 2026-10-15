@@ -2,9 +2,10 @@
 //! server.
 
 use punchlist_api::{
-    AppendLog, Claim, ClaimRequest, CreateComment, CreateIssue, ErrorBody, Event, FinishRun,
-    GateChecklist, Heartbeat, HeartbeatReply, Issue, IssueList, MoveIssue, Moved, PullRequest,
-    PullRequestsNow, RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
+    ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
+    CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist, Heartbeat, HeartbeatReply, Issue,
+    IssueList, MoveIssue, Moved, PullRequest, PullRequestsNow, RegisterRunner, RegisteredRunner,
+    Run, RunLog, RunnerList, WorkflowInfo,
 };
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -135,6 +136,16 @@ impl Client {
 
     pub async fn list_runners(&self) -> Result<RunnerList, ClientError> {
         self.send::<(), _>(Method::GET, &["runners"], None).await
+    }
+
+    /// Mints an agent actor with its own token. Person token; the token is in the response
+    /// only.
+    pub async fn create_agent(&self, request: &CreateAgent) -> Result<CreatedAgent, ClientError> {
+        self.send(Method::POST, &["actors"], Some(request)).await
+    }
+
+    pub async fn list_actors(&self) -> Result<ActorList, ClientError> {
+        self.send::<(), _>(Method::GET, &["actors"], None).await
     }
 
     /// Records a heartbeat and renews the leases of the attempts in `heartbeat.held`. The
