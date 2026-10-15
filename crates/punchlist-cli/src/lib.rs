@@ -8,8 +8,8 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
-    ChecksState, CreateIssue, Event, EventDetail, GateChecklist, Issue, PullRequest, Run,
-    RunOutcome, Runner, WorkflowInfo, gate_lines,
+    ActorInfo, ChecksState, CreateAgent, CreateIssue, CreatedAgent, Event, EventDetail,
+    GateChecklist, Issue, PullRequest, Run, RunOutcome, Runner, WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -30,6 +30,9 @@ pub enum Command {
     /// Work with issues.
     #[command(subcommand)]
     Issue(IssueCommand),
+    /// Work with actors: people, agents and runners.
+    #[command(subcommand)]
+    Actor(ActorCommand),
     /// Work with runners.
     #[command(subcommand)]
     Runner(RunnerCommand),
@@ -69,6 +72,27 @@ pub struct McpArgs {
 pub enum PullRequestCommand {
     /// List pull requests whose branch and title name no issue.
     Unlinked,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ActorCommand {
+    /// Mint an agent actor with its own token. It acts on the workspace's issues and nothing
+    /// else.
+    Create {
+        /// Create an agent: the only kind of actor this makes.
+        #[arg(long, required = true)]
+        agent: bool,
+        /// The agent key: claude-code, codex, opencode, pi or cursor.
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        model: Option<String>,
+        /// The name of the person the agent acts for. You by default.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// List the workspace's people, agents and runners.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -206,6 +230,28 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
     let client = Client::new(&config.server_url, &config.token)?;
     match cli.command {
         Command::Issue(command) => issue(&client, command, out).await,
+        Command::Actor(ActorCommand::Create {
+            agent: _,
+            kind,
+            model,
+            owner,
+        }) => {
+            let request = CreateAgent { kind, model, owner };
+            write!(
+                out,
+                "{}",
+                render_created(&client.create_agent(&request).await?)
+            )?;
+            Ok(())
+        }
+        Command::Actor(ActorCommand::List) => {
+            write!(
+                out,
+                "{}",
+                render_actors(&client.list_actors().await?.actors)
+            )?;
+            Ok(())
+        }
         Command::Runner(RunnerCommand::List) => {
             let list = client.list_runners().await?;
             write!(out, "{}", render_runners(&list.runners, Utc::now()))?;
@@ -326,6 +372,71 @@ pub fn runner_config(
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
+    }
+}
+
+fn render_created(created: &CreatedAgent) -> String {
+    let actor = &created.actor;
+    let mut text = format!(
+        "Created agent {}\nId     {}\nKind   {}\n",
+        actor.name,
+        actor.id,
+        actor.kind.as_deref().unwrap_or("-"),
+    );
+    if let Some(model) = &actor.model {
+        text.push_str(&format!("Model  {model}\n"));
+    }
+    text.push_str(&format!(
+        "Owner  {}\nToken  {}\nThe token is shown once; only its hash is stored.\n",
+        actor.owner.as_deref().unwrap_or("-"),
+        created.token,
+    ));
+    text
+}
+
+fn render_actors(actors: &[ActorInfo]) -> String {
+    let rows: Vec<[String; 6]> = actors
+        .iter()
+        .map(|a| {
+            let or_dash = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".into());
+            [
+                a.name.clone(),
+                a.role.to_string(),
+                or_dash(&a.kind),
+                or_dash(&a.model),
+                or_dash(&a.owner),
+                a.id.to_string(),
+            ]
+        })
+        .collect();
+    let header = ["NAME", "ROLE", "KIND", "MODEL", "OWNER", "ID"].map(String::from);
+    let widths: Vec<usize> = (0..6)
+        .map(|i| {
+            std::iter::once(&header)
+                .chain(&rows)
+                .map(|row| row[i].len())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    std::iter::once(&header)
+        .chain(&rows)
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .zip(&widths)
+                .map(|(cell, width)| format!("{cell:width$}"))
+                .collect();
+            format!("{}\n", cells.join("  ").trim_end())
+        })
+        .collect()
+}
+
+/// How the timeline names an actor: `Codex (agent, codex)`, `Gannon (person)`.
+fn actor_marking(actor: &punchlist_api::Actor) -> String {
+    match &actor.kind {
+        Some(kind) => format!("{} ({}, {kind})", actor.name, actor.role),
+        None => format!("{} ({})", actor.name, actor.role),
     }
 }
 
@@ -542,10 +653,9 @@ fn render_show(
     }
     for event in events {
         let who = format!(
-            "  {}  {} ({})  ",
+            "  {}  {}  ",
             event.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
-            event.actor.name,
-            event.actor.role,
+            actor_marking(&event.actor),
         );
         match &event.detail {
             EventDetail::Transition {
@@ -714,6 +824,7 @@ mod tests {
                 id: "00000000-0000-0000-0000-000000000000".parse().unwrap(),
                 name: name.into(),
                 role,
+                kind: None,
             },
             created_at: "2026-10-10T12:30:45Z".parse().unwrap(),
             detail,
@@ -846,6 +957,86 @@ mod tests {
              \n\
              \x20   See #12.\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  refused Merging → Done: gate proof_attached failed: no proof  [delivery d-2]\n"
+        );
+    }
+
+    #[test]
+    fn timeline_marks_each_role_and_an_agent_kind() {
+        let comment = || EventDetail::Comment { body: "Hi".into() };
+        let mut codex = event(punchlist_api::Role::Agent, "Codex", comment());
+        codex.actor.kind = Some("codex".into());
+        let events = [
+            event(punchlist_api::Role::Person, "Gannon", comment()),
+            codex,
+            event(punchlist_api::Role::Runner, "sartre", comment()),
+            event(punchlist_api::Role::Github, "gannonh", comment()),
+        ];
+        let issue = Issue {
+            id: "PL-7".into(),
+            title: "Fix".into(),
+            body: String::new(),
+            status: "todo".into(),
+            status_name: "Todo".into(),
+            created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            waiting_on_person: None,
+        };
+        let text = render_show(&issue, &[], None, &events);
+        let who: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("  2026-10-10 12:30:45 UTC  "))
+            .collect();
+        assert_eq!(
+            who,
+            [
+                "Gannon (person)  commented:",
+                "Codex (agent, codex)  commented:",
+                "sartre (runner)  commented:",
+                "gannonh (github)  commented:",
+            ]
+        );
+    }
+
+    #[test]
+    fn renders_actors() {
+        let actor = |name: &str, role, kind: Option<&str>, owner: Option<&str>| ActorInfo {
+            id: "00000000-0000-0000-0000-000000000000".parse().unwrap(),
+            name: name.into(),
+            role,
+            kind: kind.map(Into::into),
+            model: None,
+            owner: owner.map(Into::into),
+            created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+        };
+        let mut codex = actor(
+            "Codex",
+            punchlist_api::Role::Agent,
+            Some("codex"),
+            Some("Gannon"),
+        );
+        codex.model = Some("gpt-6-luna".into());
+        let id = "00000000-0000-0000-0000-000000000000";
+        assert_eq!(
+            render_actors(&[
+                actor("Gannon", punchlist_api::Role::Person, None, None),
+                codex.clone(),
+            ]),
+            format!(
+                "NAME    ROLE    KIND   MODEL       OWNER   ID\n\
+                 Gannon  person  -      -           -       {id}\n\
+                 Codex   agent   codex  gpt-6-luna  Gannon  {id}\n"
+            )
+        );
+        let created = CreatedAgent {
+            actor: codex,
+            token: "plt_x".into(),
+        };
+        assert_eq!(
+            render_created(&created),
+            format!(
+                "Created agent Codex\nId     {id}\nKind   codex\nModel  gpt-6-luna\n\
+                 Owner  Gannon\nToken  plt_x\nThe token is shown once; only its hash is stored.\n"
+            )
         );
     }
 
