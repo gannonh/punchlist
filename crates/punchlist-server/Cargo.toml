@@ -18,6 +18,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 hmac.workspace = true
+percent-encoding.workspace = true
 punchlist-api.workspace = true
 punchlist-core.workspace = true
 reqwest.workspace = true

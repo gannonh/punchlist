@@ -1577,6 +1577,7 @@ dependencies = [
  "clap",
  "hmac",
  "http-body-util",
+ "percent-encoding",
  "punchlist-api",
  "punchlist-core",
  "reqwest",

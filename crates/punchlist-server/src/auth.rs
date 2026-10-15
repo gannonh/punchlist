@@ -1,6 +1,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use percent_encoding::percent_decode_str;
 use punchlist_core::Role;
 use sha2::{Digest, Sha256};
 use utoipa::Modify;
@@ -61,13 +62,16 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
             .ok_or(ApiError::Unauthorized)?;
-        // The issue a path names: `/api/issues/<id>` and below.
+        // The issue a path names: `/api/issues/<id>` and below. Decoded as the route's `Path`
+        // decodes it, so `PL%2D1` is checked as the `PL-1` the handler acts on.
         let issue_id = parts
             .uri
             .path()
             .strip_prefix("/api/issues/")
             .and_then(|rest| rest.split('/').next())
+            .and_then(|id| percent_decode_str(id).decode_utf8().ok())
             .filter(|id| !id.is_empty());
+        let issue_id = issue_id.as_deref();
         let row = sqlx::query!(
             r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
                       r.issue_id AS "issue_id?", r.outcome AS "outcome?",

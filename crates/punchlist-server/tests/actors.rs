@@ -260,6 +260,9 @@ async fn no_token_reaches_another_workspaces_issue(pool: PgPool) {
     let (status, body) = call(&app, &agent, "GET", "/api/issues/OT-1", None).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["message"], "issue OT-1 is in another workspace");
+    let (status, body) = call(&app, &agent, "GET", "/api/issues/OT%2D1", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["message"], "issue OT-1 is in another workspace");
     let (status, _) = comment(&app, &agent, "OT-1").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     // A person's token too.
