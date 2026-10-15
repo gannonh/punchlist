@@ -704,6 +704,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn proof_types_are_found_by_extension_in_any_case_and_by_content_type() {
+        assert_eq!(
+            proof_type_by_extension("JPEG"),
+            Some(("image/jpeg", ProofKind::Image))
+        );
+        assert_eq!(
+            proof_type_by_extension("log"),
+            Some(("text/plain", ProofKind::Report))
+        );
+        assert_eq!(proof_type_by_extension("html"), None);
+        assert_eq!(proof_kind("video/quicktime"), Some(ProofKind::Video));
+        for refused in ["text/html", "image/svg+xml", "application/json"] {
+            assert_eq!(proof_kind(refused), None);
+        }
+    }
+
+    #[test]
     fn event_detail_is_tagged_by_kind() {
         let detail = EventDetail::transition(
             "in_progress".into(),
