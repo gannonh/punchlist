@@ -12,8 +12,8 @@ pub use agent::{
     AGENT_KINDS, FenceError, agent_display_name, branch_name, fence, fenced, is_plain_name, quoted,
 };
 pub use gate::{
-    CheckRunEvidence, Evidence, Gate, GateResult, PullRequestEvidence, PullRequestState,
-    RequiredCheck, ReviewThreadEvidence,
+    CheckRunEvidence, Evidence, Gate, GateResult, ProofEvidence, PullRequestEvidence,
+    PullRequestState, RequiredCheck, ReviewThreadEvidence,
 };
 pub use link::linked_issue_id;
 pub use workflow::{

@@ -10,8 +10,8 @@ use punchlist_api::{
     MoveIssue, Moved,
 };
 use punchlist_core::{
-    Evidence, GateResult, PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence,
-    Role, START, Transition, Workflow, display_name,
+    Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence, PullRequestState,
+    Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -487,12 +487,29 @@ async fn evaluate_gates(
     Ok((evidence, gates))
 }
 
+/// The issue's attempt: how many times it has moved from Start to In Progress, 0 before the
+/// first. Proof records the attempt it was uploaded in, and `proof_attached` reads the
+/// current one. This is not the `attempt` table's number, which counts one run's leases.
+pub(crate) async fn current_attempt(conn: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<i32> {
+    let count = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "count!" FROM transition
+           WHERE issue_id = $1 AND from_status = $2 AND to_status = $3"#,
+        id,
+        START,
+        IN_PROGRESS,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    i32::try_from(count).map_err(|_| sqlx::Error::Decode("attempt count overflows".into()))
+}
+
 /// What the gates read: the pull requests linked to the issue, each open one with the check
-/// runs on its head commit and its review threads, and the one a GitHub event merged or
-/// closed when that event is causing the move.
+/// runs on its head commit and its review threads, the one a GitHub event merged or closed
+/// when that event is causing the move, and the issue's attempt and proof.
 ///
 /// `written_since` in `github.rs` is its mirror: it asks whether any of these rows changed
-/// after a gated request read them from GitHub. Change the two together.
+/// after a gated request read them from GitHub. Change the two together. Proof is not read
+/// from GitHub, and its upload takes the issue's row lock, so it cannot change under a move.
 async fn evidence(
     tx: &mut sqlx::PgConnection,
     id: &str,
@@ -534,10 +551,19 @@ async fn evidence(
             review_threads,
         });
     }
+    let proof = sqlx::query_as!(
+        ProofEvidence,
+        "SELECT attempt FROM proof WHERE issue_id = $1",
+        id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     Ok(Evidence {
         issue_id: id.to_string(),
         pull_requests,
         closed_pull_request,
+        attempt: current_attempt(tx, id).await?,
+        proof,
     })
 }
 

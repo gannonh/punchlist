@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.content_type, p.storage_key\n         FROM proof p JOIN issue i ON i.id = p.issue_id\n         WHERE p.id = $1 AND i.workspace_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "content_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proof",
+            "name": "content_type"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "storage_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proof",
+            "name": "storage_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0e52654c19e2f412430be01cdd04f7f0b0920102e61cf56b3b1396ec09d974d3"
+}
