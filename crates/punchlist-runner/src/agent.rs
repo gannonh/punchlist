@@ -279,6 +279,7 @@ pub async fn run_claude(
     args: &[String],
     worktree: &Path,
     prompt: &str,
+    marker: &str,
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
@@ -295,6 +296,7 @@ pub async fn run_claude(
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
+        .env(ATTEMPT_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -370,6 +372,53 @@ pub async fn run_claude(
     }
 }
 
+/// The environment variable every agent process, and so every command it starts, carries:
+/// `<run id>:<attempt>`. A runner killed outright leaves its agents running, since each leads
+/// its own process group; the runner that restarts finds them by it (`kill_attempt`).
+pub(crate) const ATTEMPT_MARKER: &str = "PUNCHLIST_ATTEMPT";
+
+pub(crate) fn attempt_marker(run_id: uuid::Uuid, attempt: i32) -> String {
+    format!("{run_id}:{attempt}")
+}
+
+/// Kills every process of this user whose environment carries `marker`, and the process
+/// group each leads: the agents, and their commands, of an attempt an earlier runner process
+/// started. Returns how many it found. Reads `/proc`, so it finds nothing off Linux.
+// ponytail: Linux only. Upgrade path: a per-attempt pid file under the worktree root, for
+// macOS runners.
+pub(crate) fn kill_attempt(marker: &str) -> usize {
+    let wanted = format!("{ATTEMPT_MARKER}={marker}").into_bytes();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut found = 0;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environ
+            .split(|&b| b == 0)
+            .any(|var| var == wanted.as_slice())
+        {
+            found += 1;
+            kill_group(Some(pid));
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    found
+}
+
 /// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
 /// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
 pub(crate) fn kill_group(leader: Option<u32>) {
@@ -389,6 +438,28 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    #[test]
+    fn kill_attempt_kills_only_the_processes_of_its_attempt() {
+        let marker = attempt_marker(uuid::Uuid::new_v4(), 1);
+        let spawn = |value: &str| {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env(ATTEMPT_MARKER, value)
+                .spawn()
+                .unwrap()
+        };
+        let mut ours = spawn(&marker);
+        let mut other = spawn(&attempt_marker(uuid::Uuid::new_v4(), 1));
+        assert_eq!(kill_attempt(&marker), 1);
+        assert_eq!(ours.wait().unwrap().code(), None, "killed by a signal");
+        assert_eq!(
+            other.try_wait().unwrap(),
+            None,
+            "the other attempt's process still runs"
+        );
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
     async fn records(input: &[u8], max: usize) -> Vec<String> {
         let mut reader = BufReader::with_capacity(8, input);
         let mut out = Vec::new();
@@ -444,6 +515,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
+            "test",
             tx,
             stop_rx,
         )
@@ -517,6 +589,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             &claude_args(Some("haiku"), None, uuid::Uuid::nil(), false),
             temp.path(),
             prompt,
+            "test",
             tx,
             stop_rx,
         )
@@ -689,6 +762,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
+            "test",
             tx,
             stop_rx,
         )
@@ -712,6 +786,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 &claude_args(None, None, uuid::Uuid::nil(), false),
                 temp.path(),
                 "p",
+                "test",
                 tx,
                 stop_rx,
             )
@@ -757,6 +832,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 &claude_args(None, None, uuid::Uuid::nil(), false),
                 &dir,
                 "p",
+                "test",
                 tx,
                 stop_rx,
             )

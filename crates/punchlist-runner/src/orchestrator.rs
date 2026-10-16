@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, build_prompt, claude_args, run_claude, write_mcp_config,
+    AgentExit, AgentResult, attempt_marker, build_prompt, claude_args, kill_attempt, run_claude,
+    write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::worktree::Worktrees;
@@ -234,6 +235,14 @@ pub(crate) async fn run_with_worktrees(
         Ok(leases) => {
             for lease in leases {
                 let run_id = lease.run_id.to_string();
+                // The agent the killed runner started may still be at work: it goes before
+                // another works in its worktree or on its branch.
+                let left = kill_attempt(&attempt_marker(lease.run_id, lease.attempt));
+                if left > 0 {
+                    tracing::info!(
+                        "run {run_id}: killed {left} process(es) left from before the restart"
+                    );
+                }
                 let worktree = match lease.agent.as_str() {
                     "claude-code" => {
                         (ctx.worktrees)
@@ -647,6 +656,7 @@ async fn run_agent(
             output_tokens: None,
         })
     };
+    let marker = &attempt_marker(claim.run_id, claim.attempt);
     match claim.agent.as_str() {
         "codex" => {
             // Outside the worktree, and removed when this returns or is dropped.
@@ -661,7 +671,17 @@ async fn run_agent(
                 worktree,
             );
             let command = &config.codex_command;
-            run_codex(command, home.path(), params, worktree, prompt, lines, stop).await
+            run_codex(
+                command,
+                home.path(),
+                params,
+                worktree,
+                prompt,
+                marker,
+                lines,
+                stop,
+            )
+            .await
         }
         "claude-code" => {
             // Outside the worktree, so the agent cannot commit its token.
@@ -677,8 +697,16 @@ async fn run_agent(
                 claim.session_id,
                 resume,
             );
-            let exit =
-                run_claude(&config.claude_command, &args, worktree, prompt, lines, stop).await;
+            let exit = run_claude(
+                &config.claude_command,
+                &args,
+                worktree,
+                prompt,
+                marker,
+                lines,
+                stop,
+            )
+            .await;
             let _ = std::fs::remove_file(&mcp_config);
             exit
         }
