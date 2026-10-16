@@ -348,6 +348,14 @@ fn prepare_blocking(
             ));
         }
     }
+    // A worktree deleted without git (`rm -rf`) is still registered, and git refuses to add
+    // one at its path or on its branch until the registration is pruned. Pruning drops only
+    // registrations whose directories are gone, so other issues' worktrees are untouched.
+    git.run(
+        Some(&clone_dir),
+        &["worktree", "prune"],
+        "git worktree prune",
+    )?;
     std::fs::create_dir_all(worktree.parent().expect("worktree has a parent"))
         .map_err(|e| e.to_string())?;
 
@@ -513,6 +521,44 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("is on `feature/pl-1-first-issue`, not `feature/other`"));
+    }
+
+    #[tokio::test]
+    async fn prepare_after_the_worktree_was_deleted_without_git_adds_it_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        let main_sha = make_origin(&origin);
+        let worktrees = Worktrees::with_remote_base(
+            temp.path().join("root"),
+            origin.to_string_lossy().to_string(),
+        );
+        let branch = "feature/pl-1";
+        let path = worktrees
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap();
+        let other = worktrees
+            .prepare(&repository(), "feature/pl-2", &[], "PL-2")
+            .await
+            .unwrap();
+        std::fs::write(other.join("marker.txt"), "kept").unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+
+        let again = worktrees
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap();
+        assert_eq!(again, path);
+        assert_eq!(run(&path, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+        assert_eq!(run(&path, &["rev-parse", "HEAD"]), main_sha);
+        assert_eq!(
+            std::fs::read_to_string(other.join("marker.txt")).unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            run(&other, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature/pl-2"
+        );
     }
 
     /// A second lifecycle: the issue's first branch was pushed and squash-merged, the default
