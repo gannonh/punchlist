@@ -296,7 +296,7 @@ pub async fn run_claude(
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
-        .env(ATTEMPT_MARKER, marker)
+        .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -373,21 +373,18 @@ pub async fn run_claude(
 }
 
 /// The environment variable every agent process, and so every command it starts, carries:
-/// `<run id>:<attempt>`. A runner killed outright leaves its agents running, since each leads
-/// its own process group; the runner that restarts finds them by it (`kill_attempt`).
-pub(crate) const ATTEMPT_MARKER: &str = "PUNCHLIST_ATTEMPT";
+/// the id of the runner that started it. A runner killed outright leaves its agents running,
+/// since each leads its own process group; the runner that restarts finds them by it
+/// (`kill_runner`).
+pub(crate) const RUNNER_MARKER: &str = "PUNCHLIST_RUNNER";
 
-pub(crate) fn attempt_marker(run_id: uuid::Uuid, attempt: i32) -> String {
-    format!("{run_id}:{attempt}")
-}
-
-/// Kills every process of this user whose environment carries `marker`, and the process
-/// group each leads: the agents, and their commands, of an attempt an earlier runner process
+/// Kills every process of this user whose environment carries `runner_id`, and the process
+/// group each leads: the agents, and their commands, an earlier process of this runner
 /// started. Returns how many it found. Reads `/proc`, so it finds nothing off Linux.
-// ponytail: Linux only. Upgrade path: a per-attempt pid file under the worktree root, for
+// ponytail: Linux only. Upgrade path: a pid file per agent under the worktree root, for
 // macOS runners.
-pub(crate) fn kill_attempt(marker: &str) -> usize {
-    let wanted = format!("{ATTEMPT_MARKER}={marker}").into_bytes();
+pub(crate) fn kill_runner(runner_id: &str) -> usize {
+    let wanted = format!("{RUNNER_MARKER}={runner_id}").into_bytes();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return 0;
     };
@@ -439,23 +436,23 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     #[test]
-    fn kill_attempt_kills_only_the_processes_of_its_attempt() {
-        let marker = attempt_marker(uuid::Uuid::new_v4(), 1);
+    fn kill_runner_kills_only_the_processes_of_its_runner() {
+        let marker = uuid::Uuid::new_v4().to_string();
         let spawn = |value: &str| {
             std::process::Command::new("sleep")
                 .arg("30")
-                .env(ATTEMPT_MARKER, value)
+                .env(RUNNER_MARKER, value)
                 .spawn()
                 .unwrap()
         };
         let mut ours = spawn(&marker);
-        let mut other = spawn(&attempt_marker(uuid::Uuid::new_v4(), 1));
-        assert_eq!(kill_attempt(&marker), 1);
+        let mut other = spawn(&uuid::Uuid::new_v4().to_string());
+        assert_eq!(kill_runner(&marker), 1);
         assert_eq!(ours.wait().unwrap().code(), None, "killed by a signal");
         assert_eq!(
             other.try_wait().unwrap(),
             None,
-            "the other attempt's process still runs"
+            "the other runner's process still runs"
         );
         other.kill().unwrap();
         other.wait().unwrap();

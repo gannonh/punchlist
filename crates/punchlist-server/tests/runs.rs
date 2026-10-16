@@ -1063,6 +1063,44 @@ async fn a_runner_registered_again_by_name_keeps_its_id_and_the_old_token_stops(
 }
 
 #[sqlx::test]
+async fn a_claim_waiting_when_its_runner_registers_again_gets_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let old = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let waiting = {
+        let app = app.clone();
+        tokio::spawn(async move { claim(&app, &old, 5).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let new = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Displaced", &["todo", "start"]).await;
+    let (status, body) = waiting.await.unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, claimed) = claim(&app, &new, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["attempt"], 1);
+}
+
+#[sqlx::test]
+async fn a_lost_attempt_of_a_run_with_no_stored_prompt_fails_the_run(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Old run", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    let run_id = first["run_id"].as_str().unwrap();
+    // As a run from before the migration that stored prompts.
+    sqlx::query!("UPDATE run SET prompt = ''")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, run) = finish(&app, &r1, run_id, lost(1)).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "failed");
+    let (_, next) = claim(&app, &r1, 0).await;
+    assert_ne!(next["run_id"], first["run_id"]);
+    assert_eq!(next["attempt"], 1);
+}
+
+#[sqlx::test]
 async fn a_restarted_runner_reads_its_leases_and_resumes_an_attempt(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;

@@ -18,8 +18,7 @@ use uuid::Uuid;
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, attempt_marker, build_prompt, claude_args, kill_attempt, run_claude,
-    write_mcp_config,
+    AgentExit, AgentResult, build_prompt, claude_args, kill_runner, run_claude, write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::worktree::Worktrees;
@@ -103,6 +102,7 @@ impl Drop for HeldGuard {
 
 struct Context {
     config: RunnerConfig,
+    runner_id: String,
     client: Client,
     worktrees: Worktrees,
     shutdown: watch::Receiver<bool>,
@@ -210,6 +210,7 @@ pub(crate) async fn run_with_worktrees(
     let claim_wait = config.claim_wait.as_secs().min(30) as u32;
     let ctx = Arc::new(Context {
         config,
+        runner_id: runner_id.clone(),
         client,
         worktrees,
         shutdown: shutdown_rx,
@@ -231,18 +232,16 @@ pub(crate) async fn run_with_worktrees(
     // The attempts this runner held when it last stopped. Each Claude Code one whose
     // worktree is still on its branch carries on in its session; the rest are reported lost,
     // so their runs get their next attempts now rather than when the leases lapse.
+    // Every agent an earlier process of this runner started goes first, lease lapsed or not:
+    // it may still be at work in a worktree or on a branch another attempt is about to use.
+    let left = kill_runner(&runner_id);
+    if left > 0 {
+        tracing::info!("killed {left} process(es) left from before the restart");
+    }
     match ctx.client.leases(&runner_id).await {
         Ok(leases) => {
             for lease in leases {
                 let run_id = lease.run_id.to_string();
-                // The agent the killed runner started may still be at work: it goes before
-                // another works in its worktree or on its branch.
-                let left = kill_attempt(&attempt_marker(lease.run_id, lease.attempt));
-                if left > 0 {
-                    tracing::info!(
-                        "run {run_id}: killed {left} process(es) left from before the restart"
-                    );
-                }
                 let worktree = match lease.agent.as_str() {
                     "claude-code" => {
                         (ctx.worktrees)
@@ -656,7 +655,7 @@ async fn run_agent(
             output_tokens: None,
         })
     };
-    let marker = &attempt_marker(claim.run_id, claim.attempt);
+    let marker = &ctx.runner_id;
     match claim.agent.as_str() {
         "codex" => {
             // Outside the worktree, and removed when this returns or is dropped.

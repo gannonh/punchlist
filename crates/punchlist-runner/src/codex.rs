@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
 use crate::agent::{
-    ATTEMPT_MARKER, AgentExit, AgentResult, MAX_RECORD_BYTES, kill_group, read_record,
+    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, kill_group, read_record,
 };
 
 const INITIALIZE_ID: u64 = 1;
@@ -440,7 +440,7 @@ pub(crate) async fn run_codex(
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
-        .env(ATTEMPT_MARKER, marker)
+        .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

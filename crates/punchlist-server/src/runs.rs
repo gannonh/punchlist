@@ -159,6 +159,14 @@ async fn try_claim(
     let mut tx = state.pool.begin().await?;
     // Before the workflow is read, so a claim waiting behind a load uses the new one.
     lock_workspace(&mut tx, actor.workspace_id).await?;
+    // A claim that waited through a re-registration of its runner holds the old token: the
+    // runner that registered since gets the work.
+    let current = sqlx::query_scalar!("SELECT token_hash FROM actor WHERE id = $1", actor.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if current.is_none() || current != actor.token_hash {
+        return Err(ApiError::Unauthorized);
+    }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let claimable =
         select_claimable(&mut tx, actor.workspace_id, &workflow, runner, target).await?;
@@ -801,14 +809,16 @@ async fn settle_run(
 ) -> sqlx::Result<()> {
     if lost.is_some_and(|attempt| attempt < ATTEMPTS_PER_RUN) {
         let run = sqlx::query!(
-            "SELECT r.status, i.status AS issue_status FROM run r JOIN issue i ON i.id = r.issue_id
+            "SELECT r.status, r.prompt, i.status AS issue_status FROM run r JOIN issue i ON i.id = r.issue_id
              WHERE r.id = $1",
             run_id,
         )
         .fetch_one(&mut *tx)
         .await?;
-        // A workflow this server cannot read ends the run; `queue_redispatch` logs it.
+        // A workflow this server cannot read ends the run; `queue_redispatch` logs it. A run
+        // from before prompts were stored has none to give its next attempt, so it ends too.
         let kept = run.status == run.issue_status
+            && !run.prompt.is_empty()
             && active_workflow(tx, workspace_id)
                 .await
                 .is_ok_and(|(active, _)| {
