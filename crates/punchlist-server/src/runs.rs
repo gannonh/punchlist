@@ -989,8 +989,7 @@ impl From<LogRow> for LogLine {
 }
 
 /// Runs of the workspace, newest first, each with its latest attempt, every attempt and its
-/// log tail. Filter
-/// by issue or by run id.
+/// log tail. Filter by issue or by run id.
 async fn load_runs(
     pool: &PgPool,
     actor: &Actor,
