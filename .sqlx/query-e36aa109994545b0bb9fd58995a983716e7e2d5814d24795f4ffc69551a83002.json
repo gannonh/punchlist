@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)\n         VALUES ($1, $2, $3, $4, $5)\n         RETURNING id, name, agents, registered_at, last_heartbeat",
+  "query": "INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)\n             VALUES ($1, $2, $3, $4, $5)\n             RETURNING id, name, agents, registered_at, last_heartbeat",
   "describe": {
     "columns": [
       {
@@ -76,5 +76,5 @@
       false
     ]
   },
-  "hash": "14244d835d5df3046ed91b75bfeb35b1f1d97da9ebafb725090dd04e475f6cf7"
+  "hash": "e36aa109994545b0bb9fd58995a983716e7e2d5814d24795f4ffc69551a83002"
 }

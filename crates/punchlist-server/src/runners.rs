@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ErrorBody, Heartbeat, HeartbeatReply, HeldAttempt, RegisterRunner, RegisteredRunner, Runner,
-    RunnerList,
+    ErrorBody, Heartbeat, HeartbeatReply, HeldAttempt, Lease, RegisterRunner, RegisteredRunner,
+    Repository, Runner, RunnerList,
 };
 use punchlist_core::Role;
 use utoipa_axum::router::OpenApiRouter;
@@ -15,12 +15,14 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
+use crate::workflow::lock_workspace;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(register_runner, list_runners))
         .routes(routes!(heartbeat))
+        .routes(routes!(leases))
 }
 
 pub(crate) struct RunnerRow {
@@ -58,13 +60,39 @@ pub(crate) async fn runner_of(state: &AppState, actor: &Actor) -> Result<RunnerR
     .ok_or_else(|| ApiError::Forbidden("this actor has no runner".into()))
 }
 
-/// Register a runner. Needs a person's token. Creates the runner's own actor.
+/// The runner `id`, when it is the actor's own. Another workspace's runner, or none, is 404,
+/// and another runner of this workspace is forbidden.
+async fn own_runner(state: &AppState, actor: &Actor, id: Uuid) -> Result<RunnerRow, ApiError> {
+    let known = sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM runner WHERE id = $1 AND workspace_id = $2) AS "exists!""#,
+        id,
+        actor.workspace_id,
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    if !known {
+        return Err(ApiError::RunnerNotFound(id));
+    }
+    let own = runner_of(state, actor).await?;
+    if own.id != id {
+        return Err(ApiError::Forbidden(
+            "a runner can only act as itself".into(),
+        ));
+    }
+    Ok(own)
+}
+
+/// Register a runner. Needs a person's token. Creates the runner's own actor. A name this
+/// person already registered in the workspace re-adopts the newest such runner instead: the
+/// same id and actor, the request's agents, and a new token, so the old one stops working.
+/// That is how a restarted runner keeps the attempts it holds (`GET /api/runners/{id}/leases`),
+/// and why two runners started with one name cannot both run.
 #[utoipa::path(
     post,
     path = "/api/runners",
     request_body = RegisterRunner,
     responses(
-        (status = 201, body = RegisteredRunner),
+        (status = 201, body = RegisteredRunner, description = "Registered, or re-adopted with a new token."),
         (status = 401, body = ErrorBody),
         (status = 403, body = ErrorBody, description = "Not a person's token."),
         (status = 422, body = ErrorBody),
@@ -96,28 +124,59 @@ async fn register_runner(
     }
     let token = new_token();
     let mut tx = state.pool.begin().await?;
-    let actor_id = sqlx::query_scalar!(
-        "INSERT INTO actor (workspace_id, name, role, token_hash)
-         VALUES ($1, $2, 'runner', $3) RETURNING id",
+    // Two registrations of one name serialize here, so they cannot both create a runner.
+    // Older data may hold one name twice, so the name has no unique index.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
+    let adopted = sqlx::query_scalar!(
+        "SELECT actor_id FROM runner WHERE workspace_id = $1 AND name = $2 AND registered_by = $3
+         ORDER BY registered_at DESC, id DESC LIMIT 1",
         actor.workspace_id,
         name,
-        hash_token(&token),
-    )
-    .fetch_one(&mut *tx)
-    .await?;
-    let row = sqlx::query_as!(
-        RunnerRow,
-        "INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, name, agents, registered_at, last_heartbeat",
-        actor.workspace_id,
-        actor_id,
-        name,
-        &agents,
         actor.id,
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let row = if let Some(actor_id) = adopted {
+        sqlx::query!(
+            "UPDATE actor SET token_hash = $2 WHERE id = $1",
+            actor_id,
+            hash_token(&token),
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query_as!(
+            RunnerRow,
+            "UPDATE runner SET agents = $2, last_heartbeat = now() WHERE actor_id = $1
+             RETURNING id, name, agents, registered_at, last_heartbeat",
+            actor_id,
+            &agents,
+        )
+        .fetch_one(&mut *tx)
+        .await?
+    } else {
+        let actor_id = sqlx::query_scalar!(
+            "INSERT INTO actor (workspace_id, name, role, token_hash)
+             VALUES ($1, $2, 'runner', $3) RETURNING id",
+            actor.workspace_id,
+            name,
+            hash_token(&token),
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query_as!(
+            RunnerRow,
+            "INSERT INTO runner (workspace_id, actor_id, name, agents, registered_by)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, name, agents, registered_at, last_heartbeat",
+            actor.workspace_id,
+            actor_id,
+            name,
+            &agents,
+            actor.id,
+        )
+        .fetch_one(&mut *tx)
+        .await?
+    };
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,
@@ -182,22 +241,7 @@ async fn heartbeat(
         serde_json::from_slice(&body)
             .map_err(|e| ApiError::Invalid(format!("invalid heartbeat body: {e}")))?
     };
-    let known = sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM runner WHERE id = $1 AND workspace_id = $2) AS "exists!""#,
-        id,
-        actor.workspace_id,
-    )
-    .fetch_one(&state.pool)
-    .await?;
-    if !known {
-        return Err(ApiError::RunnerNotFound(id));
-    }
-    let own = runner_of(&state, &actor).await?;
-    if own.id != id {
-        return Err(ApiError::Forbidden(
-            "a runner can only send its own heartbeat".into(),
-        ));
-    }
+    own_runner(&state, &actor, id).await?;
     let run_ids: Vec<Uuid> = held.held.iter().map(|h| h.run_id).collect();
     let attempts: Vec<i32> = held.held.iter().map(|h| h.attempt).collect();
     let mut tx = state.pool.begin().await?;
@@ -230,4 +274,54 @@ async fn heartbeat(
         runner: row.into(),
         stale,
     }))
+}
+
+/// The running attempts the runner holds whose leases have not lapsed, oldest first. A
+/// runner that restarts reads these: it resumes each one it can (`POST /api/runs/{id}/resume`)
+/// and reports the rest lost. Read-only. Runner token, for the runner's own id only.
+#[utoipa::path(
+    get,
+    path = "/api/runners/{id}/leases",
+    params(("id" = Uuid, Path, description = "Runner id")),
+    responses(
+        (status = 200, body = Vec<Lease>),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn leases(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Lease>>, ApiError> {
+    own_runner(&state, &actor, id).await?;
+    let rows = sqlx::query!(
+        "SELECT a.run_id, a.attempt, r.agent, a.issue_id, r.branch, a.lease_expires_at,
+                p.owner, p.name, p.default_branch
+         FROM attempt a JOIN run r ON r.id = a.run_id
+         JOIN repository p ON p.workspace_id = r.workspace_id
+         WHERE a.runner_id = $1 AND a.state = 'running' AND a.lease_expires_at > now()
+         ORDER BY a.started_at, a.id",
+        id,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| Lease {
+                run_id: row.run_id,
+                attempt: row.attempt,
+                agent: row.agent,
+                issue_id: row.issue_id,
+                branch: row.branch,
+                repository: Repository {
+                    owner: row.owner,
+                    name: row.name,
+                    default_branch: row.default_branch,
+                },
+                lease_expires_at: row.lease_expires_at,
+            })
+            .collect(),
+    ))
 }

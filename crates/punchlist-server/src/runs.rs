@@ -1,5 +1,6 @@
-//! `/api/runs`: claim an issue, append logs, finish an attempt, and read runs.
+//! `/api/runs`: claim an issue, append logs, finish or resume an attempt, and read runs.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::Json;
@@ -8,8 +9,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    AppendLog, Claim, ClaimRequest, ErrorBody, FinishRun, LogLine, Repository, Run, RunLog,
-    RunOutcome, RunnerRef,
+    AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, Issue, LogLine, Repository,
+    ResumeRun, Run, RunLog, RunOutcome, RunnerRef,
 };
 use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
@@ -33,12 +34,18 @@ const LOG_TAIL: i64 = 20;
 // ponytail: one limit for every status of every workspace. Upgrade path: a `[dispatch]`
 // field in the workflow file, read from the version of the entering transition.
 pub(crate) const RUNS_PER_ENTRY: i32 = 3;
+/// How many attempts one run gets when its runner loses them, such as in a restart, before
+/// the run fails and the issue is dispatched again.
+// ponytail: one limit for every run of every workspace. Upgrade path: a `[dispatch]` field
+// in the workflow file, beside `RUNS_PER_ENTRY`'s.
+pub(crate) const ATTEMPTS_PER_RUN: i32 = 2;
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(claim))
         .routes(routes!(append_log))
         .routes(routes!(finish_run))
+        .routes(routes!(resume_run))
         .routes(routes!(run_log))
         .routes(routes!(issue_runs))
 }
@@ -57,21 +64,25 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .is_some_and(|e| e.is_unique_violation())
 }
 
-/// What a claim found to run: the issue, locked, the status it is in, and the agent.
+/// What a claim found to run: the issue, locked, the status it is in, and the agent. A run
+/// that lost its attempt and waits for its next one is `run_id`.
 struct Claimable {
     id: String,
     from: String,
     agent: String,
+    run_id: Option<Uuid>,
 }
 
 /// Selects what the runner can claim and locks its issue row: the lowest-numbered issue no
 /// other claim has locked that is in Start, when the runner can run the agent In Progress
 /// dispatches, or whose dispatch waits in the status it entered, names an agent the runner
 /// can run, and is not behind a run of the issue that is still running (one run works on an
-/// issue at a time; `finish_run` wakes the runners when that run ends). The two kinds are
-/// ordered together, so started issues do not hold back a dispatch on an older one. An issue
-/// in a status the workflow locks to agents or runners is never claimed, even with a dispatch
-/// waiting there from an older workflow.
+/// issue at a time; `finish_run` wakes the runners when that run ends), or whose running run
+/// for the status it is in has no running attempt and an agent the runner can run: its
+/// attempt was lost (`settle_run`). The three kinds are ordered together, so started issues
+/// do not hold back a dispatch on an older one. An issue in a status the workflow locks to
+/// agents or runners is never claimed, even with a dispatch waiting there from an older
+/// workflow.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -107,12 +118,17 @@ async fn select_claimable(
     // A waiting dispatch is always for the status its issue is in: `queue_dispatch`.
     sqlx::query_as!(
         Claimable,
-        r#"SELECT i.id, i.status AS "from",
-                  CASE WHEN i.status = $4 THEN $5 ELSE d.agent END AS "agent!"
+        r#"SELECT i.id, i.status AS "from", r.id AS "run_id?",
+                  CASE WHEN r.id IS NOT NULL THEN r.agent
+                       WHEN i.status = $4 THEN $5 ELSE d.agent END AS "agent!"
            FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL
+           LEFT JOIN run r ON r.issue_id = i.id AND r.outcome = 'running' AND r.status = i.status
+                AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
+                                AND a.state = 'running')
            WHERE i.workspace_id = $1 AND ($3::text IS NULL OR i.id = $3)
              AND NOT i.status = ANY($6)
-             AND CASE WHEN i.status = $4 THEN $5::text IS NOT NULL
+             AND CASE WHEN r.id IS NOT NULL THEN r.agent = ANY($2)
+                      WHEN i.status = $4 THEN $5::text IS NOT NULL
                       ELSE d.agent = ANY($2)
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
                                            AND run.outcome = 'running')
@@ -132,6 +148,8 @@ async fn select_claimable(
 /// Claims one issue for the runner in one transaction: selects it, moves it from Start to
 /// In Progress as the runner if that is where it is, then creates the run, attempt 1 and the
 /// agent actor the run acts as, leases the attempt, and marks the issue's dispatch claimed.
+/// A run waiting for its next attempt gets that attempt instead, on the run's branch with the
+/// run's prompt, and no dispatch is touched.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
@@ -144,7 +162,13 @@ async fn try_claim(
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let claimable =
         select_claimable(&mut tx, actor.workspace_id, &workflow, runner, target).await?;
-    let Some(Claimable { id, from, agent }) = claimable else {
+    let Some(Claimable {
+        id,
+        from,
+        agent,
+        run_id: waiting,
+    }) = claimable
+    else {
         tx.rollback().await?;
         // A runner woken for an issue that a run is working on, with no dispatch waiting
         // behind that run, lost the race for it. Otherwise there is nothing here for this
@@ -169,51 +193,114 @@ async fn try_claim(
             None => Ok(None),
         };
     };
+    let merged_branches = merged_branches(&mut tx, &id).await?;
+    let agent_token = new_token();
+    let (run_id, attempt, branch, prompt, issue) = match waiting {
+        // The lost attempt's agent held the old token: it can do nothing now.
+        Some(run_id) => {
+            let run = sqlx::query!(
+                r#"SELECT branch, prompt,
+                          (SELECT max(attempt) FROM attempt WHERE run_id = $1) AS "last!"
+                   FROM run WHERE id = $1"#,
+                run_id,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            set_agent_token(&mut tx, run_id, &agent_token).await?;
+            let issue = issue_row(&mut tx, &id).await?;
+            (run_id, run.last + 1, run.branch, run.prompt, issue)
+        }
+        None => {
+            let (run_id, branch, prompt, issue) = new_run(
+                &mut tx,
+                actor,
+                runner,
+                &workflow,
+                (id.clone(), from, agent.clone()),
+                &merged_branches,
+                &agent_token,
+            )
+            .await?;
+            (run_id, 1, branch, prompt, issue)
+        }
+    };
+    let leased = sqlx::query!(
+        "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
+         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
+         RETURNING lease_expires_at, session_id",
+        run_id,
+        id,
+        runner.id,
+        attempt,
+        state.lease.as_secs_f64(),
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| {
+        if is_unique_violation(&error) {
+            ApiError::ClaimTaken(format!("{id} was claimed by another runner"))
+        } else {
+            error.into()
+        }
+    })?;
+    let repository = repository(&mut tx, actor.workspace_id).await?;
+    tx.commit().await?;
+    Ok(Some(Claim {
+        run_id,
+        attempt,
+        agent,
+        issue,
+        repository,
+        branch,
+        merged_branches,
+        lease_expires_at: leased.lease_expires_at,
+        prompt,
+        agent_token,
+        session_id: leased.session_id,
+        next_line: 1,
+    }))
+}
+
+/// A new run for what `select_claimable` found, `(issue, status it is in, agent)`, and the
+/// agent actor it acts as, with `agent_token`. Returns the run, its branch, the prompt it
+/// stores for all its attempts, and the issue in the status the run is for.
+async fn new_run(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    runner: &RunnerRow,
+    workflow: &Workflow,
+    (id, from, agent): (String, String, String),
+    merged_branches: &[String],
+    agent_token: &str,
+) -> Result<(Uuid, String, String, Issue), ApiError> {
     // The status the run is for, the issue in that status, and the prompt of the workflow
     // version that named the agent.
     let (status, issue, prompt) = if from == START {
-        let gates = check_move(&mut tx, &workflow, actor, &id, START, IN_PROGRESS).await?;
+        let gates = check_move(&mut *tx, workflow, actor, &id, START, IN_PROGRESS).await?;
         let moved = record_transition(
-            &mut tx,
+            &mut *tx,
             actor,
             &id,
             from,
             IN_PROGRESS,
             None,
-            &workflow,
+            workflow,
             &gates,
         )
         .await?;
         let prompt = workflow.prompt_for(IN_PROGRESS);
         (IN_PROGRESS.to_string(), moved.issue, prompt)
     } else {
-        let issue = sqlx::query_as!(
-            IssueRow,
-            "SELECT id, title, body, status, created_at, updated_at FROM issue WHERE id = $1",
-            id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        let queued_under = dispatch_workflow(&mut tx, actor.workspace_id, &id).await?;
+        let issue = issue_row(&mut *tx, &id).await?;
+        let queued_under = dispatch_workflow(&mut *tx, actor.workspace_id, &id).await?;
         let prompt = queued_under.prompt_for(&from);
-        (from, issue.into(), prompt)
+        (from, issue, prompt)
     };
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
     // a retry, because nothing has merged on the branch it was given. A run dispatched in a
     // later status of the same lifecycle, such as Agent Review, gets the same branch for
     // the same reason, and the runner that has its worktree reuses it.
-    // ponytail: "merged" is judged by head branch name alone, so a pull request merged into
-    // a non-default base, or from a fork with the same branch name, also finishes the
-    // branch. Upgrade path: record the base ref and head repository on `pull_request`.
-    let merged_branches = sqlx::query_scalar!(
-        "SELECT branch FROM pull_request WHERE issue_id = $1
-         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')
-         ORDER BY branch",
-        id,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
     let base = branch_name(&id);
     let mut branch = base.clone();
     let mut lifecycle = 1;
@@ -222,13 +309,14 @@ async fn try_claim(
         branch = format!("{base}-{lifecycle}");
     }
     let run_id = sqlx::query_scalar!(
-        "INSERT INTO run (workspace_id, issue_id, status, agent, branch)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         actor.workspace_id,
         id,
         status,
         agent,
         branch,
+        prompt,
     )
     .fetch_one(&mut *tx)
     .await
@@ -248,51 +336,73 @@ async fn try_claim(
     )
     .execute(&mut *tx)
     .await?;
-    let agent_token = new_token();
     sqlx::query!(
         "INSERT INTO actor (workspace_id, name, role, token_hash, run_id, kind, owner_id)
          VALUES ($1, $2, 'agent', $3, $4, $5,
                  (SELECT registered_by FROM runner WHERE id = $6))",
         actor.workspace_id,
         agent_display_name(&agent),
-        hash_token(&agent_token),
+        hash_token(agent_token),
         run_id,
         agent,
         runner.id,
     )
     .execute(&mut *tx)
     .await?;
-    let lease_expires_at = sqlx::query_scalar!(
-        "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
-         VALUES ($1, $2, $3, 1, now() + make_interval(secs => $4))
-         RETURNING lease_expires_at",
-        run_id,
+    Ok((run_id, branch, prompt, issue))
+}
+
+/// The issue's branches with a merged pull request and no open one, sorted.
+// ponytail: "merged" is judged by head branch name alone, so a pull request merged into a
+// non-default base, or from a fork with the same branch name, also finishes the branch.
+// Upgrade path: record the base ref and head repository on `pull_request`.
+async fn merged_branches(conn: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        "SELECT branch FROM pull_request WHERE issue_id = $1
+         GROUP BY branch HAVING bool_or(state = 'merged') AND NOT bool_or(state = 'open')
+         ORDER BY branch",
         id,
-        runner.id,
-        state.lease.as_secs_f64(),
     )
-    .fetch_one(&mut *tx)
+    .fetch_all(&mut *conn)
+    .await
+}
+
+async fn issue_row(conn: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Issue> {
+    let row = sqlx::query_as!(
+        IssueRow,
+        "SELECT id, title, body, status, created_at, updated_at FROM issue WHERE id = $1",
+        id,
+    )
+    .fetch_one(&mut *conn)
     .await?;
-    let repository = sqlx::query_as!(
+    Ok(row.into())
+}
+
+async fn repository(conn: &mut sqlx::PgConnection, workspace_id: Uuid) -> sqlx::Result<Repository> {
+    sqlx::query_as!(
         Repository,
         "SELECT owner, name, default_branch FROM repository WHERE workspace_id = $1",
-        actor.workspace_id,
+        workspace_id,
     )
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Some(Claim {
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// Gives the run's agent actor a new token. Every claim and resume of the run does, so only
+/// the agent of the attempt that is running now can act as the run.
+async fn set_agent_token(
+    conn: &mut sqlx::PgConnection,
+    run_id: Uuid,
+    token: &str,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE actor SET token_hash = $2 WHERE run_id = $1",
         run_id,
-        attempt: 1,
-        agent,
-        issue,
-        repository,
-        branch,
-        merged_branches,
-        lease_expires_at,
-        prompt,
-        agent_token,
-    }))
+        hash_token(token),
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
@@ -492,7 +602,8 @@ async fn ensure_run(pool: &PgPool, actor: &Actor, id: Uuid) -> Result<(), ApiErr
     }
 }
 
-/// Record the outcome of the runner's running attempt and of its run.
+/// Record the outcome of the runner's running attempt and of its run. A lost attempt keeps
+/// the run running for its next attempt while the run has one left (`settle_run`).
 #[utoipa::path(
     post,
     path = "/api/runs/{id}/finish",
@@ -527,6 +638,11 @@ async fn finish_run(
         }
         RunOutcome::Failed if reason.is_none() => {
             return Err(ApiError::Invalid("a failed attempt needs a reason".into()));
+        }
+        RunOutcome::Succeeded if request.lost => {
+            return Err(ApiError::Invalid(
+                "only a failed attempt can be lost".into(),
+            ));
         }
         _ => {}
     }
@@ -575,26 +691,143 @@ async fn finish_run(
     if updated.is_none() {
         return Err(stale(id, request.attempt));
     }
-    sqlx::query!(
-        "UPDATE run SET outcome = $2, finished_at = now() WHERE id = $1",
-        id,
-        request.outcome.as_str(),
-    )
-    .execute(&mut *tx)
-    .await?;
-    queue_redispatch(&mut tx, actor.workspace_id, id).await?;
+    let lost = request.lost.then_some(request.attempt);
+    settle_run(&mut tx, actor.workspace_id, id, request.outcome, lost).await?;
     tx.commit().await?;
     let run = load_runs(&state.pool, &actor, None, Some(id))
         .await?
         .into_iter()
         .next()
         .ok_or(ApiError::RunNotFound(id))?;
-    // A dispatch that waited for this run to end, or the one its end queued, can be claimed
-    // now: wake the runners. The claim finds out whether there is one.
+    // A dispatch that waited for this run to end, the one its end queued, or the run's next
+    // attempt can be claimed now: wake the runners. The claim finds out whether there is one.
     let _ = state
         .starts
         .send((actor.workspace_id, run.issue_id.clone()));
     Ok(Json(run))
+}
+
+/// Resume the runner's running attempt after the runner restarted: renews its lease, gives
+/// the run's agent a new token, and answers the attempt's claim again, with the same agent
+/// session and the number of the attempt's next log line. No attempt is created. Runner
+/// token; 409 `stale_attempt` unless the attempt is the runner's running attempt and its
+/// lease has not lapsed.
+#[utoipa::path(
+    post,
+    path = "/api/runs/{id}/resume",
+    params(("id" = Uuid, Path, description = "Run id")),
+    request_body = ResumeRun,
+    responses(
+        (status = 200, body = Claim),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "The attempt is not the runner's running attempt."),
+    )
+)]
+async fn resume_run(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ResumeRun>,
+) -> Result<Json<Claim>, ApiError> {
+    let runner = runner_of(&state, &actor).await?;
+    ensure_run(&state.pool, &actor, id).await?;
+    let mut tx = state.pool.begin().await?;
+    let Some(held) = sqlx::query!(
+        "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $4)
+         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
+             AND lease_expires_at > now()
+         RETURNING issue_id, lease_expires_at, session_id",
+        id,
+        request.attempt,
+        runner.id,
+        state.lease.as_secs_f64(),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Err(stale(id, request.attempt));
+    };
+    let run = sqlx::query!("SELECT agent, branch, prompt FROM run WHERE id = $1", id)
+        .fetch_one(&mut *tx)
+        .await?;
+    // `append_log` skips lines numbered at or below the stored maximum.
+    let next_line = sqlx::query_scalar!(
+        r#"SELECT coalesce(max(line_no), 0) + 1 AS "next!" FROM run_log
+           WHERE run_id = $1 AND attempt = $2"#,
+        id,
+        request.attempt,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let agent_token = new_token();
+    set_agent_token(&mut tx, id, &agent_token).await?;
+    let issue = issue_row(&mut tx, &held.issue_id).await?;
+    let merged_branches = merged_branches(&mut tx, &held.issue_id).await?;
+    let repository = repository(&mut tx, actor.workspace_id).await?;
+    tx.commit().await?;
+    Ok(Json(Claim {
+        run_id: id,
+        attempt: request.attempt,
+        agent: run.agent,
+        issue,
+        repository,
+        branch: run.branch,
+        merged_branches,
+        lease_expires_at: held.lease_expires_at,
+        prompt: run.prompt,
+        agent_token,
+        session_id: held.session_id,
+        next_line,
+    }))
+}
+
+/// After an attempt of the run ended with `outcome`: ends the run with it and dispatches the
+/// issue again (`queue_redispatch`), or keeps the run running for its next attempt. A run is
+/// kept when the attempt was lost, `lost` is its number and it is not the run's
+/// `ATTEMPTS_PER_RUN`th, and the issue is still in the status the run is for, which the
+/// active workflow does not lock to agents or runners: a person can move it, which ends the
+/// run (`queue_dispatch`). A kept run has no running attempt, so `select_claimable` offers
+/// its next one; its agent actor gets a token nobody holds, so the lost attempt's agent can
+/// do nothing. The caller holds the workspace's lock, then the issue's, and has just ended
+/// the attempt. `finish_run` and `expire_lease` both decide here.
+async fn settle_run(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    run_id: Uuid,
+    outcome: RunOutcome,
+    lost: Option<i32>,
+) -> sqlx::Result<()> {
+    if lost.is_some_and(|attempt| attempt < ATTEMPTS_PER_RUN) {
+        let run = sqlx::query!(
+            "SELECT r.status, i.status AS issue_status FROM run r JOIN issue i ON i.id = r.issue_id
+             WHERE r.id = $1",
+            run_id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        // A workflow this server cannot read ends the run; `queue_redispatch` logs it.
+        let kept = run.status == run.issue_status
+            && active_workflow(tx, workspace_id)
+                .await
+                .is_ok_and(|(active, _)| {
+                    [Role::Agent, Role::Runner]
+                        .into_iter()
+                        .all(|role| active.check_unlocked(&run.status, role).is_ok())
+                });
+        if kept {
+            return set_agent_token(tx, run_id, &new_token()).await;
+        }
+    }
+    sqlx::query!(
+        "UPDATE run SET outcome = $2, finished_at = now() WHERE id = $1",
+        run_id,
+        outcome.as_str(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    queue_redispatch(tx, workspace_id, run_id).await
 }
 
 /// Dispatch again. The caller has just ended the run in this transaction, whatever the
@@ -646,11 +879,12 @@ async fn queue_redispatch(
     Ok(())
 }
 
-/// Fails every running attempt whose lease has lapsed, and its run, and dispatches the issue
-/// again if it has not moved (`queue_redispatch`). Returns how many attempts expired.
-// ponytail: nothing wakes a long-polling runner for the dispatch queued here, so it is
-// claimed at that runner's next poll, at most `MAX_WAIT_SECONDS` later. Upgrade path: give
-// the sweep `AppState::starts`.
+/// Fails every running attempt whose lease has lapsed as lost, and settles its run
+/// (`settle_run`): the run gets its next attempt, or fails and the issue is dispatched again
+/// if it has not moved. Returns how many attempts expired.
+// ponytail: nothing wakes a long-polling runner for the attempt or dispatch this makes
+// claimable, so it is claimed at that runner's next poll, at most `MAX_WAIT_SECONDS` later.
+// Upgrade path: give the sweep `AppState::starts`.
 pub async fn expire_leases(pool: &PgPool) -> sqlx::Result<u64> {
     let lapsed = sqlx::query!(
         "SELECT a.run_id, a.issue_id, r.workspace_id FROM attempt a JOIN run r ON r.id = a.run_id
@@ -692,28 +926,29 @@ async fn expire_lease(
     sqlx::query!("SELECT FROM issue WHERE id = $1 FOR UPDATE", issue_id)
         .fetch_one(&mut *tx)
         .await?;
-    let failed = sqlx::query!(
+    let failed = sqlx::query_scalar!(
         "UPDATE attempt SET state = 'failed', finished_at = now(),
                 failure_reason = 'lease expired: runner ' || runner.name
                                  || ' stopped sending heartbeats'
          FROM runner
          WHERE runner.id = attempt.runner_id AND attempt.run_id = $1
-           AND attempt.state = 'running' AND attempt.lease_expires_at < now()",
+           AND attempt.state = 'running' AND attempt.lease_expires_at < now()
+         RETURNING attempt.attempt",
         run_id,
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if failed.rows_affected() == 0 {
+    let Some(attempt) = failed else {
         return Ok(false);
-    }
-    sqlx::query!(
-        "UPDATE run SET outcome = 'failed', finished_at = now()
-         WHERE id = $1 AND outcome = 'running'",
+    };
+    settle_run(
+        &mut tx,
+        workspace_id,
         run_id,
+        RunOutcome::Failed,
+        Some(attempt),
     )
-    .execute(&mut *tx)
     .await?;
-    queue_redispatch(&mut tx, workspace_id, run_id).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -753,7 +988,8 @@ impl From<LogRow> for LogLine {
     }
 }
 
-/// Runs of the workspace, newest first, each with its latest attempt and log tail. Filter
+/// Runs of the workspace, newest first, each with its latest attempt, every attempt and its
+/// log tail. Filter
 /// by issue or by run id.
 async fn load_runs(
     pool: &PgPool,
@@ -781,6 +1017,30 @@ async fn load_runs(
     )
     .fetch_all(pool)
     .await?;
+    let run_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let mut attempts: HashMap<Uuid, Vec<AttemptInfo>> = HashMap::new();
+    for row in sqlx::query!(
+        "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state,
+                a.failure_reason, a.started_at, a.finished_at
+         FROM attempt a JOIN runner n ON n.id = a.runner_id
+         WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
+        &run_ids,
+    )
+    .fetch_all(pool)
+    .await?
+    {
+        attempts.entry(row.run_id).or_default().push(AttemptInfo {
+            attempt: row.attempt,
+            runner: RunnerRef {
+                id: row.runner_id,
+                name: row.runner_name,
+            },
+            state: parse_outcome(&row.state)?,
+            failure_reason: row.failure_reason,
+            started_at: row.started_at,
+            finished_at: row.finished_at,
+        });
+    }
     let mut runs = Vec::with_capacity(rows.len());
     for row in rows {
         let mut tail = sqlx::query_as!(
@@ -793,9 +1053,7 @@ async fn load_runs(
         .fetch_all(pool)
         .await?;
         tail.reverse();
-        let outcome = RunOutcome::parse(&row.outcome).ok_or_else(|| {
-            sqlx::Error::Decode(format!("unknown run outcome `{}`", row.outcome).into())
-        })?;
+        let outcome = parse_outcome(&row.outcome)?;
         runs.push(Run {
             id: row.id,
             issue_id: row.issue_id,
@@ -815,9 +1073,15 @@ async fn load_runs(
             input_tokens: row.input_tokens,
             output_tokens: row.output_tokens,
             log_tail: tail.into_iter().map(LogLine::from).collect(),
+            attempts: attempts.remove(&row.id).unwrap_or_default(),
         });
     }
     Ok(runs)
+}
+
+fn parse_outcome(value: &str) -> sqlx::Result<RunOutcome> {
+    RunOutcome::parse(value)
+        .ok_or_else(|| sqlx::Error::Decode(format!("unknown run outcome `{value}`").into()))
 }
 
 /// An issue's runs, newest first.

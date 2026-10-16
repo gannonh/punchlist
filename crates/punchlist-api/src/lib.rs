@@ -150,7 +150,8 @@ impl EventDetail {
     }
 }
 
-/// `POST /api/runners`, with a person's token. Registers a runner and creates its actor.
+/// `POST /api/runners`, with a person's token. Registers a runner and creates its actor, or
+/// re-adopts the runner this person registered under the same name, with a new token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RegisterRunner {
     /// A name people read, such as `sartre`.
@@ -268,8 +269,35 @@ pub struct Claim {
     /// The workflow's prompt for the status: `prompts/system.md`, then the status's own.
     pub prompt: String,
     /// The bearer token of the agent actor this run acts as, for the MCP server. Valid
-    /// while the run is running.
+    /// while the run is running, until the next claim or resume of the run replaces it.
     pub agent_token: String,
+    /// The attempt's agent session: `claude --session-id` on a fresh attempt, `--resume`
+    /// on a resumed one.
+    pub session_id: Uuid,
+    /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
+    /// stored line on a resumed one.
+    pub next_line: i64,
+}
+
+/// `GET /api/runners/{id}/leases`: a running attempt the runner holds whose lease has not
+/// lapsed. A runner that restarts resumes or fails each one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Lease {
+    pub run_id: Uuid,
+    pub attempt: i32,
+    pub agent: String,
+    pub issue_id: String,
+    pub branch: String,
+    /// Where the issue's worktree is cloned from.
+    pub repository: Repository,
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+/// `POST /api/runs/{id}/resume`: the attempt the runner still holds, to run again in the
+/// same agent session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ResumeRun {
+    pub attempt: i32,
 }
 
 /// An attempt a runner is working on.
@@ -352,6 +380,11 @@ pub struct FinishRun {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    /// The runner lost the attempt before its agent finished, such as when it stopped or
+    /// restarted. Only with `failed`. A lost attempt that is not the run's last allowed one
+    /// keeps the run running for another attempt.
+    #[serde(default)]
+    pub lost: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -390,6 +423,20 @@ pub struct Run {
     pub output_tokens: Option<i64>,
     /// The last 20 log lines, oldest first.
     pub log_tail: Vec<LogLine>,
+    /// Every attempt, oldest first.
+    #[serde(default)]
+    pub attempts: Vec<AttemptInfo>,
+}
+
+/// One attempt of a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AttemptInfo {
+    pub attempt: i32,
+    pub runner: RunnerRef,
+    pub state: RunOutcome,
+    pub failure_reason: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 /// `GET /api/runs/{id}/log`: every line, oldest first.

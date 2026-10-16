@@ -374,6 +374,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
                 duration_ms: 83_000,
                 input_tokens: Some(1000),
                 output_tokens: Some(250),
+                lost: false,
             },
         )
         .await

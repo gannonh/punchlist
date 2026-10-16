@@ -483,6 +483,7 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
         duration_ms: start.elapsed().as_millis().min(i64::MAX as u128) as i64,
         input_tokens: result.input_tokens,
         output_tokens: result.output_tokens,
+        lost: false,
     };
     finish_with_retry(
         &ctx.client,
@@ -631,6 +632,7 @@ mod tests {
             duration_ms: 1,
             input_tokens: None,
             output_tokens: None,
+            lost: false,
         }
     }
 

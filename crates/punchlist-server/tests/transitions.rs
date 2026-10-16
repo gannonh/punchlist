@@ -298,9 +298,11 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/pull-requests/unlinked",
             "/api/runners",
             "/api/runners/{id}/heartbeat",
+            "/api/runners/{id}/leases",
             "/api/runs/claim",
             "/api/runs/{id}/finish",
             "/api/runs/{id}/log",
+            "/api/runs/{id}/resume",
             "/api/workflow",
             "/api/workflow/schema.json"
         ]
