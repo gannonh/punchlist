@@ -11,6 +11,7 @@
 #   control-punchlist webhook RUN_ID EVENT PAYLOAD_FILE [DELIVERY_ID]  post a signed GitHub webhook delivery
 #   control-punchlist runner RUN_ID NAME [ARGS...]  start `pl runner start --name NAME`; wait until it registers
 #   control-punchlist runner-stop RUN_ID NAME       stop that runner
+#   control-punchlist runner-signal RUN_ID NAME SIG send SIG (KILL, STOP, CONT) to that runner's process group
 #   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
 set -euo pipefail
 
@@ -260,11 +261,27 @@ cmd_runner_stop() {
   echo "stopped runner $name" >&2
 }
 
+# KILL is the crash a restart must survive: no outcome is reported and the agent, in its own
+# process group, is left to die on its closed pipes. STOP freezes the runner as a stale writer.
+cmd_runner_signal() {
+  load "${1:-}"; local name="${2:-}" sig="${3:-}"
+  [[ "$sig" =~ ^(KILL|STOP|CONT)$ ]] || die "usage: runner-signal RUN_ID NAME KILL|STOP|CONT"
+  local pidfile="$RUN_DIR/runner-$name.pgid"
+  [ -f "$pidfile" ] || die "no runner $name in run $RUN_ID"
+  local pgid; pgid="$(cat "$pidfile")"
+  kill "-$sig" -- "-$pgid"
+  if [ "$sig" = KILL ]; then
+    for _ in $(seq 1 20); do kill -0 -- "-$pgid" 2>/dev/null || break; sleep 0.25; done
+    rm -f "$pidfile"
+  fi
+  echo "sent SIG$sig to runner $name (pgid $pgid)" >&2
+}
+
 cmd_down() {
   load "${1:-}"
   local file
   for file in "$RUN_DIR"/runner-*.pgid; do
-    [ -f "$file" ] && stop_group "$(cat "$file")"
+    [ -f "$file" ] && { kill -CONT -- "-$(cat "$file")" 2>/dev/null || true; stop_group "$(cat "$file")"; }
   done
   local pgid; pgid="$(cat "$RUN_DIR/server.pgid" 2>/dev/null || true)"
   if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
@@ -289,6 +306,7 @@ case "${1:-}" in
   webhook) shift; cmd_webhook "$@" ;;
   runner) shift; cmd_runner "$@" ;;
   runner-stop) shift; cmd_runner_stop "$@" ;;
+  runner-signal) shift; cmd_runner_signal "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

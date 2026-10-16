@@ -1498,6 +1498,7 @@ async fn close_issue_on_pull_request(
         name: name.to_string(),
         role: Role::Github,
         kind: None,
+        token_hash: None,
     };
     let checked = check_gates(
         tx,

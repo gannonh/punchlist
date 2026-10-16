@@ -105,8 +105,15 @@ pub fn write_mcp_config(
 }
 
 /// The arguments after the executable. The prompt goes on stdin. `mcp_config` is a file
-/// that attaches Punchlist's MCP server, and no other.
-pub fn claude_args(model: Option<&str>, mcp_config: Option<&Path>) -> Vec<String> {
+/// that attaches Punchlist's MCP server, and no other. A fresh attempt starts the session
+/// `session_id`; a resumed one (`resume`) carries it on, so the agent keeps what it did
+/// before its runner restarted.
+pub fn claude_args(
+    model: Option<&str>,
+    mcp_config: Option<&Path>,
+    session_id: uuid::Uuid,
+    resume: bool,
+) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -126,6 +133,8 @@ pub fn claude_args(model: Option<&str>, mcp_config: Option<&Path>) -> Vec<String
         args.push(config.display().to_string());
         args.push("--strict-mcp-config".into());
     }
+    args.push(if resume { "--resume" } else { "--session-id" }.into());
+    args.push(session_id.to_string());
     args
 }
 
@@ -270,6 +279,7 @@ pub async fn run_claude(
     args: &[String],
     worktree: &Path,
     prompt: &str,
+    marker: &str,
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
@@ -286,6 +296,7 @@ pub async fn run_claude(
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
+        .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -361,6 +372,50 @@ pub async fn run_claude(
     }
 }
 
+/// The environment variable every agent process, and so every command it starts, carries:
+/// the id of the runner that started it. A runner killed outright leaves its agents running,
+/// since each leads its own process group; the runner that restarts finds them by it
+/// (`kill_runner`).
+pub(crate) const RUNNER_MARKER: &str = "PUNCHLIST_RUNNER";
+
+/// Kills every process of this user whose environment carries `runner_id`, and the process
+/// group each leads: the agents, and their commands, an earlier process of this runner
+/// started. Returns how many it found. Reads `/proc`, so it finds nothing off Linux.
+// ponytail: Linux only. Upgrade path: a pid file per agent under the worktree root, for
+// macOS runners.
+pub(crate) fn kill_runner(runner_id: &str) -> usize {
+    let wanted = format!("{RUNNER_MARKER}={runner_id}").into_bytes();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut found = 0;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environ
+            .split(|&b| b == 0)
+            .any(|var| var == wanted.as_slice())
+        {
+            found += 1;
+            kill_group(Some(pid));
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    found
+}
+
 /// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
 /// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
 pub(crate) fn kill_group(leader: Option<u32>) {
@@ -380,6 +435,28 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    #[test]
+    fn kill_runner_kills_only_the_processes_of_its_runner() {
+        let marker = uuid::Uuid::new_v4().to_string();
+        let spawn = |value: &str| {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .env(RUNNER_MARKER, value)
+                .spawn()
+                .unwrap()
+        };
+        let mut ours = spawn(&marker);
+        let mut other = spawn(&uuid::Uuid::new_v4().to_string());
+        assert_eq!(kill_runner(&marker), 1);
+        assert_eq!(ours.wait().unwrap().code(), None, "killed by a signal");
+        assert_eq!(
+            other.try_wait().unwrap(),
+            None,
+            "the other runner's process still runs"
+        );
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
     async fn records(input: &[u8], max: usize) -> Vec<String> {
         let mut reader = BufReader::with_capacity(8, input);
         let mut out = Vec::new();
@@ -432,9 +509,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         });
         let exit = run_claude(
             &command,
-            &claude_args(None, None),
+            &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
+            "test",
             tx,
             stop_rx,
         )
@@ -505,9 +583,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let (_stop_tx, stop_rx) = watch::channel(false);
         let exit = run_claude(
             &command,
-            &claude_args(Some("haiku"), None),
+            &claude_args(Some("haiku"), None, uuid::Uuid::nil(), false),
             temp.path(),
             prompt,
+            "test",
             tx,
             stop_rx,
         )
@@ -524,13 +603,20 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
 
     #[test]
     fn claude_command_line() {
+        let session = uuid::Uuid::from_u128(7);
         assert_eq!(
-            claude_args(Some("haiku"), Some(Path::new("/w/mcp/r.json"))).join(" "),
-            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --model haiku --mcp-config /w/mcp/r.json --strict-mcp-config"
+            claude_args(
+                Some("haiku"),
+                Some(Path::new("/w/mcp/r.json")),
+                session,
+                false
+            )
+            .join(" "),
+            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --model haiku --mcp-config /w/mcp/r.json --strict-mcp-config --session-id 00000000-0000-0000-0000-000000000007"
         );
         assert_eq!(
-            claude_args(None, None).join(" "),
-            "-p --output-format stream-json --verbose --permission-mode bypassPermissions"
+            claude_args(None, None, session, true).join(" "),
+            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --resume 00000000-0000-0000-0000-000000000007"
         );
     }
 
@@ -670,9 +756,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let missing = temp.path().join("nope");
         let exit = run_claude(
             &missing,
-            &claude_args(None, None),
+            &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
+            "test",
             tx,
             stop_rx,
         )
@@ -693,9 +780,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let handle = tokio::spawn(async move {
             run_claude(
                 &command,
-                &claude_args(None, None),
+                &claude_args(None, None, uuid::Uuid::nil(), false),
                 temp.path(),
                 "p",
+                "test",
                 tx,
                 stop_rx,
             )
@@ -736,7 +824,16 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            run_claude(&command, &claude_args(None, None), &dir, "p", tx, stop_rx).await
+            run_claude(
+                &command,
+                &claude_args(None, None, uuid::Uuid::nil(), false),
+                &dir,
+                "p",
+                "test",
+                tx,
+                stop_rx,
+            )
+            .await
         });
         let mut pid = String::new();
         for _ in 0..40 {

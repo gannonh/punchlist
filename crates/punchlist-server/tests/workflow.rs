@@ -616,6 +616,76 @@ async fn a_merge_read_from_github_moves_the_issue_once(pool: PgPool) {
     assert_eq!(issue_status(&pool).await, "done");
 }
 
+/// A run whose attempt was lost waits for its next attempt. A move of the issue meanwhile
+/// fails it, so the issue does not wait behind a run no runner holds.
+#[sqlx::test]
+async fn a_move_while_a_run_waits_for_its_next_attempt_fails_the_run(pool: PgPool) {
+    let s = setup(&pool).await;
+    let (_, runner, claim) = claimed_by_runner(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    deliver(&s, "pull_request", "d-ready", READY).await;
+    let run_id = claim["run_id"].as_str().unwrap();
+    let (status, run) = call(
+        &s.app,
+        &runner,
+        "POST",
+        &format!("/api/runs/{run_id}/finish"),
+        Some(
+            json!({"attempt": 1, "outcome": "failed", "reason": "runner restarted",
+                    "lost": true, "duration_ms": 1}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "running");
+
+    let (status, agent) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/actors",
+        Some(json!({"kind": "claude-code"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{agent}");
+    let (status, body) = request_agent_review(&s, agent["token"].as_str().unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, runs) = call(
+        &s.app,
+        &s.person.token,
+        "GET",
+        "/api/issues/PL-1/runs",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(runs[0]["outcome"], "failed");
+    assert!(runs[0]["finished_at"].is_string());
+    assert_eq!(runs[0]["failure_reason"], "runner restarted");
+    // Agent Review's dispatch is not behind it: a Codex runner claims it.
+    let (status, codex) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "codex-box", "agents": ["codex"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, review) = call(
+        &s.app,
+        codex["token"].as_str().unwrap(),
+        "POST",
+        "/api/runs/claim",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["issue"]["status"], "agent_review");
+    assert_ne!(review["run_id"], claim["run_id"]);
+}
+
 #[sqlx::test]
 async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     let s = setup(&pool).await;

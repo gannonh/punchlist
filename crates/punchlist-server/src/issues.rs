@@ -590,7 +590,10 @@ pub(crate) async fn record_transition(
 
 /// Dispatch on entry. The issue has left the status a dispatch still waiting was for, so
 /// that one goes; `to` gets its own, for this transition, when it has a dispatch rule and
-/// the workflow does not lock agents or runners out of it. True when one was queued.
+/// the workflow does not lock agents or runners out of it. True when one was queued. A run
+/// waiting for its next attempt (`settle_run`) was for the status the issue left, so it
+/// fails, its last attempt's reason saying why; else the issue would wait behind a running
+/// run that no runner holds.
 async fn queue_dispatch(
     tx: &mut sqlx::PgConnection,
     workflow: &Workflow,
@@ -600,6 +603,15 @@ async fn queue_dispatch(
 ) -> sqlx::Result<bool> {
     sqlx::query!(
         "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE run SET outcome = 'failed', finished_at = now()
+         WHERE issue_id = $1 AND outcome = 'running'
+           AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = run.id
+                           AND a.state = 'running')",
         id
     )
     .execute(&mut *tx)

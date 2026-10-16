@@ -28,7 +28,9 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
-use crate::agent::{AgentExit, AgentResult, MAX_RECORD_BYTES, kill_group, read_record};
+use crate::agent::{
+    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, kill_group, read_record,
+};
 
 const INITIALIZE_ID: u64 = 1;
 const THREAD_START_ID: u64 = 2;
@@ -413,12 +415,14 @@ impl Session {
 /// messages go to `lines` as they arrive, without the streaming deltas; its stderr lines go
 /// there prefixed with `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
 /// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_codex(
     codex_command: &Path,
     home: &Path,
     thread_params: Value,
     worktree: &Path,
     prompt: &str,
+    marker: &str,
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
@@ -436,6 +440,7 @@ pub(crate) async fn run_codex(
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
         .env_remove("PUNCHLIST_CONFIG")
+        .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -543,6 +548,7 @@ done"#
             thread_params(Some("gpt-6-luna"), "low", mcp, temp.path()),
             temp.path(),
             "Review the pull request.",
+            "test",
             tx,
             stop_rx,
         )
@@ -847,7 +853,7 @@ done"#;
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let run = tokio::spawn(async move {
-            run_codex(&command, &dir, json!({}), &dir, "p", tx, stop_rx).await
+            run_codex(&command, &dir, json!({}), &dir, "p", "test", tx, stop_rx).await
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop_tx.send(true).unwrap();

@@ -19,6 +19,8 @@ pub struct Actor {
     pub role: Role,
     /// The agent key, such as `codex`. Only agents have one.
     pub kind: Option<String>,
+    /// The hash of the token the request came with; none for an actor acting without one.
+    pub token_hash: Option<String>,
 }
 
 impl From<&Actor> for punchlist_api::Actor {
@@ -72,13 +74,14 @@ impl FromRequestParts<AppState> for Actor {
             .and_then(|id| percent_decode_str(id).decode_utf8().ok())
             .filter(|id| !id.is_empty());
         let issue_id = issue_id.as_deref();
+        let token_hash = hash_token(token);
         let row = sqlx::query!(
             r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
                       r.issue_id AS "issue_id?", r.outcome AS "outcome?",
                       (SELECT workspace_id FROM issue WHERE id = $2) AS "issue_workspace_id?"
                FROM actor a LEFT JOIN run r ON r.id = a.run_id
                WHERE a.token_hash = $1"#,
-            hash_token(token),
+            token_hash,
             issue_id,
         )
         .fetch_optional(&state.pool)
@@ -130,6 +133,7 @@ impl FromRequestParts<AppState> for Actor {
             role,
             name: row.name,
             kind: row.kind,
+            token_hash: Some(token_hash),
         })
     }
 }

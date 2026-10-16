@@ -2,7 +2,8 @@
 //! in Start and issues waiting in a status with a dispatch rule, prepares a worktree on the
 //! issue's branch, runs the agent named by the dispatch rule (Claude Code or Codex), streams
 //! the agent's output to the server and reports the outcome. It keeps no
-//! database: the server holds runs, attempts and leases.
+//! database: the server holds runs, attempts and leases. A runner started again under the
+//! same name gets the same runner back and carries on the attempts it still holds.
 
 use std::path::PathBuf;
 use std::time::Duration;

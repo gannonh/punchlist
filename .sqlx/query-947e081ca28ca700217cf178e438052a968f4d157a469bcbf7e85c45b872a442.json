@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE run SET prompt = ''",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "947e081ca28ca700217cf178e438052a968f4d157a469bcbf7e85c45b872a442"
+}

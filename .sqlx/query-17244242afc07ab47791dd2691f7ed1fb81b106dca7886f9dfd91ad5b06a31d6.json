@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(max(line_no), 0) + 1 AS \"next!\" FROM run_log\n           WHERE run_id = $1 AND attempt = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "17244242afc07ab47791dd2691f7ed1fb81b106dca7886f9dfd91ad5b06a31d6"
+}

@@ -168,6 +168,8 @@ pub struct RunnerStart {
 pub enum RunCommand {
     /// Print every log line of a run.
     Log { run_id: String },
+    /// List an issue's runs, newest first, each with its attempts.
+    List { issue: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +329,14 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Mcp(_) => unreachable!("handled above"),
+        Command::Run(RunCommand::List { issue }) => {
+            write!(
+                out,
+                "{}",
+                render_run_list(&client.issue_runs(&issue).await?)
+            )?;
+            Ok(())
+        }
         Command::Run(RunCommand::Log { run_id }) => {
             let log = client.run_log(&run_id).await?;
             for line in &log.lines {
@@ -590,30 +600,60 @@ fn truncate_line(line: &str) -> String {
     }
 }
 
+/// A run and its latest attempt on one line, indented two spaces.
+fn run_line(run: &Run) -> String {
+    let mut text = format!(
+        "  {}  {}  runner {}  started {}  duration {}  {}",
+        run.id,
+        run.agent_name,
+        run.runner.name,
+        run.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        format_duration(run.duration_ms),
+        run.outcome.as_str(),
+    );
+    if let (Some(input), Some(output)) = (run.input_tokens, run.output_tokens) {
+        text.push_str(&format!("  tokens {input} in / {output} out"));
+    }
+    if run.outcome == RunOutcome::Failed
+        && let Some(reason) = &run.failure_reason
+    {
+        text.push_str(&format!("  ({reason})"));
+    }
+    text.push('\n');
+    text
+}
+
+/// `pl run list`: each run, and under it each attempt with its runner, outcome and reason.
+fn render_run_list(runs: &[Run]) -> String {
+    let mut text = String::from("Runs\n");
+    if runs.is_empty() {
+        text.push_str("  No runs yet.\n");
+    }
+    for run in runs {
+        text.push_str(&run_line(run));
+        for attempt in &run.attempts {
+            text.push_str(&format!(
+                "    attempt {}  runner {}  {}",
+                attempt.attempt,
+                attempt.runner.name,
+                attempt.state.as_str()
+            ));
+            if let Some(reason) = &attempt.failure_reason {
+                text.push_str(&format!("  ({reason})"));
+            }
+            text.push('\n');
+        }
+    }
+    text
+}
+
 fn render_runs(runs: &[Run]) -> String {
     let mut text = String::from("\nRuns\n");
     if runs.is_empty() {
         text.push_str("  No runs yet.\n");
     }
     for run in runs {
-        text.push_str(&format!(
-            "  {}  {}  runner {}  started {}  duration {}  {}",
-            run.id,
-            run.agent_name,
-            run.runner.name,
-            run.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
-            format_duration(run.duration_ms),
-            run.outcome.as_str(),
-        ));
-        if let (Some(input), Some(output)) = (run.input_tokens, run.output_tokens) {
-            text.push_str(&format!("  tokens {input} in / {output} out"));
-        }
-        if run.outcome == RunOutcome::Failed
-            && let Some(reason) = &run.failure_reason
-        {
-            text.push_str(&format!("  ({reason})"));
-        }
-        text.push('\n');
+        text.push_str(&run_line(run));
         for line in &run.log_tail {
             text.push_str(&format!("    {}\n", truncate_line(&line.line)));
         }
@@ -1194,6 +1234,52 @@ mod tests {
         assert_eq!(format_age(60), "1m");
         assert_eq!(format_age(3599), "59m");
         assert_eq!(format_age(7200), "2h");
+    }
+
+    #[test]
+    fn run_list_shows_each_attempt_under_its_run() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let runner = |name: &str| punchlist_api::RunnerRef {
+            id: Default::default(),
+            name: name.into(),
+        };
+        let attempt = |n, name, state, reason: Option<&str>| punchlist_api::AttemptInfo {
+            attempt: n,
+            runner: runner(name),
+            state,
+            failure_reason: reason.map(String::from),
+            started_at: at("2026-10-16T10:00:00Z"),
+            finished_at: None,
+        };
+        let run = Run {
+            id: Default::default(),
+            issue_id: "PL-1".into(),
+            agent: "claude-code".into(),
+            agent_name: "Claude Code".into(),
+            branch: "feature/pl-1".into(),
+            outcome: RunOutcome::Running,
+            started_at: at("2026-10-16T10:00:00Z"),
+            finished_at: None,
+            attempt: 2,
+            runner: runner("sartre"),
+            failure_reason: None,
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            log_tail: vec![],
+            attempts: vec![
+                attempt(1, "sartre", RunOutcome::Failed, Some("runner restarted")),
+                attempt(2, "sartre", RunOutcome::Running, None),
+            ],
+        };
+        assert_eq!(
+            render_run_list(&[run]),
+            "Runs\n\
+             \x20 00000000-0000-0000-0000-000000000000  Claude Code  runner sartre  started 2026-10-16 10:00:00 UTC  duration —  running\n\
+             \x20   attempt 1  runner sartre  failed  (runner restarted)\n\
+             \x20   attempt 2  runner sartre  running\n"
+        );
+        assert_eq!(render_run_list(&[]), "Runs\n  No runs yet.\n");
     }
 
     #[test]

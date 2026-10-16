@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO actor (workspace_id, name, role, token_hash)\n         VALUES ($1, $2, 'runner', $3) RETURNING id",
+  "query": "INSERT INTO actor (workspace_id, name, role, token_hash)\n             VALUES ($1, $2, 'runner', $3) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "dbf474c6de1ef794ef88443be43555683b6af208e59cb02d5773f91dfddc165f"
+  "hash": "c80ddb57d25439ea164d9b37e705772e7d4e9e9a71c1edd2f4501c1c88455f30"
 }

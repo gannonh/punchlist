@@ -274,17 +274,18 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
         Some("lease expired: runner r1 stopped sending heartbeats")
     );
     assert!(attempt.finished_at.is_some());
+    // The run keeps going: its first attempt was lost, so it waits for its second.
     let outcome = sqlx::query_scalar!("SELECT outcome FROM run WHERE issue_id = 'PL-1'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(outcome, "failed");
+    assert_eq!(outcome, "running");
     let issue = sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-1'")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(issue, "in_progress");
-    // The issue has not moved, so it is dispatched again: once, however often the sweep runs.
+    // Once, however often the sweep runs.
     assert_eq!(expire_leases(&pool).await.unwrap(), 0);
     // The runner is told to stop the attempt it still lists as held.
     let (status, hb) = call(&app, &r1.token, "POST", &heartbeat_uri, Some(held)).await;
@@ -300,10 +301,11 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(dispatches, [(1, false), (2, true)]);
+    assert_eq!(dispatches, [(1, false)]);
     let (status, again) = claim(&app, &r1, 0).await;
     assert_eq!(status, StatusCode::OK);
-    assert_ne!(again["run_id"], claimed["run_id"]);
+    assert_eq!(again["run_id"], claimed["run_id"]);
+    assert_eq!(again["attempt"], 2);
 }
 
 #[sqlx::test]
@@ -311,11 +313,16 @@ async fn a_lease_that_expires_on_the_third_run_queues_no_fourth(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_millis(300)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Lease", &["todo", "start"]).await;
-    for _ in 0..3 {
-        assert_eq!(claim(&app, &r1, 0).await.0, StatusCode::OK);
+    // Each run gets two attempts.
+    let mut claimed = Vec::new();
+    for _ in 0..6 {
+        let (status, body) = claim(&app, &r1, 0).await;
+        assert_eq!(status, StatusCode::OK);
+        claimed.push(body["attempt"].as_i64().unwrap());
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(expire_leases(&pool).await.unwrap(), 1);
     }
+    assert_eq!(claimed, [1, 2, 1, 2, 1, 2]);
     let dispatches: Vec<(i32, bool)> = sqlx::query_as(
         "SELECT run_number, run_id IS NULL FROM dispatch WHERE issue_id = 'PL-1'
          ORDER BY run_number",
@@ -368,11 +375,12 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
         Some("lease expired: runner r1 stopped sending heartbeats")
     );
 
-    // The issue was dispatched again when the lease expired. This attempt the runner does
+    // The run got its next attempt when the lease expired. This attempt the runner does
     // hold, so it stays running past its first lease.
     let (status, claimed2) = claim(&app, &r1, 0).await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
-    let held = json!({"held": [{"run_id": claimed2["run_id"], "attempt": 1}]});
+    assert_eq!(claimed2["attempt"], 2);
+    let held = json!({"held": [{"run_id": claimed2["run_id"], "attempt": 2}]});
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_millis(600)).await;
         let (status, _) = call(&app, &r1.token, "POST", &heartbeat_uri, Some(held.clone())).await;
@@ -800,5 +808,395 @@ async fn a_claim_after_the_branchs_pull_request_merged_names_the_next_branch(poo
     assert_eq!(
         renamed["merged_branches"],
         json!(["feature/pl-1", "feature/pl-1-2"])
+    );
+}
+
+/// Lapses every running lease now, as time would.
+async fn lapse_leases(pool: &PgPool) {
+    sqlx::query(
+        "UPDATE attempt SET lease_expires_at = now() - interval '1 second' WHERE state = 'running'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn finish(app: &Router, runner: &Reg, run_id: &str, body: Value) -> (StatusCode, Value) {
+    call(
+        app,
+        &runner.token,
+        "POST",
+        &format!("/api/runs/{run_id}/finish"),
+        Some(body),
+    )
+    .await
+}
+
+fn lost(attempt: i64) -> Value {
+    json!({"attempt": attempt, "outcome": "failed", "reason": "runner restarted",
+           "lost": true, "duration_ms": 1})
+}
+
+#[sqlx::test]
+async fn a_lost_attempt_gets_a_second_attempt_on_the_same_run(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Lost", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    let run_id = first["run_id"].as_str().unwrap();
+    assert_eq!(first["next_line"], 1);
+
+    // `lost` is only for a failed attempt.
+    let (status, body) = finish(
+        &app,
+        &r1,
+        run_id,
+        json!({"attempt": 1, "outcome": "succeeded", "lost": true, "duration_ms": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["message"], "only a failed attempt can be lost");
+
+    let (status, run) = finish(&app, &r1, run_id, lost(1)).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "running");
+    // The lost attempt's agent can do nothing.
+    let agent = first["agent_token"].as_str().unwrap();
+    let (status, _) = call(&app, agent, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, second) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["run_id"], first["run_id"]);
+    assert_eq!(second["attempt"], 2);
+    assert_eq!(second["branch"], "feature/pl-1");
+    assert_eq!(second["prompt"], first["prompt"]);
+    assert_eq!(second["issue"]["status"], "in_progress");
+    assert_eq!(second["next_line"], 1);
+    assert_ne!(second["session_id"], first["session_id"]);
+    let stored = sqlx::query_scalar!("SELECT prompt FROM run WHERE id = $1::text::uuid", run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, first["prompt"].as_str().unwrap());
+    let agent = second["agent_token"].as_str().unwrap();
+    let (status, _) = call(&app, agent, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let dispatches = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM dispatch"#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dispatches, 1);
+
+    // The second lost attempt is the run's last: it fails, and the issue is dispatched again.
+    let (status, run) = finish(&app, &r1, run_id, lost(2)).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "failed");
+    let attempts: Vec<(i64, &str, &str, Option<&str>)> = run["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["attempt"].as_i64().unwrap(),
+                a["runner"]["name"].as_str().unwrap(),
+                a["state"].as_str().unwrap(),
+                a["failure_reason"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        attempts,
+        [
+            (1, "r1", "failed", Some("runner restarted")),
+            (2, "r1", "failed", Some("runner restarted"))
+        ]
+    );
+    let (status, third) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(third["run_id"], first["run_id"]);
+    assert_eq!(third["attempt"], 1);
+}
+
+#[sqlx::test]
+async fn a_lapsed_lease_gives_the_run_a_second_attempt_and_a_second_lapse_fails_it(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Lapse", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    lapse_leases(&pool).await;
+    assert_eq!(expire_leases(&pool).await.unwrap(), 1);
+    let outcome = sqlx::query_scalar!("SELECT outcome FROM run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "running");
+
+    let (_, second) = claim(&app, &r1, 0).await;
+    assert_eq!(second["run_id"], first["run_id"]);
+    assert_eq!(second["attempt"], 2);
+    lapse_leases(&pool).await;
+    assert_eq!(expire_leases(&pool).await.unwrap(), 1);
+    let outcome = sqlx::query_scalar!("SELECT outcome FROM run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outcome, "failed");
+    let dispatches: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT run_number, run_id IS NULL FROM dispatch WHERE issue_id = 'PL-1'
+         ORDER BY run_number",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(dispatches, [(1, false), (2, true)]);
+}
+
+#[sqlx::test]
+async fn a_stale_attempt_number_is_refused_and_writes_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Stale", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    let run_id = first["run_id"].as_str().unwrap().to_string();
+    finish(&app, &r1, &run_id, lost(1)).await;
+    let (_, second) = claim(&app, &r1, 0).await;
+    assert_eq!(second["attempt"], 2);
+    let log_uri = format!("/api/runs/{run_id}/log");
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &log_uri,
+        Some(json!({"attempt": 2, "first_line": 1, "lines": ["fresh"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let refused = |(status, body): (StatusCode, Value)| {
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (StatusCode::CONFLICT, Some("stale_attempt")),
+            "{body}"
+        );
+    };
+    refused(
+        call(
+            &app,
+            &r1.token,
+            "POST",
+            &log_uri,
+            Some(json!({"attempt": 1, "first_line": 2, "lines": ["stale"]})),
+        )
+        .await,
+    );
+    refused(
+        finish(
+            &app,
+            &r1,
+            &run_id,
+            json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1}),
+        )
+        .await,
+    );
+    refused(
+        call(
+            &app,
+            &r1.token,
+            "POST",
+            &format!("/api/runs/{run_id}/resume"),
+            Some(json!({"attempt": 1})),
+        )
+        .await,
+    );
+    // A heartbeat renews no lease for attempt 1, and says so.
+    let (status, hb) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runners/{}/heartbeat", r1.id),
+        Some(json!({"held": [{"run_id": run_id, "attempt": 1}]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hb["stale"], json!([{"run_id": run_id, "attempt": 1}]));
+
+    let lines: Vec<String> = sqlx::query_scalar(
+        "SELECT line FROM run_log WHERE run_id = $1::text::uuid AND attempt = 2 ORDER BY seq",
+    )
+    .bind(&run_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lines, ["fresh"]);
+    let states: Vec<(i32, String)> =
+        sqlx::query_as("SELECT attempt, state FROM attempt ORDER BY attempt")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states, [(1, "failed".into()), (2, "running".into())]);
+}
+
+#[sqlx::test]
+async fn a_runner_registered_again_by_name_keeps_its_id_and_the_old_token_stops(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let first = register(&app, &person.token, "sartre", &["claude-code"]).await;
+    let again = register(&app, &person.token, "sartre", &["claude-code", "codex"]).await;
+    assert_eq!(again.id, first.id);
+    assert_ne!(again.token, first.token);
+    let heartbeat = format!("/api/runners/{}/heartbeat", first.id);
+    let (status, _) = call(&app, &first.token, "POST", &heartbeat, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, hb) = call(&app, &again.token, "POST", &heartbeat, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hb["agents"], json!(["claude-code", "codex"]));
+    let other = register(&app, &person.token, "other", &["claude-code"]).await;
+    assert_ne!(other.id, first.id);
+    let runners: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT r.name, (SELECT count(*) FROM actor a WHERE a.id = r.actor_id)
+         FROM runner r ORDER BY r.registered_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(runners, [("sartre".into(), 1), ("other".into(), 1)]);
+}
+
+#[sqlx::test]
+async fn a_claim_waiting_when_its_runner_registers_again_gets_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let old = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let waiting = {
+        let app = app.clone();
+        tokio::spawn(async move { claim(&app, &old, 5).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let new = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Displaced", &["todo", "start"]).await;
+    let (status, body) = waiting.await.unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, claimed) = claim(&app, &new, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["attempt"], 1);
+}
+
+#[sqlx::test]
+async fn a_lost_attempt_of_a_run_with_no_stored_prompt_fails_the_run(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Old run", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    let run_id = first["run_id"].as_str().unwrap();
+    // As a run from before the migration that stored prompts.
+    sqlx::query!("UPDATE run SET prompt = ''")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, run) = finish(&app, &r1, run_id, lost(1)).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "failed");
+    let (_, next) = claim(&app, &r1, 0).await;
+    assert_ne!(next["run_id"], first["run_id"]);
+    assert_eq!(next["attempt"], 1);
+}
+
+#[sqlx::test]
+async fn a_restarted_runner_reads_its_leases_and_resumes_an_attempt(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Resume", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r1, 0).await;
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/log"),
+        Some(json!({"attempt": 1, "first_line": 1, "lines": ["a", "b", "c"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The runner restarts: the same name, a new token.
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let leases_uri = format!("/api/runners/{}/leases", r1.id);
+    let (status, leases) = call(&app, &r1.token, "GET", &leases_uri, None).await;
+    assert_eq!(status, StatusCode::OK, "{leases}");
+    let leases = leases.as_array().unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0]["run_id"], run_id);
+    assert_eq!(leases[0]["attempt"], 1);
+    assert_eq!(leases[0]["agent"], "claude-code");
+    assert_eq!(leases[0]["issue_id"], "PL-1");
+    assert_eq!(leases[0]["branch"], "feature/pl-1");
+    assert_eq!(leases[0]["repository"]["owner"], "gannonh");
+    assert_eq!(leases[0]["lease_expires_at"], claimed["lease_expires_at"]);
+    let (status, _) = call(&app, &r2.token, "GET", &leases_uri, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, resumed) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/resume"),
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["run_id"], run_id);
+    assert_eq!(resumed["attempt"], 1);
+    assert_eq!(resumed["session_id"], claimed["session_id"]);
+    assert_eq!(resumed["next_line"], 4);
+    assert_eq!(resumed["branch"], "feature/pl-1");
+    assert_eq!(resumed["prompt"], claimed["prompt"]);
+    assert_eq!(resumed["issue"]["id"], "PL-1");
+    assert_ne!(resumed["lease_expires_at"], claimed["lease_expires_at"]);
+    let old_agent = claimed["agent_token"].as_str().unwrap();
+    let (status, _) = call(&app, old_agent, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let new_agent = resumed["agent_token"].as_str().unwrap();
+    let (status, _) = call(&app, new_agent, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let attempts = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM attempt"#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+
+    // A lapsed lease is not listed and cannot be resumed.
+    lapse_leases(&pool).await;
+    let (_, leases) = call(&app, &r1.token, "GET", &leases_uri, None).await;
+    assert_eq!(leases, json!([]));
+    let (status, body) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/resume"),
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (StatusCode::CONFLICT, Some("stale_attempt"))
+    );
+}
+
+#[sqlx::test]
+async fn one_issue_has_at_most_one_running_attempt(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Once", &["todo", "start"]).await;
+    claim(&app, &r1, 0).await;
+    let error = sqlx::query(
+        "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
+         SELECT run_id, issue_id, runner_id, 2, now() + interval '1 minute' FROM attempt",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("attempt_one_running_per_issue")
     );
 }

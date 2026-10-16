@@ -110,6 +110,54 @@ impl Worktrees {
         .await
         .map_err(|e| format!("worktree task failed: {e}"))?
     }
+
+    /// The issue's worktree, when it exists and is checked out on `branch`: where a runner
+    /// that restarted resumes the attempt it held. It is not prepared again, since that
+    /// fetches, and a remote that is down would fail an attempt that needs nothing from it.
+    pub async fn existing(
+        &self,
+        repository: &Repository,
+        branch: &str,
+        issue_id: &str,
+    ) -> Option<PathBuf> {
+        let root = self.root.clone();
+        let repository = repository.clone();
+        let branch = branch.to_string();
+        let issue_id = issue_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let root = canonicalize(&root).ok()?;
+            let worktree = worktree_path(&root, &repository, &issue_id).ok()?;
+            if !worktree.join(".git").exists() {
+                return None;
+            }
+            let git = Git {
+                cancel: Cancel::default(),
+                timeout: Duration::from_secs(30),
+            };
+            let head = git
+                .run(
+                    Some(&worktree),
+                    &["rev-parse", "--abbrev-ref", "HEAD"],
+                    "git rev-parse",
+                )
+                .ok()?;
+            (head == branch).then_some(worktree)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+}
+
+/// `<root>/worktrees/<owner>/<name>/<issue>`, checked to be under `root`, which is
+/// canonical.
+fn worktree_path(root: &Path, repository: &Repository, issue_id: &str) -> Result<PathBuf, String> {
+    let owner = safe_segment(&repository.owner, "repository owner")?;
+    let name = safe_segment(&repository.name, "repository name")?;
+    let worktree =
+        (root.join("worktrees").join(owner).join(name)).join(sanitize_identifier(issue_id));
+    validate_workspace_path(&worktree, root).map_err(|e| e.to_string())?;
+    Ok(worktree)
 }
 
 fn safe_segment(value: &str, what: &str) -> Result<String, String> {
@@ -227,7 +275,6 @@ fn prepare_blocking(
 ) -> Result<PathBuf, String> {
     let owner = safe_segment(&repository.owner, "repository owner")?;
     let name = safe_segment(&repository.name, "repository name")?;
-    let issue_dir = sanitize_identifier(issue_id);
     std::fs::create_dir_all(root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
     let root = canonicalize(root).map_err(|e| e.to_string())?;
 
@@ -251,12 +298,7 @@ fn prepare_blocking(
         )?;
     }
 
-    let worktree = root
-        .join("worktrees")
-        .join(&owner)
-        .join(&name)
-        .join(&issue_dir);
-    validate_workspace_path(&worktree, &root).map_err(|e| e.to_string())?;
+    let worktree = worktree_path(&root, repository, issue_id)?;
     if worktree.exists() {
         let head = git.run(
             Some(&worktree),
@@ -344,7 +386,7 @@ fn prepare_blocking(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn git(dir: Option<&Path>, args: &[&str], context: &str) -> Result<String, String> {
@@ -398,7 +440,7 @@ mod tests {
     }
 
     /// A bare origin at `<base>/acme/widgets.git` with one commit on `main`.
-    fn make_origin(base: &Path) -> String {
+    pub(crate) fn make_origin(base: &Path) -> String {
         let bare = base.join("acme").join("widgets.git");
         std::fs::create_dir_all(&bare).unwrap();
         git(Some(&bare), &["init", "--bare", "-b", "main"], "init").unwrap();
@@ -427,7 +469,7 @@ mod tests {
         run(&seed, &["rev-parse", "HEAD"])
     }
 
-    fn repository() -> Repository {
+    pub(crate) fn repository() -> Repository {
         Repository {
             owner: "acme".into(),
             name: "widgets".into(),
@@ -606,6 +648,40 @@ mod tests {
             .unwrap();
         assert_eq!(run(&retry, &["rev-parse", "--abbrev-ref", "HEAD"]), next);
         assert_eq!(run(&retry, &["rev-parse", "HEAD"]), next_sha);
+    }
+
+    #[tokio::test]
+    async fn existing_finds_the_worktree_only_on_its_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        make_origin(&origin);
+        let worktrees = Worktrees::with_remote_base(
+            temp.path().join("root"),
+            origin.to_string_lossy().to_string(),
+        );
+        let branch = "feature/pl-1";
+        assert_eq!(
+            worktrees.existing(&repository(), branch, "PL-1").await,
+            None
+        );
+        let path = worktrees
+            .prepare(&repository(), branch, &[], "PL-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            worktrees.existing(&repository(), branch, "PL-1").await,
+            Some(path)
+        );
+        assert_eq!(
+            worktrees
+                .existing(&repository(), "feature/other", "PL-1")
+                .await,
+            None
+        );
+        assert_eq!(
+            worktrees.existing(&repository(), branch, "PL-2").await,
+            None
+        );
     }
 
     #[tokio::test]
