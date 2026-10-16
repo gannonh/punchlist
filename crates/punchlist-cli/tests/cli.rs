@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use punchlist_api::{AppendLog, FinishRun, RegisterRunner, RunOutcome};
 use punchlist_client::Client;
-use punchlist_server::{AppState, Bootstrap, bootstrap, router};
+use punchlist_server::{AppState, Bootstrap, ProofStore, bootstrap, router};
 use sqlx::PgPool;
 
 struct Pl {
@@ -35,12 +35,15 @@ impl Pl {
         )
         .await
         .unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(AppState::new(pool.clone()));
+        let app = router(AppState::new(pool.clone()).with_proof(ProofStore {
+            dir: dir.path().join("proof"),
+            max_bytes: 1024 * 1024,
+        }));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
         std::fs::write(
             &config,
@@ -102,6 +105,9 @@ async fn create_show_move_and_refuse(pool: PgPool) {
     Pull requests
       None linked.
 
+    Proof
+      None attached.
+
     Timeline
       No transitions yet.
 
@@ -131,6 +137,9 @@ async fn create_show_move_and_refuse(pool: PgPool) {
         Pull requests
           None linked.
 
+        Proof
+          None attached.
+
         Timeline
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
@@ -155,6 +164,85 @@ async fn create_show_move_and_refuse(pool: PgPool) {
     PL-1  Start    First
     PL-2  Backlog  Second
     ");
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn proof_attach_list_and_show(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "List"]).await;
+    let shot = pl.config.with_file_name("shot.png");
+    std::fs::write(&shot, vec![7u8; 12_345]).unwrap();
+    let shot = shot.to_str().unwrap();
+
+    let attach = pl
+        .run(&[
+            "proof",
+            "attach",
+            "PL-1",
+            shot,
+            "--title",
+            "List at 1280×800",
+        ])
+        .await;
+    assert_eq!(attach.code, 0, "{}", attach.stderr);
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(attach.stdout, @r#"Attached [run]: image "List at 1280×800" (12.3 kB) to PL-1 for attempt 0"#);
+    });
+    let list = pl.run(&["proof", "list", "PL-1"]).await;
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(list.stdout, @r#"[time]  image  "List at 1280×800"  12.3 kB  Gannon (person)  [run]"#);
+    });
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(show.stdout, @r#"
+        PL-1  List
+        Status: Backlog
+
+        Pull requests
+          None linked.
+
+        Proof
+          [time]  image  "List at 1280×800"  12.3 kB  Gannon (person)  [run]
+
+        Timeline
+          No transitions yet.
+
+        Runs
+          No runs yet.
+        "#);
+    });
+
+    // A wrong kind and a type proof cannot be are refused before anything is stored.
+    let wrong = pl
+        .run(&[
+            "proof", "attach", "PL-1", shot, "--title", "x", "--kind", "video",
+        ])
+        .await;
+    assert_eq!(wrong.code, 1);
+    insta::assert_snapshot!(wrong.stderr, @"error: `image/png` is image proof, not `video` (422 Unprocessable Entity)");
+    let page = pl.config.with_file_name("page.html");
+    std::fs::write(&page, "<p>").unwrap();
+    let html = pl
+        .run(&[
+            "proof",
+            "attach",
+            "PL-1",
+            page.to_str().unwrap(),
+            "--title",
+            "x",
+        ])
+        .await;
+    assert_eq!(html.code, 1);
+    assert!(
+        html.stderr.ends_with(
+            "page.html is not a file proof can be; use one of .png, .jpg, .jpeg, .gif, .webp, \
+             .mp4, .webm, .mov, .txt, .log, .md, .xml, .pdf\n"
+        ),
+        "{}",
+        html.stderr
+    );
+    let empty = pl.run(&["proof", "list", "PL-2"]).await;
+    assert_eq!(empty.code, 1);
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
@@ -254,6 +342,9 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         Pull requests
           None linked.
 
+        Proof
+          None attached.
+
         Gates for In Progress → Agent Review
           pr_open: fail (no open pull request is linked to PL-1)
           pr_ready: fail (no open pull request is linked to PL-1)
@@ -295,6 +386,9 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
 
         Pull requests
           None linked.
+
+        Proof
+          None attached.
 
         Gates for In Progress → Agent Review
           pr_open: fail (no open pull request is linked to PL-1)
@@ -410,6 +504,9 @@ async fn a_linked_pull_request_shows_on_the_issue(pool: PgPool) {
       #6 open  feature/pl-1-try  no checks  1 open thread
         https://github.com/gannonh/punchlist/pull/6
 
+    Proof
+      None attached.
+
     Timeline
       No transitions yet.
 
@@ -493,6 +590,9 @@ async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
 
         Pull requests
           None linked.
+
+        Proof
+          None attached.
 
         Timeline
           [time]  octocat (github)  commented:
@@ -624,6 +724,12 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
     pl.run(&["issue", "move", "PL-1", "start"]).await;
     let claim = register(&pl, "r1").await.claim(0).await.unwrap().unwrap();
 
+    let shot = pl.config.with_file_name("shot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").unwrap();
+    let attach = serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "attach_proof",
+                   "arguments": {"path": shot, "title": "List at 1280×800"}}})
+    .to_string();
     let url = pl.url.clone();
     let lines = tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("pl"))
@@ -658,9 +764,10 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"comment","arguments":{"body":"Started."}}}"#,
             true,
         );
+        let attached = exchange(&attach, true);
         drop(stdin);
         assert!(child.wait().unwrap().success());
-        [refused, commented]
+        [refused, commented, attached]
     })
     .await
     .unwrap();
@@ -680,6 +787,17 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
         "Refused (gate_failed): gate pr_open failed: no open pull request is linked to PL-1"
     );
     assert_eq!(result(&lines[1]), (false, "Commented on PL-1.".to_string()));
+    let (is_error, text) = result(&lines[2]);
+    assert!(!is_error, "{text}");
+    assert!(
+        text.starts_with("Attached proof ")
+            && text.ends_with(" to PL-1: image, 8 bytes, attempt 1."),
+        "{text}"
+    );
+    let list = pl.run(&["proof", "list", "PL-1"]).await;
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(list.stdout, @r#"[time]  image  "List at 1280×800"  8 B  Claude Code (agent, claude-code)  [run]"#);
+    });
     let show = pl.run(&["issue", "show", "PL-1"]).await;
     assert!(
         show.stdout.contains(

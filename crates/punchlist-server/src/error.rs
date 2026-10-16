@@ -33,12 +33,16 @@ pub enum ApiError {
     RunNotFound(Uuid),
     #[error("runner {0} not found")]
     RunnerNotFound(Uuid),
+    #[error("proof {0} not found")]
+    ProofNotFound(Uuid),
     #[error("{0}")]
     ClaimTaken(String),
     #[error("{0}")]
     StaleAttempt(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    TooLarge(String),
     #[error(transparent)]
     Refused(#[from] Refusal),
     /// A gate failed: the refusal names the first one, with every result and the evidence.
@@ -46,6 +50,9 @@ pub enum ApiError {
     GateFailed(Box<GateFailure>),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    /// Reading or writing a proof file failed.
+    #[error(transparent)]
+    Storage(#[from] std::io::Error),
 }
 
 #[derive(Debug)]
@@ -62,14 +69,16 @@ impl ApiError {
             ApiError::GithubNotConfigured
             | ApiError::GithubUnreadable(_)
             | ApiError::EvidenceChanged(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
-                StatusCode::NOT_FOUND
-            }
+            ApiError::IssueNotFound(_)
+            | ApiError::RunNotFound(_)
+            | ApiError::RunnerNotFound(_)
+            | ApiError::ProofNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) => StatusCode::CONFLICT,
             ApiError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Refused(_) | ApiError::GateFailed(_) => StatusCode::CONFLICT,
-            ApiError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Database(_) | ApiError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -79,16 +88,18 @@ impl ApiError {
             ApiError::GithubNotConfigured => "github_not_configured",
             ApiError::GithubUnreadable(_) => "github_unreadable",
             ApiError::EvidenceChanged(_) => "evidence_changed",
-            ApiError::IssueNotFound(_) | ApiError::RunNotFound(_) | ApiError::RunnerNotFound(_) => {
-                "not_found"
-            }
+            ApiError::IssueNotFound(_)
+            | ApiError::RunNotFound(_)
+            | ApiError::RunnerNotFound(_)
+            | ApiError::ProofNotFound(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
             ApiError::ClaimTaken(_) => "claim_taken",
             ApiError::StaleAttempt(_) => "stale_attempt",
             ApiError::Invalid(_) => "invalid",
+            ApiError::TooLarge(_) => "too_large",
             ApiError::Refused(refusal) => refusal.code(),
             ApiError::GateFailed(failure) => failure.refusal.code(),
-            ApiError::Database(_) => "internal",
+            ApiError::Database(_) | ApiError::Storage(_) => "internal",
         }
     }
 }
@@ -99,6 +110,10 @@ impl IntoResponse for ApiError {
         let message = match &self {
             ApiError::Database(error) => {
                 tracing::error!(%error, "database error");
+                "internal error".to_string()
+            }
+            ApiError::Storage(error) => {
+                tracing::error!(%error, "proof storage error");
                 "internal error".to_string()
             }
             other => other.to_string(),

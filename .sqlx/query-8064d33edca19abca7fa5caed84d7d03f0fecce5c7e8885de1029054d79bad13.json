@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO transition (issue_id, from_status, to_status, actor_id, workflow_version)\n         VALUES ($1, 'start', 'in_progress', $2, 'test')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8064d33edca19abca7fa5caed84d7d03f0fecce5c7e8885de1029054d79bad13"
+}

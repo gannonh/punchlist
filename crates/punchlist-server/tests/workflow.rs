@@ -14,8 +14,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use punchlist_core::Workflow;
 use punchlist_server::{
-    AppState, Bootstrap, Bootstrapped, GithubClient, bootstrap, router, run_jobs_until_idle,
-    warn_invalid_workflows,
+    AppState, Bootstrap, Bootstrapped, GithubClient, ProofStore, bootstrap, router,
+    run_jobs_until_idle, warn_invalid_workflows,
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -236,6 +236,8 @@ struct Setup {
     state: AppState,
     person: Bootstrapped,
     github: FakeGithub,
+    /// The proof directory, removed with the setup.
+    _proof: tempfile::TempDir,
 }
 
 async fn setup(pool: &PgPool) -> Setup {
@@ -252,14 +254,20 @@ async fn setup(pool: &PgPool) -> Setup {
     .await
     .unwrap();
     let (github, url) = fake_github().await;
+    let proof = tempfile::tempdir().unwrap();
     let state = AppState::new(pool.clone())
         .with_github_webhook_secret(SECRET)
-        .with_github(GithubClient::with_token(&url, "test-token"));
+        .with_github(GithubClient::with_token(&url, "test-token"))
+        .with_proof(ProofStore {
+            dir: proof.path().to_path_buf(),
+            max_bytes: 1024,
+        });
     Setup {
         app: router(state.clone()),
         state,
         person,
         github,
+        _proof: proof,
     }
 }
 
@@ -404,6 +412,8 @@ async fn a_failing_gate_refuses_and_writes_no_transition(pool: PgPool) {
             "reason": "pull request #12 is a draft",
             "evidence": {
                 "issue_id": "PL-1",
+                "attempt": 1,
+                "proof": [],
                 "pull_requests": [{
                     "number": 12,
                     "title": "Fix the thing",
@@ -2753,9 +2763,38 @@ async fn a_waiting_dispatch_on_an_older_issue_is_claimed_before_a_started_one(po
     assert_eq!(claim(&s, &runner).await.0, StatusCode::NO_CONTENT);
 }
 
-/// PL-1 in Agent Review with pull request #12 open and ready, and a Codex run claimed for
-/// it. Returns that run's agent token.
+/// PL-1 in Agent Review with pull request #12 open and ready, proof attached, and a Codex run
+/// claimed for it. Returns that run's agent token.
 async fn issue_in_agent_review(s: &Setup) -> String {
+    let codex = issue_in_agent_review_with_no_proof(s).await;
+    attach_proof(s, &codex).await;
+    codex
+}
+
+/// A screenshot attached to PL-1 as proof.
+async fn attach_proof(s: &Setup, token: &str) {
+    let boundary = "punchlist-test-boundary";
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nList at 1280×800\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot.png\"\r\n\
+         Content-Type: image/png\r\n\r\npng\r\n--{boundary}--\r\n"
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/issues/PL-1/proof")
+        .header("authorization", format!("Bearer {token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = s.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+/// `issue_in_agent_review` before the proof.
+async fn issue_in_agent_review_with_no_proof(s: &Setup) -> String {
     waiting_in_agent_review(s).await;
     let codex_runner = register(s, "r2", &["codex"]).await;
     let (status, claim) = claim(s, &codex_runner).await;
@@ -3381,7 +3420,7 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
     pool: PgPool,
 ) {
     let s = setup(&pool).await;
-    let codex = issue_in_agent_review(&s).await;
+    let codex = issue_in_agent_review_with_no_proof(&s).await;
     s.github.lock().unwrap().pulls = vec![ready_with_merge_state("clean")];
     let refused = |body: &Value| {
         assert_eq!(body["code"], "gate_failed", "{body}");
@@ -3525,12 +3564,24 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
             ("ci_green", true),
             ("mergeable", true),
             ("no_open_threads", false),
-            ("proof_attached", true)
+            ("proof_attached", false)
         ]
     );
 
-    // Resolved: the request is accepted, and the transition records the four results.
+    // Resolved, but no proof is attached for this attempt, the first claim's.
     s.github.lock().unwrap().threads[0]["isResolved"] = json!(true);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused(&body),
+        (
+            "proof_attached".into(),
+            "no proof is attached to PL-1 for attempt 1".into()
+        )
+    );
+
+    // With proof the request is accepted, and the transition records the four results.
+    attach_proof(&s, &codex).await;
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["issue"]["status"], "human_review");
@@ -3553,10 +3604,7 @@ async fn human_review_is_refused_on_a_check_the_merge_state_and_a_thread_then_ac
                 "pull request #12 has no conflicts and GitHub's merge state is clean"
             ),
             row("no_open_threads", "1 review thread, all resolved"),
-            row(
-                "proof_attached",
-                "passes vacuously: Punchlist records no proof yet, so nothing was checked"
-            ),
+            row("proof_attached", "1 proof record is attached for attempt 1"),
         ]
     );
     // Human Review has no dispatch rule and no gated transition.

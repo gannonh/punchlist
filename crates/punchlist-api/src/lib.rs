@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use punchlist_core::display_name;
 pub use punchlist_core::{
-    CheckRunEvidence, Evidence, GateResult, PullRequestEvidence, PullRequestState,
+    CheckRunEvidence, Evidence, GateResult, ProofEvidence, PullRequestEvidence, PullRequestState,
     ReviewThreadEvidence, Role,
 };
 use serde::{Deserialize, Serialize};
@@ -530,6 +530,96 @@ pub struct CreateComment {
     pub body: String,
 }
 
+/// What a proof file shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofKind {
+    Image,
+    Video,
+    Report,
+}
+
+impl ProofKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProofKind::Image => "image",
+            ProofKind::Video => "video",
+            ProofKind::Report => "report",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ProofKind> {
+        [ProofKind::Image, ProofKind::Video, ProofKind::Report]
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+    }
+}
+
+/// The files proof can be: extension, content type and kind. The server accepts only these
+/// content types, and the client picks one by a file's extension. No HTML or SVG, which can
+/// run scripts when served, and no JSON, the shape of credential files such as `auth.json`.
+pub const PROOF_TYPES: &[(&str, &str, ProofKind)] = &[
+    ("png", "image/png", ProofKind::Image),
+    ("jpg", "image/jpeg", ProofKind::Image),
+    ("jpeg", "image/jpeg", ProofKind::Image),
+    ("gif", "image/gif", ProofKind::Image),
+    ("webp", "image/webp", ProofKind::Image),
+    ("mp4", "video/mp4", ProofKind::Video),
+    ("webm", "video/webm", ProofKind::Video),
+    ("mov", "video/quicktime", ProofKind::Video),
+    ("txt", "text/plain", ProofKind::Report),
+    ("log", "text/plain", ProofKind::Report),
+    ("md", "text/markdown", ProofKind::Report),
+    ("xml", "application/xml", ProofKind::Report),
+    ("pdf", "application/pdf", ProofKind::Report),
+];
+
+/// The content type and kind of a file with this extension, in any case.
+pub fn proof_type_by_extension(extension: &str) -> Option<(&'static str, ProofKind)> {
+    (PROOF_TYPES.iter())
+        .find(|(ext, _, _)| ext.eq_ignore_ascii_case(extension))
+        .map(|&(_, content_type, kind)| (content_type, kind))
+}
+
+/// The kind of proof a content type is, or `None` when proof cannot be one.
+pub fn proof_kind(content_type: &str) -> Option<ProofKind> {
+    (PROOF_TYPES.iter())
+        .find(|(_, known, _)| *known == content_type)
+        .map(|&(_, _, kind)| kind)
+}
+
+/// A file attached to an issue as proof of its work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Proof {
+    pub id: Uuid,
+    pub issue_id: String,
+    /// The issue's attempt when it was uploaded: how many times the issue had moved from
+    /// Start to In Progress.
+    pub attempt: i32,
+    pub kind: ProofKind,
+    /// What it shows, in its uploader's words.
+    pub title: String,
+    pub content_type: String,
+    /// In bytes.
+    pub size: i64,
+    /// Who uploaded it.
+    pub actor: Actor,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /api/issues/{id}/proof`, as `multipart/form-data`.
+#[derive(ToSchema)]
+#[allow(dead_code)]
+pub struct AttachProof {
+    /// What the file shows.
+    title: String,
+    /// Must be the kind of the file's content type, when given.
+    kind: Option<ProofKind>,
+    /// The file, with its content type on the part.
+    #[schema(format = Binary, value_type = String)]
+    file: Vec<u8>,
+}
+
 /// `GET /api/workflow`: the workspace's active workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkflowInfo {
@@ -612,6 +702,23 @@ pub fn gate_line(gate: &GateResult, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_types_are_found_by_extension_in_any_case_and_by_content_type() {
+        assert_eq!(
+            proof_type_by_extension("JPEG"),
+            Some(("image/jpeg", ProofKind::Image))
+        );
+        assert_eq!(
+            proof_type_by_extension("log"),
+            Some(("text/plain", ProofKind::Report))
+        );
+        assert_eq!(proof_type_by_extension("html"), None);
+        assert_eq!(proof_kind("video/quicktime"), Some(ProofKind::Video));
+        for refused in ["text/html", "image/svg+xml", "application/json"] {
+            assert_eq!(proof_kind(refused), None);
+        }
+    }
 
     #[test]
     fn event_detail_is_tagged_by_kind() {

@@ -25,7 +25,7 @@ pub enum Gate {
     Mergeable,
     /// None of its review threads is unresolved.
     NoOpenThreads,
-    /// Passes without evidence until proof exists (Slice 7), and says so in its reason.
+    /// The issue has proof attached for its current attempt.
     ProofAttached,
 }
 
@@ -80,9 +80,7 @@ impl Gate {
                 .and_then(|pr| ci_green(pr, required)),
             Gate::Mergeable => one_open(evidence).and_then(mergeable).map_err(alone),
             Gate::NoOpenThreads => one_open(evidence).map_err(alone).and_then(no_open_threads),
-            Gate::ProofAttached => Ok(
-                "passes vacuously: Punchlist records no proof yet, so nothing was checked".into(),
-            ),
+            Gate::ProofAttached => proof_attached(evidence).map_err(alone),
         };
         let (passed, (reason, (outside, outside_more))) = match outcome {
             Ok(reason) => (true, alone(reason)),
@@ -236,6 +234,20 @@ pub struct Evidence {
     /// is causing the move; absent on a requested move, and read only by `pr_names_issue`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_pull_request: Option<i64>,
+    /// The issue's attempt: how many times it has moved from Start to In Progress.
+    #[serde(default)]
+    pub attempt: i32,
+    /// The proof attached to the issue, from every attempt.
+    #[serde(default)]
+    pub proof: Vec<ProofEvidence>,
+}
+
+/// A proof record attached to the issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ProofEvidence {
+    /// The issue's attempt when it was uploaded.
+    pub attempt: i32,
 }
 
 /// One gate's result. `reason` says why it passed or failed, in Punchlist's own words: every
@@ -597,6 +609,39 @@ fn no_open_threads(pr: &PullRequestEvidence) -> Result<String, Failed> {
     }
 }
 
+/// Some proof was uploaded during the current attempt; proof from an earlier attempt shows
+/// work that has since been redone. The reason holds only numbers and the issue id: a proof's
+/// title is its uploader's text.
+fn proof_attached(evidence: &Evidence) -> Result<String, String> {
+    let records = |n: usize| {
+        if n == 1 {
+            "1 proof record is".to_string()
+        } else {
+            format!("{n} proof records are")
+        }
+    };
+    let attempt = evidence.attempt;
+    let current = (evidence.proof.iter())
+        .filter(|proof| proof.attempt == attempt)
+        .count();
+    let earlier = evidence.proof.len() - current;
+    match (current, earlier) {
+        (0, 0) => Err(format!(
+            "no proof is attached to {} for attempt {attempt}",
+            evidence.issue_id
+        )),
+        (0, earlier) => Err(format!(
+            "no proof is attached to {} for attempt {attempt}; {} from earlier attempts",
+            evidence.issue_id,
+            records(earlier)
+        )),
+        (current, _) => Ok(format!(
+            "{} attached for attempt {attempt}",
+            records(current)
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,6 +671,8 @@ mod tests {
             issue_id: "PL-7".into(),
             pull_requests,
             closed_pull_request: None,
+            attempt: 0,
+            proof: Vec::new(),
         }
     }
 
@@ -1300,14 +1347,48 @@ mod tests {
         }
     }
 
+    /// Evidence for attempt 3 with proof uploaded during these attempts.
+    fn proved(attempts: &[i32]) -> Evidence {
+        Evidence {
+            attempt: 3,
+            proof: (attempts.iter())
+                .map(|&attempt| ProofEvidence { attempt })
+                .collect(),
+            ..evidence(vec![])
+        }
+    }
+
     #[test]
-    fn proof_attached_passes_and_says_nothing_was_checked() {
+    fn proof_attached_needs_proof_from_the_current_attempt() {
         assert_eq!(
-            check(Gate::ProofAttached, &evidence(vec![])),
+            check(Gate::ProofAttached, &proved(&[])),
+            (false, "no proof is attached to PL-7 for attempt 3".into())
+        );
+        assert_eq!(
+            check(Gate::ProofAttached, &proved(&[3])),
+            (true, "1 proof record is attached for attempt 3".into())
+        );
+        assert_eq!(
+            check(Gate::ProofAttached, &proved(&[1])),
             (
-                true,
-                "passes vacuously: Punchlist records no proof yet, so nothing was checked".into()
+                false,
+                "no proof is attached to PL-7 for attempt 3; 1 proof record is from earlier \
+                 attempts"
+                    .into()
             )
+        );
+        assert_eq!(
+            check(Gate::ProofAttached, &proved(&[1, 2])),
+            (
+                false,
+                "no proof is attached to PL-7 for attempt 3; 2 proof records are from earlier \
+                 attempts"
+                    .into()
+            )
+        );
+        assert_eq!(
+            check(Gate::ProofAttached, &proved(&[2, 3, 3])),
+            (true, "2 proof records are attached for attempt 3".into())
         );
     }
 

@@ -4,10 +4,11 @@
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist, Heartbeat, HeartbeatReply, Issue,
-    IssueList, MoveIssue, Moved, PullRequest, PullRequestsNow, RegisterRunner, RegisteredRunner,
-    Run, RunLog, RunnerList, WorkflowInfo,
+    IssueList, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest, PullRequestsNow,
+    RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
+    proof_type_by_extension,
 };
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -28,6 +29,10 @@ pub enum ClientError {
     BadUrl(String),
     #[error("cannot reach the Punchlist server: {0}")]
     Http(#[from] reqwest::Error),
+    /// A file to upload could not be read or is not a kind the server accepts. Nothing was
+    /// sent.
+    #[error("{0}")]
+    File(String),
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +82,55 @@ impl Client {
             body: body.to_string(),
         };
         self.send(Method::POST, &["issues", id, "comments"], Some(&request))
+            .await
+    }
+
+    /// Uploads a file as proof for the issue. Its content type comes from its extension;
+    /// `kind`, when given, must be that type's kind.
+    pub async fn attach_proof(
+        &self,
+        id: &str,
+        path: &std::path::Path,
+        title: &str,
+        kind: Option<ProofKind>,
+    ) -> Result<Proof, ClientError> {
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let (content_type, _) = proof_type_by_extension(extension).ok_or_else(|| {
+            let accepted: Vec<&str> = PROOF_TYPES.iter().map(|(ext, _, _)| *ext).collect();
+            ClientError::File(format!(
+                "{} is not a file proof can be; use one of .{}",
+                path.display(),
+                accepted.join(", .")
+            ))
+        })?;
+        // ponytail: the whole file is read into memory, up to the server's size limit.
+        // Upgrade path: stream it.
+        let bytes = std::fs::read(path)
+            .map_err(|error| ClientError::File(format!("read {}: {error}", path.display())))?;
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let file = reqwest::multipart::Part::bytes(bytes)
+            .file_name(name)
+            .mime_str(content_type)?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("title", title.to_string())
+            .part("file", file);
+        if let Some(kind) = kind {
+            form = form.text("kind", kind.as_str());
+        }
+        let request = self
+            .builder(Method::POST, &["issues", id, "proof"])?
+            .multipart(form);
+        Ok(Self::respond(request).await?.json().await?)
+    }
+
+    /// An issue's proof, oldest first.
+    pub async fn list_proof(&self, id: &str) -> Result<Vec<Proof>, ClientError> {
+        self.send::<(), _>(Method::GET, &["issues", id, "proof"], None)
             .await
     }
 
@@ -221,16 +275,26 @@ impl Client {
         path: &[&str],
         body: Option<&B>,
     ) -> Result<reqwest::Response, ClientError> {
+        let mut request = self.builder(method, path)?;
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        Self::respond(request).await
+    }
+
+    /// A request to `/api/<path>` with the token.
+    fn builder(&self, method: Method, path: &[&str]) -> Result<RequestBuilder, ClientError> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
             .map_err(|()| ClientError::BadUrl(self.base_url.to_string()))?
             .pop_if_empty()
             .push("api")
             .extend(path);
-        let mut request = self.http.request(method, url).bearer_auth(&self.token);
-        if let Some(body) = body {
-            request = request.json(body);
-        }
+        Ok(self.http.request(method, url).bearer_auth(&self.token))
+    }
+
+    /// Sends the request; an error status is a `ClientError`.
+    async fn respond(request: RequestBuilder) -> Result<reqwest::Response, ClientError> {
         let response = request.send().await?;
         let status = response.status();
         if status.is_success() {

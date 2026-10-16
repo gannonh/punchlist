@@ -8,6 +8,7 @@ mod github;
 mod github_api;
 mod issues;
 mod jobs;
+mod proof;
 mod pull_requests;
 mod runners;
 mod runs;
@@ -46,6 +47,15 @@ pub struct AppState {
     pub job_wake: std::sync::Arc<tokio::sync::Notify>,
     /// Reads `.punchlist/` from the repository. Without it a workflow load fails.
     pub github: Option<GithubClient>,
+    /// Where proof files are kept, and how large one may be.
+    pub proof: ProofStore,
+}
+
+/// Proof files on local disk, each named by its storage key.
+#[derive(Clone, Debug)]
+pub struct ProofStore {
+    pub dir: std::path::PathBuf,
+    pub max_bytes: u64,
 }
 
 impl AppState {
@@ -57,6 +67,10 @@ impl AppState {
             github_webhook_secret: None,
             job_wake: std::sync::Arc::new(tokio::sync::Notify::new()),
             github: None,
+            proof: ProofStore {
+                dir: std::env::temp_dir().join("punchlist-proof"),
+                max_bytes: 100 * 1024 * 1024,
+            },
         }
     }
 
@@ -70,6 +84,11 @@ impl AppState {
         secret: impl Into<std::sync::Arc<str>>,
     ) -> AppState {
         self.github_webhook_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_proof(mut self, proof: ProofStore) -> AppState {
+        self.proof = proof;
         self
     }
 
@@ -93,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .merge(actors::routes())
         .merge(github::routes())
         .merge(issues::routes())
+        .merge(proof::routes(&state))
         .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())

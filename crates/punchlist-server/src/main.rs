@@ -1,8 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
-    AppState, Bootstrap, GithubClient, MIGRATOR, bootstrap, expire_leases, queue_workflow_load,
-    router, warn_invalid_workflows, work_jobs,
+    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, expire_leases,
+    queue_workflow_load, router, warn_invalid_workflows, work_jobs,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -42,6 +42,16 @@ enum Command {
             requires = "github_app_id"
         )]
         github_app_private_key: Option<String>,
+        /// The directory proof files are kept in. A leading `~/` is the home directory.
+        #[arg(
+            long,
+            env = "PUNCHLIST_PROOF_DIR",
+            default_value = "~/.local/share/punchlist/proof"
+        )]
+        proof_dir: String,
+        /// The largest proof file accepted, in bytes.
+        #[arg(long, env = "PUNCHLIST_PROOF_MAX_BYTES", default_value_t = 104_857_600)]
+        proof_max_bytes: u64,
     },
     /// Create a workspace, its repository and one person, and print the person's token.
     Bootstrap {
@@ -88,7 +98,18 @@ async fn main() -> anyhow::Result<()> {
             github_webhook_secret,
             github_app_id,
             github_app_private_key,
+            proof_dir,
+            proof_max_bytes,
         } => {
+            let proof_dir = match proof_dir.strip_prefix("~/") {
+                Some(rest) => std::path::PathBuf::from(
+                    std::env::var_os("HOME").context("HOME is not set, so `~/` has no meaning")?,
+                )
+                .join(rest),
+                None => proof_dir.into(),
+            };
+            std::fs::create_dir_all(&proof_dir)
+                .with_context(|| format!("create {}", proof_dir.display()))?;
             warn_invalid_workflows(&pool)
                 .await
                 .context("read the active workflows")?;
@@ -104,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             });
-            let mut state = AppState::new(pool);
+            let mut state = AppState::new(pool).with_proof(ProofStore {
+                dir: proof_dir,
+                max_bytes: proof_max_bytes,
+            });
             // An empty secret is no secret: anyone could sign with it.
             match github_webhook_secret.filter(|secret| !secret.is_empty()) {
                 Some(secret) => state = state.with_github_webhook_secret(secret),

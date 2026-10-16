@@ -1,9 +1,11 @@
 //! Punchlist's MCP server over stdio (PRD R10). The runner attaches it to each agent run,
 //! bound to the run's issue and acting with the run's agent token. Its tools read the
-//! issue, comment on it and request a transition; the server checks every request.
+//! issue, comment on it, attach proof and request a transition; the server checks every
+//! request.
 
 use punchlist_api::{
-    ChecksState, Event, EventDetail, GateResult, Issue, PullRequestsNow, ReviewThread, gate_line,
+    ChecksState, Event, EventDetail, GateResult, Issue, ProofKind, PullRequestsNow, ReviewThread,
+    gate_line,
 };
 use punchlist_client::{Client, ClientError};
 use punchlist_core::{fenced, is_plain_name, quoted};
@@ -32,6 +34,16 @@ struct CommentRequest {
 struct TransitionRequest {
     /// The status key to move the issue to, such as `agent_review`.
     to: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AttachProofRequest {
+    /// The file: a path on this machine, absolute or relative to your working directory.
+    path: String,
+    /// What the file shows, such as `Issue list at 1280×800`.
+    title: String,
+    /// `image`, `video` or `report`. Optional: the file's extension decides it.
+    kind: Option<String>,
 }
 
 fn text(result: Result<String, String>) -> Result<CallToolResult, ErrorData> {
@@ -75,6 +87,38 @@ impl Tools {
             Ok(_) => Ok(format!("Commented on {}.", self.issue_id)),
             Err(error) => Err(error.to_string()),
         })
+    }
+
+    #[tool(
+        description = "Attach a file to your issue as proof of the work: a screenshot (png, jpg, gif, webp), a video (mp4, webm, mov) or a report (txt, log, md, xml, pdf)."
+    )]
+    async fn attach_proof(
+        &self,
+        Parameters(AttachProofRequest { path, title, kind }): Parameters<AttachProofRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let kind = match kind.as_deref().map(ProofKind::parse) {
+            None => None,
+            Some(Some(kind)) => Some(kind),
+            Some(None) => return text(Err("kind is image, video or report".into())),
+        };
+        let path = std::path::Path::new(&path);
+        text(
+            match self
+                .client
+                .attach_proof(&self.issue_id, path, &title, kind)
+                .await
+            {
+                Ok(proof) => Ok(format!(
+                    "Attached proof {} to {}: {}, {} bytes, attempt {}.",
+                    proof.id,
+                    proof.issue_id,
+                    proof.kind.as_str(),
+                    proof.size,
+                    proof.attempt
+                )),
+                Err(error) => Err(render_error(&error)),
+            },
+        )
     }
 
     #[tool(
