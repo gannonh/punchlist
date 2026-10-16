@@ -4,9 +4,9 @@
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist, Heartbeat, HeartbeatReply, Issue,
-    IssueList, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest, PullRequestsNow,
-    RegisterRunner, RegisteredRunner, Run, RunLog, RunnerList, WorkflowInfo,
-    proof_type_by_extension,
+    IssueList, Lease, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest,
+    PullRequestsNow, RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList,
+    WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -179,8 +179,9 @@ impl Client {
             .await
     }
 
-    /// Registers a runner. Call with a person's token; the response holds the runner's own
-    /// token for every later runner call.
+    /// Registers a runner, or re-adopts the one this person registered under the same name.
+    /// Call with a person's token; the response holds the runner's own token for every later
+    /// runner call, and an earlier token of a re-adopted runner stops working.
     pub async fn register_runner(
         &self,
         request: &RegisterRunner,
@@ -215,6 +216,20 @@ impl Client {
             Some(heartbeat),
         )
         .await
+    }
+
+    /// The running attempts the runner holds whose leases have not lapsed. Runner token.
+    pub async fn leases(&self, runner_id: &str) -> Result<Vec<Lease>, ClientError> {
+        self.send::<(), _>(Method::GET, &["runners", runner_id, "leases"], None)
+            .await
+    }
+
+    /// Resumes an attempt the runner holds: renews its lease and returns its claim again. A
+    /// lapsed lease is `ClientError::Refused` with code `stale_attempt`. Runner token.
+    pub async fn resume_run(&self, run_id: &str, attempt: i32) -> Result<Claim, ClientError> {
+        let request = ResumeRun { attempt };
+        self.send(Method::POST, &["runs", run_id, "resume"], Some(&request))
+            .await
     }
 
     /// Claims one issue, in Start or waiting in a status with a dispatch rule, waiting up to
