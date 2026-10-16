@@ -105,8 +105,15 @@ pub fn write_mcp_config(
 }
 
 /// The arguments after the executable. The prompt goes on stdin. `mcp_config` is a file
-/// that attaches Punchlist's MCP server, and no other.
-pub fn claude_args(model: Option<&str>, mcp_config: Option<&Path>) -> Vec<String> {
+/// that attaches Punchlist's MCP server, and no other. A fresh attempt starts the session
+/// `session_id`; a resumed one (`resume`) carries it on, so the agent keeps what it did
+/// before its runner restarted.
+pub fn claude_args(
+    model: Option<&str>,
+    mcp_config: Option<&Path>,
+    session_id: uuid::Uuid,
+    resume: bool,
+) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -126,6 +133,8 @@ pub fn claude_args(model: Option<&str>, mcp_config: Option<&Path>) -> Vec<String
         args.push(config.display().to_string());
         args.push("--strict-mcp-config".into());
     }
+    args.push(if resume { "--resume" } else { "--session-id" }.into());
+    args.push(session_id.to_string());
     args
 }
 
@@ -432,7 +441,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         });
         let exit = run_claude(
             &command,
-            &claude_args(None, None),
+            &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
             tx,
@@ -505,7 +514,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let (_stop_tx, stop_rx) = watch::channel(false);
         let exit = run_claude(
             &command,
-            &claude_args(Some("haiku"), None),
+            &claude_args(Some("haiku"), None, uuid::Uuid::nil(), false),
             temp.path(),
             prompt,
             tx,
@@ -524,13 +533,20 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
 
     #[test]
     fn claude_command_line() {
+        let session = uuid::Uuid::from_u128(7);
         assert_eq!(
-            claude_args(Some("haiku"), Some(Path::new("/w/mcp/r.json"))).join(" "),
-            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --model haiku --mcp-config /w/mcp/r.json --strict-mcp-config"
+            claude_args(
+                Some("haiku"),
+                Some(Path::new("/w/mcp/r.json")),
+                session,
+                false
+            )
+            .join(" "),
+            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --model haiku --mcp-config /w/mcp/r.json --strict-mcp-config --session-id 00000000-0000-0000-0000-000000000007"
         );
         assert_eq!(
-            claude_args(None, None).join(" "),
-            "-p --output-format stream-json --verbose --permission-mode bypassPermissions"
+            claude_args(None, None, session, true).join(" "),
+            "-p --output-format stream-json --verbose --permission-mode bypassPermissions --resume 00000000-0000-0000-0000-000000000007"
         );
     }
 
@@ -670,7 +686,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let missing = temp.path().join("nope");
         let exit = run_claude(
             &missing,
-            &claude_args(None, None),
+            &claude_args(None, None, uuid::Uuid::nil(), false),
             temp.path(),
             "p",
             tx,
@@ -693,7 +709,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let handle = tokio::spawn(async move {
             run_claude(
                 &command,
-                &claude_args(None, None),
+                &claude_args(None, None, uuid::Uuid::nil(), false),
                 temp.path(),
                 "p",
                 tx,
@@ -736,7 +752,15 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let handle = tokio::spawn(async move {
-            run_claude(&command, &claude_args(None, None), &dir, "p", tx, stop_rx).await
+            run_claude(
+                &command,
+                &claude_args(None, None, uuid::Uuid::nil(), false),
+                &dir,
+                "p",
+                tx,
+                stop_rx,
+            )
+            .await
         });
         let mut pid = String::new();
         for _ in 0..40 {

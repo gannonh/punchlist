@@ -1,14 +1,15 @@
 // Copied from kata-symphony apps/symphony/src/orchestrator.rs at e7c160f5; trimmed: only the failure-retry backoff (`FAILURE_RETRY_BASE_MS`, `retry_delay_ms`) is copied. The claim loop, concurrency limit, heartbeat and attempt lifecycle below are written for Punchlist against the server API (the original polls a tracker); tracker polling, supervisor, triage, docker/ssh workers, shared context, notifications and the workflow store are dropped.
-//! The claim loop: register, heartbeat, claim up to `max_concurrent` issues and run each
-//! attempt, backing off on server errors.
+//! The claim loop: register, resume or release the attempts this runner held before it
+//! restarted, heartbeat, claim up to `max_concurrent` issues and run each attempt, backing
+//! off on server errors.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use punchlist_api::{
-    AppendLog, Claim, FinishRun, Heartbeat, HeldAttempt, RegisterRunner, RunOutcome,
+    AppendLog, Claim, FinishRun, Heartbeat, HeldAttempt, Lease, RegisterRunner, RunOutcome,
 };
 use punchlist_client::{Client, ClientError};
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -24,6 +25,10 @@ use crate::worktree::Worktrees;
 
 /// The agent keys this runner has an adapter for.
 const AGENTS: [&str; 2] = ["claude-code", "codex"];
+
+/// What a resumed Claude Code session is told on stdin.
+const RESUME_PROMPT: &str = "Punchlist's runner restarted while you were working on this issue. \
+Carry on from where you stopped.";
 
 pub const FAILURE_RETRY_BASE_MS: i64 = 10_000;
 pub const MAX_RETRY_BACKOFF_MS: i64 = 300_000;
@@ -140,11 +145,17 @@ pub(crate) async fn run_with_worktrees(
     let client = Client::new(&config.server_url, &registered.token)?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Set when the server stops taking this runner's token: another `pl runner start`
+    // registered its name and holds the runner now, so this one stops before two processes
+    // run agents in one worktree.
+    let (displaced_tx, displaced) = watch::channel(false);
     let held: Held = Arc::default();
     let heartbeat = {
         let client = client.clone();
         let held = held.clone();
         let interval = config.heartbeat_interval;
+        let name = config.name.clone();
+        let runner_id = runner_id.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -178,6 +189,13 @@ pub(crate) async fn run_with_worktrees(
                             }
                         }
                     }
+                    Ok(Err(ClientError::Api { status, .. })) if status.as_u16() == 401 => {
+                        tracing::error!(
+                            "the server no longer accepts this runner's token: another `pl runner start` registered the name `{name}`; stopping every agent and shutting down"
+                        );
+                        let _ = displaced_tx.send(true);
+                        return;
+                    }
                     Ok(Err(e)) => tracing::warn!("heartbeat failed: {e}"),
                     Err(_) => {
                         tracing::warn!("heartbeat timed out after {}s", HEARTBEAT_TIMEOUT.as_secs())
@@ -198,7 +216,60 @@ pub(crate) async fn run_with_worktrees(
     let permits = Arc::new(Semaphore::new(max_concurrent));
     let mut attempts = JoinSet::new();
     let mut failures: u32 = 0;
+    let shutdown = {
+        let mut displaced = displaced.clone();
+        async move {
+            tokio::select! {
+                () = shutdown => {}
+                _ = displaced.wait_for(|d| *d) => {}
+            }
+        }
+    };
     tokio::pin!(shutdown);
+
+    // The attempts this runner held when it last stopped. Each Claude Code one whose
+    // worktree is still on its branch carries on in its session; the rest are reported lost,
+    // so their runs get their next attempts now rather than when the leases lapse.
+    match ctx.client.leases(&runner_id).await {
+        Ok(leases) => {
+            for lease in leases {
+                let run_id = lease.run_id.to_string();
+                let worktree = match lease.agent.as_str() {
+                    "claude-code" => {
+                        (ctx.worktrees)
+                            .existing(&lease.repository, &lease.branch, &lease.issue_id)
+                            .await
+                    }
+                    _ => None,
+                };
+                let permit = permits.clone().try_acquire_owned().ok();
+                let (Some(worktree), Some(permit)) = (worktree, permit) else {
+                    release_lost(&ctx.client, &lease).await;
+                    continue;
+                };
+                match ctx.client.resume_run(&run_id, lease.attempt).await {
+                    Ok(claim) => {
+                        let ctx = ctx.clone();
+                        let stop = Arc::new(watch::channel(false).0);
+                        let key = (claim.run_id, claim.attempt);
+                        let guard = HeldGuard::new(held.clone(), key, stop.clone());
+                        attempts.spawn(async move {
+                            run_attempt(&ctx, claim, stop, Some(worktree)).await;
+                            drop(guard);
+                            drop(permit);
+                        });
+                    }
+                    Err(e) if is_code(&e, "stale_attempt") => {
+                        tracing::info!("run {run_id}: the lease lapsed before it was resumed")
+                    }
+                    Err(e) => {
+                        tracing::warn!("run {run_id}: cannot resume: {e}; the lease will expire")
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!("cannot read this runner's leases: {e}; they will expire"),
+    }
 
     loop {
         let permit = tokio::select! {
@@ -223,7 +294,7 @@ pub(crate) async fn run_with_worktrees(
                 let key = (claim.run_id, claim.attempt);
                 let guard = HeldGuard::new(held.clone(), key, stop.clone());
                 attempts.spawn(async move {
-                    run_attempt(&ctx, claim, stop).await;
+                    run_attempt(&ctx, claim, stop, None).await;
                     drop(guard);
                     drop(permit);
                 });
@@ -259,26 +330,57 @@ pub(crate) async fn run_with_worktrees(
         }
     }
     heartbeat.abort();
+    if *displaced.borrow() {
+        anyhow::bail!(
+            "another `pl runner start` registered runner `{}`; this one stopped",
+            ctx.config.name
+        );
+    }
     Ok(())
+}
+
+/// Reports a held attempt this runner cannot carry on after a restart as lost, once. A
+/// report that fails leaves the attempt to its lease.
+async fn release_lost(client: &Client, lease: &Lease) {
+    let run_id = lease.run_id.to_string();
+    let request = FinishRun {
+        attempt: lease.attempt,
+        outcome: RunOutcome::Failed,
+        reason: Some("runner restarted".into()),
+        duration_ms: 0,
+        input_tokens: None,
+        output_tokens: None,
+        lost: true,
+    };
+    match client.finish_run(&run_id, &request).await {
+        Ok(_) => tracing::info!(
+            "run {run_id}: attempt {} of {} lost in the restart",
+            lease.attempt,
+            lease.issue_id
+        ),
+        Err(e) => tracing::warn!("run {run_id}: cannot report the attempt lost: {e}"),
+    }
 }
 
 /// Batches log lines: a flush after 500 ms, 50 lines or 1 MiB. A batch the server refuses
 /// as invalid is dropped; one that keeps failing is retried with backoff, then dropped after
 /// `LOG_BATCH_TRIES`. Once shutdown starts, a send gets `final_timeout`, and the first
-/// failure abandons the rest of the log. Returns true when the server said the attempt is
-/// stale, after signalling `stop`.
+/// failure abandons the rest of the log. Lines are numbered from `first_line`. Returns true
+/// when the server said the attempt is stale, after signalling `stop`.
+#[allow(clippy::too_many_arguments)]
 async fn flush_logs(
     client: Client,
     run_id: String,
     attempt: i32,
+    mut first_line: i64,
     mut lines: mpsc::Receiver<String>,
     stop: Arc<watch::Sender<bool>>,
     mut shutdown: watch::Receiver<bool>,
     final_timeout: Duration,
 ) -> bool {
     let mut pending: Vec<String> = Vec::new();
-    // The number of the first pending line; the lines of an attempt are numbered 1, 2, 3...
-    let mut first_line: i64 = 1;
+    // `first_line` is the number of the first pending line; the lines of an attempt are
+    // numbered 1, 2, 3..., and a resumed attempt's go on after those the server stored.
     let mut stale = false;
     let mut closed = false;
     let mut tries: u32 = 0;
@@ -371,13 +473,25 @@ async fn flush_logs(
     stale
 }
 
-async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<bool>>) {
+/// Runs one attempt and reports its outcome. `resume_in` is the worktree of an attempt this
+/// runner held before it restarted: its agent carries on there in the attempt's session.
+async fn run_attempt(
+    ctx: &Context,
+    claim: Claim,
+    stop_tx: Arc<watch::Sender<bool>>,
+    resume_in: Option<PathBuf>,
+) {
     let start = Instant::now();
     let run_id = claim.run_id.to_string();
     let attempt = claim.attempt;
     // The branch is not checked yet, so it is logged escaped.
     tracing::info!(
-        "claimed {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
+        "{} {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
+        if resume_in.is_some() {
+            "resumed"
+        } else {
+            "claimed"
+        },
         claim.issue.id,
         claim.agent,
         claim.branch
@@ -389,6 +503,7 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
         ctx.client.clone(),
         run_id.clone(),
         attempt,
+        claim.next_line,
         lines_rx,
         stop_tx.clone(),
         ctx.shutdown.clone(),
@@ -420,12 +535,16 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
         })
     };
     // Stopping the runner drops the preparation, which kills the git command it is running.
-    let exit = match prompt {
-        Err(reason) => {
+    let exit = match (resume_in, prompt) {
+        (Some(path), _) => {
+            let resume = RESUME_PROMPT;
+            run_agent(ctx, &claim, &path, resume, true, lines_tx.clone(), stop_rx).await
+        }
+        (None, Err(reason)) => {
             let _ = lines_tx.send(reason.clone()).await;
             failed(reason)
         }
-        Ok(prompt) => {
+        (None, Ok(prompt)) => {
             let prepared = {
                 let mut stop = stop_rx.clone();
                 tokio::select! {
@@ -444,7 +563,16 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
                             claim.branch
                         ))
                         .await;
-                    run_agent(ctx, &claim, &path, &prompt, lines_tx.clone(), stop_rx).await
+                    run_agent(
+                        ctx,
+                        &claim,
+                        &path,
+                        &prompt,
+                        false,
+                        lines_tx.clone(),
+                        stop_rx,
+                    )
+                    .await
                 }
                 Some(Err(reason)) => {
                     let reason = format!("worktree preparation failed: {reason}");
@@ -458,18 +586,22 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
     forward.abort();
     let stale = flusher.await.unwrap_or(false);
 
-    let result = match exit {
-        AgentExit::Finished(result) => result,
+    // A stopped agent did not finish: the attempt is lost, and the run gets its next one.
+    let (result, lost) = match exit {
+        AgentExit::Finished(result) => (result, false),
         AgentExit::Stopped if stale => {
             tracing::warn!("run {run_id}: agent stopped, lease lost; not reporting an outcome");
             return;
         }
-        AgentExit::Stopped => AgentResult {
-            outcome: RunOutcome::Failed,
-            reason: Some("runner stopped".into()),
-            input_tokens: None,
-            output_tokens: None,
-        },
+        AgentExit::Stopped => (
+            AgentResult {
+                outcome: RunOutcome::Failed,
+                reason: Some("runner stopped".into()),
+                input_tokens: None,
+                output_tokens: None,
+            },
+            true,
+        ),
     };
     tracing::info!(
         "agent exited for {} (run {run_id}): {}",
@@ -483,7 +615,7 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
         duration_ms: start.elapsed().as_millis().min(i64::MAX as u128) as i64,
         input_tokens: result.input_tokens,
         output_tokens: result.output_tokens,
-        lost: false,
+        lost,
     };
     finish_with_retry(
         &ctx.client,
@@ -496,11 +628,13 @@ async fn run_attempt(ctx: &Context, claim: Claim, stop_tx: Arc<watch::Sender<boo
 }
 
 /// Runs the agent the claim names in the worktree, with Punchlist's MCP server attached.
+/// `resume` carries on the attempt's Claude Code session; only Claude Code is resumed.
 async fn run_agent(
     ctx: &Context,
     claim: &Claim,
     worktree: &Path,
     prompt: &str,
+    resume: bool,
     lines: mpsc::Sender<String>,
     stop: watch::Receiver<bool>,
 ) -> AgentExit {
@@ -537,7 +671,12 @@ async fn run_agent(
                 Ok(mcp_config) => mcp_config,
                 Err(e) => return failed(format!("cannot write the MCP config: {e}")),
             };
-            let args = claude_args(config.model.as_deref(), Some(&mcp_config));
+            let args = claude_args(
+                config.model.as_deref(),
+                Some(&mcp_config),
+                claim.session_id,
+                resume,
+            );
             let exit =
                 run_claude(&config.claude_command, &args, worktree, prompt, lines, stop).await;
             let _ = std::fs::remove_file(&mcp_config);
@@ -692,6 +831,7 @@ mod tests {
             client,
             "run".into(),
             1,
+            1,
             rx,
             Arc::new(stop_tx),
             shutdown_rx,
@@ -781,6 +921,7 @@ mod tests {
             runner.clone(),
             run_id.clone(),
             claim.attempt,
+            claim.next_line,
             rx,
             Arc::new(stop_tx),
             watch::channel(false).1,
@@ -807,6 +948,301 @@ mod tests {
         assert_eq!(lines[0], "short");
         let clipped = format!("{}… [truncated]", "x".repeat(LOG_LINE_MAX_BYTES));
         assert!(lines[1..].iter().all(|line| *line == clipped));
+    }
+
+    /// Requests a fake server was sent: method, path and JSON body.
+    type Seen = Arc<Mutex<Vec<(String, String, serde_json::Value)>>>;
+
+    const RUNNER: Uuid = Uuid::from_u128(1);
+    const RESUMED: Uuid = Uuid::from_u128(0xa);
+    const MISSING: Uuid = Uuid::from_u128(0xb);
+    const FRESH: Uuid = Uuid::from_u128(0xc);
+    const RESUMED_SESSION: Uuid = Uuid::from_u128(0x5a);
+    const FRESH_SESSION: Uuid = Uuid::from_u128(0x5c);
+
+    fn fake_claim(run_id: Uuid, issue: &str, session_id: Uuid, next_line: i64) -> Claim {
+        let now = chrono::Utc::now();
+        Claim {
+            run_id,
+            attempt: 1,
+            agent: "claude-code".into(),
+            issue: punchlist_api::Issue {
+                id: issue.into(),
+                title: "Fix it".into(),
+                body: String::new(),
+                status: "in_progress".into(),
+                status_name: "In Progress".into(),
+                created_at: now,
+                updated_at: now,
+                waiting_on_person: None,
+            },
+            repository: crate::worktree::tests::repository(),
+            branch: format!("feature/{}", issue.to_lowercase()),
+            merged_branches: vec![],
+            lease_expires_at: now,
+            prompt: "Do the work.".into(),
+            agent_token: "agent-token".into(),
+            session_id,
+            next_line,
+        }
+    }
+
+    /// A Punchlist server that holds two leases for runner `RUNNER`, resumes `RESUMED`,
+    /// hands out `FRESH` on the first claim, and records every request. When `displaced`,
+    /// it holds nothing and refuses the runner's heartbeats with 401, as after another
+    /// registration of its name.
+    async fn fake_server(seen: Seen, displaced: bool) -> String {
+        use axum::http::{Method, StatusCode, Uri};
+        use axum::response::IntoResponse;
+        let claims = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let app = axum::Router::new().fallback(
+            move |method: Method, uri: Uri, body: axum::body::Bytes| {
+                let seen = seen.clone();
+                let claims = claims.clone();
+                async move {
+                    let json = serde_json::from_slice(&body).unwrap_or_default();
+                    let path = uri.path().to_string();
+                    seen.lock()
+                        .unwrap()
+                        .push((method.to_string(), path.clone(), json));
+                    let now = chrono::Utc::now();
+                    let runner = punchlist_api::Runner {
+                        id: RUNNER,
+                        name: "sartre".into(),
+                        agents: vec!["claude-code".into()],
+                        registered_at: now,
+                        last_heartbeat: now,
+                    };
+                    let lease = |run_id, issue: &str| Lease {
+                        run_id,
+                        attempt: 1,
+                        agent: "claude-code".into(),
+                        issue_id: issue.into(),
+                        branch: format!("feature/{}", issue.to_lowercase()),
+                        repository: crate::worktree::tests::repository(),
+                        lease_expires_at: now,
+                    };
+                    let run = punchlist_api::Run {
+                        id: RESUMED,
+                        issue_id: "PL-1".into(),
+                        agent: "claude-code".into(),
+                        agent_name: "Claude Code".into(),
+                        branch: "feature/pl-1".into(),
+                        outcome: RunOutcome::Succeeded,
+                        started_at: now,
+                        finished_at: Some(now),
+                        attempt: 1,
+                        runner: punchlist_api::RunnerRef {
+                            id: RUNNER,
+                            name: "sartre".into(),
+                        },
+                        failure_reason: None,
+                        duration_ms: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                        log_tail: vec![],
+                        attempts: vec![],
+                    };
+                    let resume = format!("/api/runs/{RESUMED}/resume");
+                    match (method.as_str(), path.as_str()) {
+                        ("POST", "/api/runners") => axum::Json(punchlist_api::RegisteredRunner {
+                            runner,
+                            token: "runner-token".into(),
+                            lease_seconds: 30,
+                        })
+                        .into_response(),
+                        ("GET", _) if displaced => axum::Json(Vec::<Lease>::new()).into_response(),
+                        ("POST", p) if displaced && p.ends_with("/heartbeat") => {
+                            StatusCode::UNAUTHORIZED.into_response()
+                        }
+                        ("POST", "/api/runs/claim") if displaced => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            StatusCode::NO_CONTENT.into_response()
+                        }
+                        ("GET", p) if p == format!("/api/runners/{RUNNER}/leases") => {
+                            axum::Json(vec![lease(RESUMED, "PL-1"), lease(MISSING, "PL-2")])
+                                .into_response()
+                        }
+                        ("POST", p) if p == resume => {
+                            axum::Json(fake_claim(RESUMED, "PL-1", RESUMED_SESSION, 4))
+                                .into_response()
+                        }
+                        ("POST", "/api/runs/claim") => {
+                            if claims.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                                axum::Json(fake_claim(FRESH, "PL-3", FRESH_SESSION, 1))
+                                    .into_response()
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                StatusCode::NO_CONTENT.into_response()
+                            }
+                        }
+                        ("POST", p) if p.ends_with("/heartbeat") => {
+                            axum::Json(punchlist_api::HeartbeatReply {
+                                runner,
+                                stale: vec![],
+                            })
+                            .into_response()
+                        }
+                        ("POST", p) if p.ends_with("/finish") => axum::Json(run).into_response(),
+                        _ => StatusCode::NO_CONTENT.into_response(),
+                    }
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        url
+    }
+
+    fn fake_config(server_url: String, worktree_root: PathBuf, claude: PathBuf) -> RunnerConfig {
+        RunnerConfig {
+            server_url,
+            token: "person-token".into(),
+            name: "sartre".into(),
+            agents: vec!["claude-code".into()],
+            worktree_root,
+            claude_command: claude,
+            mcp_command: "pl".into(),
+            model: None,
+            codex_command: "codex".into(),
+            codex_model: None,
+            codex_effort: "medium".into(),
+            max_concurrent: 2,
+            heartbeat_interval: Duration::from_secs(1),
+            claim_wait: Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runner_whose_name_was_registered_again_shuts_down() {
+        let temp = tempfile::tempdir().unwrap();
+        let url = fake_server(Arc::default(), true).await;
+        let config = fake_config(url, temp.path().into(), "claude".into());
+        let ran = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_with_worktrees(
+                Worktrees::new(temp.path().into()),
+                config,
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("the runner stops by itself");
+        assert_eq!(
+            ran.unwrap_err().to_string(),
+            "another `pl runner start` registered runner `sartre`; this one stopped"
+        );
+    }
+
+    /// A runner restarts holding two Claude Code attempts: it resumes the one whose worktree
+    /// is still on its branch in the attempt's session, reports the one with no worktree
+    /// lost, and starts a fresh claim in a new session.
+    #[tokio::test]
+    async fn a_restarted_runner_resumes_an_intact_worktree_and_reports_a_missing_one_lost() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        crate::worktree::tests::make_origin(&origin);
+        let root = temp.path().join("root");
+        let remote = origin.to_string_lossy().to_string();
+        let worktrees = Worktrees::with_remote_base(root.clone(), remote);
+        let repository = crate::worktree::tests::repository();
+        (worktrees
+            .prepare(&repository, "feature/pl-1", &[], "PL-1")
+            .await)
+            .unwrap();
+        let argv = temp.path().join("argv");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = crate::agent::tests::fake_agent(
+            &bin,
+            &format!(
+                r#"echo "$@" >> {}
+cat > /dev/null
+echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
+                argv.display()
+            ),
+        );
+        let seen: Seen = Arc::default();
+        let url = fake_server(seen.clone(), false).await;
+        let config = fake_config(url, root, claude);
+        let finished = |seen: &Seen, run: Uuid| {
+            let path = format!("/api/runs/{run}/finish");
+            seen.lock().unwrap().iter().any(|(_, p, _)| *p == path)
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let runner = tokio::spawn(run_with_worktrees(worktrees, config, async {
+            let _ = stopped.await;
+        }));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !(finished(&seen, RESUMED) && finished(&seen, FRESH)) {
+            assert!(Instant::now() < deadline, "{:?}", seen.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        stop.send(()).unwrap();
+        runner.await.unwrap().unwrap();
+
+        let seen = seen.lock().unwrap().clone();
+        let startup: Vec<(&str, &str, &serde_json::Value)> = (seen.iter())
+            .filter(|(_, p, _)| !p.ends_with("/heartbeat") && !p.ends_with("/log"))
+            .map(|(m, p, b)| (m.as_str(), p.as_str(), b))
+            .take(4)
+            .collect();
+        let leases = format!("/api/runners/{RUNNER}/leases");
+        let resume = format!("/api/runs/{RESUMED}/resume");
+        let lost = format!("/api/runs/{MISSING}/finish");
+        let register = serde_json::json!({"name": "sartre", "agents": ["claude-code"]});
+        assert_eq!(
+            startup,
+            [
+                ("POST", "/api/runners", &register),
+                ("GET", leases.as_str(), &serde_json::Value::Null),
+                ("POST", resume.as_str(), &serde_json::json!({"attempt": 1})),
+                (
+                    "POST",
+                    lost.as_str(),
+                    &serde_json::json!({"attempt": 1, "outcome": "failed",
+                        "reason": "runner restarted", "lost": true, "duration_ms": 0,
+                        "input_tokens": null, "output_tokens": null})
+                ),
+            ]
+        );
+        // The resumed attempt's log goes on after the 3 lines the server has.
+        let resumed_log = format!("/api/runs/{RESUMED}/log");
+        let first_lines: Vec<i64> = (seen.iter())
+            .filter(|(_, p, _)| *p == resumed_log)
+            .map(|(_, _, b)| b["first_line"].as_i64().unwrap())
+            .collect();
+        assert_eq!(first_lines.first(), Some(&4));
+        let fresh_log = format!("/api/runs/{FRESH}/log");
+        let first = seen.iter().find(|(_, p, _)| *p == fresh_log).unwrap();
+        assert_eq!(first.2["first_line"], 1);
+        for run in [RESUMED, FRESH] {
+            let path = format!("/api/runs/{run}/finish");
+            let (_, _, body) = seen.iter().find(|(_, p, _)| *p == path).unwrap();
+            assert_eq!(
+                (body["outcome"].as_str(), body["lost"].as_bool()),
+                (Some("succeeded"), Some(false))
+            );
+        }
+
+        let argv = std::fs::read_to_string(&argv).unwrap();
+        let mut sessions: Vec<&str> = argv
+            .lines()
+            .filter(|line| !line.starts_with("--probe"))
+            .map(|line| {
+                let at = line.find("--session-id").or(line.find("--resume")).unwrap();
+                &line[at..]
+            })
+            .collect();
+        sessions.sort();
+        assert_eq!(
+            sessions,
+            [
+                format!("--resume {RESUMED_SESSION}"),
+                format!("--session-id {FRESH_SESSION}"),
+            ]
+        );
     }
 
     #[test]
