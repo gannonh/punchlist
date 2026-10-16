@@ -104,7 +104,7 @@ struct Upload {
         (status = 401, body = ErrorBody),
         (status = 403, body = ErrorBody, description = "An agent attached proof to another issue than its run's."),
         (status = 404, body = ErrorBody),
-        (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
+        (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role, or its attempt changed while the file uploaded."),
         (status = 413, body = ErrorBody, description = "The file is over the server's limit."),
         (status = 422, body = ErrorBody, description = "No title or file, a content type proof cannot be, or a kind that is not the content type's."),
     )
@@ -140,6 +140,20 @@ async fn attach(
             "the upload is not valid multipart: {}",
             error.body_text()
         ))
+    };
+    // Before the body is read: a refused upload is not streamed to disk first, and the
+    // proof belongs to the attempt that was current when it started, checked again below.
+    let started = {
+        let mut conn = state.pool.acquire().await?;
+        let status = sqlx::query_scalar!(
+            "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
+            id,
+            actor.workspace_id,
+        )
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
+        unlocked_attempt(&mut conn, actor, id, &status).await?
     };
     let mut upload = Upload::default();
     while let Some(mut field) = multipart.next_field().await.map_err(malformed)? {
@@ -209,9 +223,12 @@ async fn attach(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
-    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
-    workflow.check_unlocked(&status, actor.role)?;
-    let attempt = current_attempt(&mut tx, id).await?;
+    let attempt = unlocked_attempt(&mut tx, actor, id, &status).await?;
+    if attempt != started {
+        return Err(ApiError::StaleAttempt(format!(
+            "{id} moved from attempt {started} to attempt {attempt} while the proof uploaded, so it was not attached"
+        )));
+    }
     let row = sqlx::query!(
         "INSERT INTO proof (issue_id, attempt, kind, title, content_type, size, storage_key, actor_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at",
@@ -238,6 +255,18 @@ async fn attach(
         actor: actor.into(),
         created_at: row.created_at,
     })
+}
+
+/// The issue's attempt, once its status is checked against the actor's role.
+async fn unlocked_attempt(
+    conn: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    status: &str,
+) -> Result<i32, ApiError> {
+    let (workflow, _) = active_workflow(conn, actor.workspace_id).await?;
+    workflow.check_unlocked(status, actor.role)?;
+    Ok(current_attempt(conn, id).await?)
 }
 
 /// An issue's proof, oldest first.

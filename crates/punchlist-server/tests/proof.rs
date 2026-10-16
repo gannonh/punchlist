@@ -1,10 +1,13 @@
 //! Proof uploads, lists and downloads: multipart requests against the router, then the rows
 //! and files they left, read back from Postgres and the proof directory.
 
+use std::convert::Infallible;
+
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use http_body_util::channel::Channel;
 use punchlist_server::{AppState, Bootstrap, Bootstrapped, ProofStore, bootstrap, router};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -328,6 +331,64 @@ async fn an_agent_cannot_attach_proof_in_human_review_or_download_it(pool: PgPoo
     // The person still can.
     let (status, _) = attach(&s, &s.person.token, &id, "image/png", b"png", None).await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+#[sqlx::test]
+async fn an_upload_that_outlives_its_attempt_is_refused_and_nothing_is_kept(pool: PgPool) {
+    let s = setup(&pool, "PL").await;
+    let id = issue(&s).await;
+    // Room for one chunk: the second send returns only once the server has read the first,
+    // so the upload has started in attempt 0.
+    let (mut body, channel) = Channel::<Bytes, Infallible>::new(1);
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/issues/{id}/proof"))
+        .header("authorization", format!("Bearer {}", s.person.token))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::new(channel))
+        .unwrap();
+    let app = s.app.clone();
+    let response = tokio::spawn(async move { send(&app, request).await });
+    body.send_data(Bytes::from(format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nShot\r\n\
+         --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n\
+         Content-Type: image/png\r\n\r\npn"
+    )))
+    .await
+    .unwrap();
+    body.send_data(Bytes::from_static(b"g")).await.unwrap();
+
+    // Test-only: the issue is started again while the file is still uploading.
+    sqlx::query!(
+        "INSERT INTO transition (issue_id, from_status, to_status, actor_id, workflow_version)
+         VALUES ($1, 'start', 'in_progress', $2, 'test')",
+        id,
+        s.person.actor_id,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    body.send_data(Bytes::from(format!("\r\n--{BOUNDARY}--\r\n")))
+        .await
+        .unwrap();
+    drop(body);
+
+    let (status, error) = response.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        (&error["code"], &error["message"]),
+        (
+            &json!("stale_attempt"),
+            &json!(format!(
+                "{id} moved from attempt 0 to attempt 1 while the proof uploaded, so it was not attached"
+            ))
+        )
+    );
+    assert_eq!(proof_rows(&pool).await, 0);
+    assert_eq!(stored(&s), Vec::<String>::new());
 }
 
 #[sqlx::test]
