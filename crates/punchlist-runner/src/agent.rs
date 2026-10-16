@@ -438,12 +438,21 @@ pub(crate) mod tests {
     #[test]
     fn kill_runner_kills_only_the_processes_of_its_runner() {
         let marker = uuid::Uuid::new_v4().to_string();
+        // `spawn` returns once the child is in `execve`, which can be before the kernel sets
+        // up the new environment: until then `/proc/<pid>/environ` reads empty.
         let spawn = |value: &str| {
-            std::process::Command::new("sleep")
+            let child = std::process::Command::new("sleep")
                 .arg("30")
                 .env(RUNNER_MARKER, value)
                 .spawn()
-                .unwrap()
+                .unwrap();
+            let environ = format!("/proc/{}/environ", child.id());
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::fs::read(&environ).unwrap_or_default().is_empty() {
+                assert!(std::time::Instant::now() < deadline, "no environment");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            child
         };
         let mut ours = spawn(&marker);
         let mut other = spawn(&uuid::Uuid::new_v4().to_string());
