@@ -6,6 +6,7 @@ export type IssueRow = Schemas['IssueRow']
 export type IssueList = Schemas['IssueList']
 export type IssueWritten = Schemas['IssueWritten']
 export type StreamItem = Schemas['StreamItem']
+export type Moved = Schemas['Moved']
 export type StatusInfo = Schemas['StatusInfo']
 export type ErrorBody = Schemas['ErrorBody']
 export type Actor = Schemas['Actor']
@@ -237,4 +238,33 @@ export function replaceRow(cache: IssueCache, id: string, change: (row: IssueRow
   const index = cache.rows.findIndex((r) => r.issue.id === id)
   const row = cache.rows[index]
   return row ? { ...cache, rows: cache.rows.with(index, change(row)) } : cache
+}
+
+/** A transition's answer: the issue's new status, unless the cache already holds that event or a later one. */
+export function applyMove(cache: IssueCache, moved: Moved): IssueCache {
+  const { issue, event } = moved
+  if ((cache.rowSeq[issue.id] ?? -1) >= event.seq) return cache
+  const next = replaceRow(cache, issue.id, (row) => ({
+    ...row,
+    issue: { ...row.issue, status: issue.status, status_name: issue.status_name, updated_at: issue.updated_at },
+  }))
+  return { ...next, rowSeq: { ...next.rowSeq, [issue.id]: event.seq } }
+}
+
+export type EditedField = 'title' | 'labels' | 'assignee'
+
+/**
+ * A refused edit: each of its fields goes back to `before`, unless the row no longer shows the edit's value
+ * there, because a later edit or the stream changed it since. Every other field keeps what the row has now.
+ */
+export function revertEdit(
+  cache: IssueCache,
+  before: IssueRow['issue'],
+  edited: IssueRow['issue'],
+  fields: readonly EditedField[],
+): IssueCache {
+  return replaceRow(cache, before.id, (row) => {
+    const kept = fields.filter((field) => JSON.stringify(row.issue[field]) === JSON.stringify(edited[field]))
+    return { ...row, issue: { ...row.issue, ...Object.fromEntries(kept.map((field) => [field, before[field]])) } }
+  })
 }

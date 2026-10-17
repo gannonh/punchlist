@@ -21,10 +21,20 @@ import type { Edit } from '@/lib/queries'
 const UNASSIGNED = 'unassigned'
 
 /** An input that saves on Enter or blur when its value changed. Keyed by the saved value, so a rollback shows. */
-function SavedInput({ value, label, onSave }: { value: string; label: string; onSave: (value: string) => void }) {
+function SavedInput({
+  value,
+  label,
+  onSave,
+  allowEmpty = false,
+}: {
+  value: string
+  label: string
+  onSave: (value: string) => void
+  allowEmpty?: boolean
+}) {
   const save = (input: HTMLInputElement) => {
     const next = input.value.trim()
-    if (next && next !== value) onSave(next)
+    if ((next || allowEmpty) && next !== value) onSave(next)
     else input.value = value
   }
   return (
@@ -178,6 +188,7 @@ function SheetBody({
           <SavedInput
             value={view.labels.join(', ')}
             label="Labels"
+            allowEmpty
             onSave={(text) => {
               onEdit({
                 id: view.id,

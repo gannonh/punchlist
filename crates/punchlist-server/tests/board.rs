@@ -200,6 +200,32 @@ async fn the_list_and_the_stream_agree_over_a_concurrent_write(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn an_open_stream_ends_when_the_server_shuts_down(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    let app = router(AppState::new(pool.clone()).with_shutdown(stopping));
+    create(&app, &person.token, "First").await;
+    let uri = format!("/api/workspaces/{}/events?after=0", person.workspace_id);
+    let response = app
+        .oneshot(request(&person.token, "GET", &uri, None))
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    assert_eq!(read_stream(&mut body, 1).await[0].0, 1);
+    stop.send(true).unwrap();
+    let end = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("the stream stayed open after shutdown");
+        match frame {
+            Some(Ok(frame)) if frame.is_data() => continue,
+            other => break other.map(|frame| frame.is_ok()),
+        }
+    };
+    assert_eq!(end, None);
+}
+
+#[sqlx::test]
 async fn the_stream_is_only_for_the_tokens_workspace(pool: PgPool) {
     let (app, person) = setup(&pool).await;
     let other = workspace(&pool, "OT", "Ola").await;

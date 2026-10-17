@@ -55,6 +55,9 @@ pub struct AppState {
     pub github: Option<GithubClient>,
     /// Where proof files are kept, and how large one may be.
     pub proof: ProofStore,
+    /// Turns true when the server begins to shut down. Open event streams end on it, since
+    /// graceful shutdown waits for every open response and a stream never finishes by itself.
+    pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Proof files on local disk, each named by its storage key.
@@ -77,7 +80,13 @@ impl AppState {
                 dir: std::env::temp_dir().join("punchlist-proof"),
                 max_bytes: 100 * 1024 * 1024,
             },
+            shutdown: tokio::sync::watch::channel(false).1,
         }
+    }
+
+    pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> AppState {
+        self.shutdown = shutdown;
+        self
     }
 
     pub fn with_github(mut self, github: GithubClient) -> AppState {

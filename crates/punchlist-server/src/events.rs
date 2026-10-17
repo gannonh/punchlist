@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{self, KeepAlive, Sse};
 use chrono::{DateTime, Utc};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use punchlist_api::{ErrorBody, Event, EventDetail, StreamItem};
 use punchlist_core::display_name;
 use serde::Deserialize;
@@ -206,6 +206,13 @@ async fn event_stream(
     let after = (headers.get("last-event-id"))
         .and_then(|value| value.to_str().ok()?.parse().ok())
         .unwrap_or(query.after);
+    let mut shutdown = state.shutdown;
+    let stopped = async move {
+        // A dropped sender means nothing will ever stop the server this way.
+        if shutdown.wait_for(|stopping| *stopping).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
     let stream = futures_util::stream::unfold(
         (state.pool, id, after, VecDeque::new()),
         |(pool, workspace_id, mut after, mut pending)| async move {
@@ -230,7 +237,7 @@ async fn event_stream(
             }
         },
     );
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream.take_until(stopped)).keep_alive(KeepAlive::default()))
 }
 
 /// The next events after `after` with their issues' rows, read in one snapshot.

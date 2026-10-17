@@ -135,10 +135,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             });
-            let mut state = AppState::new(pool).with_proof(ProofStore {
-                dir: proof_dir,
-                max_bytes: proof_max_bytes,
-            });
+            let (stop, stopping) = tokio::sync::watch::channel(false);
+            let mut state = AppState::new(pool)
+                .with_proof(ProofStore {
+                    dir: proof_dir,
+                    max_bytes: proof_max_bytes,
+                })
+                .with_shutdown(stopping);
             // An empty secret is no secret: anyone could sign with it.
             match github_webhook_secret.filter(|secret| !secret.is_empty()) {
                 Some(secret) => state = state.with_github_webhook_secret(secret),
@@ -157,8 +160,9 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("listen on {bind}"))?;
             tracing::info!("listening on http://{}", listener.local_addr()?);
             axum::serve(listener, app)
-                .with_graceful_shutdown(async {
+                .with_graceful_shutdown(async move {
                     let _ = tokio::signal::ctrl_c().await;
+                    let _ = stop.send(true);
                 })
                 .await?;
         }

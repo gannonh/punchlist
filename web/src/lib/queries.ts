@@ -5,11 +5,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { api, ApiError, call } from '@/api/client'
 import {
+  applyMove,
   applyStream,
   applyWrite,
   fromList,
   refusalText,
   replaceRow,
+  revertEdit,
   type ActorInfo,
   type IssueCache,
   type IssueRow,
@@ -34,7 +36,7 @@ export const sessionQuery = queryOptions({
 export const workflowQuery = queryOptions({
   queryKey: ['workflow'],
   queryFn: () => call(api.GET('/api/workflow')),
-  staleTime: Infinity,
+  staleTime: 60_000,
 })
 
 export const actorsQuery = queryOptions({
@@ -57,19 +59,41 @@ const setIssues = (client: QueryClient, change: (cache: IssueCache) => IssueCach
 /** Opens `GET /api/workspaces/{id}/events` once the list is loaded, after the list's last sequence. */
 export function useEventStream(workspaceId: string, ready: boolean): void {
   const client = useQueryClient()
+  const [opened, setOpened] = useState(0)
   useEffect(() => {
     if (!ready) return
+    let retry: ReturnType<typeof setTimeout> | undefined
     const after = client.getQueryData(issuesQuery.queryKey)?.lastSeq ?? 0
-    // EventSource reconnects by itself and sends Last-Event-ID, which the server prefers over `after`.
+    // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
+    // over `after`.
     const source = new EventSource(`/api/workspaces/${workspaceId}/events?after=${String(after)}`)
     source.addEventListener('issue', (message) => {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       setIssues(client, (cache) => applyStream(cache, item))
+      const statuses = client.getQueryData(workflowQuery.queryKey)?.statuses
+      if (statuses && !statuses.some((status) => status.key === item.row.issue.status)) {
+        void client.invalidateQueries({ queryKey: workflowQuery.queryKey })
+      }
+    })
+    // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
+    // ends. Read the session and a fresh list, then open it again; a signed-out session shows the sign-in page.
+    // ponytail: a fixed 2 s wait between attempts, no backoff.
+    source.addEventListener('error', () => {
+      if (source.readyState !== EventSource.CLOSED) return
+      retry = setTimeout(() => {
+        void Promise.allSettled([
+          client.refetchQueries({ queryKey: sessionQuery.queryKey }),
+          client.refetchQueries({ queryKey: issuesQuery.queryKey }),
+        ]).then(() => {
+          setOpened((count) => count + 1)
+        })
+      }, 2000)
     })
     return () => {
+      clearTimeout(retry)
       source.close()
     }
-  }, [client, workspaceId, ready])
+  }, [client, workspaceId, ready, opened])
 }
 
 export function useSignIn() {
@@ -124,32 +148,31 @@ export function useEditIssue() {
           body: { ...fields, ...(assignee !== undefined && { assignee: assignee?.id ?? null }) },
         }),
       ),
-    onMutate: async (edit): Promise<{ before: IssueRow | undefined }> => {
+    onMutate: async (edit): Promise<{ before: IssueRow['issue']; edited: IssueRow['issue'] } | undefined> => {
       await client.cancelQueries({ queryKey: issuesQuery.queryKey })
-      const before = client.getQueryData(issuesQuery.queryKey)?.rows.find((row) => row.issue.id === edit.id)
-      setIssues(client, (cache) =>
-        replaceRow(cache, edit.id, (row) => ({
-          ...row,
-          issue: {
-            ...row.issue,
-            ...(edit.title !== undefined && { title: edit.title }),
-            ...(edit.labels !== undefined && { labels: edit.labels }),
-            ...(edit.assignee !== undefined && {
-              assignee: edit.assignee && {
-                id: edit.assignee.id,
-                name: edit.assignee.name,
-                role: edit.assignee.role,
-                kind: edit.assignee.kind,
-              },
-            }),
+      const before = client.getQueryData(issuesQuery.queryKey)?.rows.find((row) => row.issue.id === edit.id)?.issue
+      if (!before) return undefined
+      const edited: IssueRow['issue'] = {
+        ...before,
+        ...(edit.title !== undefined && { title: edit.title }),
+        ...(edit.labels !== undefined && { labels: edit.labels }),
+        ...(edit.assignee !== undefined && {
+          assignee: edit.assignee && {
+            id: edit.assignee.id,
+            name: edit.assignee.name,
+            role: edit.assignee.role,
+            kind: edit.assignee.kind,
           },
-        })),
-      )
-      return { before }
+        }),
+      }
+      setIssues(client, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
+      return { before, edited }
     },
     onError: (error, edit, context) => {
-      const before = context?.before
-      if (before) setIssues(client, (cache) => replaceRow(cache, edit.id, () => before))
+      if (context) {
+        const fields = (['title', 'labels', 'assignee'] as const).filter((field) => edit[field] !== undefined)
+        setIssues(client, (cache) => revertEdit(cache, context.before, context.edited, fields))
+      }
       toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
     onSuccess: (written) => {
@@ -176,17 +199,7 @@ export function useTransitions() {
         const moved = await call(
           api.POST('/api/issues/{id}/transitions', { params: { path: { id } }, body: { to: to.key } }),
         )
-        setIssues(client, (cache) =>
-          replaceRow(cache, id, (row) => ({
-            ...row,
-            issue: {
-              ...row.issue,
-              status: moved.issue.status,
-              status_name: moved.issue.status_name,
-              updated_at: moved.issue.updated_at,
-            },
-          })),
-        )
+        setIssues(client, (cache) => applyMove(cache, moved))
         set(id, undefined)
         if (moved.warning) toast.warning(moved.warning)
         return true

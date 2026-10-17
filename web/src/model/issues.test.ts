@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'vitest'
 import {
+  applyMove,
   applyStream,
   applyWrite,
   filterRows,
   fromList,
   groupByStatus,
   refusalText,
+  revertEdit,
   rowView,
   type IssueRow,
   type StatusInfo,
@@ -171,5 +173,30 @@ describe('the cache', () => {
       'from the stream',
     )
     expect(applyWrite(cache, { seq: 4, row: row('PL-1', { title: 'newer' }) }).rows[0]?.issue.title).toBe('newer')
+  })
+
+  test("a transition's answer older than the row the stream gave is dropped", () => {
+    const cache = applyStream(fromList({ issues: [row('PL-1', { status: 'todo' })], last_event_seq: 1 }), {
+      event: event(3, 'PL-1'),
+      row: row('PL-1', { status: 'in_progress', status_name: 'In Progress' }),
+    })
+    const moved = (seq: number) => ({
+      issue: row('PL-1', { status: 'start', status_name: 'Start' }).issue,
+      event: event(seq, 'PL-1'),
+    })
+    expect(applyMove(cache, moved(2)).rows[0]?.issue.status).toBe('in_progress')
+    expect(applyMove(cache, moved(3)).rows[0]?.issue.status).toBe('in_progress')
+    expect(applyMove(cache, moved(4)).rows[0]?.issue.status).toBe('start')
+  })
+
+  test('a refused edit puts back only its own fields, where nothing changed them since', () => {
+    const before = row('PL-1', { title: 'Old', labels: ['a'] })
+    const edited = { ...before.issue, title: 'Mine', labels: ['b'] }
+    const since = fromList({
+      issues: [row('PL-1', { title: 'Mine', labels: ['c'], status: 'todo', status_name: 'Todo' })],
+      last_event_seq: 4,
+    })
+    const reverted = revertEdit(since, before.issue, edited, ['title', 'labels'])
+    expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Old', labels: ['c'], status: 'todo' })
   })
 })

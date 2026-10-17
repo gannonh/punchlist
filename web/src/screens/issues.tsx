@@ -331,10 +331,21 @@ export function IssuesScreen({
                 ? filter.text
                   ? `No issues match “${filter.text}”.`
                   : 'No issues match these filters.'
-                : 'There are no issues yet.'}{' '}
+                : rows.length > 0
+                  ? `Every issue is in ${closed.map((status) => status.name).join(' or ')}, which are hidden.`
+                  : 'There are no issues yet.'}{' '}
               Issues appear here as the runner picks them up and moves them through the workflow.
             </p>
-            {filtered ? (
+            {!filtered && rows.length > 0 ? (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setHideClosed(false)
+                }}
+              >
+                Show them
+              </Button>
+            ) : filtered ? (
               <Button
                 variant="outline"
                 onClick={() => {
