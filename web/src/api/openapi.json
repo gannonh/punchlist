@@ -1939,7 +1939,7 @@
             "items": {
               "type": "string"
             },
-            "description": "The branches other than the default branch that a pull request from the run's head\nbranch has been into, open or closed, earlier bases too. A pull request's run takes its\nworkflow file from the head commit merged into the base, and GitHub does not say which\npull request a run was for, so any of them may have run it. Empty when every one was\ninto the default branch; absent when no pull request from a branch of the workspace's\nrepository is behind the run, and wherever `workflow_path` is."
+            "description": "The branches other than the default branch that a pull request from the run's head\nbranch has been into, open or closed, earlier bases too. A pull request's run takes its\nworkflow file from the head commit merged into the base, and GitHub does not say which\npull request a run was for, so any of them may have run it. Empty when every one was\ninto the default branch; absent when no pull request from a branch of the workspace's\nrepository is behind the run, and whenever `workflow_path` is absent."
           },
           "workflow_path": {
             "type": [

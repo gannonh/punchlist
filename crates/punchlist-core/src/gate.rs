@@ -185,7 +185,7 @@ pub struct CheckRunEvidence {
     /// workflow file from the head commit merged into the base, and GitHub does not say which
     /// pull request a run was for, so any of them may have run it. Empty when every one was
     /// into the default branch; absent when no pull request from a branch of the workspace's
-    /// repository is behind the run, and wherever `workflow_path` is.
+    /// repository is behind the run, and whenever `workflow_path` is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_other_bases: Option<Vec<String>>,
 }
@@ -207,7 +207,7 @@ impl CheckRunEvidence {
     }
 
     /// Whether a runner ran the job from the default branch's copy of its workflow file, and
-    /// only a pull request into the default branch can have been what it ran for.
+    /// every pull request it can have run for was into the default branch alone.
     fn default_workflow_ran(&self) -> bool {
         self.workflow_path.is_some()
             && self.default_file()

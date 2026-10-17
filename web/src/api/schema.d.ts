@@ -604,7 +604,7 @@ export interface components {
              *     workflow file from the head commit merged into the base, and GitHub does not say which
              *     pull request a run was for, so any of them may have run it. Empty when every one was
              *     into the default branch; absent when no pull request from a branch of the workspace's
-             *     repository is behind the run, and wherever `workflow_path` is.
+             *     repository is behind the run, and whenever `workflow_path` is absent.
              */
             workflow_other_bases?: string[] | null;
             /**
