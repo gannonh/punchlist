@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)\n                c.name, c.status, c.conclusion, c.app,\n                c.workflow_path, c.workflow_sha, c.workflow_default_sha\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           -- Whatever `workflow_path` either has: a run with no suite has no job read for it.\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id\n                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))\n         ORDER BY c.check_suite_id, c.app, c.name,\n                  (c.workflow_path IS NULL AND c.status = 'completed' AND EXISTS (\n                      SELECT 1 FROM check_run w WHERE w.repository_id = c.repository_id\n                        AND w.head_sha = c.head_sha AND w.check_suite_id = c.check_suite_id\n                        AND w.workflow_path IS NOT NULL)),\n                  c.id DESC",
+  "query": "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)\n                c.name, c.status, c.conclusion, c.app,\n                c.workflow_path, c.workflow_sha, c.workflow_default_sha, c.workflow_other_bases\n         FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2\n           -- Whatever `workflow_path` either has: a run with no suite has no job read for it.\n           AND NOT (c.check_suite_id IS NULL AND EXISTS (\n               SELECT 1 FROM check_run n WHERE n.repository_id = c.repository_id\n                 AND n.head_sha = c.head_sha AND n.name = c.name AND n.id > c.id\n                 AND (c.app IS NULL OR n.app IS NULL OR n.app = c.app)))\n         ORDER BY c.check_suite_id, c.app, c.name,\n                  (c.workflow_path IS NULL AND c.status = 'completed' AND EXISTS (\n                      SELECT 1 FROM check_run w WHERE w.repository_id = c.repository_id\n                        AND w.head_sha = c.head_sha AND w.check_suite_id = c.check_suite_id\n                        AND w.workflow_path IS NOT NULL)),\n                  c.id DESC",
   "describe": {
     "columns": [
       {
@@ -79,6 +79,17 @@
             "name": "workflow_default_sha"
           }
         }
+      },
+      {
+        "ordinal": 7,
+        "name": "workflow_other_bases",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "check_run",
+            "name": "workflow_other_bases"
+          }
+        }
       }
     ],
     "parameters": {
@@ -94,8 +105,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "4d6c002cb4b1454deb5343c4963b5b29d95f0efaa04971bdb3546d814699640b"
+  "hash": "073c066464b426038468ef493780b35b15e31d04c1d7b44949264de780738095"
 }
