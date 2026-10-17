@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                a.kind AS actor_kind, e.kind,\n                coalesce(t.from_status, r.from_status) AS \"from_status?\",\n                coalesce(t.to_status, r.to_status) AS \"to_status?\",\n                coalesce(t.workflow_version, r.workflow_version) AS \"workflow_version?\",\n                coalesce(t.delivery_id, r.delivery_id) AS \"delivery_id?\",\n                c.body AS \"comment_body?\", r.gate AS \"gate?\", r.reason AS \"reason?\"\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         LEFT JOIN refusal r ON r.id = e.refusal_id\n         WHERE e.workspace_id = $1 AND e.issue_id = $2\n         ORDER BY e.seq",
+  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                a.kind AS actor_kind, e.kind,\n                coalesce(t.from_status, r.from_status) AS \"from_status?\",\n                coalesce(t.to_status, r.to_status) AS \"to_status?\",\n                coalesce(t.workflow_version, r.workflow_version) AS \"workflow_version?\",\n                coalesce(t.delivery_id, r.delivery_id) AS \"delivery_id?\",\n                c.body AS \"comment_body?\", r.gate AS \"gate?\", r.reason AS \"reason?\",\n                e.edited_fields\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         LEFT JOIN refusal r ON r.id = e.refusal_id\n         WHERE e.workspace_id = $1 AND ($2::text IS NULL OR e.issue_id = $2) AND e.seq > $3\n         ORDER BY e.seq\n         LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -147,12 +147,25 @@
             "name": "reason"
           }
         }
+      },
+      {
+        "ordinal": 15,
+        "name": "edited_fields",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "edited_fields"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
         "Uuid",
-        "Text"
+        "Text",
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -170,8 +183,9 @@
       null,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "fae09e34027872a625858029643f5ecc1024c5257c993c807b6ddb976ed13e7f"
+  "hash": "d1a845b98280f3be900bec71e5dafb67585084406830eab434d114124f722f22"
 }

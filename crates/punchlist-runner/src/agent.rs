@@ -548,6 +548,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             status_name: "In Progress".into(),
             created_at: now,
             updated_at: now,
+            assignee: None,
+            labels: Vec::new(),
             waiting_on_person: None,
         }
     }

@@ -21,7 +21,8 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
-use crate::issues::{IssueRow, check_move, record_transition};
+use crate::issues::{check_move, record_transition};
+use crate::rows::issue;
 use crate::runners::{RunnerRow, runner_of};
 use crate::workflow::{active_workflow, dispatch_workflow, lock_workspace};
 use crate::{ApiError, AppState};
@@ -215,7 +216,7 @@ async fn try_claim(
             .fetch_one(&mut *tx)
             .await?;
             set_agent_token(&mut tx, run_id, &agent_token).await?;
-            let issue = issue_row(&mut tx, &id).await?;
+            let issue = issue_row(&mut tx, actor.workspace_id, &id).await?;
             (run_id, run.last + 1, run.branch, run.prompt, issue)
         }
         None => {
@@ -299,7 +300,7 @@ async fn new_run(
         let prompt = workflow.prompt_for(IN_PROGRESS);
         (IN_PROGRESS.to_string(), moved.issue, prompt)
     } else {
-        let issue = issue_row(&mut *tx, &id).await?;
+        let issue = issue_row(&mut *tx, actor.workspace_id, &id).await?;
         let queued_under = dispatch_workflow(&mut *tx, actor.workspace_id, &id).await?;
         let prompt = queued_under.prompt_for(&from);
         (from, issue, prompt)
@@ -375,15 +376,15 @@ async fn merged_branches(conn: &mut sqlx::PgConnection, id: &str) -> sqlx::Resul
     .await
 }
 
-async fn issue_row(conn: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<Issue> {
-    let row = sqlx::query_as!(
-        IssueRow,
-        "SELECT id, title, body, status, created_at, updated_at FROM issue WHERE id = $1",
-        id,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-    Ok(row.into())
+/// The issue a run is for, which is in the runner's workspace.
+async fn issue_row(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    id: &str,
+) -> sqlx::Result<Issue> {
+    issue(conn, workspace_id, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 async fn repository(conn: &mut sqlx::PgConnection, workspace_id: Uuid) -> sqlx::Result<Repository> {
@@ -771,7 +772,7 @@ async fn resume_run(
     .await?;
     let agent_token = new_token();
     set_agent_token(&mut tx, id, &agent_token).await?;
-    let issue = issue_row(&mut tx, &held.issue_id).await?;
+    let issue = issue_row(&mut tx, actor.workspace_id, &held.issue_id).await?;
     let merged_branches = merged_branches(&mut tx, &held.issue_id).await?;
     let repository = repository(&mut tx, actor.workspace_id).await?;
     tx.commit().await?;

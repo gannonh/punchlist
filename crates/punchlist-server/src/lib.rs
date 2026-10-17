@@ -4,19 +4,25 @@ mod actors;
 mod auth;
 mod bootstrap;
 mod error;
+mod events;
 mod github;
 mod github_api;
 mod issues;
 mod jobs;
 mod proof;
 mod pull_requests;
+mod rows;
 mod runners;
 mod runs;
+mod session;
 mod workflow;
 
 use auth::BearerAuth;
-use axum::{Json, Router, routing::get};
+use axum::http::StatusCode;
+use axum::routing::{any, get};
+use axum::{Json, Router};
 use sqlx::PgPool;
+use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 
@@ -106,18 +112,50 @@ impl AppState {
 )]
 struct ApiDoc;
 
-/// The API router and the OpenAPI document built from the same routes (ADR 0008).
-pub fn router(state: AppState) -> Router {
-    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+/// Every API route, registered with its OpenAPI path (ADR 0008). `proof_max_bytes` sizes
+/// the proof upload's body limit.
+fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(actors::routes())
+        .merge(events::routes())
         .merge(github::routes())
         .merge(issues::routes())
-        .merge(proof::routes(&state))
+        .merge(proof::routes(proof_max_bytes))
         .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())
+        .merge(session::routes())
         .merge(workflow::routes())
+}
+
+/// The API router, which also serves the OpenAPI document built from its routes at
+/// `/api/openapi.json`.
+pub fn router(state: AppState) -> Router {
+    let (router, api) = api_routes(state.proof.max_bytes)
         .with_state(state)
         .split_for_parts();
     router.route("/api/openapi.json", get(move || async move { Json(api) }))
+}
+
+/// The OpenAPI document, built from the routes without a database.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    api_routes(0).split_for_parts().1
+}
+
+/// `router` serving the web app's build in `dir` too: its files at `/`, and its
+/// `index.html` for any other path outside `/api/`, so the app's own routes load it. Without
+/// an `index.html` in `dir` it is the API alone.
+pub fn with_web_app(router: Router, dir: &std::path::Path) -> Router {
+    let index = dir.join("index.html");
+    if !index.is_file() {
+        tracing::warn!(
+            "no {}; serving the API without the web app",
+            index.display()
+        );
+        return router;
+    }
+    let app = ServeDir::new(dir).fallback(ServeFile::new(index));
+    router
+        .route("/api/{*rest}", any(|| async { StatusCode::NOT_FOUND }))
+        .fallback_service(app)
 }

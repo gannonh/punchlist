@@ -664,8 +664,8 @@ fn render_runs(runs: &[Run]) -> String {
 async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> anyhow::Result<()> {
     match command {
         IssueCommand::Create { title, body } => {
-            let issue = client.create_issue(&CreateIssue { title, body }).await?;
-            writeln!(out, "{}", issue.id)?;
+            let written = client.create_issue(&CreateIssue { title, body }).await?;
+            writeln!(out, "{}", written.row.issue.id)?;
         }
         IssueCommand::Show { id } => {
             let (issue, events) = issue_with_timeline(client, &id).await?;
@@ -682,7 +682,8 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
         }
         IssueCommand::List => {
             let list = client.list_issues().await?;
-            write!(out, "{}", render_list(&list.issues))?;
+            let issues: Vec<Issue> = list.issues.into_iter().map(|row| row.issue).collect();
+            write!(out, "{}", render_list(&issues))?;
         }
         IssueCommand::Move { id, status } => {
             let moved = client.move_issue(&id, &status).await.map_err(with_gates)?;
@@ -731,7 +732,10 @@ fn render_workflow(workflow: &WorkflowInfo) -> String {
         workflow.version,
         invalid.unwrap_or_default(),
         workflow.commit_sha.as_deref().unwrap_or("built-in"),
-        workflow.statuses.join(", ")
+        (workflow.statuses.iter())
+            .map(|status| status.key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if let Some(refused) = &workflow.refused {
         out += &format!("Refused   {}: {}\n", refused.commit_sha, refused.reason);
@@ -750,7 +754,10 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
         // Comments do not change the status, so compare with the last transition.
         let last_move = events.iter().rev().find_map(|event| match &event.detail {
             EventDetail::Transition { to, .. } => Some(to),
-            EventDetail::Comment { .. } | EventDetail::Refusal { .. } => None,
+            EventDetail::Comment { .. }
+            | EventDetail::Refusal { .. }
+            | EventDetail::Created
+            | EventDetail::Edited { .. } => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -822,6 +829,10 @@ fn render_show(
                     text.push_str(&format!("  [delivery {delivery_id}]"));
                 }
                 text.push('\n');
+            }
+            EventDetail::Created => text.push_str(&format!("{who}created\n")),
+            EventDetail::Edited { fields } => {
+                text.push_str(&format!("{who}edited {}\n", fields.join(", ")));
             }
             EventDetail::Comment { body } => {
                 text.push_str(&format!("{who}commented:\n"));
@@ -1019,6 +1030,8 @@ mod tests {
             status_name: "Agent Review".into(),
             created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            assignee: None,
+            labels: Vec::new(),
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
         };
         let mut moved = EventDetail::transition(
@@ -1055,6 +1068,14 @@ mod tests {
             ],
         };
         let events = [
+            event(punchlist_api::Role::Person, "Gannon", EventDetail::Created),
+            event(
+                punchlist_api::Role::Person,
+                "Gannon",
+                EventDetail::Edited {
+                    fields: vec!["title".into(), "labels".into()],
+                },
+            ),
             event(punchlist_api::Role::Github, "gannonh", moved),
             event(
                 punchlist_api::Role::Github,
@@ -1089,6 +1110,8 @@ mod tests {
              \x20 mergeable: pass (pull request #12 has no conflicts and GitHub's merge state is clean)\n\
              \x20 1 of 2 gates pass\n\
              \nTimeline\n\
+             \x20 2026-10-10 12:30:45 UTC  Gannon (person)  created\n\
+             \x20 2026-10-10 12:30:45 UTC  Gannon (person)  edited title, labels\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  In Progress → Agent Review  [delivery d-1]\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  commented:\n\
              \x20   Closed without merging.\n\
@@ -1117,6 +1140,8 @@ mod tests {
             status_name: "Todo".into(),
             created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            assignee: None,
+            labels: Vec::new(),
             waiting_on_person: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);
@@ -1184,7 +1209,13 @@ mod tests {
             version: "sha256:ab".into(),
             invalid: None,
             commit_sha: None,
-            statuses: vec!["backlog".into(), "todo".into()],
+            statuses: ["backlog", "todo"]
+                .map(|key| punchlist_api::StatusInfo {
+                    key: key.into(),
+                    name: key.into(),
+                    locked_to: Vec::new(),
+                })
+                .to_vec(),
             refused: None,
         };
         assert_eq!(

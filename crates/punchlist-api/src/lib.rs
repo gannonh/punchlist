@@ -5,11 +5,11 @@
 //! with their schemas from `punchlist-core`'s `openapi` feature.
 
 use chrono::{DateTime, Utc};
-use punchlist_core::display_name;
 pub use punchlist_core::{
     CheckRunEvidence, Evidence, GateResult, ProofEvidence, PullRequestEvidence, PullRequestState,
     ReviewThreadEvidence, Role,
 };
+use punchlist_core::{display_name, is_plain_name};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -34,6 +34,12 @@ pub struct Issue {
     pub status: String,
     /// The status as people read it, such as `In Progress`.
     pub status_name: String,
+    /// A person or an agent; `None` when nobody is assigned.
+    #[serde(default)]
+    pub assignee: Option<Actor>,
+    /// In the order they were set.
+    #[serde(default)]
+    pub labels: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Why the issue waits on a person, when it does: every run this entry into its status
@@ -43,10 +49,170 @@ pub struct Issue {
     pub waiting_on_person: Option<String>,
 }
 
+/// An issue as the list and the board show it: the issue, its run, its newest pull request
+/// and its next gated transition's gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueRow {
+    pub issue: Issue,
+    pub run: RunSummary,
+    /// The issue's highest-numbered pull request; `None` when none is linked.
+    pub pull_request: Option<PullRequestSummary>,
+    /// `None` when no transition an actor can request from the issue's status has gates.
+    pub gates: Option<GateSummary>,
+}
+
+/// What the issue's agent is doing in its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RunSummary {
+    /// No run is running or waiting, and the last one in this status did not fail.
+    Idle,
+    /// A dispatch waits for a runner that can run `agent`.
+    Queued {
+        agent: String,
+    },
+    Running {
+        agent: String,
+        since: DateTime<Utc>,
+    },
+    /// The latest run in the issue's status failed.
+    Failed {
+        agent: String,
+        /// The last attempt's failure reason.
+        reason: Option<String>,
+        at: DateTime<Utc>,
+    },
+}
+
+/// A pull request's state as people read it: `draft` is an open draft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestStatus {
+    Draft,
+    Open,
+    Merged,
+    Closed,
+}
+
+impl PullRequestStatus {
+    pub fn new(state: PullRequestState, draft: bool) -> PullRequestStatus {
+        match state {
+            PullRequestState::Open if draft => PullRequestStatus::Draft,
+            PullRequestState::Open => PullRequestStatus::Open,
+            PullRequestState::Merged => PullRequestStatus::Merged,
+            PullRequestState::Closed => PullRequestStatus::Closed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PullRequestSummary {
+    pub number: i64,
+    pub state: PullRequestStatus,
+    pub checks: ChecksState,
+    /// `None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL.
+    pub url: Option<String>,
+}
+
+/// The gates of the issue's next gated transition, over the evidence recorded now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GateSummary {
+    /// The status the gated transition moves to.
+    pub to: String,
+    pub to_name: String,
+    pub passed: u32,
+    pub total: u32,
+    /// The first gate that fails, in the workflow's order.
+    pub first_failed: Option<String>,
+}
+
+/// The answer to a write: the changed issue's row and the sequence number of the event it
+/// recorded, or the workspace's latest when it recorded none (ADR 0006). The client drops
+/// that event when the stream delivers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueWritten {
+    pub row: IssueRow,
+    pub seq: i64,
+}
+
+/// `PATCH /api/issues/{id}`. An absent field is left as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateIssue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub title: Option<String>,
+    /// Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub body: Option<String>,
+    /// Each trimmed, 1 to 50 characters; at most 20, duplicates dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub labels: Option<Vec<String>>,
+    /// A person's or an agent's actor id, or `null` to unassign.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    #[schema(value_type = Option<Uuid>, nullable = true)]
+    pub assignee: Option<Option<Uuid>>,
+}
+
+/// A field that is present, `null` or not, as `Some`; serde's default leaves an absent one
+/// `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// One message of `GET /api/workspaces/{id}/events`: an event and its issue's row as it is
+/// now, which can be newer than the event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StreamItem {
+    pub event: Event,
+    pub row: IssueRow,
+}
+
+/// `POST /api/session`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignIn {
+    /// A person's bearer token.
+    pub token: String,
+}
+
+/// Who a request is signed in as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Session {
+    pub actor: Actor,
+    pub workspace_id: Uuid,
+}
+
+/// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
+/// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
+/// the fence.
+pub fn plain_pull_request_url(number: i64, url: &str) -> Option<&str> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    // `.` and `..` are plain names and not an owner or a repository.
+    let plain =
+        |part: Option<&str>| part.is_some_and(|p| is_plain_name(p) && p != "." && p != "..");
+    (plain(parts.next())
+        && plain(parts.next())
+        && parts.next() == Some("pull")
+        && parts.next() == Some(&number.to_string())
+        && parts.next().is_none())
+    .then_some(url)
+}
+
 /// `GET /api/issues`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct IssueList {
-    pub issues: Vec<Issue>,
+    /// Oldest first.
+    pub issues: Vec<IssueRow>,
     /// The sequence number of the workspace's latest event, read in the same snapshot as
     /// the list (ADR 0006).
     pub last_event_seq: i64,
@@ -133,6 +299,13 @@ pub enum EventDetail {
         /// the pull request from GitHub itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_id: Option<String>,
+    },
+    /// The issue was created.
+    Created,
+    /// Fields of the issue changed.
+    Edited {
+        /// Among `title`, `body`, `labels` and `assignee`, in that order.
+        fields: Vec<String>,
     },
 }
 
@@ -677,9 +850,20 @@ pub struct WorkflowInfo {
     pub invalid: Option<String>,
     /// The default branch commit it was loaded from; `None` for the built-in workflow.
     pub commit_sha: Option<String>,
-    pub statuses: Vec<String>,
+    /// In the workflow's order.
+    pub statuses: Vec<StatusInfo>,
     /// The last push of `workflow.toml` that was refused; `None` once a later load succeeds.
     pub refused: Option<WorkflowRefusal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StatusInfo {
+    /// The status key, such as `in_progress`.
+    pub key: String,
+    /// As people read it, such as `In Progress`.
+    pub name: String,
+    /// The roles that may not act on an issue in it, from the workflow's `[lock]`.
+    pub locked_to: Vec<Role>,
 }
 
 /// A pushed `workflow.toml` the server refused to load.
@@ -806,6 +990,49 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&detail).unwrap(),
             r#"{"kind":"refusal","from":"merging","from_name":"Merging","to":"done","to_name":"Done","gate":"proof_attached","reason":"no proof","workflow_version":"sha256:ab"}"#
+        );
+    }
+
+    #[test]
+    fn a_pull_request_url_is_plain_only_as_the_github_path_of_that_number() {
+        let url = "https://github.com/gannonh/punchlist-sandbox/pull/12";
+        assert_eq!(plain_pull_request_url(12, url), Some(url));
+        assert_eq!(plain_pull_request_url(13, url), None);
+        assert_eq!(
+            plain_pull_request_url(12, "https://github.com/../x/pull/12"),
+            None
+        );
+        assert_eq!(
+            plain_pull_request_url(12, "https://github.com/a/b/pull/12/files"),
+            None
+        );
+    }
+
+    #[test]
+    fn update_issue_tells_an_absent_assignee_from_a_null_one() {
+        let absent: UpdateIssue = serde_json::from_str(r#"{"title":"T"}"#).unwrap();
+        assert_eq!(absent.assignee, None);
+        let cleared: UpdateIssue = serde_json::from_str(r#"{"assignee":null}"#).unwrap();
+        assert_eq!(cleared.assignee, Some(None));
+        let id = Uuid::nil();
+        let set: UpdateIssue = serde_json::from_str(&format!(r#"{{"assignee":"{id}"}}"#)).unwrap();
+        assert_eq!(set.assignee, Some(Some(id)));
+    }
+
+    #[test]
+    fn run_summary_is_tagged_by_state() {
+        let failed = RunSummary::Failed {
+            agent: "codex".into(),
+            reason: None,
+            at: "2026-10-10T12:00:00Z".parse().unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_string(&failed).unwrap(),
+            r#"{"state":"failed","agent":"codex","reason":null,"at":"2026-10-10T12:00:00Z"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&RunSummary::Idle).unwrap(),
+            r#"{"state":"idle"}"#
         );
     }
 

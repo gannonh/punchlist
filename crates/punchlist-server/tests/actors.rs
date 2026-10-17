@@ -77,7 +77,7 @@ async fn issue_in(app: &Router, person: &str, to: &[&str]) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{issue}");
-    let id = issue["id"].as_str().unwrap().to_string();
+    let id = issue["row"]["issue"]["id"].as_str().unwrap().to_string();
     for to in to {
         let (status, body) = call(
             app,

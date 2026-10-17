@@ -101,7 +101,7 @@ async fn create_issue(s: &Setup, title: &str) -> String {
     let response = s.app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice::<Value>(&bytes).unwrap()["id"]
+    serde_json::from_slice::<Value>(&bytes).unwrap()["row"]["issue"]["id"]
         .as_str()
         .unwrap()
         .to_string()
@@ -403,7 +403,7 @@ async fn closing_unmerged_moves_to_todo_once_with_one_comment(pool: PgPool) {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(kinds, vec!["transition", "comment"]);
+        assert_eq!(kinds, vec!["created", "transition", "comment"]);
     };
     assert_once(pool.clone()).await;
 
@@ -433,11 +433,15 @@ async fn closing_unmerged_moves_to_todo_once_with_one_comment(pool: PgPool) {
         .collect();
     assert_eq!(
         details,
-        vec![("transition", "github"), ("comment", "github")]
+        vec![
+            ("created", "person"),
+            ("transition", "github"),
+            ("comment", "github")
+        ]
     );
-    assert_eq!(events[0]["detail"]["delivery_id"], "dup");
+    assert_eq!(events[1]["detail"]["delivery_id"], "dup");
     assert!(
-        events[1]["detail"]["body"]
+        events[2]["detail"]["body"]
             .as_str()
             .unwrap()
             .contains("@octocat")

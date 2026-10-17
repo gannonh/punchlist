@@ -85,7 +85,7 @@ async fn create_and_move(app: &Router, person: &str, title: &str, to: &[&str]) -
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let id = issue["id"].as_str().unwrap().to_string();
+    let id = issue["row"]["issue"]["id"].as_str().unwrap().to_string();
     for to in to {
         let (status, _) = call(
             app,

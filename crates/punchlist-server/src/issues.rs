@@ -4,10 +4,9 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use chrono::{DateTime, Utc};
 use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
-    MoveIssue, Moved,
+    IssueWritten, MoveIssue, Moved, UpdateIssue,
 };
 use punchlist_core::{
     Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence, PullRequestState,
@@ -19,9 +18,11 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
+use crate::events::{events, next_event_seq};
 use crate::github::{
     PullRequestRead, lock_pull_requests, newest_check_runs, refresh_pull_requests, written_since,
 };
+use crate::rows::{issue, issue_rows};
 use crate::runs::RUNS_PER_ENTRY;
 use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
 use crate::{ApiError, AppState};
@@ -29,118 +30,20 @@ use crate::{ApiError, AppState};
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create_issue, list_issues))
-        .routes(routes!(get_issue))
+        .routes(routes!(get_issue, update_issue))
         .routes(routes!(move_issue))
         .routes(routes!(issue_events))
         .routes(routes!(issue_gates))
         .routes(routes!(add_comment))
 }
 
-pub(crate) struct IssueRow {
-    pub id: String,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl From<IssueRow> for Issue {
-    fn from(row: IssueRow) -> Issue {
-        Issue {
-            status_name: display_name(&row.status),
-            id: row.id,
-            title: row.title,
-            body: row.body,
-            status: row.status,
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            waiting_on_person: None,
-        }
-    }
-}
-
-struct EventRow {
-    seq: i64,
-    issue_id: String,
-    created_at: DateTime<Utc>,
-    actor_id: Uuid,
-    actor_name: String,
-    actor_role: String,
-    actor_kind: Option<String>,
-    kind: String,
-    from_status: Option<String>,
-    to_status: Option<String>,
-    workflow_version: Option<String>,
-    delivery_id: Option<String>,
-    comment_body: Option<String>,
-    gate: Option<String>,
-    reason: Option<String>,
-}
-
-impl TryFrom<EventRow> for Event {
-    type Error = sqlx::Error;
-
-    fn try_from(row: EventRow) -> Result<Event, sqlx::Error> {
-        let corrupt = |what: &str| sqlx::Error::Decode(format!("{what} event row").into());
-        let detail = match (row.kind.as_str(), row.comment_body) {
-            ("comment", Some(body)) => EventDetail::Comment { body },
-            ("refusal", None) => match (
-                row.from_status,
-                row.to_status,
-                row.gate,
-                row.reason,
-                row.workflow_version,
-            ) {
-                (Some(from), Some(to), Some(gate), Some(reason), Some(version)) => {
-                    EventDetail::Refusal {
-                        from_name: display_name(&from),
-                        to_name: display_name(&to),
-                        from,
-                        to,
-                        gate,
-                        reason,
-                        workflow_version: version,
-                        delivery_id: row.delivery_id,
-                    }
-                }
-                _ => return Err(corrupt("incomplete refusal")),
-            },
-            ("transition", None) => match (row.from_status, row.to_status, row.workflow_version) {
-                (Some(from), Some(to), Some(version)) => EventDetail::Transition {
-                    from_name: display_name(&from),
-                    to_name: display_name(&to),
-                    from,
-                    to,
-                    workflow_version: version,
-                    delivery_id: row.delivery_id,
-                },
-                _ => return Err(corrupt("incomplete transition")),
-            },
-            _ => return Err(corrupt("unknown")),
-        };
-        Ok(Event {
-            seq: row.seq,
-            issue_id: row.issue_id,
-            created_at: row.created_at,
-            actor: punchlist_api::Actor {
-                id: row.actor_id,
-                name: row.actor_name,
-                role: parse_role(&row.actor_role)?,
-                kind: row.actor_kind,
-            },
-            detail,
-        })
-    }
-}
-
-/// Create an issue in the workflow's first status.
+/// Create an issue in the workflow's first status, and its `created` event.
 #[utoipa::path(
     post,
     path = "/api/issues",
     request_body = CreateIssue,
     responses(
-        (status = 201, body = Issue),
+        (status = 201, body = IssueWritten),
         (status = 401, body = ErrorBody),
         (status = 422, body = ErrorBody, description = "The title is empty."),
     )
@@ -149,7 +52,7 @@ async fn create_issue(
     State(state): State<AppState>,
     actor: Actor,
     Json(request): Json<CreateIssue>,
-) -> Result<(StatusCode, Json<Issue>), ApiError> {
+) -> Result<(StatusCode, Json<IssueWritten>), ApiError> {
     let title = request.title.trim();
     if title.is_empty() {
         return Err(ApiError::Invalid("an issue needs a title".into()));
@@ -164,12 +67,11 @@ async fn create_issue(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let row = sqlx::query_as!(
-        IssueRow,
+    let id = format!("{}-{}", next.issue_prefix, next.number);
+    sqlx::query!(
         "INSERT INTO issue (id, workspace_id, number, title, body, status, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, title, body, status, created_at, updated_at",
-        format!("{}-{}", next.issue_prefix, next.number),
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        id,
         actor.workspace_id,
         next.number,
         title,
@@ -177,13 +79,60 @@ async fn create_issue(
         workflow.initial_status().as_str(),
         actor.id,
     )
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
+    let seq = record_event(&mut tx, &actor, &id, None).await?;
+    let written = written(&mut tx, &actor, &id, seq).await?;
     tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(row.into())))
+    Ok((StatusCode::CREATED, Json(written)))
 }
 
-/// List the workspace's issues, oldest first.
+/// The issue's row and the sequence number of the write's event, read in the write's
+/// transaction.
+async fn written(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    seq: i64,
+) -> Result<IssueWritten, ApiError> {
+    let row = issue_rows(tx, actor.workspace_id, Some(&[id.to_string()]))
+        .await?
+        .pop()
+        .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
+    Ok(IssueWritten { row, seq })
+}
+
+/// Writes an issue's `created` event, or with `fields` its `edited` event, and returns its
+/// sequence number.
+async fn record_event(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    fields: Option<&[&str]>,
+) -> sqlx::Result<i64> {
+    let seq = next_event_seq(tx, actor.workspace_id).await?;
+    let fields: Option<Vec<String>> = fields.map(|f| f.iter().map(|f| f.to_string()).collect());
+    sqlx::query!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, edited_fields)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        actor.workspace_id,
+        seq,
+        id,
+        if fields.is_some() {
+            "edited"
+        } else {
+            "created"
+        },
+        actor.id,
+        fields.as_deref(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(seq)
+}
+
+/// List the workspace's issues, oldest first, each with its run, newest pull request and
+/// next gated transition's gates.
 #[utoipa::path(
     get,
     path = "/api/issues",
@@ -198,14 +147,7 @@ async fn list_issues(
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let rows = sqlx::query_as!(
-        IssueRow,
-        "SELECT id, title, body, status, created_at, updated_at
-         FROM issue WHERE workspace_id = $1 ORDER BY number",
-        actor.workspace_id,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let issues = issue_rows(&mut tx, actor.workspace_id, None).await?;
     let last_event_seq = sqlx::query_scalar!(
         "SELECT last_event_seq FROM workspace WHERE id = $1",
         actor.workspace_id
@@ -214,7 +156,7 @@ async fn list_issues(
     .await?;
     tx.commit().await?;
     Ok(Json(IssueList {
-        issues: rows.into_iter().map(Issue::from).collect(),
+        issues,
         last_event_seq,
     }))
 }
@@ -235,16 +177,10 @@ async fn get_issue(
     actor: Actor,
     Path(id): Path<String>,
 ) -> Result<Json<Issue>, ApiError> {
-    let row = sqlx::query_as!(
-        IssueRow,
-        "SELECT id, title, body, status, created_at, updated_at
-         FROM issue WHERE id = $1 AND workspace_id = $2",
-        id,
-        actor.workspace_id,
-    )
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let mut conn = state.pool.acquire().await?;
+    let mut issue = issue(&mut conn, actor.workspace_id, &id)
+        .await?
+        .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
     // The last run this entry into the status gets has ended, and the issue is still there:
     // nothing dispatches it again. The same two rules as `queue_redispatch`, the latest
     // transition and the limit; change them together.
@@ -257,9 +193,8 @@ async fn get_issue(
         id,
         RUNS_PER_ENTRY,
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *conn)
     .await?;
-    let mut issue = Issue::from(row);
     issue.waiting_on_person = ended.map(|runs| {
         format!(
             "{runs} runs in {} ended without moving it",
@@ -473,7 +408,7 @@ pub(crate) async fn check_gates(
 /// Each of a transition's gates, checked against the issue's recorded evidence, with that
 /// evidence. The one evaluation behind a move and behind the checklist `pl issue show`
 /// prints, so the two cannot disagree on the same rows.
-async fn evaluate_gates(
+pub(crate) async fn evaluate_gates(
     tx: &mut sqlx::PgConnection,
     workflow: &Workflow,
     transition: &Transition,
@@ -648,15 +583,16 @@ pub(crate) async fn write_transition(
     gates: &[GateResult],
 ) -> Result<(Moved, Uuid, bool), ApiError> {
     let workflow_version = workflow.version();
-    let issue = sqlx::query_as!(
-        IssueRow,
-        "UPDATE issue SET status = $2, updated_at = now() WHERE id = $1
-         RETURNING id, title, body, status, created_at, updated_at",
+    sqlx::query!(
+        "UPDATE issue SET status = $2, updated_at = now() WHERE id = $1",
         id,
         to,
     )
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
+    let issue = issue(tx, actor.workspace_id, id)
+        .await?
+        .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
     let transition_id = sqlx::query_scalar!(
         "INSERT INTO transition
              (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id)
@@ -684,13 +620,7 @@ pub(crate) async fn write_transition(
         .await?;
     }
     let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
-    let seq = sqlx::query_scalar!(
-        "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
-         RETURNING last_event_seq",
-        actor.workspace_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let seq = next_event_seq(tx, actor.workspace_id).await?;
     let created_at = sqlx::query_scalar!(
         "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, transition_id)
          VALUES ($1, $2, $3, 'transition', $4, $5) RETURNING created_at",
@@ -711,7 +641,7 @@ pub(crate) async fn write_transition(
         *detail_delivery = delivery_id.map(str::to_string);
     }
     let moved = Moved {
-        issue: issue.into(),
+        issue,
         event: Event {
             seq,
             issue_id: id.to_string(),
@@ -751,32 +681,7 @@ async fn issue_events(
     if !exists {
         return Err(ApiError::IssueNotFound(id));
     }
-    let rows = sqlx::query_as!(
-        EventRow,
-        r#"SELECT e.seq, e.issue_id, e.created_at,
-                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,
-                a.kind AS actor_kind, e.kind,
-                coalesce(t.from_status, r.from_status) AS "from_status?",
-                coalesce(t.to_status, r.to_status) AS "to_status?",
-                coalesce(t.workflow_version, r.workflow_version) AS "workflow_version?",
-                coalesce(t.delivery_id, r.delivery_id) AS "delivery_id?",
-                c.body AS "comment_body?", r.gate AS "gate?", r.reason AS "reason?"
-         FROM event e
-         JOIN actor a ON a.id = e.actor_id
-         LEFT JOIN transition t ON t.id = e.transition_id
-         LEFT JOIN comment c ON c.id = e.comment_id
-         LEFT JOIN refusal r ON r.id = e.refusal_id
-         WHERE e.workspace_id = $1 AND e.issue_id = $2
-         ORDER BY e.seq"#,
-        actor.workspace_id,
-        id,
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    let events = rows
-        .into_iter()
-        .map(Event::try_from)
-        .collect::<Result<_, _>>()?;
+    let events = events(&mut conn, actor.workspace_id, Some(&id), 0, i64::MAX).await?;
     Ok(Json(events))
 }
 
@@ -843,13 +748,7 @@ pub(crate) async fn record_comment(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let seq = sqlx::query_scalar!(
-        "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
-         RETURNING last_event_seq",
-        actor.workspace_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let seq = next_event_seq(tx, actor.workspace_id).await?;
     let created_at = sqlx::query_scalar!(
         "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id)
          VALUES ($1, $2, $3, 'comment', $4, $5) RETURNING created_at",
@@ -902,13 +801,7 @@ pub(crate) async fn record_refusal(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let seq = sqlx::query_scalar!(
-        "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
-         RETURNING last_event_seq",
-        actor.workspace_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let seq = next_event_seq(tx, actor.workspace_id).await?;
     sqlx::query!(
         "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, refusal_id)
          VALUES ($1, $2, $3, 'refusal', $4, $5)",
@@ -981,9 +874,197 @@ async fn add_comment(
     Ok((StatusCode::CREATED, Json(event)))
 }
 
+/// The most labels an issue has, and the longest one, in characters.
+const MAX_LABELS: usize = 20;
+const MAX_LABEL_CHARS: usize = 50;
+
+/// A `PATCH` request, parsed: the title trimmed and not empty, the labels trimmed, each
+/// neither empty nor too long, duplicates dropped in order.
+#[derive(Debug, PartialEq)]
+struct Edit {
+    title: Option<String>,
+    body: Option<String>,
+    labels: Option<Vec<String>>,
+    assignee: Option<Option<Uuid>>,
+}
+
+fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
+    let title = match request.title.as_deref().map(str::trim) {
+        Some("") => return Err(ApiError::Invalid("an issue needs a title".into())),
+        title => title.map(str::to_string),
+    };
+    let labels = match request.labels {
+        Some(raw) => {
+            let mut labels: Vec<String> = Vec::new();
+            for label in raw.iter().map(|l| l.trim()) {
+                if label.is_empty() {
+                    return Err(ApiError::Invalid("a label cannot be empty".into()));
+                }
+                if label.chars().count() > MAX_LABEL_CHARS {
+                    return Err(ApiError::Invalid(format!(
+                        "a label is at most {MAX_LABEL_CHARS} characters"
+                    )));
+                }
+                if !labels.iter().any(|l| l == label) {
+                    labels.push(label.to_string());
+                }
+            }
+            if labels.len() > MAX_LABELS {
+                return Err(ApiError::Invalid(format!(
+                    "an issue has at most {MAX_LABELS} labels"
+                )));
+            }
+            Some(labels)
+        }
+        None => None,
+    };
+    Ok(Edit {
+        title,
+        body: request.body,
+        labels,
+        assignee: request.assignee,
+    })
+}
+
+/// Edit an issue's title, body, labels or assignee. Only the fields that change are
+/// written, with one `edited` event naming them; a request that changes nothing writes
+/// nothing and answers the workspace's latest sequence number. Nobody in a role the issue's
+/// status locks may edit it.
+#[utoipa::path(
+    patch,
+    path = "/api/issues/{id}",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    request_body = UpdateIssue,
+    responses(
+        (status = 200, body = IssueWritten),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "An agent edited another issue than its run's."),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
+        (status = 422, body = ErrorBody, description = "An empty title, a bad label, or an assignee that is not a person or agent of the workspace."),
+    )
+)]
+async fn update_issue(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateIssue>,
+) -> Result<Json<IssueWritten>, ApiError> {
+    let edit = parse_edit(request)?;
+    let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
+    let current = sqlx::query!(
+        "SELECT status, title, body, labels, assignee_id FROM issue
+         WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    workflow.check_unlocked(&current.status, actor.role)?;
+    if let Some(Some(assignee)) = edit.assignee {
+        let role = sqlx::query_scalar!(
+            "SELECT role FROM actor WHERE id = $1 AND workspace_id = $2",
+            assignee,
+            actor.workspace_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let assignable = role
+            .map(|role| parse_role(&role))
+            .transpose()?
+            .is_some_and(|role| matches!(role, Role::Person | Role::Agent));
+        if !assignable {
+            return Err(ApiError::Invalid(format!(
+                "{assignee} is not a person or an agent of this workspace"
+            )));
+        }
+    }
+    let title = edit.title.filter(|t| *t != current.title);
+    let body = edit.body.filter(|b| *b != current.body);
+    let labels = edit.labels.filter(|l| *l != current.labels);
+    let assignee = edit.assignee.filter(|a| *a != current.assignee_id);
+    let fields: Vec<&str> = [
+        ("title", title.is_some()),
+        ("body", body.is_some()),
+        ("labels", labels.is_some()),
+        ("assignee", assignee.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(field, changed)| changed.then_some(field))
+    .collect();
+    let seq = if fields.is_empty() {
+        sqlx::query_scalar!(
+            "SELECT last_event_seq FROM workspace WHERE id = $1",
+            actor.workspace_id
+        )
+        .fetch_one(&mut *tx)
+        .await?
+    } else {
+        sqlx::query!(
+            "UPDATE issue SET title = coalesce($2, title), body = coalesce($3, body),
+                    labels = coalesce($4, labels),
+                    assignee_id = CASE WHEN $5 THEN $6 ELSE assignee_id END,
+                    updated_at = now()
+             WHERE id = $1",
+            id,
+            title,
+            body,
+            labels.as_deref(),
+            assignee.is_some(),
+            assignee.flatten(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        record_event(&mut tx, &actor, &id, Some(&fields)).await?
+    };
+    let written = written(&mut tx, &actor, &id, seq).await?;
+    tx.commit().await?;
+    Ok(Json(written))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_trims_the_title_and_cleans_the_labels() {
+        let edit = parse_edit(UpdateIssue {
+            title: Some("  New title ".into()),
+            labels: Some(vec![" ui ".into(), "bug".into(), "ui".into()]),
+            ..UpdateIssue::default()
+        })
+        .unwrap();
+        assert_eq!(
+            edit,
+            Edit {
+                title: Some("New title".into()),
+                body: None,
+                labels: Some(vec!["ui".into(), "bug".into()]),
+                assignee: None,
+            }
+        );
+        let refused = |request: UpdateIssue| parse_edit(request).unwrap_err().to_string();
+        let labels = |labels: Vec<String>| UpdateIssue {
+            labels: Some(labels),
+            ..UpdateIssue::default()
+        };
+        assert_eq!(refused(labels(vec![" ".into()])), "a label cannot be empty");
+        assert_eq!(
+            refused(labels(vec!["x".repeat(51)])),
+            "a label is at most 50 characters"
+        );
+        assert_eq!(
+            refused(labels((0..21).map(|n| n.to_string()).collect())),
+            "an issue has at most 20 labels"
+        );
+        assert_eq!(
+            parse_edit(labels(vec!["x".repeat(50)])).unwrap().labels,
+            Some(vec!["x".repeat(50)])
+        );
+    }
 
     #[test]
     fn agent_comments_end_with_the_agent_line() {

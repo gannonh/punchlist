@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::State;
-use punchlist_api::{ErrorBody, WorkflowInfo, WorkflowRefusal};
+use punchlist_api::{ErrorBody, StatusInfo, WorkflowInfo, WorkflowRefusal};
 use punchlist_core::{Workflow, default_workflow, workflow_schema};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -309,10 +309,15 @@ async fn show_workflow(
         version: workflow.version().to_string(),
         invalid,
         commit_sha,
-        statuses: workflow
-            .statuses()
-            .iter()
-            .map(|s| s.as_str().to_string())
+        statuses: (workflow.statuses().iter())
+            .map(|status| StatusInfo {
+                key: status.as_str().to_string(),
+                name: status.display_name(),
+                locked_to: (workflow.locks().iter())
+                    .find(|(locked, _)| locked == status)
+                    .map(|(_, roles)| roles.clone())
+                    .unwrap_or_default(),
+            })
             .collect(),
         refused: refused
             .workflow_refused_commit

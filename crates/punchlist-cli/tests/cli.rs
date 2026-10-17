@@ -96,24 +96,26 @@ async fn create_show_move_and_refuse(pool: PgPool) {
 
     let show = pl.run(&["issue", "show", "PL-1"]).await;
     assert_eq!(show.code, 0);
-    insta::assert_snapshot!(show.stdout, @r"
-    PL-1  First
-    Status: Backlog
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(show.stdout, @r"
+        PL-1  First
+        Status: Backlog
 
-    Body
+        Body
 
-    Pull requests
-      None linked.
+        Pull requests
+          None linked.
 
-    Proof
-      None attached.
+        Proof
+          None attached.
 
-    Timeline
-      No transitions yet.
+        Timeline
+          [time]  Gannon (person)  created
 
-    Runs
-      No runs yet.
-    ");
+        Runs
+          No runs yet.
+        ");
+    });
 
     let todo = pl.run(&["issue", "move", "PL-1", "todo"]).await;
     assert_eq!(
@@ -141,6 +143,7 @@ async fn create_show_move_and_refuse(pool: PgPool) {
           None attached.
 
         Timeline
+          [time]  Gannon (person)  created
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
 
@@ -205,7 +208,7 @@ async fn proof_attach_list_and_show(pool: PgPool) {
           [time]  image  "List at 1280×800"  12.3 kB  Gannon (person)  [run]
 
         Timeline
-          No transitions yet.
+          [time]  Gannon (person)  created
 
         Runs
           No runs yet.
@@ -352,6 +355,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           0 of 3 gates pass
 
         Timeline
+          [time]  Gannon (person)  created
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
           [time]  r1 (runner)  Start → In Progress
@@ -398,6 +402,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           0 of 3 gates pass
 
         Timeline
+          [time]  Gannon (person)  created
           [time]  Gannon (person)  Backlog → Todo
           [time]  Gannon (person)  Todo → Start
           [time]  r1 (runner)  Start → In Progress
@@ -495,25 +500,27 @@ async fn a_linked_pull_request_shows_on_the_issue(pool: PgPool) {
     let show = pl.run(&["issue", "show", "PL-1"]).await;
     assert_eq!(show.code, 0, "{}", show.stderr);
     assert!(show.stdout.contains("#7 draft"), "{}", show.stdout);
-    insta::assert_snapshot!(show.stdout, @r"
-    PL-1  Fix
-    Status: Backlog
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(show.stdout, @r"
+        PL-1  Fix
+        Status: Backlog
 
-    Pull requests
-      #7 draft  feature/pl-1-fix  checks passing 2/2  0 open threads
-        https://github.com/gannonh/punchlist/pull/7
-      #6 open  feature/pl-1-try  no checks  1 open thread
-        https://github.com/gannonh/punchlist/pull/6
+        Pull requests
+          #7 draft  feature/pl-1-fix  checks passing 2/2  0 open threads
+            https://github.com/gannonh/punchlist/pull/7
+          #6 open  feature/pl-1-try  no checks  1 open thread
+            https://github.com/gannonh/punchlist/pull/6
 
-    Proof
-      None attached.
+        Proof
+          None attached.
 
-    Timeline
-      No transitions yet.
+        Timeline
+          [time]  Gannon (person)  created
 
-    Runs
-      No runs yet.
-    ");
+        Runs
+          No runs yet.
+        ");
+    });
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
@@ -573,10 +580,10 @@ async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
              INSERT INTO comment (issue_id, actor_id, body)
              SELECT 'PL-1', id, E'Closed without merging.\\nSee #7.' FROM gh RETURNING id, actor_id
          ), s AS (
-             UPDATE workspace SET last_event_seq = 1 RETURNING id
+             UPDATE workspace SET last_event_seq = 2 RETURNING id
          )
          INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id)
-         SELECT s.id, 1, 'PL-1', 'comment', c.actor_id, c.id FROM s, c",
+         SELECT s.id, 2, 'PL-1', 'comment', c.actor_id, c.id FROM s, c",
     )
     .execute(&pool)
     .await
@@ -596,6 +603,7 @@ async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
           None attached.
 
         Timeline
+          [time]  Gannon (person)  created
           [time]  octocat (github)  commented:
             Closed without merging.
             See #7.

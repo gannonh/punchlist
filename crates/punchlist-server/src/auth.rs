@@ -1,5 +1,6 @@
 use axum::extract::FromRequestParts;
-use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
+use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
 use percent_encoding::percent_decode_str;
 use punchlist_core::Role;
@@ -34,6 +35,21 @@ impl From<&Actor> for punchlist_api::Actor {
     }
 }
 
+/// The cookie a browser signs in with (`POST /api/session`); its value is a person's token.
+/// It is `SameSite=Strict`, so a browser sends it only on requests that Punchlist's own
+/// pages make: that is the defence against cross-site request forgery, since no other
+/// site's page can make a request that carries it.
+pub const SESSION_COOKIE: &str = "punchlist_session";
+
+/// The token in the request's session cookie.
+fn session_token(headers: &HeaderMap) -> Option<&str> {
+    (headers.get_all(COOKIE).iter())
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .find_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+        .filter(|token| !token.is_empty())
+}
+
 /// Reads an `actor.role` column. Its `CHECK` constraint allows only known roles, so an
 /// unknown one is corrupt data, not a bad request.
 pub fn parse_role(value: &str) -> Result<Role, sqlx::Error> {
@@ -58,12 +74,19 @@ impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Actor, ApiError> {
-        let token = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .ok_or(ApiError::Unauthorized)?;
+        // The bearer token, or without an `Authorization` header the session cookie.
+        let (token, from_cookie) = match parts.headers.get(AUTHORIZATION) {
+            Some(value) => (
+                (value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .ok_or(ApiError::Unauthorized)?,
+                false,
+            ),
+            None => (
+                session_token(&parts.headers).ok_or(ApiError::Unauthorized)?,
+                true,
+            ),
+        };
         // The issue a path names: `/api/issues/<id>` and below. Decoded as the route's `Path`
         // decodes it, so `PL%2D1` is checked as the `PL-1` the handler acts on.
         let issue_id = parts
@@ -88,6 +111,10 @@ impl FromRequestParts<AppState> for Actor {
         .await?
         .ok_or(ApiError::Unauthorized)?;
         let role = parse_role(&row.role)?;
+        // Only a person signs in from a browser.
+        if from_cookie && role != Role::Person {
+            return Err(ApiError::Unauthorized);
+        }
         // A run's agent's token works only while its run is running.
         if role == Role::Agent && row.run_id.is_some() && row.outcome.as_deref() != Some("running")
         {

@@ -4,7 +4,7 @@
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist, Heartbeat, HeartbeatReply, Issue,
-    IssueList, Lease, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest,
+    IssueList, IssueWritten, Lease, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest,
     PullRequestsNow, RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList,
     WorkflowInfo, proof_type_by_extension,
 };
@@ -58,7 +58,7 @@ impl Client {
         })
     }
 
-    pub async fn create_issue(&self, request: &CreateIssue) -> Result<Issue, ClientError> {
+    pub async fn create_issue(&self, request: &CreateIssue) -> Result<IssueWritten, ClientError> {
         self.send(Method::POST, &["issues"], Some(request)).await
     }
 

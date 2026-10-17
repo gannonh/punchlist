@@ -5,10 +5,10 @@
 
 use punchlist_api::{
     ChecksState, Event, EventDetail, GateResult, Issue, ProofKind, PullRequestsNow, ReviewThread,
-    gate_line,
+    gate_line, plain_pull_request_url,
 };
 use punchlist_client::{Client, ClientError};
-use punchlist_core::{fenced, is_plain_name, quoted};
+use punchlist_core::{fenced, quoted};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
@@ -206,23 +206,6 @@ fn gates_fence(gates: &[GateResult]) -> String {
     )
 }
 
-/// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
-/// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
-/// the fence.
-fn pr_url(number: i64, url: &str) -> Option<&str> {
-    let path = url.strip_prefix("https://github.com/")?;
-    let mut parts = path.split('/');
-    // `.` and `..` are plain names and not an owner or a repository.
-    let plain =
-        |part: Option<&str>| part.is_some_and(|p| is_plain_name(p) && p != "." && p != "..");
-    (plain(parts.next())
-        && plain(parts.next())
-        && parts.next() == Some("pull")
-        && parts.next() == Some(&number.to_string())
-        && parts.next().is_none())
-    .then_some(url)
-}
-
 fn new_nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -295,7 +278,8 @@ fn render_issue(issue: &Issue, now: &PullRequestsNow, events: &[Event]) -> Strin
             pr.number,
             pr.state_word(),
             pr.open_threads,
-            pr_url(pr.number, &pr.url).map_or(String::new(), |url| format!("  {url}"))
+            plain_pull_request_url(pr.number, &pr.url)
+                .map_or(String::new(), |url| format!("  {url}"))
         ));
     }
     let mut untrusted = format!(
@@ -379,17 +363,10 @@ mod tests {
             status_name: "In Progress".into(),
             created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            assignee: None,
+            labels: Vec::new(),
             waiting_on_person: None,
         }
-    }
-
-    #[test]
-    fn a_pull_request_url_is_printed_only_as_the_plain_github_path() {
-        let url = "https://github.com/gannonh/punchlist-sandbox/pull/12";
-        assert_eq!(pr_url(12, url), Some(url));
-        assert_eq!(pr_url(13, url), None);
-        assert_eq!(pr_url(12, "https://github.com/../x/pull/12"), None);
-        assert_eq!(pr_url(12, "https://github.com/a/b/pull/12/files"), None);
     }
 
     #[test]

@@ -1,16 +1,16 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, title, body, status, created_at, updated_at\n         FROM issue WHERE id = $1 AND workspace_id = $2",
+  "query": "SELECT status, title, body, labels, assignee_id FROM issue\n         WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "status",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "issue",
-            "name": "id"
+            "name": "status"
           }
         }
       },
@@ -38,34 +38,23 @@
       },
       {
         "ordinal": 3,
-        "name": "status",
-        "type_info": "Text",
+        "name": "labels",
+        "type_info": "TextArray",
         "origin": {
           "Table": {
             "table": "issue",
-            "name": "status"
+            "name": "labels"
           }
         }
       },
       {
         "ordinal": 4,
-        "name": "created_at",
-        "type_info": "Timestamptz",
+        "name": "assignee_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
             "table": "issue",
-            "name": "created_at"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
-        "name": "updated_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "issue",
-            "name": "updated_at"
+            "name": "assignee_id"
           }
         }
       }
@@ -81,9 +70,8 @@
       false,
       false,
       false,
-      false,
-      false
+      true
     ]
   },
-  "hash": "9edc0ff1bbf9a5fb3aeef6e53169fee00fbc65306bd2e14554512c4a0f586e3f"
+  "hash": "0111f04b7c3ac7c1c4702eb543908ad59e766b4f01afdeead517e8f66906fdfb"
 }
