@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT state, issue_id FROM pull_request WHERE repository_id = $1 AND number = $2\n         FOR UPDATE",
+  "query": "SELECT state, issue_id, updated_at FROM pull_request\n         WHERE repository_id = $1 AND number = $2 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,17 @@
             "name": "issue_id"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "updated_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -34,8 +45,9 @@
     },
     "nullable": [
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "160be39f1c9b37d982d2f29fc5af0edd7fbfdd4f605aae9635f7312dbbb27346"
+  "hash": "185457ca15c679e864e9ee5bda79104729e17cc16a300660a707f64f154613b2"
 }
