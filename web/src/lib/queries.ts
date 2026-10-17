@@ -176,7 +176,7 @@ export function useEditIssue() {
       ),
     onMutate: async (
       edit,
-    ): Promise<{ before: IssueRow['issue']; edited: IssueRow['issue']; seq: number } | undefined> => {
+    ): Promise<{ edited: IssueRow['issue']; seq: number } | undefined> => {
       await client.cancelQueries({ queryKey: issuesQuery.queryKey })
       const cache = client.getQueryData(issuesQuery.queryKey)
       const before = cache?.rows.find((row) => row.issue.id === edit.id)?.issue
@@ -198,14 +198,14 @@ export function useEditIssue() {
         ...(edit.milestone !== undefined && { milestone: edit.milestone }),
       }
       setIssues(client, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
-      return { before, edited, seq: cache.rowSeq[edit.id] ?? -1 }
+      return { edited, seq: cache.rowSeq[edit.id] ?? -1 }
     },
     onError: (error, edit, context) => {
       if (context) {
         const fields = (['title', 'labels', 'assignee', 'parent', 'project', 'milestone'] as const).filter(
           (field) => edit[field] !== undefined,
         )
-        setIssues(client, (cache) => revertEdit(cache, context.before, context.edited, fields, context.seq))
+        setIssues(client, (cache) => revertEdit(cache, context.edited, fields, context.seq))
       }
       toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
