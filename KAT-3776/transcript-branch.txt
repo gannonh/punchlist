@@ -16,8 +16,8 @@ PL-3
 --- stderr
 --- exit 0
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"parent":"PL-1"}
-{"row":{"issue":{"id":"PL-2","title":"Slice: the sheet edits them","body":"","status":"backlog","status_name":"Backlog","assignee":null,"labels":[],"parent":"PL-1","project":null,"milestone":null,"created_at":"2026-10-17T15:46:40.904079Z","updated_at":"2026-10-17T15:46:40.989250Z"},"run":{"state":"idle"},"pull_request":null,"gates":null},"seq":4}
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"parent":"PL-1"}
+{"row":{"issue":{"id":"PL-2","title":"Slice: the sheet edits them","body":"","status":"backlog","status_name":"Backlog","assignee":null,"labels":[],"parent":"PL-1","project":null,"milestone":null,"created_at":"2026-10-17T16:06:49.204792Z","updated_at":"2026-10-17T16:06:49.285212Z"},"run":{"state":"idle"},"pull_request":null,"gates":null},"seq":4}
 HTTP 200
 
 $ pl issue edit PL-3 --parent PL-2
@@ -141,8 +141,8 @@ Proof
   None attached.
 
 Timeline
-  2026-10-17 15:46:43 UTC  Verify Person (person)  created
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:49 UTC  Verify Person (person)  created
+  2026-10-17 16:06:49 UTC  Verify Person (person)  edited parent, project, milestone
 
 Runs
   No runs yet.
@@ -177,9 +177,9 @@ Proof
   None attached.
 
 Timeline
-  2026-10-17 15:46:43 UTC  Verify Person (person)  created
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:49 UTC  Verify Person (person)  created
+  2026-10-17 16:06:49 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:50 UTC  Verify Person (person)  edited parent, project, milestone
 
 Runs
   No runs yet.
@@ -257,10 +257,10 @@ $ psql: SELECT w.issue_prefix, p.name AS project, p.id AS project_id, m.name AS 
 --- stdout
  issue_prefix |  project   |              project_id              | milestone |             milestone_id             
 --------------+------------+--------------------------------------+-----------+--------------------------------------
- PL           | Punchlist  | fb6488f9-cf07-4ca0-81ba-663beb209f7f | Gate 0    | e48ec792-5ef6-44af-8cac-6764e600028b
- PL           | Punchlist  | fb6488f9-cf07-4ca0-81ba-663beb209f7f | Gate 1    | 0fe0c254-bba9-4e04-b799-f3d7ec23450a
- PL           | Groundwork | 3f7c87d2-517f-4619-b6a6-626e51fcb0b4 |           | 
- OT           | Theirs     | 600d7b2c-0075-4d25-851e-9c760d1e55a8 | Gate 0    | 2a63dc4c-e0eb-4b77-8295-b65a4fdf8852
+ PL           | Punchlist  | eb99bcc0-61a5-41f8-9f7d-ca4d6d730ed7 | Gate 0    | 8515e8a6-7219-489e-8a0d-fcf61f2799e8
+ PL           | Punchlist  | eb99bcc0-61a5-41f8-9f7d-ca4d6d730ed7 | Gate 1    | f6481059-7d1e-416c-b53a-2965a19f2bdf
+ PL           | Groundwork | 9ce9caa1-f5af-4156-a7d2-e34d61782d9e |           | 
+ OT           | Theirs     | b45eb375-ec0d-4c77-8c5e-05d25a1bb97e | Gate 0    | ab738660-a91d-44d1-9fca-5f3d851422eb
 (4 rows)
 
 --- stderr
@@ -276,19 +276,19 @@ $ psql: SELECT max(seq) FROM event WHERE workspace_id = (SELECT workspace_id FRO
 --- stderr
 --- exit 0
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"parent":"OT-1"}
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"parent":"OT-1"}
 {"code":"invalid","message":"no issue OT-1 in this workspace"} HTTP 422
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"600d7b2c-0075-4d25-851e-9c760d1e55a8"}
-{"code":"invalid","message":"no project 600d7b2c-0075-4d25-851e-9c760d1e55a8 in this workspace"} HTTP 422
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"project":"b45eb375-ec0d-4c77-8c5e-05d25a1bb97e"}
+{"code":"invalid","message":"no project b45eb375-ec0d-4c77-8c5e-05d25a1bb97e in this workspace"} HTTP 422
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"fb6488f9-cf07-4ca0-81ba-663beb209f7f","milestone":"2a63dc4c-e0eb-4b77-8295-b65a4fdf8852"}
-{"code":"invalid","message":"no milestone 2a63dc4c-e0eb-4b77-8295-b65a4fdf8852 in this workspace"} HTTP 422
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"project":"eb99bcc0-61a5-41f8-9f7d-ca4d6d730ed7","milestone":"ab738660-a91d-44d1-9fca-5f3d851422eb"}
+{"code":"invalid","message":"no milestone ab738660-a91d-44d1-9fca-5f3d851422eb in this workspace"} HTTP 422
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"3f7c87d2-517f-4619-b6a6-626e51fcb0b4","milestone":"e48ec792-5ef6-44af-8cac-6764e600028b"}
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"project":"9ce9caa1-f5af-4156-a7d2-e34d61782d9e","milestone":"8515e8a6-7219-489e-8a0d-fcf61f2799e8"}
 {"code":"invalid","message":"milestone Gate 0 is in project Punchlist; give PL-2 that project to set it"} HTTP 422
 
-$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"milestone":"e48ec792-5ef6-44af-8cac-6764e600028b"}
+$ curl -X PATCH http://127.0.0.1:54167/api/issues/PL-2 -d {"milestone":"8515e8a6-7219-489e-8a0d-fcf61f2799e8"}
 {"code":"invalid","message":"milestone Gate 0 is in project Punchlist; give PL-2 that project to set it"} HTTP 422
 
 $ psql: SELECT max(seq) FROM event WHERE workspace_id = (SELECT workspace_id FROM issue WHERE id = 'PL-2')
@@ -370,11 +370,11 @@ Proof
   None attached.
 
 Timeline
-  2026-10-17 15:46:43 UTC  Verify Person (person)  created
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
-  2026-10-17 15:46:54 UTC  Verify Person (person)  edited project
-  2026-10-17 15:46:56 UTC  Verify Person (person)  edited milestone
+  2026-10-17 16:06:49 UTC  Verify Person (person)  created
+  2026-10-17 16:06:49 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:50 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:59 UTC  Verify Person (person)  edited project
+  2026-10-17 16:07:01 UTC  Verify Person (person)  edited milestone
 
 Runs
   No runs yet.
@@ -452,15 +452,15 @@ Proof
   None attached.
 
 Timeline
-  2026-10-17 15:46:43 UTC  Verify Person (person)  created
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
-  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
-  2026-10-17 15:46:54 UTC  Verify Person (person)  edited project
-  2026-10-17 15:46:56 UTC  Verify Person (person)  edited milestone
-  2026-10-17 15:47:03 UTC  Verify Person (person)  edited parent
-  2026-10-17 15:47:06 UTC  Verify Person (person)  edited parent
-  2026-10-17 15:47:15 UTC  Verify Person (person)  edited milestone
-  2026-10-17 15:47:17 UTC  Verify Person (person)  edited parent
+  2026-10-17 16:06:49 UTC  Verify Person (person)  created
+  2026-10-17 16:06:49 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:50 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 16:06:59 UTC  Verify Person (person)  edited project
+  2026-10-17 16:07:01 UTC  Verify Person (person)  edited milestone
+  2026-10-17 16:07:07 UTC  Verify Person (person)  edited parent
+  2026-10-17 16:07:11 UTC  Verify Person (person)  edited parent
+  2026-10-17 16:07:19 UTC  Verify Person (person)  edited milestone
+  2026-10-17 16:07:22 UTC  Verify Person (person)  edited parent
 
 Runs
   No runs yet.
