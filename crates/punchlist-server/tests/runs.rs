@@ -950,6 +950,28 @@ async fn a_lapsed_lease_gives_the_run_a_second_attempt_and_a_second_lapse_fails_
     .await
     .unwrap();
     assert_eq!(dispatches, [(1, false), (2, true)]);
+    // Each claim and each lapse told the event stream the row changed, as the runner.
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT e.kind, a.role FROM event e JOIN actor a ON a.id = e.actor_id
+         WHERE e.issue_id = 'PL-1' ORDER BY e.seq",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let expected = [
+        ("created", "person"),
+        ("transition", "person"),
+        ("transition", "person"),
+        ("transition", "runner"),
+        ("run", "runner"),
+        ("run", "runner"),
+        ("run", "runner"),
+        ("run", "runner"),
+    ];
+    assert_eq!(
+        events,
+        expected.map(|(kind, role)| (kind.to_string(), role.to_string()))
+    );
 }
 
 #[sqlx::test]

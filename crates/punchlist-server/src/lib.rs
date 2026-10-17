@@ -29,6 +29,7 @@ use utoipa_axum::router::OpenApiRouter;
 pub use auth::hash_token;
 pub use bootstrap::{Bootstrap, Bootstrapped, bootstrap};
 pub use error::ApiError;
+pub use events::write_pull_request_events;
 pub use github_api::GithubClient;
 pub use jobs::{run_jobs_until_idle, run_next_job, work_jobs};
 pub use runs::expire_leases;

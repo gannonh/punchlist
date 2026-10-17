@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
+use crate::events::mark_pull_request_change;
 use crate::github_api::{
     CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
 };
@@ -802,8 +803,9 @@ fn recorded_comments(comments: &ThreadComments) -> Vec<ReviewComment> {
     recorded.collect()
 }
 
-/// Records review threads on a pull request and recounts its open ones. The caller holds the
-/// pull request's row lock: the lock order is workspace, pull request, issue, then threads.
+/// Records review threads on a pull request, recounts its open ones and marks its issue for a
+/// `pull_request` event. The caller holds the pull request's row lock: the lock order is
+/// workspace, pull request, issue, then threads.
 /// `updated_at` is the write clock under that lock, not the transaction's start, so that it
 /// orders against a `PullRequestRead` noted under the same lock. It moves only when something
 /// the gates read changed (the pull request, `resolved`, `path`, `line`): every thread event and
@@ -863,16 +865,16 @@ async fn record_review_threads(
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
+    let issue = sqlx::query_scalar!(
         "UPDATE pull_request SET open_threads =
             (SELECT count(*) FROM review_thread
              WHERE pull_request_id = $1 AND NOT resolved)::int
-         WHERE id = $1",
+         WHERE id = $1 RETURNING issue_id",
         pull_request_id,
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(())
+    mark_pull_request_change(tx, issue.as_slice()).await
 }
 
 /// Records a pull request from a payload, unless a newer payload was already applied, and
@@ -926,8 +928,9 @@ async fn record_pull_request(
     // Locks the row: a second payload closing it waits here, then reads the closed state.
     // Two payloads that are both the first to record it closed wait on the workspace lock
     // above instead, so the second still reads the first's row.
-    let was = sqlx::query_scalar!(
-        "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
+    let was = sqlx::query!(
+        "SELECT state, issue_id FROM pull_request WHERE repository_id = $1 AND number = $2
+         FOR UPDATE",
         repository_id,
         pr.number
     )
@@ -989,7 +992,12 @@ async fn record_pull_request(
         return Ok(id);
     };
     recompute_checks(tx, repository_id, &pr.head.sha).await?;
-    let closed = state != "open" && was.is_none_or(|was| was == "open");
+    // The issue it named before no longer shows it once it names another.
+    let unlinked = was.as_ref().and_then(|was| was.issue_id.clone());
+    if unlinked.is_some() && unlinked != linked {
+        mark_pull_request_change(tx, unlinked.as_slice()).await?;
+    }
+    let closed = state != "open" && was.is_none_or(|was| was.state == "open");
     if let (true, Some(issue_id)) = (closed, linked) {
         close_issue_on_pull_request(tx, workspace_id, pr, closed_by, delivery_id, &issue_id)
             .await?;
@@ -1421,7 +1429,8 @@ pub(crate) async fn newest_check_runs(
     .await
 }
 
-/// Summarizes the check runs on a commit onto every pull request whose head it is.
+/// Summarizes the check runs on a commit onto every pull request whose head it is, and marks
+/// their issues for a `pull_request` event.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
@@ -1436,20 +1445,46 @@ async fn recompute_checks(
         (_, _, 1..) => "pending",
         _ => "passing",
     };
-    sqlx::query!(
+    let issues = sqlx::query_scalar!(
         // In id order, as `lock_pull_requests` takes them.
-        "UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
-         WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
-                      ORDER BY id FOR UPDATE)",
+        r#"WITH summarized AS (
+               UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
+               WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
+                            ORDER BY id FOR UPDATE)
+               RETURNING issue_id)
+           SELECT DISTINCT issue_id AS "issue_id!" FROM summarized WHERE issue_id IS NOT NULL"#,
         repository_id,
         head_sha,
         checks,
         runs.len() as i32,
         passed as i32,
     )
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(())
+    mark_pull_request_change(tx, &issues).await
+}
+
+/// The workspace's actor for a GitHub login, made on first use. With no login it is GitHub
+/// itself, for what nobody is credited with; no GitHub login is empty, so that actor is never
+/// a user's.
+pub(crate) async fn github_actor(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    login: Option<&str>,
+) -> sqlx::Result<Uuid> {
+    let (name, login) = login.map_or(("GitHub", ""), |login| (login, login));
+    sqlx::query_scalar!(
+        "INSERT INTO actor (workspace_id, name, role, github_login)
+         VALUES ($1, $2, 'github', $3)
+         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL
+         DO UPDATE SET name = EXCLUDED.name
+         RETURNING id",
+        workspace_id,
+        name,
+        login,
+    )
+    .fetch_one(&mut *conn)
+    .await
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
@@ -1487,23 +1522,9 @@ async fn close_issue_on_pull_request(
         );
         return Ok(());
     };
-    // With nobody to credit the actor is GitHub itself. No GitHub login is empty, so that
-    // actor is never a user's.
-    let (name, login) = closed_by.map_or(("GitHub", ""), |login| (login, login));
-    let actor_id = sqlx::query_scalar!(
-        "INSERT INTO actor (workspace_id, name, role, github_login)
-         VALUES ($1, $2, 'github', $3)
-         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL
-         DO UPDATE SET name = EXCLUDED.name
-         RETURNING id",
-        workspace_id,
-        name,
-        login,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let name = closed_by.unwrap_or("GitHub");
     let actor = Actor {
-        id: actor_id,
+        id: github_actor(tx, workspace_id, closed_by).await?,
         workspace_id,
         name: name.to_string(),
         role: Role::Github,

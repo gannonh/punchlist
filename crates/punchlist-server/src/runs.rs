@@ -21,6 +21,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
+use crate::events::record_row_event;
 use crate::issues::{check_move, record_transition};
 use crate::rows::issue;
 use crate::runners::{RunnerRow, runner_of};
@@ -252,6 +253,7 @@ async fn try_claim(
             error.into()
         }
     })?;
+    record_row_event(&mut tx, actor.workspace_id, &id, actor.id, "run").await?;
     let repository = repository(&mut tx, actor.workspace_id).await?;
     tx.commit().await?;
     Ok(Some(Claim {
@@ -674,8 +676,8 @@ async fn finish_run(
     // with a move of the issue, so the dispatch queued below is for the status the issue is
     // in, under the workflow that is active.
     lock_workspace(&mut tx, actor.workspace_id).await?;
-    sqlx::query!(
-        "SELECT FROM issue WHERE id = (SELECT issue_id FROM run WHERE id = $1) FOR UPDATE",
+    let issue_id = sqlx::query_scalar!(
+        "SELECT id FROM issue WHERE id = (SELECT issue_id FROM run WHERE id = $1) FOR UPDATE",
         id,
     )
     .fetch_one(&mut *tx)
@@ -702,6 +704,7 @@ async fn finish_run(
     }
     let lost = request.lost.then_some(request.attempt);
     settle_run(&mut tx, actor.workspace_id, id, request.outcome, lost).await?;
+    record_row_event(&mut tx, actor.workspace_id, &issue_id, actor.id, "run").await?;
     tx.commit().await?;
     let run = load_runs(&state.pool, &actor, None, Some(id))
         .await?
@@ -937,19 +940,19 @@ async fn expire_lease(
     sqlx::query!("SELECT FROM issue WHERE id = $1 FOR UPDATE", issue_id)
         .fetch_one(&mut *tx)
         .await?;
-    let failed = sqlx::query_scalar!(
+    let failed = sqlx::query!(
         "UPDATE attempt SET state = 'failed', finished_at = now(),
                 failure_reason = 'lease expired: runner ' || runner.name
                                  || ' stopped sending heartbeats'
          FROM runner
          WHERE runner.id = attempt.runner_id AND attempt.run_id = $1
            AND attempt.state = 'running' AND attempt.lease_expires_at < now()
-         RETURNING attempt.attempt",
+         RETURNING attempt.attempt, runner.actor_id",
         run_id,
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(attempt) = failed else {
+    let Some(failed) = failed else {
         return Ok(false);
     };
     settle_run(
@@ -957,9 +960,10 @@ async fn expire_lease(
         workspace_id,
         run_id,
         RunOutcome::Failed,
-        Some(attempt),
+        Some(failed.attempt),
     )
     .await?;
+    record_row_event(&mut tx, workspace_id, issue_id, failed.actor_id, "run").await?;
     tx.commit().await?;
     Ok(true)
 }

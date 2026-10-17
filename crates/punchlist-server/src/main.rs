@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use punchlist_server::{
     AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, expire_leases, openapi,
     queue_workflow_load, router, warn_invalid_workflows, with_web_app, work_jobs,
+    write_pull_request_events,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -132,6 +133,18 @@ async fn main() -> anyhow::Result<()> {
                         Ok(0) => {}
                         Ok(n) => tracing::warn!(attempts = n, "expired attempt leases"),
                         Err(error) => tracing::error!(%error, "expire leases"),
+                    }
+                }
+            });
+            // The open app hears of recorded GitHub evidence within this period and the event
+            // stream's.
+            let events_pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+                loop {
+                    tick.tick().await;
+                    if let Err(error) = write_pull_request_events(&events_pool).await {
+                        tracing::error!(%error, "write pull request events");
                     }
                 }
             });
