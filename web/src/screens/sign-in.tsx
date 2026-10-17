@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { ApiError } from '@/api/client'
 import { useSignIn } from '@/lib/queries'
 
-/** v1 signs a person in with their token; the server keeps it in an HttpOnly session cookie. */
+/** The server keeps the token in an HttpOnly session cookie. */
 export function SignInScreen() {
   const signIn = useSignIn()
   const navigate = useNavigate()

@@ -177,7 +177,6 @@ async fn the_list_and_the_stream_agree_over_a_concurrent_write(pool: PgPool) {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "text/event-stream");
     let mut body = response.into_body();
-    // Nothing is delivered while the write is open.
     let early = tokio::time::timeout(Duration::from_millis(1200), body.frame()).await;
     assert!(early.is_err(), "the stream sent an uncommitted event");
 
@@ -228,7 +227,6 @@ async fn an_edit_writes_one_event_naming_the_fields_it_changed(pool: PgPool) {
     assert_eq!(edited["row"]["issue"]["labels"], json!(["ui", "bug"]));
     assert_eq!(edited["row"]["issue"]["assignee"], Value::Null);
 
-    // The same values again change nothing, so nothing is written.
     let (status, same) = patch(
         &app,
         &person.token,
@@ -312,7 +310,6 @@ async fn bad_edits_are_refused_and_write_nothing(pool: PgPool) {
         assert_eq!(answer, json!({"code": "invalid", "message": message}));
     }
 
-    // An agent cannot edit an issue in a status locked to agents.
     let (status, agent) = call(
         &app,
         &person.token,
@@ -467,7 +464,6 @@ async fn a_person_signs_in_and_the_cookie_alone_authenticates(pool: PgPool) {
     let (status, _, me) = send(&app, with_cookie("/api/session", &person.token)).await;
     assert_eq!((status, me), (StatusCode::OK, expected));
 
-    // A runner's token signs nobody in, and is not taken from a cookie.
     let (_, runner) = call(
         &app,
         &person.token,

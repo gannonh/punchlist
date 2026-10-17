@@ -135,7 +135,6 @@ export function rowView(row: IssueRow, now: Date): RowView {
   }
 }
 
-/** A status no agent may act in carries the "people only" badge. */
 export const peopleOnly = (status: StatusInfo): boolean => status.locked_to.includes('agent')
 
 /** What a row shows for a refused request: the code and the rule, and for a gate the gate and its reason. */
@@ -145,7 +144,6 @@ export function refusalText(error: ErrorBody): string {
   return `Refused (${error.code}): ${error.message}`
 }
 
-// ---------- the transition a row waits on ----------
 
 /** A status change is not optimistic: the row shows the request until the server answers. */
 export type Transition =
@@ -153,7 +151,6 @@ export type Transition =
 
 export type Transitions = Readonly<Record<string, Transition>>
 
-// ---------- filters and grouping ----------
 
 export type Who = '' | 'people' | 'agents' | 'none' | `agent:${string}`
 
@@ -200,7 +197,6 @@ export function neighbourStatus(statuses: readonly StatusInfo[], key: string, de
   return index < 0 ? null : (statuses[index + delta] ?? null)
 }
 
-// ---------- the cache the stream keeps current (ADR 0006) ----------
 
 export interface IssueCache {
   rows: IssueRow[]

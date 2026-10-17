@@ -10,7 +10,7 @@ import {
 import { LockBadge, StatusDot } from '@/components/atoms'
 import type { StatusInfo } from '@/model/issues'
 
-/** The prototype's status menu: "Move PL-1 to…", every status in workflow order, the current one checked. */
+/** Statuses in workflow order, the current one checked. */
 export function StatusMenu({
   issueId,
   current,

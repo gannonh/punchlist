@@ -1,4 +1,3 @@
-// The pieces each row and card shows, drawn from a RowView (src/model/issues.ts) as the prototype draws them.
 import {
   Bot,
   GitMerge,
@@ -163,7 +162,6 @@ export function Labels({ labels }: { labels: readonly string[] }) {
   ))
 }
 
-/** A pending or refused status change, under the row it belongs to. */
 export function TransitionNote({ transition, onDismiss }: { transition: Transition; onDismiss: () => void }) {
   if (transition.state === 'pending')
     return (

@@ -74,7 +74,6 @@ impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Actor, ApiError> {
-        // The bearer token, or without an `Authorization` header the session cookie.
         let (token, from_cookie) = match parts.headers.get(AUTHORIZATION) {
             Some(value) => (
                 (value.to_str().ok())

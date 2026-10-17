@@ -2317,7 +2317,6 @@
           },
           {
             "type": "object",
-            "description": "The issue was created.",
             "required": [
               "kind"
             ],
@@ -2332,7 +2331,6 @@
           },
           {
             "type": "object",
-            "description": "Fields of the issue changed.",
             "required": [
               "fields",
               "kind"

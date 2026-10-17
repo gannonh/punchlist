@@ -6,7 +6,6 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* The approved prototype's tokens (prototypes/issue-list/styles.css), as Groundwork's theme variables. */
 :root {
   --radius: 0.5rem;
   --background: #f7f7f5;
@@ -120,7 +119,6 @@
     background: var(--color-primary-soft) !important;
   }
 
-  /* The list row: one line on a wide screen, stacked below 1024px. */
   .list-row {
     display: grid;
     grid-template-columns: 56px minmax(0, 1fr);

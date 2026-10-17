@@ -61,7 +61,6 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   await signIn(page)
   await expect(row(page, inProgress)).toBeVisible()
 
-  // Create: the row shows as soon as the server answers.
   await page.getByRole('button', { name: 'New issue' }).click()
   await page.getByRole('dialog').getByLabel('Title').fill('Written in the browser')
   await page.getByRole('dialog').getByLabel('Body').fill('From the e2e test')
@@ -71,7 +70,6 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   const id = await created.getAttribute('data-issue')
   if (!id) throw new Error('the created row has no id')
 
-  // Edit: visible at once and after a reload.
   let sheet = await openSheet(page, id)
   await sheet.getByLabel('Title').fill('Renamed in the browser')
   await sheet.getByLabel('Title').press('Enter')
@@ -79,7 +77,6 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   await page.reload()
   await expect(row(page, id)).toContainText('Renamed in the browser')
 
-  // Rollback: a refused edit puts the title back and says why.
   await page.route(`**/api/issues/${id}`, (route) =>
     route.request().method() === 'PATCH'
       ? route.fulfill({ status: 409, json: { code: 'conflict', message: 'the issue changed meanwhile' } })
@@ -94,7 +91,6 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   await expect(row(page, id)).toContainText('Renamed in the browser')
   await expect(row(page, id)).not.toContainText('Refused title')
 
-  // A status change waits for the server: pending, then the refusal, and the issue stays put.
   let release: () => void = () => undefined
   const held = new Promise<void>((resolve) => (release = resolve))
   await page.route(`**/api/issues/${inProgress}/transitions`, async (route) => {

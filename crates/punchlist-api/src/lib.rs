@@ -300,9 +300,7 @@ pub enum EventDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_id: Option<String>,
     },
-    /// The issue was created.
     Created,
-    /// Fields of the issue changed.
     Edited {
         /// Among `title`, `body`, `labels` and `assignee`, in that order.
         fields: Vec<String>,
