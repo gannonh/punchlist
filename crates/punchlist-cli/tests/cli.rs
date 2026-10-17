@@ -691,6 +691,145 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    for title in ["Epic", "Slice", "Task"] {
+        pl.run(&["issue", "create", "--title", title]).await;
+    }
+    assert_eq!(pl.run(&["project", "list"]).await.stdout, "No projects.\n");
+    for args in [
+        &["project", "create", "Punchlist"][..],
+        &["project", "create", "Groundwork"],
+        &[
+            "milestone",
+            "create",
+            "Gate 0",
+            "--project",
+            "Punchlist",
+            "--pass-when",
+            "pl creates and moves an issue",
+        ],
+        &["milestone", "create", "Gate 1", "--project", "Punchlist"],
+    ] {
+        let created = pl.run(args).await;
+        assert_eq!(created.code, 0, "{args:?}: {}", created.stderr);
+    }
+    let list = pl.run(&["project", "list"]).await;
+    insta::assert_snapshot!(list.stdout, @r"
+    Punchlist
+      Gate 0  PASS when pl creates and moves an issue
+      Gate 1
+    Groundwork
+      No milestones.
+    ");
+    let again = pl.run(&["project", "create", "Punchlist"]).await;
+    assert_eq!(
+        (again.code, again.stderr.as_str()),
+        (
+            1,
+            "error: a project named Punchlist already exists (422 Unprocessable Entity)\n"
+        )
+    );
+
+    let edit = async |args: &[&str]| pl.run(&[&["issue", "edit"][..], args].concat()).await;
+    let placed = edit(&[
+        "PL-2",
+        "--parent",
+        "PL-1",
+        "--project",
+        "Punchlist",
+        "--milestone",
+        "Gate 0",
+    ])
+    .await;
+    assert_eq!(
+        (placed.code, placed.stdout.as_str()),
+        (
+            0,
+            "PL-2  parent PL-1 · project Punchlist · milestone Gate 0\n"
+        )
+    );
+    let show = pl.run(&["issue", "show", "PL-2"]).await;
+    insta::with_settings!({filters => time_filters()}, {
+        insta::assert_snapshot!(show.stdout, @r"
+        PL-2  Slice
+        Status: Backlog
+        Parent: PL-1
+        Project: Punchlist
+        Milestone: Gate 0
+
+        Pull requests
+          None linked.
+
+        Proof
+          None attached.
+
+        Timeline
+          [time]  Gannon (person)  created
+          [time]  Gannon (person)  edited parent, project, milestone
+
+        Runs
+          No runs yet.
+        ");
+    });
+
+    // The issue's own project is where a milestone is looked up, and another project leaves
+    // no milestone.
+    let gate1 = edit(&["PL-2", "--milestone", "Gate 1"]).await;
+    assert_eq!(
+        gate1.stdout,
+        "PL-2  parent PL-1 · project Punchlist · milestone Gate 1\n"
+    );
+    let moved = edit(&["PL-2", "--project", "Groundwork"]).await;
+    assert_eq!(
+        moved.stdout,
+        "PL-2  parent PL-1 · project Groundwork · milestone none\n"
+    );
+
+    edit(&["PL-3", "--parent", "PL-2"]).await;
+    let refused = [
+        (
+            &["PL-1", "--parent", "PL-3"][..],
+            "error: PL-3 is under PL-1 (PL-1 → PL-2 → PL-3), so it cannot be PL-1's parent (422 Unprocessable Entity)\n",
+        ),
+        (
+            &["PL-1", "--milestone", "Gate 0"],
+            "error: PL-1 has no project; give --project with --milestone\n",
+        ),
+        (
+            &["PL-1", "--project", "Nope"],
+            "error: no project named Nope in this workspace\n",
+        ),
+        (
+            &["PL-1", "--project", "Groundwork", "--milestone", "Gate 0"],
+            "error: project Groundwork has no milestone named Gate 0\n",
+        ),
+    ];
+    for (args, stderr) in refused {
+        let output = edit(args).await;
+        assert_eq!(
+            (output.code, output.stderr.as_str()),
+            (1, stderr),
+            "{args:?}"
+        );
+    }
+    let nothing = edit(&["PL-1"]).await;
+    assert_eq!(nothing.code, 2, "{}", nothing.stderr);
+
+    let cleared = edit(&["PL-2", "--no-parent", "--no-project"]).await;
+    assert_eq!(
+        (cleared.code, cleared.stdout.as_str()),
+        (0, "PL-2  parent none · project none · milestone none\n")
+    );
+    let show = pl.run(&["issue", "show", "PL-2"]).await;
+    assert!(
+        show.stdout.starts_with("PL-2  Slice\nStatus: Backlog\n\n"),
+        "{}",
+        show.stdout
+    );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
 async fn a_move_to_start_under_a_version_no_runner_can_claim_warns(pool: PgPool) {
     let pl = Pl::start(&pool).await;
     pl.run(&["issue", "create", "--title", "First"]).await;
