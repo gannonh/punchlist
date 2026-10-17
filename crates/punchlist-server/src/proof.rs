@@ -16,6 +16,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
+use crate::events::record_row_event;
 use crate::issues::current_attempt;
 use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
@@ -243,6 +244,7 @@ async fn attach(
     )
     .fetch_one(&mut *tx)
     .await?;
+    record_row_event(&mut tx, actor.workspace_id, id, actor.id, "proof").await?;
     tx.commit().await?;
     Ok(Proof {
         id: row.id,

@@ -220,6 +220,20 @@ async fn each_kind_is_stored_listed_and_served_with_its_content_type(pool: PgPoo
         ]
     );
     assert_eq!(stored(&s).len(), 3);
+    // Each upload told the event stream the row changed, as its uploader.
+    let events: Vec<(String, String)> = sqlx::query_as(
+        "SELECT e.kind, a.name FROM event e JOIN actor a ON a.id = e.actor_id
+         WHERE e.issue_id = $1 ORDER BY e.seq",
+    )
+    .bind(&id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let expected = ["created", "proof", "proof", "proof"];
+    assert_eq!(
+        events,
+        expected.map(|kind| (kind.to_string(), "Gannon".to_string()))
+    );
 
     let request = Request::builder()
         .uri(format!("/api/proof/{}", ids[0]))

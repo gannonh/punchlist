@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pull_request SET open_threads =\n            (SELECT count(*) FROM review_thread\n             WHERE pull_request_id = $1 AND NOT resolved)::int\n         WHERE id = $1 RETURNING issue_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "issue_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "da85d464af04ccfd22556e70fd8ce25d1d9b00c98c403d71ed795ba84028642d"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO pull_request_change (issue_id) SELECT * FROM UNNEST($1::text[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c239d0c9ba43742c257bde15ee5693e7dfad08b6a51a42bbf539c63653a1f135"
+}
