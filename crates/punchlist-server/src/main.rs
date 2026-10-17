@@ -1,8 +1,8 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
-    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, expire_leases,
-    queue_workflow_load, router, warn_invalid_workflows, work_jobs,
+    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, expire_leases, openapi,
+    queue_workflow_load, router, warn_invalid_workflows, with_web_app, work_jobs,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -52,7 +52,12 @@ enum Command {
         /// The largest proof file accepted, in bytes.
         #[arg(long, env = "PUNCHLIST_PROOF_MAX_BYTES", default_value_t = 104_857_600)]
         proof_max_bytes: u64,
+        /// The web app's build. Served at `/` when it has an `index.html`.
+        #[arg(long, env = "PUNCHLIST_WEB_DIR", default_value = "web/dist")]
+        web_dir: std::path::PathBuf,
     },
+    /// Print the OpenAPI document as JSON. Needs no database.
+    Openapi,
     /// Create a workspace, its repository and one person, and print the person's token.
     Bootstrap {
         /// Workspace name.
@@ -82,6 +87,10 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let cli = Cli::parse();
+    if let Command::Openapi = cli.command {
+        println!("{}", serde_json::to_string_pretty(&openapi())?);
+        return Ok(());
+    }
     let database_url = cli
         .database_url
         .context("set DATABASE_URL or pass --database-url")?;
@@ -100,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
             github_app_private_key,
             proof_dir,
             proof_max_bytes,
+            web_dir,
         } => {
             let proof_dir = match proof_dir.strip_prefix("~/") {
                 Some(rest) => std::path::PathBuf::from(
@@ -125,10 +135,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             });
-            let mut state = AppState::new(pool).with_proof(ProofStore {
-                dir: proof_dir,
-                max_bytes: proof_max_bytes,
-            });
+            let (stop, stopping) = tokio::sync::watch::channel(false);
+            let mut state = AppState::new(pool)
+                .with_proof(ProofStore {
+                    dir: proof_dir,
+                    max_bytes: proof_max_bytes,
+                })
+                .with_shutdown(stopping);
             // An empty secret is no secret: anyone could sign with it.
             match github_webhook_secret.filter(|secret| !secret.is_empty()) {
                 Some(secret) => state = state.with_github_webhook_secret(secret),
@@ -141,14 +154,15 @@ async fn main() -> anyhow::Result<()> {
                 ),
             }
             tokio::spawn(work_jobs(state.clone()));
-            let app = router(state).layer(TraceLayer::new_for_http());
+            let app = with_web_app(router(state), &web_dir).layer(TraceLayer::new_for_http());
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("listen on {bind}"))?;
             tracing::info!("listening on http://{}", listener.local_addr()?);
             axum::serve(listener, app)
-                .with_graceful_shutdown(async {
+                .with_graceful_shutdown(async move {
                     let _ = tokio::signal::ctrl_c().await;
+                    let _ = stop.send(true);
                 })
                 .await?;
         }
@@ -182,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
             );
             println!("server_url = \"{server_url}\"\ntoken = \"{}\"", done.token);
         }
+        Command::Openapi => unreachable!("answered before connecting"),
     }
     Ok(())
 }

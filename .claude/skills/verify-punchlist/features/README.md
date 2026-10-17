@@ -11,6 +11,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | Runners, claims, dispatch on entry and runs | [runner.md](runner.md) | `pl runner start`, `pl runner list`, `pl issue show` (runs), `pl run log`, `/api/runners`, `/api/runs/*` |
 | GitHub webhook, pull requests and checks | [github.md](github.md) | `$C webhook`, `POST /api/github/webhook`, `pl issue show` (pull requests, comments), `pl pr unlinked`, `/api/issues/{id}/pull-requests`, `/api/pull-requests/unlinked` |
 | Workflow file, gated transitions, the gate checklist and the agent's MCP tools | [workflow-and-gates.md](workflow-and-gates.md) | `pl workflow show`, `pl issue transition`, `pl issue comment`, `pl issue show` (gates), `pl mcp`, `/api/workflow`, `/api/workflow/schema.json`, `GET /api/issues/{id}/gates`, `POST /api/issues/{id}/comments` |
+| Web app: issue list, board, edits and transitions | [web-app.md](web-app.md) | the server's URL (`web/dist`), `$C sign-in-url`, `/api/session`, `GET /api/workspaces/{id}/events`, `PATCH /api/issues/{id}`, `pnpm e2e` |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 
 ## Baseline preconditions

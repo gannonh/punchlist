@@ -6,6 +6,18 @@ source scripts/env.sh
 
 step() { printf '\n==> %s\n' "$*"; }
 
+step "web dependencies"
+pnpm install --frozen-lockfile
+
+step "web/src/api is current (pnpm gen:api)"
+pnpm gen:api >/dev/null
+git diff --exit-code --stat -- web/src/api || { echo "web/src/api is stale: run pnpm gen:api and commit it" >&2; exit 1; }
+
+step "web typecheck, lint and unit tests"
+pnpm --filter @punchlist/web typecheck
+pnpm --filter @punchlist/web lint
+pnpm --filter @punchlist/web test
+
 step "rustfmt"
 cargo fmt --all --check
 

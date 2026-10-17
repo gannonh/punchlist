@@ -1,0 +1,6 @@
+packages:
+  - web
+engineStrict: true
+allowBuilds:
+  esbuild: true
+  lightningcss: true

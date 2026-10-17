@@ -23,10 +23,10 @@ use crate::{ApiError, AppState};
 /// Room in an upload's body for the multipart framing and the other fields, past the file.
 const BODY_SLACK: usize = 64 * 1024;
 
-pub fn routes(state: &AppState) -> OpenApiRouter<AppState> {
+pub fn routes(max_bytes: u64) -> OpenApiRouter<AppState> {
     // The file's own limit is checked as it streams; this one only has to be past it, so
     // axum's 2 MB default does not cut the body first.
-    let limit = usize::try_from(state.proof.max_bytes)
+    let limit = usize::try_from(max_bytes)
         .unwrap_or(usize::MAX)
         .saturating_add(BODY_SLACK);
     OpenApiRouter::new()

@@ -1,0 +1,288 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,\n                  a.id AS \"assignee_id?\", a.name AS \"assignee_name?\",\n                  a.role AS \"assignee_role?\", a.kind AS \"assignee_kind?\",\n                  running.agent AS \"running_agent?\", running.started_at AS \"running_since?\",\n                  waiting.agent AS \"queued_agent?\",\n                  last.agent AS \"last_agent?\", last.outcome AS \"last_outcome?\",\n                  last.finished_at AS \"last_finished_at?\", last.reason AS \"last_reason?\",\n                  pr.number AS \"pr_number?\", pr.state AS \"pr_state?\", pr.draft AS \"pr_draft?\",\n                  pr.checks AS \"pr_checks?\", pr.url AS \"pr_url?\"\n           FROM issue i\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'\n           LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL\n           LEFT JOIN LATERAL (\n               SELECT r.agent, r.outcome, r.finished_at,\n                      (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id\n                       ORDER BY t.attempt DESC LIMIT 1) AS reason\n               FROM run r WHERE r.issue_id = i.id AND r.status = i.status\n               ORDER BY r.started_at DESC LIMIT 1) last ON true\n           LEFT JOIN LATERAL (\n               SELECT p.number, p.state, p.draft, p.checks, p.url FROM pull_request p\n               WHERE p.issue_id = i.id ORDER BY p.number DESC LIMIT 1) pr ON true\n           WHERE i.workspace_id = $1 AND ($2::text[] IS NULL OR i.id = ANY($2))\n           ORDER BY i.number",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "body",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "labels",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "labels"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "assignee_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "assignee_name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "assignee_role?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "assignee_kind?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "running_agent?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "running_since?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "queued_agent?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "dispatch",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "last_agent?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "last_outcome?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "last_finished_at?",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "last_reason?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 18,
+        "name": "pr_number?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "pr_state?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "pr_draft?",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "draft"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "pr_checks?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "pr_url?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "url"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ef1a84a249178e33fba782e7a9bc37bb87ac3b4dbc1a1d09de3b7acbd8e819a9"
+}

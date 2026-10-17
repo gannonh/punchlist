@@ -64,10 +64,10 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(issue["id"], "PL-1");
-    assert_eq!(issue["status"], "backlog");
-    assert_eq!(issue["status_name"], "Backlog");
-    assert_eq!(issue["body"], "Body");
+    assert_eq!(issue["row"]["issue"]["id"], "PL-1");
+    assert_eq!(issue["row"]["issue"]["status"], "backlog");
+    assert_eq!(issue["row"]["issue"]["status_name"], "Backlog");
+    assert_eq!(issue["row"]["issue"]["body"], "Body");
 
     let mut returned = Vec::new();
     for to in ["todo", "start"] {
@@ -84,7 +84,7 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
         returned.push(moved["event"].clone());
     }
     let event = &returned[1];
-    assert_eq!(event["seq"], 2);
+    assert_eq!(event["seq"], 3);
     assert_eq!(event["issue_id"], "PL-1");
     assert_eq!(
         event["actor"],
@@ -139,19 +139,20 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
     assert_eq!(
         events,
         [
-            (1, "transition", person.actor_id),
-            (2, "transition", person.actor_id)
+            (1, "created", person.actor_id),
+            (2, "transition", person.actor_id),
+            (3, "transition", person.actor_id)
         ]
     );
 
     let (status, timeline) =
         call(&app, &person.token, "GET", "/api/issues/PL-1/events", None).await;
     assert_eq!(status, StatusCode::OK);
-    // The events `move` returned are the ones the timeline reads back.
-    assert_eq!(timeline.as_array().unwrap(), &returned);
-    let timeline: Vec<(&str, &str, &str, &str)> = timeline
-        .as_array()
-        .unwrap()
+    // The events `move` returned are the ones the timeline reads back, after the creation.
+    let timeline = timeline.as_array().unwrap();
+    assert_eq!(timeline[0]["detail"], json!({"kind": "created"}));
+    assert_eq!(&timeline[1..], &returned);
+    let timeline: Vec<(&str, &str, &str, &str)> = timeline[1..]
         .iter()
         .map(|e| {
             (
@@ -172,8 +173,8 @@ async fn create_then_move_twice_records_transitions_and_events(pool: PgPool) {
 
     let (status, list) = call(&app, &person.token, "GET", "/api/issues", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list["last_event_seq"], 2);
-    assert_eq!(list["issues"][0]["id"], "PL-1");
+    assert_eq!(list["last_event_seq"], 3);
+    assert_eq!(list["issues"][0]["issue"]["id"], "PL-1");
 }
 
 #[sqlx::test]
@@ -244,7 +245,7 @@ async fn refused_moves_name_the_rule_and_write_nothing(pool: PgPool) {
             counts.pl1.as_str(),
             counts.pl2.as_str()
         ),
-        (2, 2, "start", "backlog")
+        (2, 4, "start", "backlog")
     );
 }
 
@@ -303,8 +304,10 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/runs/{id}/finish",
             "/api/runs/{id}/log",
             "/api/runs/{id}/resume",
+            "/api/session",
             "/api/workflow",
-            "/api/workflow/schema.json"
+            "/api/workflow/schema.json",
+            "/api/workspaces/{id}/events"
         ]
     );
 }

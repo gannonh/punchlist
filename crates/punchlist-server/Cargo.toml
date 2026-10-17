@@ -17,6 +17,7 @@ axum = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 hmac.workspace = true
 percent-encoding.workspace = true
 punchlist-api.workspace = true

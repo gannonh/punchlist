@@ -128,7 +128,7 @@ async fn issue(s: &Setup) -> String {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{issue}");
-    issue["id"].as_str().unwrap().to_string()
+    issue["row"]["issue"]["id"].as_str().unwrap().to_string()
 }
 
 /// The files in the proof directory.

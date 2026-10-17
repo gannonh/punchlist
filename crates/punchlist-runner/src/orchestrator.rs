@@ -1001,6 +1001,8 @@ mod tests {
                 status_name: "In Progress".into(),
                 created_at: now,
                 updated_at: now,
+                assignee: None,
+                labels: Vec::new(),
                 waiting_on_person: None,
             },
             repository: crate::worktree::tests::repository(),

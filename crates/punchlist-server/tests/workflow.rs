@@ -1652,7 +1652,10 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
         &s.app,
         &token,
         "POST",
-        &format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap()),
+        &format!(
+            "/api/issues/{}/transitions",
+            issue["row"]["issue"]["id"].as_str().unwrap()
+        ),
         Some(json!({"to": "todo"})),
     )
     .await;
@@ -1799,7 +1802,10 @@ async fn a_failed_gate_is_final_when_the_close_arrives_again_and_would_now_pass(
         .unwrap();
     assert_eq!(status, "in_progress");
     assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
-    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
+    assert_eq!(
+        events_by_kind(&pool).await,
+        [("created".to_string(), 1), ("refusal".to_string(), 1)]
+    );
 }
 
 #[sqlx::test]
@@ -1835,16 +1841,22 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
 
     // One refusal on the timeline and no transition, after the three deliveries above and
     // after the first of them once more.
-    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
+    assert_eq!(
+        events_by_kind(&pool).await,
+        [("created".to_string(), 1), ("refusal".to_string(), 1)]
+    );
     deliver(&s, "pull_request", "closed-1", MERGED).await;
-    assert_eq!(events_by_kind(&pool).await, [("refusal".to_string(), 1)]);
+    assert_eq!(
+        events_by_kind(&pool).await,
+        [("created".to_string(), 1), ("refusal".to_string(), 1)]
+    );
     assert_eq!(rows_from_github(&pool).await, (0, 0, 1));
     let token = s.person.token.clone();
     let (status, events) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
     assert_eq!(status, StatusCode::OK, "{events}");
-    assert_eq!(events.as_array().unwrap().len(), 1);
-    let detail = &events[0]["detail"];
-    assert_eq!(events[0]["actor"]["name"], "octocat");
+    assert_eq!(events.as_array().unwrap().len(), 2);
+    let detail = &events[1]["detail"];
+    assert_eq!(events[1]["actor"]["name"], "octocat");
     assert_eq!(detail["kind"], "refusal");
     assert_eq!(detail["from"], "merging");
     assert_eq!(detail["to"], "done");
@@ -1865,7 +1877,11 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     assert_eq!(body["issue"]["status"], "todo");
     assert_eq!(
         events_by_kind(&pool).await,
-        [("refusal".to_string(), 1), ("transition".to_string(), 1)]
+        [
+            ("created".to_string(), 1),
+            ("refusal".to_string(), 1),
+            ("transition".to_string(), 1)
+        ]
     );
 }
 
@@ -2164,7 +2180,10 @@ async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
         Some(json!({"title": "X"})),
     )
     .await;
-    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+    let path = format!(
+        "/api/issues/{}/transitions",
+        issue["row"]["issue"]["id"].as_str().unwrap()
+    );
     let (status, _) = call(&s.app, &token, "POST", &path, Some(json!({"to": "todo"}))).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -2245,7 +2264,7 @@ async fn a_load_waits_for_a_move_in_flight_and_then_refuses(pool: PgPool) {
         Some(json!({"title": "X"})),
     )
     .await;
-    let id = issue["id"].as_str().unwrap().to_string();
+    let id = issue["row"]["issue"]["id"].as_str().unwrap().to_string();
     put_workflow(&s, "a", PRD_WORKFLOW.replace("todo", "ready"));
 
     // A move in flight: it holds the workspace lock and has put the issue in Todo.
@@ -2286,7 +2305,10 @@ async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPoo
         Some(json!({"title": "X"})),
     )
     .await;
-    let path = format!("/api/issues/{}/transitions", issue["id"].as_str().unwrap());
+    let path = format!(
+        "/api/issues/{}/transitions",
+        issue["row"]["issue"]["id"].as_str().unwrap()
+    );
 
     // A load in flight: it holds the workspace lock and has switched to a version with `ready`.
     let mut load = pool.begin().await.unwrap();
