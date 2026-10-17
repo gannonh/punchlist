@@ -136,20 +136,32 @@ test('set a parent, project and milestone in the sheet, and roll back a parent c
   await sheet.getByLabel('Parent').fill(top)
   await sheet.getByLabel('Parent').press('Enter')
   await expect(sheet.getByText('Top of the tree')).toBeVisible()
-  // Held, so what the select shows is the optimistic edit.
+  // The project's edit is held, so both selects show optimistic edits. The milestone's edit must reach the server
+  // after the project's: before it, the server would check the milestone against no project.
   let release: () => void = () => undefined
   const held = new Promise<void>((resolve) => (release = resolve))
+  let patches = 0
   await page.route(`**/api/issues/${child}`, async (route) => {
-    if (route.request().method() === 'PATCH') await held
+    if (route.request().method() === 'PATCH' && patches++ === 0) await held
     await route.continue()
   })
   await sheet.getByLabel('Project').click()
   await page.getByRole('option', { name }).click()
   await expect(sheet.getByLabel('Project')).toHaveText(name)
-  release()
   await sheet.getByLabel('Milestone').click()
   await page.getByRole('option', { name: 'Gate 0' }).click()
+  await expect(sheet.getByLabel('Milestone')).toHaveText('Gate 0')
   await expect(sheet.getByText('PASS when the tree shows in the sheet')).toBeVisible()
+  release()
+  await expect
+    .poll(async () => {
+      const issue = await ok<{ milestone: { name: string } | null }>(
+        await request.get(`/api/issues/${child}`, { headers: person }),
+      )
+      return issue.milestone?.name
+    })
+    .toBe('Gate 0')
+  await expect(page.getByText(`${child} was not changed.`)).toHaveCount(0)
   await page.unroute(`**/api/issues/${child}`)
   await page.reload()
   sheet = await openSheet(page, child)

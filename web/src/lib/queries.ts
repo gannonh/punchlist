@@ -159,6 +159,9 @@ export interface Edit {
 export function useEditIssue() {
   const client = useQueryClient()
   return useMutation({
+    // Requests go one at a time in the order they were made, each shown at once: a milestone chosen while its
+    // project's edit is on its way reaches the server after that edit, which it is checked against.
+    scope: { id: 'edit-issue' },
     mutationFn: ({ id, assignee, project, milestone, ...fields }: Edit) =>
       call(
         api.PATCH('/api/issues/{id}', {
