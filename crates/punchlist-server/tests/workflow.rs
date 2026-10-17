@@ -61,6 +61,10 @@ struct Repo {
     branch_pulls: HashMap<String, Vec<Value>>,
     /// The branches whose pull requests were asked for, in order.
     branches_asked: Vec<String>,
+    /// What the branch pull request query answers instead, status and body.
+    branch_pulls_answer: Option<(StatusCode, Value)>,
+    /// The branch pull request query reports a next page of pull requests.
+    branch_pulls_more: bool,
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
@@ -221,7 +225,11 @@ async fn fake_github() -> (FakeGithub, String) {
                         let branch = query["variables"]["branch"].as_str().unwrap().to_string();
                         let pulls = repo.branch_pulls.get(&branch).cloned().unwrap_or_default();
                         repo.branches_asked.push(branch);
-                        let pulls = json!({"pageInfo": {"hasNextPage": false}, "nodes": pulls});
+                        if let Some((status, body)) = repo.branch_pulls_answer.clone() {
+                            return (status, axum::Json(body));
+                        }
+                        let more = repo.branch_pulls_more;
+                        let pulls = json!({"pageInfo": {"hasNextPage": more}, "nodes": pulls});
                         let data = json!({"repository": {"defaultBranchRef": {"name": "main"},
                                                          "pullRequests": pulls}});
                         return (StatusCode::OK, axum::Json(json!({"data": data})));
@@ -3325,6 +3333,100 @@ async fn a_required_actions_check_counts_only_from_a_branch_whose_pull_requests_
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(recorded().await, Some(vec![]));
+}
+
+/// An issue in Agent Review whose pull request is ready, with one required GitHub Actions check
+/// that passed from a job a runner ran, so only the read of the branch's pull requests decides.
+async fn issue_with_a_passing_required_actions_check(s: &Setup) -> String {
+    let codex = issue_in_agent_review(s).await;
+    put_workflow(
+        s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(s, "push", "push-1", PUSH).await;
+    let mut repo = s.github.lock().unwrap();
+    let mut run = listed_run(3, 3112233445, "check", "success");
+    run["app"] = json!({"slug": "github-actions"});
+    repo.pulls = vec![ready_with_merge_state("clean")];
+    repo.check_runs = vec![run];
+    repo.jobs = vec![listed_job(3, "check", Some("success"), true)];
+    repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    codex
+}
+
+async fn assert_branch_pulls_unreadable(s: &Setup, codex: &str) {
+    let (status, body) = request_human_review(s, codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "code": "github_unreadable",
+            "message": "GitHub could not be read, so the gates for PL-1 were not checked \
+                        and it did not move; request again",
+        })
+    );
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_the_branch_pull_requests_cannot_be_read(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+
+    // The query fails: GitHub answers 502.
+    s.github.lock().unwrap().branch_pulls_answer = Some((StatusCode::BAD_GATEWAY, json!({})));
+    assert_branch_pulls_unreadable(&s, &codex).await;
+    // The query answers 200 with GraphQL errors and no data.
+    s.github.lock().unwrap().branch_pulls_answer = Some((
+        StatusCode::OK,
+        json!({"errors": [{"message": "rate limited"}]}),
+    ));
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    // Read again, the same request is accepted.
+    s.github.lock().unwrap().branch_pulls_answer = None;
+    (s.github.lock().unwrap().branch_pulls)
+        .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_the_branch_has_more_pull_requests_than_one_page(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.branch_pulls
+            .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
+        repo.branch_pulls_more = true;
+    }
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    s.github.lock().unwrap().branch_pulls_more = false;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_a_pull_request_changed_its_base_more_than_one_page(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+    let mut pull = branch_pull("main", &[], false);
+    pull["timelineItems"]["pageInfo"]["hasNextPage"] = json!(true);
+    (s.github.lock().unwrap().branch_pulls).insert(BRANCH.into(), vec![pull]);
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    (s.github.lock().unwrap().branch_pulls)
+        .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 #[sqlx::test]
