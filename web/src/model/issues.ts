@@ -11,6 +11,9 @@ export type StatusInfo = Schemas['StatusInfo']
 export type ErrorBody = Schemas['ErrorBody']
 export type Actor = Schemas['Actor']
 export type ActorInfo = Schemas['ActorInfo']
+export type Project = Schemas['Project']
+export type ProjectRef = Schemas['ProjectRef']
+export type MilestoneRef = Schemas['MilestoneRef']
 export type RunState = Schemas['RunSummary']['state']
 export type ChecksState = Schemas['ChecksState']
 
@@ -251,7 +254,7 @@ export function applyMove(cache: IssueCache, moved: Moved): IssueCache {
   return { ...next, rowSeq: { ...next.rowSeq, [issue.id]: event.seq } }
 }
 
-export type EditedField = 'title' | 'labels' | 'assignee'
+export type EditedField = 'title' | 'labels' | 'assignee' | 'parent' | 'project' | 'milestone'
 
 /**
  * A refused edit, made when the row held event `seq`. A row the server sent since is the server's own and
