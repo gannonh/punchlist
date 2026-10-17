@@ -20,7 +20,9 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
+use crate::github::github_actor;
 use crate::rows::issue_rows;
+use crate::workflow::lock_workspace;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -45,6 +47,83 @@ pub(crate) async fn next_event_seq(
     )
     .fetch_one(&mut *conn)
     .await
+}
+
+/// Writes an event that says only that the issue's row changed: `run`, `pull_request` or
+/// `proof`. The caller took the workspace's lock first, as the lock order has it.
+pub(crate) async fn record_row_event(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    issue_id: &str,
+    actor_id: Uuid,
+    kind: &'static str,
+) -> sqlx::Result<()> {
+    let seq = next_event_seq(conn, workspace_id).await?;
+    sqlx::query!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id)
+         VALUES ($1, $2, $3, $4, $5)",
+        workspace_id,
+        seq,
+        issue_id,
+        kind,
+        actor_id,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Marks issues whose pull request evidence the caller's transaction records, for
+/// `write_pull_request_events`. The writers of that evidence do not take the workspace's lock,
+/// so they cannot write the event themselves.
+pub(crate) async fn mark_pull_request_change(
+    conn: &mut sqlx::PgConnection,
+    issue_ids: &[String],
+) -> sqlx::Result<()> {
+    if issue_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query!(
+        "INSERT INTO pull_request_change (issue_id) SELECT * FROM UNNEST($1::text[])",
+        issue_ids,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Writes one `pull_request` event, as the workspace's GitHub actor, for each issue marked by
+/// `mark_pull_request_change`, and deletes its marks in the same transaction, so an issue
+/// marked several times since the last sweep gets one event. Returns how many it wrote.
+// ponytail: the server runs this every 250 ms, one query on an empty table. Upgrade path: a
+// NOTIFY from the writers of evidence and one PgListener waking the sweep.
+pub async fn write_pull_request_events(pool: &PgPool) -> sqlx::Result<usize> {
+    let workspaces = sqlx::query_scalar!(
+        "SELECT DISTINCT i.workspace_id FROM pull_request_change c JOIN issue i ON i.id = c.issue_id"
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut written = 0;
+    for workspace_id in workspaces {
+        let mut tx = pool.begin().await?;
+        lock_workspace(&mut tx, workspace_id).await?;
+        let mut issues = sqlx::query_scalar!(
+            "DELETE FROM pull_request_change c USING issue i
+             WHERE i.id = c.issue_id AND i.workspace_id = $1 RETURNING c.issue_id",
+            workspace_id,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        issues.sort();
+        issues.dedup();
+        let github = github_actor(&mut tx, workspace_id, None).await?;
+        for issue_id in &issues {
+            record_row_event(&mut tx, workspace_id, issue_id, github, "pull_request").await?;
+        }
+        tx.commit().await?;
+        written += issues.len();
+    }
+    Ok(written)
 }
 
 struct EventRow {
@@ -74,6 +153,9 @@ impl TryFrom<EventRow> for Event {
         let detail = match (row.kind.as_str(), row.comment_body) {
             ("comment", Some(body)) => EventDetail::Comment { body },
             ("created", None) => EventDetail::Created,
+            ("run", None) => EventDetail::Run,
+            ("pull_request", None) => EventDetail::PullRequest,
+            ("proof", None) => EventDetail::Proof,
             ("edited", None) => EventDetail::Edited {
                 fields: row
                     .edited_fields
@@ -128,8 +210,9 @@ impl TryFrom<EventRow> for Event {
     }
 }
 
-/// The workspace's events after `after`, of one issue or of all, in sequence order, at most
-/// `limit` of them.
+/// The workspace's events after `after`, in sequence order, at most `limit` of them: every
+/// event, as the stream reads them, or with `issue_id` that issue's timeline, which leaves out
+/// the `run`, `pull_request` and `proof` events that only tell the stream its row changed.
 pub(crate) async fn events(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -153,7 +236,9 @@ pub(crate) async fn events(
          LEFT JOIN transition t ON t.id = e.transition_id
          LEFT JOIN comment c ON c.id = e.comment_id
          LEFT JOIN refusal r ON r.id = e.refusal_id
-         WHERE e.workspace_id = $1 AND ($2::text IS NULL OR e.issue_id = $2) AND e.seq > $3
+         WHERE e.workspace_id = $1 AND e.seq > $3
+           AND ($2::text IS NULL
+                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof')))
          ORDER BY e.seq
          LIMIT $4"#,
         workspace_id,

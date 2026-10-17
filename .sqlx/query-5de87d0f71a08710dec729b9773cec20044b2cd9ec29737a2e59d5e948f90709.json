@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH summarized AS (\n               UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5\n               WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2\n                            ORDER BY id FOR UPDATE)\n                 AND ($6 OR (checks, checks_total, checks_passed) IS DISTINCT FROM ($3, $4, $5))\n               RETURNING issue_id)\n           SELECT DISTINCT issue_id AS \"issue_id!\" FROM summarized WHERE issue_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "issue_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5de87d0f71a08710dec729b9773cec20044b2cd9ec29737a2e59d5e948f90709"
+}

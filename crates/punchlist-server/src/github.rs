@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
+use crate::events::mark_pull_request_change;
 use crate::github_api::{
     CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
 };
@@ -510,8 +511,9 @@ pub(crate) async fn process(
             }
         }
         GithubEvent::CheckRun(event) => {
-            record_check_run(tx, job.repository_id, &event.check_run, None, None).await?;
-            recompute_checks(tx, job.repository_id, &event.check_run.head_sha).await?;
+            let changed =
+                record_check_run(tx, job.repository_id, &event.check_run, None, None).await?;
+            recompute_checks(tx, job.repository_id, &event.check_run.head_sha, changed).await?;
         }
         GithubEvent::Push(event) => {
             if event.changes_workflow() {
@@ -608,6 +610,12 @@ pub(crate) async fn process(
 /// not look like a write to a request in flight; a read always stamps, which is what orders
 /// it against the next read. A read also records the workflow job behind the run (`job`), or
 /// that it found none; a delivery knows neither and leaves its `workflow_` columns alone.
+///
+/// True when the write changed what the gates read of the run (a first insert, or any of its
+/// head commit, name, status, conclusion, suite, app and workflow job columns, the other
+/// bases included), which a read that stamps an identical row does not: the caller marks the
+/// commit's pull requests. The old row is the statement's snapshot, so a write that commits
+/// between it and this one is compared against too; that write marks its own change.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -616,10 +624,15 @@ async fn record_check_run(
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
     job: Option<&WorkflowJob>,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
     let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
-    sqlx::query!(
-        "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
+    sqlx::query_scalar!(
+        r#"WITH old AS (
+               SELECT head_sha, name, status, conclusion, check_suite_id, app,
+                      workflow_path, workflow_sha, workflow_default_sha, workflow_other_bases
+               FROM check_run WHERE id = $1),
+           up AS (
+        INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
                                 check_suite_id, updated_at, app,
                                 workflow_path, workflow_sha, workflow_default_sha,
                                 workflow_other_bases)
@@ -651,7 +664,20 @@ async fn record_check_run(
                       IS DISTINCT FROM
                       (EXCLUDED.head_sha, EXCLUDED.name, EXCLUDED.status, EXCLUDED.conclusion,
                        COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
-                       COALESCE(EXCLUDED.app, check_run.app)) END",
+                       COALESCE(EXCLUDED.app, check_run.app)) END
+        RETURNING head_sha, name, status, conclusion, check_suite_id, app,
+                  workflow_path, workflow_sha, workflow_default_sha, workflow_other_bases)
+           SELECT EXISTS (SELECT 1 FROM up LEFT JOIN old ON true
+                          WHERE old.name IS NULL
+                             OR (old.head_sha, old.name, old.status, old.conclusion,
+                                 old.check_suite_id, old.app, old.workflow_path,
+                                 old.workflow_sha, old.workflow_default_sha,
+                                 old.workflow_other_bases)
+                                IS DISTINCT FROM
+                                (up.head_sha, up.name, up.status, up.conclusion,
+                                 up.check_suite_id, up.app, up.workflow_path,
+                                 up.workflow_sha, up.workflow_default_sha,
+                                 up.workflow_other_bases)) AS "changed!""#,
         run.id,
         repository_id,
         run.head_sha,
@@ -666,9 +692,8 @@ async fn record_check_run(
         job.and_then(|job| job.default_sha.as_deref()),
         job.and_then(|job| job.other_bases.as_deref()),
     )
-    .execute(&mut *tx)
-    .await?;
-    Ok(())
+    .fetch_one(&mut *tx)
+    .await
 }
 
 /// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before
@@ -691,11 +716,12 @@ async fn record_read_check_runs(
     runs.retain(|run| run.head_sha == head_sha);
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
+    let mut changed = false;
     for run in &runs {
         let job = jobs.get(&run.id).filter(|job| job.is_behind(run));
-        record_check_run(&mut tx, repository_id, run, Some(read_started), job).await?;
+        changed |= record_check_run(&mut tx, repository_id, run, Some(read_started), job).await?;
     }
-    recompute_checks(&mut tx, repository_id, head_sha).await?;
+    recompute_checks(&mut tx, repository_id, head_sha, changed).await?;
     let conflict = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM check_run WHERE repository_id = $1 AND head_sha = $2
                           AND updated_at > $3) AS "conflict!""#,
@@ -802,8 +828,9 @@ fn recorded_comments(comments: &ThreadComments) -> Vec<ReviewComment> {
     recorded.collect()
 }
 
-/// Records review threads on a pull request and recounts its open ones. The caller holds the
-/// pull request's row lock: the lock order is workspace, pull request, issue, then threads.
+/// Records review threads on a pull request, recounts its open ones and marks its issue for a
+/// `pull_request` event. The caller holds the pull request's row lock: the lock order is
+/// workspace, pull request, issue, then threads.
 /// `updated_at` is the write clock under that lock, not the transaction's start, so that it
 /// orders against a `PullRequestRead` noted under the same lock. It moves only when something
 /// the gates read changed (the pull request, `resolved`, `path`, `line`): every thread event and
@@ -863,16 +890,18 @@ async fn record_review_threads(
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
-        "UPDATE pull_request SET open_threads =
-            (SELECT count(*) FROM review_thread
-             WHERE pull_request_id = $1 AND NOT resolved)::int
-         WHERE id = $1",
+    // Only a changed count moves the row.
+    let issue = sqlx::query_scalar!(
+        "UPDATE pull_request SET open_threads = counted.open
+         FROM (SELECT count(*)::int AS open FROM review_thread
+               WHERE pull_request_id = $1 AND NOT resolved) counted
+         WHERE id = $1 AND open_threads IS DISTINCT FROM counted.open
+         RETURNING issue_id",
         pull_request_id,
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(())
+    mark_pull_request_change(tx, issue.flatten().as_slice()).await
 }
 
 /// Records a pull request from a payload, unless a newer payload was already applied, and
@@ -926,14 +955,15 @@ async fn record_pull_request(
     // Locks the row: a second payload closing it waits here, then reads the closed state.
     // Two payloads that are both the first to record it closed wait on the workspace lock
     // above instead, so the second still reads the first's row.
-    let was = sqlx::query_scalar!(
-        "SELECT state FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
+    let was = sqlx::query!(
+        "SELECT state, issue_id, updated_at FROM pull_request
+         WHERE repository_id = $1 AND number = $2 FOR UPDATE",
         repository_id,
         pr.number
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let applied = sqlx::query_scalar!(
+    let applied = sqlx::query!(
         "INSERT INTO pull_request
              (repository_id, number, github_id, title, branch, head_sha, url, author_login,
               state, draft, merge_state, issue_id, github_updated_at)
@@ -957,7 +987,7 @@ async fn record_pull_request(
                                THEN clock_timestamp() ELSE pull_request.updated_at END
          WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at
            AND pull_request.state <> 'merged'
-         RETURNING id",
+         RETURNING id, updated_at",
         repository_id,
         pr.number,
         pr.id,
@@ -974,7 +1004,7 @@ async fn record_pull_request(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(id) = applied else {
+    let Some(applied) = applied else {
         // A payload older than the stored state changes nothing, and nothing changes a merged
         // pull request: it cannot reopen. GitHub's `updated_at` is in whole seconds, so two
         // actions in one second still apply in delivery order; `read_current` covers the one
@@ -988,8 +1018,21 @@ async fn record_pull_request(
         .await?;
         return Ok(id);
     };
-    recompute_checks(tx, repository_id, &pr.head.sha).await?;
-    let closed = state != "open" && was.is_none_or(|was| was == "open");
+    let id = applied.id;
+    // `updated_at` moves only when something the row shows or the gates read changed.
+    if was
+        .as_ref()
+        .is_none_or(|was| was.updated_at != applied.updated_at)
+    {
+        mark_pull_request_change(tx, linked.as_slice()).await?;
+    }
+    recompute_checks(tx, repository_id, &pr.head.sha, false).await?;
+    // The issue it named before no longer shows it once it names another.
+    let unlinked = was.as_ref().and_then(|was| was.issue_id.clone());
+    if unlinked.is_some() && unlinked != linked {
+        mark_pull_request_change(tx, unlinked.as_slice()).await?;
+    }
+    let closed = state != "open" && was.is_none_or(|was| was.state == "open");
     if let (true, Some(issue_id)) = (closed, linked) {
         close_issue_on_pull_request(tx, workspace_id, pr, closed_by, delivery_id, &issue_id)
             .await?;
@@ -1421,11 +1464,15 @@ pub(crate) async fn newest_check_runs(
     .await
 }
 
-/// Summarizes the check runs on a commit onto every pull request whose head it is.
+/// Summarizes the check runs on a commit onto every pull request whose head it is, and marks
+/// their issues for a `pull_request` event when the summary changed, or when `evidence_changed`:
+/// a run's row changed in a column a gate reads, as when a read adds the workflow job behind a
+/// run, which the counts do not show.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     head_sha: &str,
+    evidence_changed: bool,
 ) -> sqlx::Result<()> {
     let runs = newest_check_runs(tx, repository_id, head_sha).await?;
     let count = |state: Option<bool>| runs.iter().filter(|run| run.passed() == state).count();
@@ -1436,20 +1483,48 @@ async fn recompute_checks(
         (_, _, 1..) => "pending",
         _ => "passing",
     };
-    sqlx::query!(
+    let issues = sqlx::query_scalar!(
         // In id order, as `lock_pull_requests` takes them.
-        "UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
-         WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
-                      ORDER BY id FOR UPDATE)",
+        r#"WITH summarized AS (
+               UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
+               WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
+                            ORDER BY id FOR UPDATE)
+                 AND ($6 OR (checks, checks_total, checks_passed) IS DISTINCT FROM ($3, $4, $5))
+               RETURNING issue_id)
+           SELECT DISTINCT issue_id AS "issue_id!" FROM summarized WHERE issue_id IS NOT NULL"#,
         repository_id,
         head_sha,
         checks,
         runs.len() as i32,
         passed as i32,
+        evidence_changed,
     )
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(())
+    mark_pull_request_change(tx, &issues).await
+}
+
+/// The workspace's actor for a GitHub login, made on first use. With no login it is GitHub
+/// itself, for what nobody is credited with; no GitHub login is empty, so that actor is never
+/// a user's.
+pub(crate) async fn github_actor(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    login: Option<&str>,
+) -> sqlx::Result<Uuid> {
+    let (name, login) = login.map_or(("GitHub", ""), |login| (login, login));
+    sqlx::query_scalar!(
+        "INSERT INTO actor (workspace_id, name, role, github_login)
+         VALUES ($1, $2, 'github', $3)
+         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL
+         DO UPDATE SET name = EXCLUDED.name
+         RETURNING id",
+        workspace_id,
+        name,
+        login,
+    )
+    .fetch_one(&mut *conn)
+    .await
 }
 
 /// A closed pull request moves its linked issue if the workflow has a transition on that
@@ -1487,23 +1562,9 @@ async fn close_issue_on_pull_request(
         );
         return Ok(());
     };
-    // With nobody to credit the actor is GitHub itself. No GitHub login is empty, so that
-    // actor is never a user's.
-    let (name, login) = closed_by.map_or(("GitHub", ""), |login| (login, login));
-    let actor_id = sqlx::query_scalar!(
-        "INSERT INTO actor (workspace_id, name, role, github_login)
-         VALUES ($1, $2, 'github', $3)
-         ON CONFLICT (workspace_id, github_login) WHERE github_login IS NOT NULL
-         DO UPDATE SET name = EXCLUDED.name
-         RETURNING id",
-        workspace_id,
-        name,
-        login,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let name = closed_by.unwrap_or("GitHub");
     let actor = Actor {
-        id: actor_id,
+        id: github_actor(tx, workspace_id, closed_by).await?,
         workspace_id,
         name: name.to_string(),
         role: Role::Github,

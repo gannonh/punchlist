@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pull_request SET open_threads = counted.open\n         FROM (SELECT count(*)::int AS open FROM review_thread\n               WHERE pull_request_id = $1 AND NOT resolved) counted\n         WHERE id = $1 AND open_threads IS DISTINCT FROM counted.open\n         RETURNING issue_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "issue_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "fc3c90e7f97519261b578ea69ed546087f80de9b6d4e9bdcabbc450c6abcc407"
+}
