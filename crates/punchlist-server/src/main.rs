@@ -136,8 +136,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             });
-            // The open app hears of recorded GitHub evidence within this period and the event
-            // stream's.
+            // An open app sees recorded GitHub evidence within this interval plus the stream's
+            // 500 ms poll.
             let events_pool = pool.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
