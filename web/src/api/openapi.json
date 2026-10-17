@@ -1,0 +1,3771 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Punchlist",
+    "description": "The Punchlist API.",
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/actors": {
+      "get": {
+        "summary": "List the workspace's people, agents and runners, oldest first. Person token.",
+        "operationId": "list_actors",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActorList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Mint an agent actor with its own token and no run. Its token reaches the workspace's\nissues, `/api/issues/<id>` and below, and nothing else. Person token.",
+        "operationId": "create_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAgent"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown kind or owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/github/webhook": {
+      "post": {
+        "summary": "Receive a GitHub webhook delivery. The signature is checked, the payload parsed, and a\njob queued to record it; the answer does not wait for the job. Unauthenticated: GitHub\nsigns the body instead of sending a bearer token.",
+        "operationId": "webhook",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted: queued, or ignored because Punchlist does not record this event."
+          },
+          "401": {
+            "description": "The signature is missing or wrong.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A required header is missing or the payload is malformed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No webhook secret is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/issues": {
+      "get": {
+        "summary": "List the workspace's issues, oldest first, each with its run, newest pull request and\nnext gated transition's gates.",
+        "operationId": "list_issues",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an issue in the workflow's first status, and its `created` event.",
+        "operationId": "create_issue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIssue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueWritten"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The title is empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}": {
+      "get": {
+        "summary": "Show one issue.",
+        "operationId": "get_issue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Issue"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Edit an issue's title, body, labels or assignee. Only the fields that change are\nwritten, with one `edited` event naming them; a request that changes nothing writes\nnothing and answers the workspace's latest sequence number. Nobody in a role the issue's\nstatus locks may edit it.",
+        "operationId": "update_issue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIssue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueWritten"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An agent edited another issue than its run's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The issue's status is locked to the actor's role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An empty title, a bad label, or an assignee that is not a person or agent of the workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/comments": {
+      "post": {
+        "summary": "Comment on an issue. An agent's comment ends with `(agent)` on its own line. Nobody\nin a role the issue's status locks may comment.",
+        "operationId": "add_comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateComment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Event"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An agent commented on another issue than its run's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The issue's status is locked to the actor's role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/events": {
+      "get": {
+        "summary": "An issue's timeline, oldest first.",
+        "operationId": "issue_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/gates": {
+      "get": {
+        "summary": "The gates of the issue's next gated transition, each checked against the evidence\nrecorded now. Nothing is read from GitHub and nothing is written: a request for the\ntransition reads GitHub first, so it can answer differently. 204 when no transition an\nactor can request from the issue's status has gates.",
+        "operationId": "issue_gates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GateChecklist"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "The issue's status has no gated transition."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/proof": {
+      "get": {
+        "summary": "An issue's proof, oldest first.",
+        "operationId": "list_proof",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Proof"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Attach a file to an issue as proof, in the issue's current attempt. Nobody in a role the\nissue's status locks may attach proof, as for comments.",
+        "operationId": "attach_proof",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachProof"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Proof"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An agent attached proof to another issue than its run's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The issue's status is locked to the actor's role, or its attempt changed while the file uploaded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The file is over the server's limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No title or file, a content type proof cannot be, or a kind that is not the content type's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/pull-requests": {
+      "get": {
+        "summary": "An issue's pull requests, newest number first.",
+        "operationId": "issue_pull_requests",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PullRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/pull-requests/refresh": {
+      "post": {
+        "summary": "An issue's pull requests and the unresolved review threads of the open ones, after\nreading both from GitHub as a gated request does: a new review thread sends no webhook,\nso this is how an agent reads what its reviewers wrote. The thread text is from outside\nthe team; only this route returns it. When GitHub cannot be read, or there is no GitHub\nApp, `refreshed` is false and the answer is what is recorded.",
+        "operationId": "refresh_issue_pull_requests",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PullRequestsNow"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/runs": {
+      "get": {
+        "summary": "An issue's runs, newest first.",
+        "operationId": "issue_runs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Run"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/transitions": {
+      "post": {
+        "summary": "Move an issue to another status. The workflow's lock, role and gate rules are checked,\nand the status, the transition, its gate results and its event are written, in one\ntransaction.",
+        "operationId": "move_issue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveIssue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Moved"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused; the message names the rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/proof/{id}": {
+      "get": {
+        "summary": "A proof file's bytes, with its content type. It is served so that a browser neither\nguesses another type nor runs it. An agent's token gets 403: agents reach only\n`/api/issues/...`.",
+        "operationId": "get_proof",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Proof id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file, with its stored content type."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pull-requests/unlinked": {
+      "get": {
+        "summary": "The workspace repository's pull requests that name no issue, newest number first.",
+        "operationId": "unlinked_pull_requests",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PullRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runners": {
+      "get": {
+        "summary": "List the workspace's runners, oldest first.",
+        "operationId": "list_runners",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register a runner. Needs a person's token. Creates the runner's own actor. A name this\nperson already registered in the workspace re-adopts the newest such runner instead: the\nsame id and actor, the request's agents, and a new token, so the old one stops working.\nThat is how a restarted runner keeps the attempts it holds (`GET /api/runners/{id}/leases`),\nand why two runners started with one name cannot both run.",
+        "operationId": "register_runner",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRunner"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Registered, or re-adopted with a new token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisteredRunner"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runners/{id}/heartbeat": {
+      "post": {
+        "summary": "Record a heartbeat and renew the leases of the attempts the body lists as held. A running\nattempt that is not listed, or whose lease already lapsed, is not renewed: it expires and\nthe sweep fails it. The answer lists the held attempts that were not renewed (`stale`),\nso the runner stops their agents: the issue of one whose lease lapsed is dispatched again.\nThe body is optional; without it no lease is renewed. Runner token, for the runner's own\nid only.",
+        "operationId": "heartbeat",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Runner id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Heartbeat"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeartbeatReply"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runners/{id}/leases": {
+      "get": {
+        "summary": "The running attempts the runner holds whose leases have not lapsed, oldest first. A\nrunner that restarts reads these: it resumes each one it can (`POST /api/runs/{id}/resume`)\nand reports the rest lost. Read-only. Runner token, for the runner's own id only.",
+        "operationId": "leases",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Runner id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Lease"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/claim": {
+      "post": {
+        "summary": "Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule\nnames an agent the runner can run. Runner token. 204 when nothing is claimable; with\n`wait_seconds` the request waits for one. When several runners wait, each issue goes to\none of them and the others get 409 `claim_taken`.",
+        "operationId": "claim",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Claim"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Nothing to claim."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another runner claimed the issue first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/finish": {
+      "post": {
+        "summary": "Record the outcome of the runner's running attempt and of its run. A lost attempt keeps\nthe run running for its next attempt while the run has one left (`settle_run`).",
+        "operationId": "finish_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishRun"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Run"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The attempt is not the runner's running attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/log": {
+      "get": {
+        "summary": "Every log line of a run, oldest first.",
+        "operationId": "run_log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunLog"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Append lines to a run's log. Only the runner holding the running attempt may write.",
+        "operationId": "append_log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendLog"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Appended."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The attempt is not the runner's running attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{id}/resume": {
+      "post": {
+        "summary": "Resume the runner's running attempt after the runner restarted: renews its lease, gives\nthe run's agent a new token, and answers the attempt's claim again, with the same agent\nsession and the number of the attempt's next log line. No attempt is created. Runner\ntoken; 409 `stale_attempt` unless the attempt is the runner's running attempt and its\nlease has not lapsed.",
+        "operationId": "resume_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeRun"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Claim"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The attempt is not the runner's running attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/session": {
+      "get": {
+        "summary": "Who the request is signed in as, by its bearer token or its session cookie.",
+        "operationId": "show_session",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Sign in with a person's token: the answer sets the session cookie to it.",
+        "operationId": "sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "headers": {
+              "set-cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The session cookie."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      },
+      "delete": {
+        "summary": "Sign out: the answer clears the session cookie.",
+        "operationId": "sign_out",
+        "responses": {
+          "204": {
+            "description": "The session cookie is cleared."
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/workflow": {
+      "get": {
+        "summary": "The workspace's active workflow: its version, the commit it came from, its statuses and\nthe last push that was refused.",
+        "operationId": "show_workflow",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workflow/schema.json": {
+      "get": {
+        "summary": "The JSON Schema for `.punchlist/workflow.toml`. Unauthenticated, so editors can fetch it.",
+        "operationId": "schema",
+        "responses": {
+          "200": {
+            "description": "A JSON Schema (draft 2020-12).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/workspaces/{id}/events": {
+      "get": {
+        "summary": "The workspace's events after `after`, as Server-Sent Events: each one's `id` is its\nsequence number and its data a `StreamItem`, with the issue's row as it is when the\nevent is sent. The stream stays open.",
+        "operationId": "event_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "description": "Stream the events after this sequence number: the list's `last_event_seq`. A\nreconnecting `EventSource`'s `Last-Event-ID` takes its place.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One `issue` message per event, in sequence order.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamItem"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Actor": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent key, such as `codex`. Only agents have one. Absent from an older server."
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "ActorInfo": {
+        "type": "object",
+        "description": "An actor in the workspace: a person, an agent or a runner.",
+        "required": [
+          "id",
+          "name",
+          "role",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent key. Only agents have one."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of the person an agent acts for. Only agents have one."
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "ActorList": {
+        "type": "object",
+        "description": "`GET /api/actors`.",
+        "required": [
+          "actors"
+        ],
+        "properties": {
+          "actors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActorInfo"
+            }
+          }
+        }
+      },
+      "AppendLog": {
+        "type": "object",
+        "description": "`POST /api/runs/{id}/log`.",
+        "required": [
+          "attempt",
+          "first_line",
+          "lines"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The 1-based number, within this attempt, of the first line in `lines`. The lines are\nconsecutive numbers from here. A resent batch keeps its `first_line`, so the server\nstores each numbered line once. Gaps between batches are fine."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AttachProof": {
+        "type": "object",
+        "description": "`POST /api/issues/{id}/proof`, as `multipart/form-data`.",
+        "required": [
+          "title",
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "The file, with its content type on the part."
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProofKind",
+                "description": "Must be the kind of the file's content type, when given."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "What the file shows."
+          }
+        }
+      },
+      "AttemptInfo": {
+        "type": "object",
+        "description": "One attempt of a run.",
+        "required": [
+          "attempt",
+          "runner",
+          "state",
+          "started_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "runner": {
+            "$ref": "#/components/schemas/RunnerRef"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunOutcome"
+          }
+        }
+      },
+      "CheckRunEvidence": {
+        "type": "object",
+        "description": "A check run on a pull request's head commit.",
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "app": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The slug of the GitHub App that created the run, such as `github-actions`; absent for a\nrun recorded before apps were."
+          },
+          "conclusion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set once completed, such as `success` or `failure`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`queued`, `in_progress` or `completed`."
+          },
+          "workflow_default_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same path's blob on the default branch when the run was read; absent when the\ndefault branch has no such file."
+          },
+          "workflow_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The workflow file of the GitHub Actions job behind the run, such as\n`.github/workflows/ci.yml`, when a gated request's read of GitHub found one that a runner\ntook. Absent for another app's run, for a check run that no job ran (anything with\n`checks: write` can create one of any name on any commit), for a job still waiting for\na runner, and for a run that only a delivery recorded."
+          },
+          "workflow_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That file's blob at the head commit; absent when the commit has no such file."
+          }
+        }
+      },
+      "ChecksState": {
+        "type": "string",
+        "description": "The check runs on a pull request's head commit, taken together.",
+        "enum": [
+          "none",
+          "pending",
+          "passing",
+          "failing"
+        ]
+      },
+      "Claim": {
+        "type": "object",
+        "description": "A claimed issue, with the attempt leased to the runner. The server either moved it from\nStart to In Progress as the runner, or it was waiting in a status it entered that has a\ndispatch rule, such as Agent Review.",
+        "required": [
+          "run_id",
+          "attempt",
+          "agent",
+          "issue",
+          "repository",
+          "branch",
+          "lease_expires_at",
+          "prompt",
+          "agent_token",
+          "session_id",
+          "next_line"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "The agent key from the dispatch rule, such as `claude-code`."
+          },
+          "agent_token": {
+            "type": "string",
+            "description": "The bearer token of the agent actor this run acts as, for the MCP server. Valid\nwhile the run is running, until the next claim or resume of the run replaces it."
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The compare-and-set token for logs and the outcome."
+          },
+          "branch": {
+            "type": "string",
+            "description": "The branch to work on, `feature/<id>`, or `feature/<id>-<n>` from the issue's second\nlifecycle on."
+          },
+          "issue": {
+            "$ref": "#/components/schemas/Issue",
+            "description": "The issue, in the status whose dispatch rule the run is for."
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "merged_branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issue's branches with a merged pull request and no open one, sorted. The runner\nreplaces a worktree it still has on one of them. Empty when no earlier branch of the\nissue has merged."
+          },
+          "next_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of the attempt's next log line: 1 on a fresh attempt, one past the last\nstored line on a resumed one."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The workflow's prompt for the status: `prompts/system.md`, then the status's own."
+          },
+          "repository": {
+            "$ref": "#/components/schemas/Repository"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The attempt's agent session: `claude --session-id` on a fresh attempt, `--resume`\non a resumed one."
+          }
+        }
+      },
+      "ClaimRequest": {
+        "type": "object",
+        "description": "`POST /api/runs/claim`, with a runner's token.",
+        "properties": {
+          "wait_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Wait up to this many seconds (at most 30) for an issue to become claimable before\nanswering 204.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateAgent": {
+        "type": "object",
+        "description": "`POST /api/actors`, with a person's token. Mints an agent actor that acts through its own\ntoken, with no run.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The agent key, such as `codex`."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of the person in the workspace the agent acts for. The requesting person by\ndefault."
+          }
+        }
+      },
+      "CreateComment": {
+        "type": "object",
+        "description": "`POST /api/issues/{id}/comments`.",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Markdown."
+          }
+        }
+      },
+      "CreateIssue": {
+        "type": "object",
+        "description": "`POST /api/issues`.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Markdown."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "CreatedAgent": {
+        "type": "object",
+        "description": "The response to `POST /api/actors`.",
+        "required": [
+          "actor",
+          "token"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/ActorInfo"
+          },
+          "token": {
+            "type": "string",
+            "description": "The agent's bearer token. Shown once; only its hash is stored."
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The body of every error response.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable code, such as `role_not_allowed`, `gate_failed` or `not_found`."
+          },
+          "evidence": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Evidence",
+                "description": "For `gate_failed`: what the gates read."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `gate_failed`: the first gate that failed."
+          },
+          "gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateResult"
+            },
+            "description": "For `gate_failed`: every gate's result."
+          },
+          "message": {
+            "type": "string",
+            "description": "What went wrong. For a refused transition, the rule that refused it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `gate_failed`: why that gate failed, as people read it: the gate result's `reason`\njoined with the names in its `outside` (`GateResult::text()`), where the result's own\n`reason` is the sentence only."
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "description": "One entry in an issue's timeline.",
+        "required": [
+          "seq",
+          "issue_id",
+          "actor",
+          "created_at",
+          "detail"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "$ref": "#/components/schemas/EventDetail"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Increases per workspace (ADR 0006)."
+          }
+        }
+      },
+      "EventDetail": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "from",
+              "from_name",
+              "to",
+              "to_name",
+              "workflow_version",
+              "kind"
+            ],
+            "properties": {
+              "delivery_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The GitHub webhook delivery that caused the move, for moves made on a GitHub\nevent."
+              },
+              "from": {
+                "type": "string"
+              },
+              "from_name": {
+                "type": "string",
+                "description": "`from` as people read it, such as `In Progress`."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "transition"
+                ]
+              },
+              "to": {
+                "type": "string"
+              },
+              "to_name": {
+                "type": "string",
+                "description": "`to` as people read it."
+              },
+              "workflow_version": {
+                "type": "string",
+                "description": "The content hash of the workflow the transition was checked against."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A comment on the issue, such as the one a pull request closed without merging\nrequires.",
+            "required": [
+              "body",
+              "kind"
+            ],
+            "properties": {
+              "body": {
+                "type": "string",
+                "description": "Markdown."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "comment"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A transition that a GitHub event would have made and a gate refused. The issue\nstayed in `from`.",
+            "required": [
+              "from",
+              "from_name",
+              "to",
+              "to_name",
+              "gate",
+              "reason",
+              "workflow_version",
+              "kind"
+            ],
+            "properties": {
+              "delivery_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The GitHub webhook delivery that brought the event; absent when the server read\nthe pull request from GitHub itself."
+              },
+              "from": {
+                "type": "string"
+              },
+              "from_name": {
+                "type": "string",
+                "description": "`from` as people read it, such as `Merging`."
+              },
+              "gate": {
+                "type": "string",
+                "description": "The gate that failed, such as `proof_attached`."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "refusal"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why it failed."
+              },
+              "to": {
+                "type": "string"
+              },
+              "to_name": {
+                "type": "string",
+                "description": "`to` as people read it."
+              },
+              "workflow_version": {
+                "type": "string",
+                "description": "The content hash of the workflow the transition was checked against."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The issue was created.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "created"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Fields of the issue changed.",
+            "required": [
+              "fields",
+              "kind"
+            ],
+            "properties": {
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Among `title`, `body`, `labels` and `assignee`, in that order."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "edited"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Evidence": {
+        "type": "object",
+        "description": "What the gates read for one issue.",
+        "required": [
+          "issue_id",
+          "pull_requests"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The issue's attempt: how many times it has moved from Start to In Progress."
+          },
+          "closed_pull_request": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The pull request that a GitHub event merged or closed without merging, when that event\nis causing the move; absent on a requested move, and read only by `pr_names_issue`."
+          },
+          "issue_id": {
+            "type": "string",
+            "description": "Such as `PL-7`."
+          },
+          "proof": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProofEvidence"
+            },
+            "description": "The proof attached to the issue, from every attempt."
+          },
+          "pull_requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PullRequestEvidence"
+            },
+            "description": "The pull requests linked to the issue, open or not."
+          }
+        }
+      },
+      "FinishRun": {
+        "type": "object",
+        "description": "`POST /api/runs/{id}/finish`. The outcome is `succeeded` or `failed`.",
+        "required": [
+          "attempt",
+          "outcome",
+          "duration_ms"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "lost": {
+            "type": "boolean",
+            "description": "The runner lost the attempt before its agent finished, such as when it stopped or\nrestarted. Only with `failed`. A lost attempt that is not the run's last allowed one\nkeeps the run running for another attempt."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/RunOutcome"
+          },
+          "output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the attempt failed. Required when the outcome is `failed`."
+          }
+        }
+      },
+      "GateChecklist": {
+        "type": "object",
+        "description": "`GET /api/issues/{id}/gates`: the gates an issue has to pass for its next gated\ntransition, each checked against the evidence recorded now.",
+        "required": [
+          "from",
+          "from_name",
+          "to",
+          "to_name",
+          "gates"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "The issue's status."
+          },
+          "from_name": {
+            "type": "string"
+          },
+          "gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateResult"
+            },
+            "description": "In the workflow's order."
+          },
+          "to": {
+            "type": "string",
+            "description": "The status the gated transition moves to."
+          },
+          "to_name": {
+            "type": "string"
+          }
+        }
+      },
+      "GateResult": {
+        "type": "object",
+        "description": "One gate's result. `reason` says why it passed or failed, in Punchlist's own words: every\nname in it is a number, an issue id or one of GitHub's own words. What GitHub's users named\nis in `outside`, so an agent's tools can show that as data and the reason as Punchlist's.\n`reason` is therefore the sentence only; `text()` is the whole of it, and is what\n`ErrorBody.reason`, the refusal's message and the stored rows hold.",
+        "required": [
+          "gate",
+          "passed",
+          "reason"
+        ],
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "outside": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The text from outside the team that the reason is about, one entry per thing: the\nfailed checks' names, the open threads' files. At most five, each cut short."
+          },
+          "outside_more": {
+            "type": "integer",
+            "description": "How many more there are than `outside` names.",
+            "minimum": 0
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "GateSummary": {
+        "type": "object",
+        "description": "The gates of the issue's next gated transition, over the evidence recorded now.",
+        "required": [
+          "to",
+          "to_name",
+          "passed",
+          "total"
+        ],
+        "properties": {
+          "first_failed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first gate that fails, in the workflow's order."
+          },
+          "passed": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "description": "The status the gated transition moves to."
+          },
+          "to_name": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "Heartbeat": {
+        "type": "object",
+        "description": "`POST /api/runners/{id}/heartbeat`.",
+        "properties": {
+          "held": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeldAttempt"
+            },
+            "description": "The attempts the runner is working on. Only these leases are renewed; any other\nrunning attempt of this runner expires and the sweep fails it."
+          }
+        }
+      },
+      "HeartbeatReply": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Runner"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "stale": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HeldAttempt"
+                },
+                "description": "The attempts in `held` that are not this runner's running attempts any more: finished,\nor failed when the lease lapsed. The issue may already have another run, so the runner\nstops their agents."
+              }
+            }
+          }
+        ],
+        "description": "The response to `POST /api/runners/{id}/heartbeat`: the runner, and what it must stop."
+      },
+      "HeldAttempt": {
+        "type": "object",
+        "description": "An attempt a runner is working on.",
+        "required": [
+          "run_id",
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "Issue": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "body",
+          "status",
+          "status_name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "assignee": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Actor",
+                "description": "A person or an agent; `None` when nobody is assigned."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "body": {
+            "type": "string",
+            "description": "Markdown."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "description": "The identifier people use, such as `PL-1`."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "In the order they were set."
+          },
+          "status": {
+            "type": "string",
+            "description": "The workflow's status key, such as `in_progress`."
+          },
+          "status_name": {
+            "type": "string",
+            "description": "The status as people read it, such as `In Progress`."
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "waiting_on_person": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the issue waits on a person, when it does: every run this entry into its status\ngets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;\nevery other response that carries an issue leaves it out."
+          }
+        }
+      },
+      "IssueList": {
+        "type": "object",
+        "description": "`GET /api/issues`.",
+        "required": [
+          "issues",
+          "last_event_seq"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueRow"
+            },
+            "description": "Oldest first."
+          },
+          "last_event_seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The sequence number of the workspace's latest event, read in the same snapshot as\nthe list (ADR 0006)."
+          }
+        }
+      },
+      "IssueRow": {
+        "type": "object",
+        "description": "An issue as the list and the board show it: the issue, its run, its newest pull request\nand its next gated transition's gates.",
+        "required": [
+          "issue",
+          "run"
+        ],
+        "properties": {
+          "gates": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GateSummary",
+                "description": "`None` when no transition an actor can request from the issue's status has gates."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "issue": {
+            "$ref": "#/components/schemas/Issue"
+          },
+          "pull_request": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestSummary",
+                "description": "The issue's highest-numbered pull request; `None` when none is linked."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSummary"
+          }
+        }
+      },
+      "IssueWritten": {
+        "type": "object",
+        "description": "The answer to a write: the changed issue's row and the sequence number of the event it\nrecorded, or the workspace's latest when it recorded none (ADR 0006). The client drops\nthat event when the stream delivers it.",
+        "required": [
+          "row",
+          "seq"
+        ],
+        "properties": {
+          "row": {
+            "$ref": "#/components/schemas/IssueRow"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Lease": {
+        "type": "object",
+        "description": "`GET /api/runners/{id}/leases`: a running attempt the runner holds whose lease has not\nlapsed. A runner that restarts resumes or fails each one.",
+        "required": [
+          "run_id",
+          "attempt",
+          "agent",
+          "issue_id",
+          "branch",
+          "repository",
+          "lease_expires_at"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "repository": {
+            "$ref": "#/components/schemas/Repository",
+            "description": "Where the issue's worktree is cloned from."
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "LogLine": {
+        "type": "object",
+        "required": [
+          "seq",
+          "attempt",
+          "line",
+          "created_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "line": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Increases per run, in the order the server received the lines."
+          }
+        }
+      },
+      "MoveIssue": {
+        "type": "object",
+        "description": "`POST /api/issues/{id}/transitions`.",
+        "required": [
+          "to"
+        ],
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "The status key to move to, such as `todo`."
+          }
+        }
+      },
+      "Moved": {
+        "type": "object",
+        "description": "A transition that the server accepted.",
+        "required": [
+          "issue",
+          "event"
+        ],
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "issue": {
+            "$ref": "#/components/schemas/Issue"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the move put the issue in Start under an active workflow version that fails\nvalidation, so no runner can claim it: the validation problem."
+          }
+        }
+      },
+      "Proof": {
+        "type": "object",
+        "description": "A file attached to an issue as proof of its work.",
+        "required": [
+          "id",
+          "issue_id",
+          "attempt",
+          "kind",
+          "title",
+          "content_type",
+          "size",
+          "actor",
+          "created_at"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor",
+            "description": "Who uploaded it."
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The issue's attempt when it was uploaded: how many times the issue had moved from\nStart to In Progress."
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProofKind"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "In bytes."
+          },
+          "title": {
+            "type": "string",
+            "description": "What it shows, in its uploader's words."
+          }
+        }
+      },
+      "ProofEvidence": {
+        "type": "object",
+        "description": "A proof record attached to the issue.",
+        "required": [
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The issue's attempt when it was uploaded."
+          }
+        }
+      },
+      "ProofKind": {
+        "type": "string",
+        "description": "What a proof file shows.",
+        "enum": [
+          "image",
+          "video",
+          "report"
+        ]
+      },
+      "PullRequest": {
+        "type": "object",
+        "description": "A pull request on the workspace's repository, as recorded from GitHub's events.\n`GET /api/issues/{id}/pull-requests` and `GET /api/pull-requests/unlinked` return these.",
+        "required": [
+          "number",
+          "title",
+          "branch",
+          "url",
+          "author_login",
+          "state",
+          "draft",
+          "merge_state",
+          "checks",
+          "checks_total",
+          "checks_passed",
+          "open_threads",
+          "updated_at"
+        ],
+        "properties": {
+          "author_login": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "checks": {
+            "$ref": "#/components/schemas/ChecksState"
+          },
+          "checks_passed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "checks_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Check runs on the head commit, and how many of them passed."
+          },
+          "draft": {
+            "type": "boolean",
+            "description": "Meaningful while the state is `open`."
+          },
+          "issue_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The issue the branch or title names; `None` when it is unlinked."
+          },
+          "merge_state": {
+            "type": "string",
+            "description": "GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "open_threads": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Review threads not yet resolved."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PullRequestState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "PullRequestEvidence": {
+        "type": "object",
+        "description": "A pull request linked to the issue, as GitHub's events recorded it.",
+        "required": [
+          "number",
+          "title",
+          "branch",
+          "state",
+          "draft",
+          "head_sha",
+          "merge_state",
+          "check_runs",
+          "review_threads"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "check_runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckRunEvidence"
+            },
+            "description": "The check runs on the head commit, the newest of each name. Read for an open pull\nrequest."
+          },
+          "draft": {
+            "type": "boolean"
+          },
+          "head_sha": {
+            "type": "string",
+            "description": "The head commit."
+          },
+          "merge_state": {
+            "type": "string",
+            "description": "GitHub's `mergeable_state`, such as `clean` or `dirty`; `unknown` until GitHub has\ncomputed it."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "review_threads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewThreadEvidence"
+            },
+            "description": "Its review threads, resolved or not. Read for an open pull request."
+          },
+          "state": {
+            "$ref": "#/components/schemas/PullRequestState"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "PullRequestState": {
+        "type": "string",
+        "description": "A pull request's state on GitHub.",
+        "enum": [
+          "open",
+          "closed",
+          "merged"
+        ]
+      },
+      "PullRequestStatus": {
+        "type": "string",
+        "description": "A pull request's state as people read it: `draft` is an open draft.",
+        "enum": [
+          "draft",
+          "open",
+          "merged",
+          "closed"
+        ]
+      },
+      "PullRequestSummary": {
+        "type": "object",
+        "required": [
+          "number",
+          "state",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/ChecksState"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PullRequestStatus"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL."
+          }
+        }
+      },
+      "PullRequestsNow": {
+        "type": "object",
+        "description": "`POST /api/issues/{id}/pull-requests/refresh`: the issue's pull requests and what their\nreviewers wrote, after reading both from GitHub.",
+        "required": [
+          "pull_requests",
+          "review_threads",
+          "refreshed"
+        ],
+        "properties": {
+          "pull_requests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PullRequest"
+            },
+            "description": "Newest number first."
+          },
+          "refreshed": {
+            "type": "boolean",
+            "description": "False when GitHub could not be read, or the server has no GitHub App: the rest is\nthen what was last recorded."
+          },
+          "review_threads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewThread"
+            },
+            "description": "The unresolved review threads of the open ones."
+          }
+        }
+      },
+      "RegisterRunner": {
+        "type": "object",
+        "description": "`POST /api/runners`, with a person's token. Registers a runner and creates its actor, or\nre-adopts the runner this person registered under the same name, with a new token.",
+        "required": [
+          "name",
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Agent keys the runner can start, such as `claude-code`."
+          },
+          "name": {
+            "type": "string",
+            "description": "A name people read, such as `sartre`."
+          }
+        }
+      },
+      "RegisteredRunner": {
+        "type": "object",
+        "description": "The response to `POST /api/runners`.",
+        "required": [
+          "runner",
+          "token",
+          "lease_seconds"
+        ],
+        "properties": {
+          "lease_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How long a lease lasts without a heartbeat.",
+            "minimum": 0
+          },
+          "runner": {
+            "$ref": "#/components/schemas/Runner"
+          },
+          "token": {
+            "type": "string",
+            "description": "The runner actor's bearer token, for heartbeats, claims, logs and outcomes. Shown\nonce; only its hash is stored."
+          }
+        }
+      },
+      "Repository": {
+        "type": "object",
+        "required": [
+          "owner",
+          "name",
+          "default_branch"
+        ],
+        "properties": {
+          "default_branch": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          }
+        }
+      },
+      "ResumeRun": {
+        "type": "object",
+        "description": "`POST /api/runs/{id}/resume`: the attempt the runner still holds, to run again in the\nsame agent session.",
+        "required": [
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ReviewComment": {
+        "type": "object",
+        "required": [
+          "author",
+          "body"
+        ],
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "The author's GitHub login."
+          },
+          "body": {
+            "type": "string"
+          },
+          "cut": {
+            "type": "boolean",
+            "description": "The comment is longer than `body`."
+          }
+        }
+      },
+      "ReviewThread": {
+        "type": "object",
+        "description": "An unresolved review thread. Its path, authors and bodies are text from outside the team.",
+        "required": [
+          "id",
+          "pull_request",
+          "comments",
+          "comments_total"
+        ],
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewComment"
+            },
+            "description": "The thread's newest comments, oldest first."
+          },
+          "comments_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many comments the thread has, which can be more than `comments`."
+          },
+          "id": {
+            "type": "string",
+            "description": "GitHub's node id for the thread, which its reply and resolve mutations take."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The line the thread is on, or was on before the file changed under it."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pull_request": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of the pull request it is on."
+          }
+        }
+      },
+      "ReviewThreadEvidence": {
+        "type": "object",
+        "description": "A review thread on a pull request.",
+        "required": [
+          "resolved"
+        ],
+        "properties": {
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The line it is on, or was on before the file changed under it."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file it is on; absent for a thread recorded before paths were."
+          },
+          "resolved": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "description": "Who asks for a transition.",
+        "enum": [
+          "person",
+          "agent",
+          "runner",
+          "github"
+        ]
+      },
+      "Run": {
+        "type": "object",
+        "description": "A run and its latest attempt. `GET /api/issues/{id}/runs` returns these, newest first.",
+        "required": [
+          "id",
+          "issue_id",
+          "agent",
+          "agent_name",
+          "branch",
+          "outcome",
+          "started_at",
+          "attempt",
+          "runner",
+          "log_tail"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "agent_name": {
+            "type": "string",
+            "description": "The agent as people read it, such as `Claude Code`."
+          },
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The latest attempt's number, runner, failure reason, duration and tokens."
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttemptInfo"
+            },
+            "description": "Every attempt, oldest first."
+          },
+          "branch": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "failure_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "log_tail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogLine"
+            },
+            "description": "The last 20 log lines, oldest first."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/RunOutcome"
+          },
+          "output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "runner": {
+            "$ref": "#/components/schemas/RunnerRef"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RunLog": {
+        "type": "object",
+        "description": "`GET /api/runs/{id}/log`: every line, oldest first.",
+        "required": [
+          "run_id",
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogLine"
+            }
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "RunOutcome": {
+        "type": "string",
+        "enum": [
+          "running",
+          "succeeded",
+          "failed"
+        ]
+      },
+      "RunSummary": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No run is running or waiting, and the last one in this status did not fail.",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "idle"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A dispatch waits for a runner that can run `agent`.",
+            "required": [
+              "agent",
+              "state"
+            ],
+            "properties": {
+              "agent": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "queued"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "agent",
+              "since",
+              "state"
+            ],
+            "properties": {
+              "agent": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "running"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The latest run in the issue's status failed.",
+            "required": [
+              "agent",
+              "at",
+              "state"
+            ],
+            "properties": {
+              "agent": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The last attempt's failure reason."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What the issue's agent is doing in its status."
+      },
+      "Runner": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "agents",
+          "registered_at",
+          "last_heartbeat"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_heartbeat": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "registered_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RunnerList": {
+        "type": "object",
+        "description": "`GET /api/runners`.",
+        "required": [
+          "runners"
+        ],
+        "properties": {
+          "runners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Runner"
+            }
+          }
+        }
+      },
+      "RunnerRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "description": "Who a request is signed in as.",
+        "required": [
+          "actor",
+          "workspace_id"
+        ],
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SignIn": {
+        "type": "object",
+        "description": "`POST /api/session`.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "A person's bearer token."
+          }
+        }
+      },
+      "StatusInfo": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "locked_to"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The status key, such as `in_progress`."
+          },
+          "locked_to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            },
+            "description": "The roles that may not act on an issue in it, from the workflow's `[lock]`."
+          },
+          "name": {
+            "type": "string",
+            "description": "As people read it, such as `In Progress`."
+          }
+        }
+      },
+      "StreamItem": {
+        "type": "object",
+        "description": "One message of `GET /api/workspaces/{id}/events`: an event and its issue's row as it is\nnow, which can be newer than the event.",
+        "required": [
+          "event",
+          "row"
+        ],
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "row": {
+            "$ref": "#/components/schemas/IssueRow"
+          }
+        }
+      },
+      "UpdateIssue": {
+        "type": "object",
+        "description": "`PATCH /api/issues/{id}`. An absent field is left as it is.",
+        "properties": {
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A person's or an agent's actor id, or `null` to unassign."
+          },
+          "body": {
+            "type": "string",
+            "description": "Markdown."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each trimmed, 1 to 50 characters; at most 20, duplicates dropped."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkflowInfo": {
+        "type": "object",
+        "description": "`GET /api/workflow`: the workspace's active workflow.",
+        "required": [
+          "version",
+          "statuses"
+        ],
+        "properties": {
+          "commit_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The default branch commit it was loaded from; `None` for the built-in workflow."
+          },
+          "invalid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a push of this version would be refused today: the line, the key and the\nproblem. The version stays in force until a valid file is pushed. `None` when valid."
+          },
+          "refused": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRefusal",
+                "description": "The last push of `workflow.toml` that was refused; `None` once a later load succeeds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "statuses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatusInfo"
+            },
+            "description": "In the workflow's order."
+          },
+          "version": {
+            "type": "string",
+            "description": "The content hash recorded on every transition."
+          }
+        }
+      },
+      "WorkflowRefusal": {
+        "type": "object",
+        "description": "A pushed `workflow.toml` the server refused to load.",
+        "required": [
+          "commit_sha",
+          "at",
+          "reason"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "commit_sha": {
+            "type": "string",
+            "description": "The default branch commit that was refused."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, as logged: the line and key, or the statuses still in use."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}
