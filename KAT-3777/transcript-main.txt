@@ -1,0 +1,57 @@
+$ pl issue create --title Updated\ live --body A\ live\ check\ of\ the\ open\ list.
+--- stdout
+PL-1
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 todo
+--- stdout
+PL-1  Backlog → Todo
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 start
+--- stdout
+PL-1  Todo → Start
+--- stderr
+--- exit 0
+
+$ webhook pull_request /tmp/kat3777-main/verify-artifacts/kat3777-main/live-main/delivery-01-pull_request_opened.json delivery 66c1b6b4-f687-47b1-b182-3788310e09c2
+--- stdout
+HTTP 202
+--- stderr
+--- exit 0
+
+$ psql: SELECT outcome, finished_at IS NOT NULL AS ended FROM run ORDER BY started_at
+--- stdout
+ outcome | ended 
+---------+-------
+ failed  | t
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT number, state, draft, issue_id FROM pull_request
+--- stdout
+ number | state | draft | issue_id 
+--------+-------+-------+----------
+      7 | open  | t     | PL-1
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT seq, kind FROM event ORDER BY seq
+--- stdout
+ seq |    kind    
+-----+------------
+   1 | created
+   2 | transition
+   3 | transition
+   4 | transition
+(4 rows)
+
+--- stderr
+--- exit 0
+

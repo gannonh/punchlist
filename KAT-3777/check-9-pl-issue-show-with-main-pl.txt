@@ -1,0 +1,29 @@
+PL-1  Updated live
+Status: Agent Review
+
+A live check of the open list.
+
+Pull requests
+  #7 open  feature/pl-1-live  checks failing 21/22  0 open threads
+    https://github.com/gannonh/punchlist/pull/12
+
+Proof
+  2026-10-17 15:57:31 UTC  image  "Screen"  8 B  Verify Person (person)  7007def9-5f5f-4dfb-afbb-acc26ccd02e1
+
+Gates for Agent Review → Human Review
+  ci_green: fail (1 of 22 checks failed on 6dcb09b: `check` (failure))
+  mergeable: pass (pull request #7 has no conflicts and GitHub's merge state is clean)
+  no_open_threads: pass (pull request #7 has no review threads)
+  proof_attached: pass (1 proof record is attached for attempt 1)
+  3 of 4 gates pass
+
+Timeline
+  2026-10-17 15:57:15 UTC  Verify Person (person)  created
+  2026-10-17 15:57:15 UTC  Verify Person (person)  Backlog → Todo
+  2026-10-17 15:57:15 UTC  Verify Person (person)  Todo → Start
+  2026-10-17 15:57:15 UTC  api-pl-1 (runner)  Start → In Progress
+  2026-10-17 15:57:25 UTC  Claude Code (agent, claude-code)  In Progress → Agent Review
+
+Runs
+  57792047-3171-42f5-9719-3e53b16cfb1a  Claude Code  runner api-pl-1  started 2026-10-17 15:57:21 UTC  duration —  failed  (lease expired: runner api-pl-1 stopped sending heartbeats)
+  a8ad032a-1bec-4eb7-82c1-d527936a9d8d  Claude Code  runner api-pl-1  started 2026-10-17 15:57:15 UTC  duration 0.0s  failed  (live check)

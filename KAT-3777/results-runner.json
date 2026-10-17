@@ -1,0 +1,11 @@
+[
+  {
+    "check": 3,
+    "step": "a real runner claims from Start",
+    "attempt_started_at": 1792252800624,
+    "dom_at": 1792252801058,
+    "delta_ms": 434,
+    "observed": "Running · 0s in in_progress",
+    "pass": true
+  }
+]

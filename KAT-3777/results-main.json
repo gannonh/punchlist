@@ -1,0 +1,24 @@
+[
+  {
+    "check": 1,
+    "step": "finish the run",
+    "answer": "run failed",
+    "changed_within_ms": null,
+    "observed": "Running · 0s",
+    "pass": true
+  },
+  {
+    "check": 1,
+    "step": "deliver opened",
+    "answer": "HTTP 202",
+    "changed_within_ms": null,
+    "observed": "no PR",
+    "pass": true
+  },
+  {
+    "check": 1,
+    "step": "no reload",
+    "observed": true,
+    "pass": true
+  }
+]

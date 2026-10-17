@@ -1,0 +1,58 @@
+$ pl issue create --title Live\ check:\ change\ nothing --body This\ issue\ is\ a\ live\ check\ of\ the\ issue\ list.\ Do\ not\ change\,\ commit\ or\ push\ anything.\ Stop\ at\ once.
+--- stdout
+PL-1
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 todo
+--- stdout
+PL-1  Backlog → Todo
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 start
+--- stdout
+PL-1  Todo → Start
+--- stderr
+--- exit 0
+
+$ psql: SELECT (extract(epoch FROM started_at) * 1000)::bigint FROM attempt WHERE issue_id = 'PL-1' AND attempt = 1
+--- stdout
+     int8      
+---------------
+ 1792252800624
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT a.attempt, r.name AS runner, a.state, a.failure_reason, to_char(a.started_at, 'HH24:MI:SS.MS') AS started FROM attempt a JOIN runner r ON r.id = a.runner_id
+--- stdout
+ attempt | runner | state  | failure_reason |   started    
+---------+--------+--------+----------------+--------------
+       1 | r1     | failed | runner stopped | 16:00:00.624
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT e.seq, e.kind, a.name, a.role FROM event e JOIN actor a ON a.id = e.actor_id ORDER BY e.seq
+--- stdout
+ seq |    kind    |     name      |  role  
+-----+------------+---------------+--------
+   1 | created    | Verify Person | person
+   2 | transition | Verify Person | person
+   3 | transition | Verify Person | person
+   4 | transition | r1            | runner
+   5 | run        | r1            | runner
+   6 | run        | r1            | runner
+(6 rows)
+
+--- stderr
+--- exit 0
+
+$ pl run log ef32a6e9-4520-4f2b-968c-4dbcc2641274
+--- stdout
+--- stderr
+--- exit 0
+

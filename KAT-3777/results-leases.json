@@ -1,0 +1,21 @@
+[
+  {
+    "check": 7,
+    "step": "claim attempt 2",
+    "answer": "run fc29a333-10b9-45dd-a842-6e2d7296dbb2 attempt 2",
+    "answered_at": 1792252824339,
+    "dom_at": 1792252824341,
+    "delta_ms": 2,
+    "observed": "Running · 30s",
+    "pass": true
+  },
+  {
+    "check": 7,
+    "step": "second lapse shows Queued",
+    "attempt_finished_at": 1792252858735,
+    "dom_at": 1792252859471,
+    "delta_ms": 736,
+    "observed": "Queued",
+    "pass": true
+  }
+]

@@ -1,0 +1,67 @@
+$ pl issue create --title Lease\ lapses --body A\ live\ check\ of\ the\ open\ list.
+--- stdout
+PL-1
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 todo
+--- stdout
+PL-1  Backlog → Todo
+--- stderr
+--- exit 0
+
+$ pl issue move PL-1 start
+--- stdout
+PL-1  Todo → Start
+--- stderr
+--- exit 0
+
+$ psql: SELECT (extract(epoch FROM finished_at) * 1000)::bigint FROM attempt WHERE issue_id = 'PL-1' AND attempt = 2
+--- stdout
+     int8      
+---------------
+ 1792252858735
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT attempt, state, failure_reason, to_char(finished_at, 'HH24:MI:SS.MS') AS finished FROM attempt ORDER BY attempt
+--- stdout
+ attempt | state  |                      failure_reason                       |   finished   
+---------+--------+-----------------------------------------------------------+--------------
+       1 | failed | lease expired: runner api-pl-1 stopped sending heartbeats | 16:00:23.735
+       2 | failed | lease expired: runner api-pl-1 stopped sending heartbeats | 16:00:58.735
+(2 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT e.seq, e.kind, a.name, a.role, to_char(e.created_at, 'HH24:MI:SS.MS') AS at FROM event e JOIN actor a ON a.id = e.actor_id ORDER BY e.seq
+--- stdout
+ seq |    kind    |     name      |  role  |      at      
+-----+------------+---------------+--------+--------------
+   1 | created    | Verify Person | person | 15:59:49.292
+   2 | transition | Verify Person | person | 15:59:49.358
+   3 | transition | Verify Person | person | 15:59:49.424
+   4 | transition | api-pl-1      | runner | 15:59:49.458
+   5 | run        | api-pl-1      | runner | 15:59:49.458
+   6 | run        | api-pl-1      | runner | 16:00:23.735
+   7 | run        | api-pl-1      | runner | 16:00:24.325
+   8 | run        | api-pl-1      | runner | 16:00:58.735
+(8 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT run_number, run_id IS NULL AS waiting FROM dispatch ORDER BY run_number
+--- stdout
+ run_number | waiting 
+------------+---------
+          1 | f
+          2 | t
+(2 rows)
+
+--- stderr
+--- exit 0
+

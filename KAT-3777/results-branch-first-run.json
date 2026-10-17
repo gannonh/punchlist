@@ -1,0 +1,149 @@
+[
+  {
+    "check": 1,
+    "step": "finish the run",
+    "answer": "run failed",
+    "answered_at": 1792252637717,
+    "dom_at": 1792252638155,
+    "delta_ms": 438,
+    "observed": "Queued",
+    "pass": true
+  },
+  {
+    "check": 1,
+    "step": "deliver opened",
+    "answer": "HTTP 202",
+    "answered_at": 1792252639740,
+    "dom_at": 1792252640168,
+    "delta_ms": 428,
+    "observed": "#7 draft",
+    "pass": true
+  },
+  {
+    "check": 2,
+    "step": "claim the waiting dispatch",
+    "answer": "PL-1 run 57792047-3171-42f5-9719-3e53b16cfb1a attempt 1",
+    "answered_at": 1792252641712,
+    "dom_at": 1792252642189,
+    "delta_ms": 477,
+    "observed": "Running · 0s",
+    "pass": true
+  },
+  {
+    "check": 4,
+    "step": "deliver ready_for_review",
+    "answer": "HTTP 202",
+    "answered_at": 1792252643776,
+    "dom_at": 1792252644194,
+    "delta_ms": 418,
+    "observed": "#7 open",
+    "pass": true
+  },
+  {
+    "check": 4,
+    "step": "gates after ready",
+    "observed": "3 of 3 gates pass",
+    "pass": true
+  },
+  {
+    "check": 5,
+    "step": "agent requests Agent Review",
+    "answer": "in_progress -> agent_review",
+    "answered_at": 1792252645734,
+    "dom_at": 1792252646212,
+    "delta_ms": 478,
+    "observed": "to Human Review; first failing: ci_green",
+    "pass": true
+  },
+  {
+    "check": 5,
+    "step": "deliver check_run created (queued)",
+    "answer": "HTTP 202",
+    "answered_at": 1792252647795,
+    "dom_at": 1792252648223,
+    "delta_ms": 428,
+    "observed": "PR #7 open, checks pending",
+    "pass": true
+  },
+  {
+    "check": 5,
+    "step": "deliver check_run completed (success)",
+    "answer": "HTTP 202",
+    "answered_at": 1792252649807,
+    "dom_at": 1792252650234,
+    "delta_ms": 427,
+    "observed": "to Human Review; first failing: proof_attached",
+    "pass": true
+  },
+  {
+    "check": 5,
+    "step": "checks after success",
+    "observed": "PR #7 open, checks passing",
+    "pass": true
+  },
+  {
+    "check": 6,
+    "step": "pl proof attach",
+    "answer": "Attached 7007def9-5f5f-4dfb-afbb-acc26ccd02e1: image \"Screen\" (8 B) to PL-1 for attempt 1",
+    "answered_at": 1792252651849,
+    "dom_at": 1792252652246,
+    "delta_ms": 397,
+    "observed": "to Human Review",
+    "pass": true
+  },
+  {
+    "check": 8,
+    "step": "seq before the burst",
+    "observed": 13,
+    "pass": true
+  },
+  {
+    "check": 8,
+    "step": "deliver check_run 7100 created (queued)",
+    "answer": "HTTP 202",
+    "answered_at": 1792252653886,
+    "dom_at": 1792252654254,
+    "delta_ms": 368,
+    "observed": "PR #7 open, checks pending",
+    "pass": true
+  },
+  {
+    "check": 8,
+    "step": "20 check_run completed in a burst",
+    "burst_ms": 1051,
+    "observed": "PR #7 open, checks pending",
+    "pass": true
+  },
+  {
+    "check": 8,
+    "step": "complete check_run 7100 (success)",
+    "answer": "HTTP 202",
+    "answered_at": 1792252656903,
+    "dom_at": 1792252657279,
+    "delta_ms": 376,
+    "observed": "PR #7 open, checks passing",
+    "pass": true
+  },
+  {
+    "check": 10,
+    "step": "one card for the issue on the board",
+    "observed": 1,
+    "pass": true
+  },
+  {
+    "check": 10,
+    "step": "board: deliver check_run completed (failure)",
+    "answer": "HTTP 202",
+    "answered_at": 1792252659909,
+    "dom_at": 1792252660298,
+    "delta_ms": 389,
+    "observed": "PR #7 open, checks failing",
+    "pass": true
+  },
+  {
+    "check": 1,
+    "step": "no reload",
+    "observed": true,
+    "pass": true
+  }
+]
