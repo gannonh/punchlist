@@ -164,6 +164,25 @@ describe('the cache', () => {
     expect(fresh.lastSeq).toBe(6)
   })
 
+  test('a run message and a pull request message replace the row they name', () => {
+    const cache = fromList({ issues: [row('PL-1'), row('PL-2')], last_event_seq: 4 })
+    const running = { state: 'running' as const, agent: 'claude-code', since: '2026-10-16T11:59:30Z' }
+    const claimed = applyStream(cache, {
+      event: { ...event(5, 'PL-1'), detail: { kind: 'run' } },
+      row: row('PL-1', {}, { run: running }),
+    })
+    const ready = applyStream(claimed, {
+      event: { ...event(6, 'PL-1'), detail: { kind: 'pull_request' } },
+      row: row('PL-1', {}, { run: running, pull_request: { number: 12, state: 'open', checks: 'pending', url: null } }),
+    })
+    const views = ready.rows.map((r) => rowView(r, now)).map((v) => [v.id, v.run.label, v.pullRequest.title])
+    expect(views).toEqual([
+      ['PL-1', 'Running · 30s', 'PR #12 open, checks pending'],
+      ['PL-2', 'Idle', 'no pull request'],
+    ])
+    expect(ready.lastSeq).toBe(6)
+  })
+
   test("a write's answer older than the row the stream gave is dropped", () => {
     const cache = applyStream(fromList({ issues: [row('PL-1')], last_event_seq: 1 }), {
       event: event(3, 'PL-1'),
