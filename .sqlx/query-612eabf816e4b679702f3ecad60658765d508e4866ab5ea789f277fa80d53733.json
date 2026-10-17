@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH old AS (\n               SELECT head_sha, name, status, conclusion, check_suite_id, app,\n                      workflow_path, workflow_sha, workflow_default_sha\n               FROM check_run WHERE id = $1),\n           up AS (\n        INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,\n                                check_suite_id, updated_at, app,\n                                workflow_path, workflow_sha, workflow_default_sha)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9, $10, $11, $12)\n         ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,\n             name = EXCLUDED.name, status = EXCLUDED.status,\n             conclusion = EXCLUDED.conclusion,\n             check_suite_id = COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),\n             app = COALESCE(EXCLUDED.app, check_run.app),\n             workflow_path = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_path\n                                  ELSE EXCLUDED.workflow_path END,\n             workflow_sha = CASE WHEN $8::timestamptz IS NULL THEN check_run.workflow_sha\n                                 ELSE EXCLUDED.workflow_sha END,\n             workflow_default_sha = CASE WHEN $8::timestamptz IS NULL\n                                         THEN check_run.workflow_default_sha\n                                         ELSE EXCLUDED.workflow_default_sha END,\n             updated_at = COALESCE($8, clock_timestamp())\n         WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8\n               ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1\n                      ELSE 0 END)\n                  <= (CASE EXCLUDED.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1\n                      ELSE 0 END)\n                  AND (check_run.head_sha, check_run.name, check_run.status,\n                       check_run.conclusion, check_run.check_suite_id, check_run.app)\n                      IS DISTINCT FROM\n                      (EXCLUDED.head_sha, EXCLUDED.name, EXCLUDED.status, EXCLUDED.conclusion,\n                       COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),\n                       COALESCE(EXCLUDED.app, check_run.app)) END\n        RETURNING head_sha, name, status, conclusion, check_suite_id, app,\n                  workflow_path, workflow_sha, workflow_default_sha)\n           SELECT EXISTS (SELECT 1 FROM up LEFT JOIN old ON true\n                          WHERE old.name IS NULL\n                             OR (old.head_sha, old.name, old.status, old.conclusion,\n                                 old.check_suite_id, old.app, old.workflow_path,\n                                 old.workflow_sha, old.workflow_default_sha)\n                                IS DISTINCT FROM\n                                (up.head_sha, up.name, up.status, up.conclusion,\n                                 up.check_suite_id, up.app, up.workflow_path,\n                                 up.workflow_sha, up.workflow_default_sha)) AS \"changed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "changed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "612eabf816e4b679702f3ecad60658765d508e4866ab5ea789f277fa80d53733"
+}

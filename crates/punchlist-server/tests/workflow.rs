@@ -15,7 +15,7 @@ use http_body_util::BodyExt;
 use punchlist_core::Workflow;
 use punchlist_server::{
     AppState, Bootstrap, Bootstrapped, GithubClient, ProofStore, bootstrap, router,
-    run_jobs_until_idle, warn_invalid_workflows,
+    run_jobs_until_idle, warn_invalid_workflows, write_pull_request_events,
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -4176,4 +4176,74 @@ async fn a_newer_payload_recorded_during_the_read_is_not_taken_for_what_was_read
         ("open".into(), "in_progress".into())
     );
     assert_eq!(event_transitions(&pool).await, []);
+}
+
+#[sqlx::test]
+async fn a_read_that_fills_in_a_check_runs_workflow_job_writes_one_event(pool: PgPool) {
+    let s = setup(&pool).await;
+    let _codex = issue_in_agent_review(&s).await;
+    put_workflow(
+        &s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(&s, "push", "push-1", PUSH).await;
+    let events = || async {
+        write_pull_request_events(&pool).await.unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM event WHERE kind = 'pull_request'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        count
+    };
+    let refresh = || async {
+        let (status, body) = call(
+            &s.app,
+            &s.person.token,
+            "POST",
+            "/api/issues/PL-1/pull-requests/refresh",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    };
+    // A delivery records the run with no workflow job, so `ci_green` fails on it.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        let mut run = listed_run(2, 3112233445, "check", "success");
+        run["app"] = json!({"slug": "github-actions"});
+        repo.check_runs = vec![run];
+        repo.jobs = vec![listed_job(2, "check", Some("success"), true)];
+        repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    }
+    deliver(
+        &s,
+        "check_run",
+        "c-1",
+        &check_run(2, "completed", Some("success")),
+    )
+    .await;
+    let delivered = events().await;
+    let provenance = || async {
+        let path: Option<String> = sqlx::query_scalar("SELECT workflow_path FROM check_run")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        path
+    };
+    assert_eq!(provenance().await, None);
+
+    // The read adds the job's workflow file: the gate now passes, and the row has one event.
+    refresh().await;
+    assert_eq!(
+        provenance().await.as_deref(),
+        Some(".github/workflows/ci.yml")
+    );
+    assert_eq!(events().await, delivered + 1);
+
+    // The same read again changes nothing the gate reads.
+    refresh().await;
+    assert_eq!(events().await, delivered + 1);
 }

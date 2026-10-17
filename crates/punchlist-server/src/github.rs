@@ -511,8 +511,9 @@ pub(crate) async fn process(
             }
         }
         GithubEvent::CheckRun(event) => {
-            record_check_run(tx, job.repository_id, &event.check_run, None, None).await?;
-            recompute_checks(tx, job.repository_id, &event.check_run.head_sha).await?;
+            let changed =
+                record_check_run(tx, job.repository_id, &event.check_run, None, None).await?;
+            recompute_checks(tx, job.repository_id, &event.check_run.head_sha, changed).await?;
         }
         GithubEvent::Push(event) => {
             if event.changes_workflow() {
@@ -609,6 +610,11 @@ pub(crate) async fn process(
 /// not look like a write to a request in flight; a read always stamps, which is what orders
 /// it against the next read. A read also records the workflow job behind the run (`job`), or
 /// that it found none; a delivery knows neither and leaves its `workflow_` columns alone.
+///
+/// True when the write changed what the gates read of the run (a first insert, or any of its
+/// head commit, name, status, conclusion, suite, app and workflow job columns), which a read
+/// that stamps an identical row does not: the caller marks the commit's pull requests. The old row is the statement's snapshot, so a write that commits
+/// between it and this one is compared against too; that write marks its own change.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -617,10 +623,15 @@ async fn record_check_run(
     run: &CheckRunData,
     read_started: Option<DateTime<Utc>>,
     job: Option<&WorkflowJob>,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
     let app = run.app.as_ref().and_then(|app| app.slug.as_deref());
-    sqlx::query!(
-        "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
+    sqlx::query_scalar!(
+        r#"WITH old AS (
+               SELECT head_sha, name, status, conclusion, check_suite_id, app,
+                      workflow_path, workflow_sha, workflow_default_sha
+               FROM check_run WHERE id = $1),
+           up AS (
+        INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
                                 check_suite_id, updated_at, app,
                                 workflow_path, workflow_sha, workflow_default_sha,
                                 workflow_other_bases)
@@ -652,7 +663,18 @@ async fn record_check_run(
                       IS DISTINCT FROM
                       (EXCLUDED.head_sha, EXCLUDED.name, EXCLUDED.status, EXCLUDED.conclusion,
                        COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
-                       COALESCE(EXCLUDED.app, check_run.app)) END",
+                       COALESCE(EXCLUDED.app, check_run.app)) END
+        RETURNING head_sha, name, status, conclusion, check_suite_id, app,
+                  workflow_path, workflow_sha, workflow_default_sha)
+           SELECT EXISTS (SELECT 1 FROM up LEFT JOIN old ON true
+                          WHERE old.name IS NULL
+                             OR (old.head_sha, old.name, old.status, old.conclusion,
+                                 old.check_suite_id, old.app, old.workflow_path,
+                                 old.workflow_sha, old.workflow_default_sha)
+                                IS DISTINCT FROM
+                                (up.head_sha, up.name, up.status, up.conclusion,
+                                 up.check_suite_id, up.app, up.workflow_path,
+                                 up.workflow_sha, up.workflow_default_sha)) AS "changed!""#,
         run.id,
         repository_id,
         run.head_sha,
@@ -667,9 +689,8 @@ async fn record_check_run(
         job.and_then(|job| job.default_sha.as_deref()),
         job.and_then(|job| job.other_bases.as_deref()),
     )
-    .execute(&mut *tx)
-    .await?;
-    Ok(())
+    .fetch_one(&mut *tx)
+    .await
 }
 
 /// Records the check runs GitHub lists on `head_sha`, in their own short transaction, before
@@ -692,11 +713,12 @@ async fn record_read_check_runs(
     runs.retain(|run| run.head_sha == head_sha);
     runs.sort_by_key(|run| run.id);
     let mut tx = pool.begin().await?;
+    let mut changed = false;
     for run in &runs {
         let job = jobs.get(&run.id).filter(|job| job.is_behind(run));
-        record_check_run(&mut tx, repository_id, run, Some(read_started), job).await?;
+        changed |= record_check_run(&mut tx, repository_id, run, Some(read_started), job).await?;
     }
-    recompute_checks(&mut tx, repository_id, head_sha).await?;
+    recompute_checks(&mut tx, repository_id, head_sha, changed).await?;
     let conflict = sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM check_run WHERE repository_id = $1 AND head_sha = $2
                           AND updated_at > $3) AS "conflict!""#,
@@ -1001,7 +1023,7 @@ async fn record_pull_request(
     {
         mark_pull_request_change(tx, linked.as_slice()).await?;
     }
-    recompute_checks(tx, repository_id, &pr.head.sha).await?;
+    recompute_checks(tx, repository_id, &pr.head.sha, false).await?;
     // The issue it named before no longer shows it once it names another.
     let unlinked = was.as_ref().and_then(|was| was.issue_id.clone());
     if unlinked.is_some() && unlinked != linked {
@@ -1440,11 +1462,14 @@ pub(crate) async fn newest_check_runs(
 }
 
 /// Summarizes the check runs on a commit onto every pull request whose head it is, and marks
-/// their issues for a `pull_request` event.
+/// their issues for a `pull_request` event when the summary changed, or when `evidence_changed`:
+/// a run's row changed in a column a gate reads, as when a read adds the workflow job behind a
+/// run, which the counts do not show.
 async fn recompute_checks(
     tx: &mut sqlx::PgConnection,
     repository_id: Uuid,
     head_sha: &str,
+    evidence_changed: bool,
 ) -> sqlx::Result<()> {
     let runs = newest_check_runs(tx, repository_id, head_sha).await?;
     let count = |state: Option<bool>| runs.iter().filter(|run| run.passed() == state).count();
@@ -1461,7 +1486,7 @@ async fn recompute_checks(
                UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
                WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
                             ORDER BY id FOR UPDATE)
-                 AND (checks, checks_total, checks_passed) IS DISTINCT FROM ($3, $4, $5)
+                 AND ($6 OR (checks, checks_total, checks_passed) IS DISTINCT FROM ($3, $4, $5))
                RETURNING issue_id)
            SELECT DISTINCT issue_id AS "issue_id!" FROM summarized WHERE issue_id IS NOT NULL"#,
         repository_id,
@@ -1469,6 +1494,7 @@ async fn recompute_checks(
         checks,
         runs.len() as i32,
         passed as i32,
+        evidence_changed,
     )
     .fetch_all(&mut *tx)
     .await?;
