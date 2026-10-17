@@ -8,9 +8,9 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
-    ActorInfo, ChecksState, CreateAgent, CreateIssue, CreatedAgent, Event, EventDetail,
-    GateChecklist, Issue, Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, WorkflowInfo,
-    gate_lines,
+    ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
+    Event, EventDetail, GateChecklist, Issue, Project, Proof, ProofKind, PullRequest, Run,
+    RunOutcome, Runner, UpdateIssue, WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -46,6 +46,12 @@ pub enum Command {
     /// Work with pull requests.
     #[command(name = "pr", subcommand)]
     PullRequest(PullRequestCommand),
+    /// Work with the workspace's projects.
+    #[command(subcommand)]
+    Project(ProjectCommand),
+    /// Work with a project's milestones.
+    #[command(subcommand)]
+    Milestone(MilestoneCommand),
     /// Read the workspace's workflow.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
@@ -97,6 +103,52 @@ fn parse_kind(s: &str) -> Result<ProofKind, String> {
 pub enum PullRequestCommand {
     /// List pull requests whose branch and title name no issue.
     Unlinked,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// Create a project in the workspace.
+    Create { name: String },
+    /// List the workspace's projects, each with its milestones and their PASS when text.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MilestoneCommand {
+    /// Create a milestone in a project.
+    Create {
+        name: String,
+        /// The project's name.
+        #[arg(long)]
+        project: String,
+        /// What must be true for the milestone to pass.
+        #[arg(long, default_value = "")]
+        pass_when: String,
+    },
+}
+
+/// What `pl issue edit` sets or clears: at least one of these.
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct Placement {
+    /// The parent issue's id, such as PL-1.
+    #[arg(long, conflicts_with = "no_parent")]
+    pub parent: Option<String>,
+    /// Clear the parent.
+    #[arg(long)]
+    pub no_parent: bool,
+    /// A project's name.
+    #[arg(long, conflicts_with = "no_project")]
+    pub project: Option<String>,
+    /// Clear the project, and with it the milestone.
+    #[arg(long)]
+    pub no_project: bool,
+    /// A milestone's name, looked up in --project, else in the issue's project.
+    #[arg(long, conflicts_with_all = ["no_milestone", "no_project"])]
+    pub milestone: Option<String>,
+    /// Clear the milestone.
+    #[arg(long)]
+    pub no_milestone: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -190,6 +242,12 @@ pub enum IssueCommand {
     /// names the rule or gate.
     #[command(visible_alias = "transition")]
     Move { id: String, status: String },
+    /// Set or clear an issue's parent, project and milestone.
+    Edit {
+        id: String,
+        #[command(flatten)]
+        placement: Placement,
+    },
     /// Comment on an issue.
     Comment {
         id: String,
@@ -322,6 +380,33 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::PullRequest(PullRequestCommand::Unlinked) => {
             let pull_requests = client.unlinked_pull_requests().await?;
             write!(out, "{}", render_unlinked(&pull_requests))?;
+            Ok(())
+        }
+        Command::Project(ProjectCommand::Create { name }) => {
+            let project = client.create_project(&CreateProject { name }).await?;
+            writeln!(out, "Created project {}.", project.name)?;
+            Ok(())
+        }
+        Command::Project(ProjectCommand::List) => {
+            let projects = client.list_projects().await?.projects;
+            write!(out, "{}", render_projects(&projects))?;
+            Ok(())
+        }
+        Command::Milestone(MilestoneCommand::Create {
+            name,
+            project,
+            pass_when,
+        }) => {
+            let projects = client.list_projects().await?.projects;
+            let project = find_project(&projects, &project)?;
+            let request = CreateMilestone { name, pass_when };
+            let id = project.id.to_string();
+            let milestone = client.create_milestone(&id, &request).await?;
+            writeln!(
+                out,
+                "Created milestone {} in {}.",
+                milestone.name, project.name
+            )?;
             Ok(())
         }
         Command::Workflow(WorkflowCommand::Show) => {
@@ -707,8 +792,73 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             client.comment(&id, &body).await?;
             writeln!(out, "Commented on {id}.")?;
         }
+        IssueCommand::Edit { id, placement } => {
+            let request = placement_edit(client, &id, placement).await?;
+            let issue = client.update_issue(&id, &request).await?.row.issue;
+            let none = || "none".to_string();
+            writeln!(
+                out,
+                "{}  parent {} · project {} · milestone {}",
+                issue.id,
+                issue.parent.unwrap_or_else(none),
+                issue.project.map_or_else(none, |p| p.name),
+                issue.milestone.map_or_else(none, |m| m.name),
+            )?;
+        }
     }
     Ok(())
+}
+
+/// A project by its name.
+fn find_project<'a>(projects: &'a [Project], name: &str) -> anyhow::Result<&'a Project> {
+    (projects.iter())
+        .find(|project| project.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no project named {name} in this workspace"))
+}
+
+/// The `PATCH` for `pl issue edit`, with project and milestone names turned into their ids.
+/// A milestone's name is looked up in `--project`, else in the issue's project.
+async fn placement_edit(
+    client: &Client,
+    id: &str,
+    placement: Placement,
+) -> anyhow::Result<UpdateIssue> {
+    let mut request = UpdateIssue {
+        parent: placement
+            .parent
+            .map(Some)
+            .or(placement.no_parent.then_some(None)),
+        project: placement.no_project.then_some(None),
+        milestone: placement.no_milestone.then_some(None),
+        ..UpdateIssue::default()
+    };
+    if placement.project.is_none() && placement.milestone.is_none() {
+        return Ok(request);
+    }
+    let projects = client.list_projects().await?.projects;
+    let project = match &placement.project {
+        Some(name) => {
+            let project = find_project(&projects, name)?;
+            request.project = Some(Some(project.id));
+            project
+        }
+        None => {
+            let current = client.get_issue(id).await?.project;
+            let current = current.ok_or_else(|| {
+                anyhow::anyhow!("{id} has no project; give --project with --milestone")
+            })?;
+            find_project(&projects, &current.name)?
+        }
+    };
+    if let Some(name) = &placement.milestone {
+        let milestone = (project.milestones.iter())
+            .find(|milestone| milestone.name == *name)
+            .ok_or_else(|| {
+                anyhow::anyhow!("project {} has no milestone named {name}", project.name)
+            })?;
+        request.milestone = Some(Some(milestone.id));
+    }
+    Ok(request)
 }
 
 /// A refused move whose gates ran lists every gate's result under the message.
@@ -778,6 +928,15 @@ fn render_show(
         "{}  {}\nStatus: {}\n",
         issue.id, issue.title, issue.status_name
     );
+    if let Some(parent) = &issue.parent {
+        text.push_str(&format!("Parent: {parent}\n"));
+    }
+    if let Some(project) = &issue.project {
+        text.push_str(&format!("Project: {}\n", project.name));
+    }
+    if let Some(milestone) = &issue.milestone {
+        text.push_str(&format!("Milestone: {}\n", milestone.name));
+    }
     if let Some(why) = &issue.waiting_on_person {
         text.push_str(&format!("waiting on a person: {why}\n"));
     }
@@ -895,6 +1054,28 @@ fn render_gates(checklist: &GateChecklist) -> String {
         gate_lines(&checklist.gates).join("\n"),
         checklist.gates.len(),
     )
+}
+
+/// `pl project list`.
+fn render_projects(projects: &[Project]) -> String {
+    if projects.is_empty() {
+        return "No projects.\n".to_string();
+    }
+    let mut text = String::new();
+    for project in projects {
+        text.push_str(&format!("{}\n", project.name));
+        if project.milestones.is_empty() {
+            text.push_str("  No milestones.\n");
+        }
+        for milestone in &project.milestones {
+            text.push_str(&format!("  {}", milestone.name));
+            if !milestone.pass_when.is_empty() {
+                text.push_str(&format!("  PASS when {}", milestone.pass_when));
+            }
+            text.push('\n');
+        }
+    }
+    text
 }
 
 /// `pl pr unlinked`.
@@ -1032,6 +1213,9 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
         };
         let mut moved = EventDetail::transition(
@@ -1142,6 +1326,9 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);

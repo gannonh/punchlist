@@ -82,10 +82,10 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * Edit an issue's title, body, labels or assignee. Only the fields that change are
-         *     written, with one `edited` event naming them; a request that changes nothing writes
-         *     nothing and answers the workspace's latest sequence number. Nobody in a role the issue's
-         *     status locks may edit it.
+         * Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+         *     fields that change are written, with one `edited` event naming them; a request that
+         *     changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
+         *     in a role the issue's status locks may edit it.
          */
         patch: operations["update_issue"];
         trace?: never;
@@ -242,6 +242,41 @@ export interface paths {
          *     transaction.
          */
         post: operations["move_issue"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the workspace's projects, oldest first, each with its milestones, oldest first. */
+        get: operations["list_projects"];
+        put?: never;
+        /** Create a project in the workspace. */
+        post: operations["create_project"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{id}/milestones": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a milestone in one of the workspace's projects. */
+        post: operations["create_milestone"];
         delete?: never;
         options?: never;
         head?: never;
@@ -699,6 +734,18 @@ export interface components {
             body?: string;
             title: string;
         };
+        /** @description `POST /api/projects/{id}/milestones`. */
+        CreateMilestone: {
+            /** @description Trimmed, 1 to 100 characters, unique in the project. */
+            name: string;
+            /** @description What must be true for the milestone to pass. */
+            pass_when?: string;
+        };
+        /** @description `POST /api/projects`. */
+        CreateProject: {
+            /** @description Trimmed, 1 to 100 characters, unique in the workspace. */
+            name: string;
+        };
         /** @description The response to `POST /api/actors`. */
         CreatedAgent: {
             actor: components["schemas"]["ActorInfo"];
@@ -781,7 +828,10 @@ export interface components {
             /** @enum {string} */
             kind: "created";
         } | {
-            /** @description Among `title`, `body`, `labels` and `assignee`, in that order. */
+            /**
+             * @description Among `title`, `body`, `labels`, `assignee`, `parent`, `project` and `milestone`, in
+             *     that order.
+             */
             fields: string[];
             /** @enum {string} */
             kind: "edited";
@@ -905,6 +955,10 @@ export interface components {
             id: string;
             /** @description In the order they were set. */
             labels?: string[];
+            milestone?: components["schemas"]["MilestoneRef"] | null;
+            /** @description The parent issue's id, such as `PL-1`; `None` when the issue has none. */
+            parent?: string | null;
+            project?: components["schemas"]["ProjectRef"] | null;
             /** @description The workflow's status key, such as `in_progress`. */
             status: string;
             /** @description The status as people read it, such as `In Progress`. */
@@ -979,6 +1033,18 @@ export interface components {
              */
             seq: number;
         };
+        Milestone: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /** @description What must be true for the milestone to pass; empty when nobody wrote it. */
+            pass_when: string;
+        };
+        MilestoneRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
         /** @description `POST /api/issues/{id}/transitions`. */
         MoveIssue: {
             /** @description The status key to move to, such as `todo`. */
@@ -993,6 +1059,23 @@ export interface components {
              *     validation, so no runner can claim it: the validation problem.
              */
             warning?: string | null;
+        };
+        Project: {
+            /** Format: uuid */
+            id: string;
+            /** @description Oldest first. */
+            milestones: components["schemas"]["Milestone"][];
+            name: string;
+        };
+        /** @description `GET /api/projects`. */
+        ProjectList: {
+            /** @description Oldest first. */
+            projects: components["schemas"]["Project"][];
+        };
+        ProjectRef: {
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         /** @description A file attached to an issue as proof of its work. */
         Proof: {
@@ -1329,6 +1412,22 @@ export interface components {
             body?: string;
             /** @description Each trimmed, 1 to 50 characters; at most 20, duplicates dropped. */
             labels?: string[];
+            /**
+             * Format: uuid
+             * @description A milestone of the project the issue has after the edit, or `null` for none.
+             */
+            milestone?: string | null;
+            /**
+             * @description An issue id of the workspace, such as `PL-1`, or `null` for none. Neither the issue
+             *     itself nor one of the issues under it.
+             */
+            parent?: string | null;
+            /**
+             * Format: uuid
+             * @description A project's id, or `null` for none. A change of project clears the milestone, unless
+             *     the same request sets one.
+             */
+            project?: string | null;
             title?: string;
         };
         /** @description `GET /api/workflow`: the workspace's active workflow. */
@@ -1661,7 +1760,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description An empty title, a bad label, or an assignee that is not a person or agent of the workspace. */
+            /** @description An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -2096,6 +2195,124 @@ export interface operations {
             };
             /** @description Refused; the message names the rule. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_projects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_project: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateProject"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Project"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An empty or long name, or one the workspace already has. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_milestone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The project's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateMilestone"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Milestone"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An empty or long name, or one the project already has. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

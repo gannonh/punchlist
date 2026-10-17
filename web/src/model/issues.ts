@@ -11,6 +11,8 @@ export type StatusInfo = Schemas['StatusInfo']
 export type ErrorBody = Schemas['ErrorBody']
 export type Actor = Schemas['Actor']
 export type ActorInfo = Schemas['ActorInfo']
+export type ProjectRef = Schemas['ProjectRef']
+export type MilestoneRef = Schemas['MilestoneRef']
 export type RunState = Schemas['RunSummary']['state']
 export type ChecksState = Schemas['ChecksState']
 
@@ -205,6 +207,8 @@ export interface IssueCache {
   lastSeq: number
   /** Per issue, the newest event its row is known to include, so an older answer never overwrites a newer row. */
   rowSeq: Readonly<Record<string, number>>
+  /** Per issue, the last issue the server sent, which a refused edit goes back to. Optimistic edits never touch it. */
+  confirmed: Readonly<Record<string, IssueRow['issue']>>
 }
 
 export function fromList(list: IssueList): IssueCache {
@@ -212,6 +216,7 @@ export function fromList(list: IssueList): IssueCache {
     rows: list.issues,
     lastSeq: list.last_event_seq,
     rowSeq: Object.fromEntries(list.issues.map((row) => [row.issue.id, list.last_event_seq])),
+    confirmed: Object.fromEntries(list.issues.map((row) => [row.issue.id, row.issue])),
   }
 }
 
@@ -220,7 +225,12 @@ function upsert(cache: IssueCache, row: IssueRow, seq: number): IssueCache {
   if ((cache.rowSeq[id] ?? -1) > seq) return cache
   const index = cache.rows.findIndex((r) => r.issue.id === id)
   const rows = index < 0 ? [...cache.rows, row] : cache.rows.with(index, row)
-  return { ...cache, rows, rowSeq: { ...cache.rowSeq, [id]: seq } }
+  return {
+    ...cache,
+    rows,
+    rowSeq: { ...cache.rowSeq, [id]: seq },
+    confirmed: { ...cache.confirmed, [id]: row.issue },
+  }
 }
 
 /** A stream message: ignored at or below the last sequence applied. */
@@ -251,23 +261,25 @@ export function applyMove(cache: IssueCache, moved: Moved): IssueCache {
   return { ...next, rowSeq: { ...next.rowSeq, [issue.id]: event.seq } }
 }
 
-export type EditedField = 'title' | 'labels' | 'assignee'
+export type EditedField = 'title' | 'labels' | 'assignee' | 'parent' | 'project' | 'milestone'
 
 /**
  * A refused edit, made when the row held event `seq`. A row the server sent since is the server's own and
- * stays as it is. Otherwise each of the edit's fields goes back to `before`, unless another edit in this app
- * changed it since; every other field keeps what the row has now.
+ * stays as it is. Otherwise each of the edit's fields goes back to what the server last sent, unless the row
+ * no longer shows this edit's value there because a newer edit is in flight, which settles it itself; every
+ * other field keeps what the row has now. Edits settle oldest first, so the server's value, not the value the
+ * previous edit showed, is the one to go back to.
  */
 export function revertEdit(
   cache: IssueCache,
-  before: IssueRow['issue'],
   edited: IssueRow['issue'],
   fields: readonly EditedField[],
   seq: number,
 ): IssueCache {
-  if ((cache.rowSeq[before.id] ?? -1) > seq) return cache
-  return replaceRow(cache, before.id, (row) => {
+  const confirmed = cache.confirmed[edited.id]
+  if (!confirmed || (cache.rowSeq[edited.id] ?? -1) > seq) return cache
+  return replaceRow(cache, edited.id, (row) => {
     const kept = fields.filter((field) => JSON.stringify(row.issue[field]) === JSON.stringify(edited[field]))
-    return { ...row, issue: { ...row.issue, ...Object.fromEntries(kept.map((field) => [field, before[field]])) } }
+    return { ...row, issue: { ...row.issue, ...Object.fromEntries(kept.map((field) => [field, confirmed[field]])) } }
   })
 }

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE above (id, parent_id, depth) AS (\n               SELECT id, parent_id, 0 FROM issue WHERE id = $1 AND workspace_id = $2\n               UNION ALL\n               SELECT i.id, i.parent_id, above.depth + 1\n               FROM issue i JOIN above ON i.id = above.parent_id\n           ) CYCLE id SET looped USING path\n           SELECT id AS \"id!\" FROM above WHERE NOT looped ORDER BY depth",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a71b3bf1a0a735972a3d0c820c2086e26f2500334305bd29264627ada4a217a8"
+}
