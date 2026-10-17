@@ -4,6 +4,7 @@
   "packageManager": "pnpm@12.9.1",
   "scripts": {
     "dev": "bash scripts/dev.sh",
+    "build": "pnpm --filter @punchlist/web build",
     "check": "bash scripts/check.sh",
     "gen:api": "SQLX_OFFLINE=true cargo run -q -p punchlist-server -- openapi > web/src/api/openapi.json && pnpm --filter @punchlist/web exec openapi-typescript src/api/openapi.json -o src/api/schema.d.ts",
     "db:up": "docker compose up -d --wait db",

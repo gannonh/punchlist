@@ -15,3 +15,7 @@ dist/
 
 # Live-check evidence from verify-punchlist
 verify-artifacts/
+
+# Playwright
+test-results/
+playwright-report/

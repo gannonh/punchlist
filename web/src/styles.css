@@ -1,0 +1,146 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* The approved prototype's tokens (prototypes/issue-list/styles.css), as Groundwork's theme variables. */
+:root {
+  --radius: 0.5rem;
+  --background: #f7f7f5;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #4f46e5;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f0ee;
+  --secondary-foreground: #18181b;
+  --muted: #f1f0ee;
+  --muted-foreground: #4b4b53;
+  --accent: #f1f0ee;
+  --accent-foreground: #18181b;
+  --destructive: #c2410c;
+  --border: #e7e5e4;
+  --input: #e7e5e4;
+  --ring: #4f46e5;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", Inter, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --text-caption: 11px;
+  --text-meta: 12px;
+  --text-body: 13px;
+  --text-lead: 14px;
+  --text-title: 17px;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-ink-3: #6b6b74;
+  --color-primary-soft: #eef2ff;
+  --color-primary-line: #c7d2fe;
+  --color-ok: #0f766e;
+  --color-ok-soft: #e6f6f4;
+  --color-bad: #c2410c;
+  --color-bad-soft: #fff1e6;
+  --color-warn: #b45309;
+  --color-warn-soft: #fef3c7;
+  --color-warn-line: #fcd34d;
+  --color-agent: #6d28d9;
+  --color-agent-soft: #f3efff;
+  --color-agent-line: #d9ccff;
+  --color-column: #f1f0ee;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-background font-sans text-body text-foreground antialiased;
+    line-height: 1.45;
+  }
+  kbd {
+    @apply rounded-[4px] border border-b-2 bg-card px-1.25 py-0.5 font-mono text-caption leading-none font-medium whitespace-nowrap;
+  }
+}
+
+/* Status colours by workflow key, as in the prototype. A key it does not know keeps the grey dot. */
+@layer components {
+  .status-dot {
+    @apply inline-block size-2.5 flex-none rounded-full border-[1.5px];
+    border-color: var(--s-color, #a1a1aa);
+    background: var(--s-fill, transparent);
+  }
+  [data-status="todo"] { --s-color: #71717a; }
+  [data-status="start"] { --s-color: #4f46e5; }
+  [data-status="in_progress"] { --s-color: #4f46e5; --s-fill: #4f46e5; }
+  [data-status="agent_review"] { --s-color: #6d28d9; --s-fill: #6d28d9; }
+  [data-status="human_review"] { --s-color: #b45309; --s-fill: #b45309; }
+  [data-status="merging"] { --s-color: #0f766e; --s-fill: #0f766e; }
+  [data-status="done"] { --s-color: #0f766e; --s-fill: #0f766e; }
+  [data-status="canceled"] { --s-color: #a1a1aa; --s-fill: #a1a1aa; }
+
+  .run-dot { @apply inline-block size-2 flex-none rounded-full; }
+  .run-running .run-dot { @apply bg-ok; animation: pl-pulse 1.4s ease-out infinite; }
+  .run-queued .run-dot { border: 1.5px solid #71717a; }
+  .run-failed .run-dot { @apply bg-bad; }
+  .run-idle .run-dot { background: #d4d4d8; }
+
+  [data-issue] { scroll-margin: 90px 0; }
+  [data-issue][aria-selected="true"] {
+    box-shadow: inset 3px 0 0 var(--primary);
+    background: var(--color-primary-soft) !important;
+  }
+
+  /* The list row: one line on a wide screen, stacked below 1024px. */
+  .list-row {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 4px 10px;
+  }
+  .list-row > :not(:first-child) { grid-column: 2; }
+  .list-row .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  @media (min-width: 1024px) {
+    .list-row { grid-template-columns: 64px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
+    .list-row > :not(:first-child) { grid-column: auto; }
+    .list-row .meta { display: contents; }
+    .list-row .transition-note { grid-column: 2 / -1; }
+  }
+}
+
+@keyframes pl-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.45); }
+  100% { box-shadow: 0 0 0 7px rgba(15, 118, 110, 0); }
+}
