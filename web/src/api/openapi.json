@@ -2350,6 +2350,51 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`\nand `proof` say only that the issue's row changed: the event stream carries them, and an\nissue's timeline leaves them out.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "run"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "GitHub evidence on the issue's pull requests was recorded: a pull request, the check\nruns on its head commit, or its review threads.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "pull_request"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Proof was attached to the issue.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "proof"
+                ]
+              }
+            }
           }
         ]
       },

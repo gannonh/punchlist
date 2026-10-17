@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pull_request_change c USING issue i\n             WHERE i.id = c.issue_id AND i.workspace_id = $1 RETURNING c.issue_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request_change",
+            "name": "issue_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cef7ce263acffa1f7c5773d8e2fca937d69c2a1d134b94a4ab2a92c7a6afbd98"
+}

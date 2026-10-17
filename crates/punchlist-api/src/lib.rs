@@ -305,6 +305,15 @@ pub enum EventDetail {
         /// Among `title`, `body`, `labels` and `assignee`, in that order.
         fields: Vec<String>,
     },
+    /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`
+    /// and `proof` say only that the issue's row changed: the event stream carries them, and an
+    /// issue's timeline leaves them out.
+    Run,
+    /// GitHub evidence on the issue's pull requests was recorded: a pull request, the check
+    /// runs on its head commit, or its review threads.
+    PullRequest,
+    /// Proof was attached to the issue.
+    Proof,
 }
 
 impl EventDetail {

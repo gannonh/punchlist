@@ -17,6 +17,7 @@ The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, ch
 - `comment` records a `comment` row and an `event` of kind `comment`; the timeline shows `<actor> (github)  commented:` and the body indented.
 - `unlinked` lists a pull request that names no issue under `pl pr unlinked` and not on any issue.
 - `redelivery` answers the same delivery id again without a second `job` row or a second effect.
+- `row-event` marks the linked issue in `pull_request_change` whenever a pull request, its check runs or its review threads are recorded (by a delivery, a gated request's read or `get_issue`'s), and the issue it named before when it comes to name another. The server's sweep turns the marks into one `event` of kind `pull_request` per issue every 250 ms, as the actor `GitHub`, so the open web app updates the row. The timeline does not show it.
 
 ## How to get to it (user POV)
 

@@ -785,6 +785,15 @@ export interface components {
             fields: string[];
             /** @enum {string} */
             kind: "edited";
+        } | {
+            /** @enum {string} */
+            kind: "run";
+        } | {
+            /** @enum {string} */
+            kind: "pull_request";
+        } | {
+            /** @enum {string} */
+            kind: "proof";
         };
         /** @description What the gates read for one issue. */
         Evidence: {

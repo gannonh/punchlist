@@ -6,12 +6,22 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
+use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use punchlist_server::{AppState, Bootstrap, Bootstrapped, bootstrap, router, with_web_app};
+use punchlist_server::{
+    AppState, Bootstrap, Bootstrapped, bootstrap, router, run_jobs_until_idle, with_web_app,
+    write_pull_request_events,
+};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+const SECRET: &str = "test-webhook-secret";
+const OPENED: &str = include_str!("fixtures/github/pull_request_opened.json");
+const READY: &str = include_str!("fixtures/github/pull_request_ready_for_review.json");
+const CHECK_RUN: &str = include_str!("fixtures/github/check_run_completed.json");
 
 async fn workspace(pool: &PgPool, prefix: &str, person: &str) -> Bootstrapped {
     bootstrap(
@@ -102,6 +112,74 @@ async fn events(pool: &PgPool) -> Vec<(i64, String, Option<Vec<String>>)> {
         .fetch_all(pool)
         .await
         .unwrap()
+}
+
+/// The workspace's event stream after `after`, or after `last_event_id` as a reconnecting
+/// `EventSource` asks.
+async fn open_stream(
+    app: &Router,
+    person: &Bootstrapped,
+    after: i64,
+    last_event_id: Option<i64>,
+) -> Body {
+    let uri = format!(
+        "/api/workspaces/{}/events?after={after}",
+        person.workspace_id
+    );
+    let mut request = request(&person.token, "GET", &uri, None);
+    if let Some(id) = last_event_id {
+        request
+            .headers_mut()
+            .insert("last-event-id", id.to_string().parse().unwrap());
+    }
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body()
+}
+
+/// A fixture delivery for the `repo-PL` repository, `edit`ed, signed and run to idle.
+async fn deliver(
+    state: &AppState,
+    event: &str,
+    delivery: &str,
+    fixture: &str,
+    edit: impl FnOnce(&mut Value),
+) {
+    let mut payload: Value = serde_json::from_str(fixture).unwrap();
+    payload["repository"]["name"] = json!("repo-PL");
+    edit(&mut payload);
+    let body = payload.to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let hex: String = (mac.finalize().into_bytes().iter())
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/github/webhook")
+        .header("content-type", "application/json")
+        .header("x-github-event", event)
+        .header("x-github-delivery", delivery)
+        .header("x-hub-signature-256", format!("sha256={hex}"))
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    run_jobs_until_idle(state).await.unwrap();
+}
+
+/// Each message's id, event kind, actor name and the row's `field`.
+fn seen(messages: &[(i64, Value)], field: &str) -> Vec<(i64, Value, Value, Value)> {
+    (messages.iter())
+        .map(|(id, item)| {
+            (
+                *id,
+                item["event"]["detail"]["kind"].clone(),
+                item["event"]["actor"]["name"].clone(),
+                item["row"][field].clone(),
+            )
+        })
+        .collect()
 }
 
 /// Reads the stream until it has delivered `count` messages: each one's `id` and data.
@@ -438,6 +516,223 @@ async fn each_row_shows_its_run_idle_running_queued_or_failed(pool: PgPool) {
         rows["issues"][0]["gates"],
         json!({"to": "agent_review", "to_name": "Agent Review", "passed": 0, "total": 3,
                "first_failed": "pr_open"})
+    );
+}
+
+#[sqlx::test]
+async fn a_run_ending_and_the_claim_of_the_next_dispatch_reach_the_open_stream(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    create(&app, &person.token, "First").await;
+    let (_, runner) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "sartre", "agents": ["claude-code"]})),
+    )
+    .await;
+    let runner = runner["token"].as_str().unwrap().to_string();
+    for to in ["todo", "start"] {
+        let path = "/api/issues/PL-1/transitions";
+        let (status, _) = call(&app, &person.token, "POST", path, Some(json!({"to": to}))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let claim = || call(&app, &runner, "POST", "/api/runs/claim", Some(json!({})));
+    let (_, first) = claim().await;
+    // Created, two moves, and the claim's move to In Progress and its `run`.
+    let snapshot = list(&app, &person.token).await;
+    assert_eq!(snapshot["last_event_seq"], 5);
+    let mut body = open_stream(&app, &person, 5, None).await;
+
+    finish_failed(&app, &runner, &first, "boom").await;
+    assert_eq!(
+        seen(&read_stream(&mut body, 1).await, "run"),
+        [(
+            6,
+            json!("run"),
+            json!("sartre"),
+            json!({"state": "queued", "agent": "claude-code"})
+        )]
+    );
+    let (status, second) = claim().await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let started: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT started_at FROM run WHERE outcome = 'running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        seen(&read_stream(&mut body, 1).await, "run"),
+        [(
+            7,
+            json!("run"),
+            json!("sartre"),
+            json!({"state": "running", "agent": "claude-code", "since": started})
+        )]
+    );
+    // The second claim moved nothing, and the timeline shows no run.
+    let (_, timeline) = call(&app, &person.token, "GET", "/api/issues/PL-1/events", None).await;
+    let kinds: Vec<&str> = (timeline.as_array().unwrap().iter())
+        .map(|event| event["detail"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["created", "transition", "transition", "transition"]);
+}
+
+#[sqlx::test]
+async fn a_pull_request_opening_turning_ready_and_its_checks_reach_the_open_stream(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    let app = router(state.clone());
+    create(&app, &person.token, "Fix the thing").await;
+    sqlx::query("UPDATE issue SET status = 'in_progress' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut body = open_stream(&app, &person, 1, None).await;
+
+    let url = "https://github.com/gannonh/punchlist/pull/12";
+    let gates = |passed: u32, first_failed: Option<&str>| {
+        json!({"to": "agent_review", "to_name": "Agent Review", "passed": passed, "total": 3,
+               "first_failed": first_failed})
+    };
+    deliver(&state, "pull_request", "d-opened", OPENED, |_| {}).await;
+    assert_eq!(write_pull_request_events(&pool).await.unwrap(), 1);
+    let opened = read_stream(&mut body, 1).await;
+    assert_eq!(
+        seen(&opened, "pull_request"),
+        [(
+            2,
+            json!("pull_request"),
+            json!("GitHub"),
+            json!({"number": 12, "state": "draft", "checks": "none", "url": url})
+        )]
+    );
+    assert_eq!(opened[0].1["row"]["gates"], gates(2, Some("pr_ready")));
+
+    // Recorded before one sweep, the ready pull request and its check are one event.
+    deliver(&state, "pull_request", "d-ready", READY, |_| {}).await;
+    deliver(&state, "check_run", "d-check", CHECK_RUN, |_| {}).await;
+    assert_eq!(write_pull_request_events(&pool).await.unwrap(), 1);
+    assert_eq!(write_pull_request_events(&pool).await.unwrap(), 0);
+    let ready = read_stream(&mut body, 1).await;
+    assert_eq!(
+        seen(&ready, "pull_request"),
+        [(
+            3,
+            json!("pull_request"),
+            json!("GitHub"),
+            json!({"number": 12, "state": "open", "checks": "passing", "url": url})
+        )]
+    );
+    assert_eq!(ready[0].1["row"]["gates"], gates(3, None));
+    let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM pull_request_change")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(marks, 0);
+
+    // A browser that reconnects after the snapshot gets both again, each with the row as it is.
+    let mut replay = open_stream(&app, &person, 0, Some(1)).await;
+    let replayed = read_stream(&mut replay, 2).await;
+    assert_eq!(
+        seen(&replayed, "pull_request")
+            .iter()
+            .map(|(id, _, _, pr)| (*id, pr["state"].clone()))
+            .collect::<Vec<_>>(),
+        [(2, json!("open")), (3, json!("open"))]
+    );
+    let (_, timeline) = call(&app, &person.token, "GET", "/api/issues/PL-1/events", None).await;
+    assert_eq!(timeline.as_array().unwrap().len(), 1);
+}
+
+/// How many `pull_request` events the log holds, after a sweep.
+async fn pull_request_events(pool: &PgPool) -> usize {
+    write_pull_request_events(pool).await.unwrap();
+    events(pool)
+        .await
+        .iter()
+        .filter(|(_, kind, _)| kind == "pull_request")
+        .count()
+}
+
+#[sqlx::test]
+async fn the_same_pull_request_delivered_twice_writes_one_event(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    create(&router(state.clone()), &person.token, "Fix the thing").await;
+
+    deliver(&state, "pull_request", "d-1", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+    deliver(&state, "pull_request", "d-2", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+    deliver(&state, "pull_request", "d-3", READY, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+}
+
+#[sqlx::test]
+async fn the_same_check_run_delivered_twice_writes_one_event(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    create(&router(state.clone()), &person.token, "Fix the thing").await;
+    deliver(&state, "pull_request", "d-pr", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+
+    deliver(&state, "check_run", "d-1", CHECK_RUN, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+    deliver(&state, "check_run", "d-2", CHECK_RUN, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+    // A conclusion that changes the row's checks is one more.
+    let failed = |payload: &mut Value| payload["check_run"]["conclusion"] = json!("failure");
+    deliver(&state, "check_run", "d-3", CHECK_RUN, failed).await;
+    assert_eq!(pull_request_events(&pool).await, 3);
+}
+
+#[sqlx::test]
+async fn a_pull_request_that_comes_to_name_another_issue_updates_both_rows(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    let app = router(state.clone());
+    create(&app, &person.token, "First").await;
+    create(&app, &person.token, "Second").await;
+    let named = |title: &'static str, at: &'static str| {
+        move |payload: &mut Value| {
+            payload["pull_request"]["head"]["ref"] = json!("stray");
+            payload["pull_request"]["title"] = json!(title);
+            payload["pull_request"]["updated_at"] = json!(at);
+        }
+    };
+    deliver(
+        &state,
+        "pull_request",
+        "d-1",
+        OPENED,
+        named("Fix (PL-1)", "2026-10-09T18:00:00Z"),
+    )
+    .await;
+    write_pull_request_events(&pool).await.unwrap();
+    let mut body = open_stream(&app, &person, 3, None).await;
+
+    deliver(
+        &state,
+        "pull_request",
+        "d-2",
+        OPENED,
+        named("Fix (PL-2)", "2026-10-09T18:01:00Z"),
+    )
+    .await;
+    assert_eq!(write_pull_request_events(&pool).await.unwrap(), 2);
+    let messages = read_stream(&mut body, 2).await;
+    let rows: Vec<(Value, Value)> = (messages.iter())
+        .map(|(_, item)| {
+            (
+                item["row"]["issue"]["id"].clone(),
+                item["row"]["pull_request"]["number"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [(json!("PL-1"), Value::Null), (json!("PL-2"), json!(12))]
     );
 }
 
