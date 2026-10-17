@@ -4247,3 +4247,75 @@ async fn a_read_that_fills_in_a_check_runs_workflow_job_writes_one_event(pool: P
     refresh().await;
     assert_eq!(events().await, delivered + 1);
 }
+
+#[sqlx::test]
+async fn a_read_that_changes_only_a_check_runs_other_bases_writes_one_event(pool: PgPool) {
+    let s = setup(&pool).await;
+    let _codex = issue_in_agent_review(&s).await;
+    put_workflow(
+        &s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(&s, "push", "push-1", PUSH).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        let mut run = listed_run(2, 3112233445, "check", "success");
+        run["app"] = json!({"slug": "github-actions"});
+        repo.check_runs = vec![run];
+        repo.jobs = vec![listed_job(2, "check", Some("success"), true)];
+        repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    }
+    let events = || async {
+        write_pull_request_events(&pool).await.unwrap();
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM event WHERE kind = 'pull_request'")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let refresh = || async {
+        let (status, body) = call(
+            &s.app,
+            &s.person.token,
+            "POST",
+            "/api/issues/PL-1/pull-requests/refresh",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    };
+    let recorded = || async {
+        sqlx::query_as::<_, (Option<String>, Option<Vec<String>>)>(
+            "SELECT workflow_sha, workflow_other_bases FROM check_run",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    // The first read records the run, its workflow job and no other base.
+    refresh().await;
+    assert_eq!(recorded().await, (Some("13de2e3".into()), Some(vec![])));
+    let first = events().await;
+
+    // A pull request from the branch, since closed, was into another base: the read changes
+    // that column and nothing else the gate reads, and the row has one event for it.
+    s.github.lock().unwrap().branch_pulls.insert(
+        BRANCH.into(),
+        vec![
+            branch_pull("main", &[], false),
+            branch_pull("agent-base", &[], false),
+        ],
+    );
+    refresh().await;
+    assert_eq!(
+        recorded().await,
+        (Some("13de2e3".into()), Some(vec!["agent-base".to_string()]))
+    );
+    assert_eq!(events().await, first + 1);
+
+    // The same read again changes nothing.
+    refresh().await;
+    assert_eq!(events().await, first + 1);
+}

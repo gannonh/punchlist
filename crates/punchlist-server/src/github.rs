@@ -612,8 +612,9 @@ pub(crate) async fn process(
 /// that it found none; a delivery knows neither and leaves its `workflow_` columns alone.
 ///
 /// True when the write changed what the gates read of the run (a first insert, or any of its
-/// head commit, name, status, conclusion, suite, app and workflow job columns), which a read
-/// that stamps an identical row does not: the caller marks the commit's pull requests. The old row is the statement's snapshot, so a write that commits
+/// head commit, name, status, conclusion, suite, app and workflow job columns, the other
+/// bases included), which a read that stamps an identical row does not: the caller marks the
+/// commit's pull requests. The old row is the statement's snapshot, so a write that commits
 /// between it and this one is compared against too; that write marks its own change.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
@@ -628,7 +629,7 @@ async fn record_check_run(
     sqlx::query_scalar!(
         r#"WITH old AS (
                SELECT head_sha, name, status, conclusion, check_suite_id, app,
-                      workflow_path, workflow_sha, workflow_default_sha
+                      workflow_path, workflow_sha, workflow_default_sha, workflow_other_bases
                FROM check_run WHERE id = $1),
            up AS (
         INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
@@ -665,16 +666,18 @@ async fn record_check_run(
                        COALESCE(EXCLUDED.check_suite_id, check_run.check_suite_id),
                        COALESCE(EXCLUDED.app, check_run.app)) END
         RETURNING head_sha, name, status, conclusion, check_suite_id, app,
-                  workflow_path, workflow_sha, workflow_default_sha)
+                  workflow_path, workflow_sha, workflow_default_sha, workflow_other_bases)
            SELECT EXISTS (SELECT 1 FROM up LEFT JOIN old ON true
                           WHERE old.name IS NULL
                              OR (old.head_sha, old.name, old.status, old.conclusion,
                                  old.check_suite_id, old.app, old.workflow_path,
-                                 old.workflow_sha, old.workflow_default_sha)
+                                 old.workflow_sha, old.workflow_default_sha,
+                                 old.workflow_other_bases)
                                 IS DISTINCT FROM
                                 (up.head_sha, up.name, up.status, up.conclusion,
                                  up.check_suite_id, up.app, up.workflow_path,
-                                 up.workflow_sha, up.workflow_default_sha)) AS "changed!""#,
+                                 up.workflow_sha, up.workflow_default_sha,
+                                 up.workflow_other_bases)) AS "changed!""#,
         run.id,
         repository_id,
         run.head_sha,
