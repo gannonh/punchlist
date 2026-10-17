@@ -196,7 +196,17 @@ describe('the cache', () => {
       issues: [row('PL-1', { title: 'Mine', labels: ['c'], status: 'todo', status_name: 'Todo' })],
       last_event_seq: 4,
     })
-    const reverted = revertEdit(since, before.issue, edited, ['title', 'labels'])
+    const reverted = revertEdit(since, before.issue, edited, ['title', 'labels'], 4)
     expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Old', labels: ['c'], status: 'todo' })
+  })
+
+  test('a refused edit leaves a row the server sent since, even one with the same value', () => {
+    const before = row('PL-1', { title: 'Old' })
+    const edited = { ...before.issue, title: 'Mine' }
+    const cache = applyStream(fromList({ issues: [row('PL-1', { title: 'Mine' })], last_event_seq: 4 }), {
+      event: event(5, 'PL-1'),
+      row: row('PL-1', { title: 'Mine' }),
+    })
+    expect(revertEdit(cache, before.issue, edited, ['title'], 4).rows[0]?.issue.title).toBe('Mine')
   })
 })

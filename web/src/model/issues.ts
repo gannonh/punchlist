@@ -254,15 +254,18 @@ export function applyMove(cache: IssueCache, moved: Moved): IssueCache {
 export type EditedField = 'title' | 'labels' | 'assignee'
 
 /**
- * A refused edit: each of its fields goes back to `before`, unless the row no longer shows the edit's value
- * there, because a later edit or the stream changed it since. Every other field keeps what the row has now.
+ * A refused edit, made when the row held event `seq`. A row the server sent since is the server's own and
+ * stays as it is. Otherwise each of the edit's fields goes back to `before`, unless another edit in this app
+ * changed it since; every other field keeps what the row has now.
  */
 export function revertEdit(
   cache: IssueCache,
   before: IssueRow['issue'],
   edited: IssueRow['issue'],
   fields: readonly EditedField[],
+  seq: number,
 ): IssueCache {
+  if ((cache.rowSeq[before.id] ?? -1) > seq) return cache
   return replaceRow(cache, before.id, (row) => {
     const kept = fields.filter((field) => JSON.stringify(row.issue[field]) === JSON.stringify(edited[field]))
     return { ...row, issue: { ...row.issue, ...Object.fromEntries(kept.map((field) => [field, before[field]])) } }

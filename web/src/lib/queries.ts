@@ -1,7 +1,7 @@
 // Server state (ADR 0006): one cached issue list kept current by the event stream, optimistic field edits,
 // and transitions that wait for the server.
 import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { api, ApiError, call } from '@/api/client'
 import {
@@ -60,6 +60,7 @@ const setIssues = (client: QueryClient, change: (cache: IssueCache) => IssueCach
 export function useEventStream(workspaceId: string, ready: boolean): void {
   const client = useQueryClient()
   const [opened, setOpened] = useState(0)
+  const failures = useRef(0)
   useEffect(() => {
     if (!ready) return
     let retry: ReturnType<typeof setTimeout> | undefined
@@ -69,6 +70,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     const source = new EventSource(`/api/workspaces/${workspaceId}/events?after=${String(after)}`)
     source.addEventListener('issue', (message) => {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
+      failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
       const statuses = client.getQueryData(workflowQuery.queryKey)?.statuses
       if (statuses && !statuses.some((status) => status.key === item.row.issue.status)) {
@@ -77,9 +79,11 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     })
     // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
     // ends. Read the session and a fresh list, then open it again; a signed-out session shows the sign-in page.
-    // ponytail: a fixed 2 s wait between attempts, no backoff.
+    // The wait doubles from 2 s to at most 60 s while the stream keeps closing, and resets once an event arrives.
     source.addEventListener('error', () => {
       if (source.readyState !== EventSource.CLOSED) return
+      const wait = Math.min(2000 * 2 ** failures.current, 60_000)
+      failures.current += 1
       retry = setTimeout(() => {
         void Promise.allSettled([
           client.refetchQueries({ queryKey: sessionQuery.queryKey }),
@@ -87,7 +91,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
         ]).then(() => {
           setOpened((count) => count + 1)
         })
-      }, 2000)
+      }, wait)
     })
     return () => {
       clearTimeout(retry)
@@ -148,10 +152,13 @@ export function useEditIssue() {
           body: { ...fields, ...(assignee !== undefined && { assignee: assignee?.id ?? null }) },
         }),
       ),
-    onMutate: async (edit): Promise<{ before: IssueRow['issue']; edited: IssueRow['issue'] } | undefined> => {
+    onMutate: async (
+      edit,
+    ): Promise<{ before: IssueRow['issue']; edited: IssueRow['issue']; seq: number } | undefined> => {
       await client.cancelQueries({ queryKey: issuesQuery.queryKey })
-      const before = client.getQueryData(issuesQuery.queryKey)?.rows.find((row) => row.issue.id === edit.id)?.issue
-      if (!before) return undefined
+      const cache = client.getQueryData(issuesQuery.queryKey)
+      const before = cache?.rows.find((row) => row.issue.id === edit.id)?.issue
+      if (!cache || !before) return undefined
       const edited: IssueRow['issue'] = {
         ...before,
         ...(edit.title !== undefined && { title: edit.title }),
@@ -166,12 +173,12 @@ export function useEditIssue() {
         }),
       }
       setIssues(client, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
-      return { before, edited }
+      return { before, edited, seq: cache.rowSeq[edit.id] ?? -1 }
     },
     onError: (error, edit, context) => {
       if (context) {
         const fields = (['title', 'labels', 'assignee'] as const).filter((field) => edit[field] !== undefined)
-        setIssues(client, (cache) => revertEdit(cache, context.before, context.edited, fields))
+        setIssues(client, (cache) => revertEdit(cache, context.before, context.edited, fields, context.seq))
       }
       toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
