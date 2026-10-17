@@ -5,7 +5,7 @@ description: Launch and drive Punchlist (the punchlist-server API on Postgres, t
 
 # Verify Punchlist
 
-Punchlist today is a server (`punchlist-server`, axum on Postgres), a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them, then claims them again in Agent Review and runs Codex. A user drives it by running `pl` commands against a running server. The server also takes GitHub App webhook deliveries at `POST /api/github/webhook`; [features/github.md](features/github.md) shows how to send signed fixture payloads and what to read afterwards. The server also loads `.punchlist/workflow.toml` from the sandbox's default branch, and agents request transitions through `pl mcp`; [features/workflow-and-gates.md](features/workflow-and-gates.md) covers both. There is no web app yet; extend this skill when a slice adds one.
+Punchlist today is a server (`punchlist-server`, axum on Postgres) that also serves the web app, a terminal client (`pl`) and a runner (`pl runner start`) that claims issues in Start and runs Claude Code on them, then claims them again in Agent Review and runs Codex. A user drives it by running `pl` commands against a running server. The server also takes GitHub App webhook deliveries at `POST /api/github/webhook`; [features/github.md](features/github.md) shows how to send signed fixture payloads and what to read afterwards. The server also loads `.punchlist/workflow.toml` from the sandbox's default branch, and agents request transitions through `pl mcp`; [features/workflow-and-gates.md](features/workflow-and-gates.md) covers both. A person drives the web app in a browser; [Web app](#web-app) says how.
 
 Everything here runs from the repository root on sartre.
 
@@ -29,7 +29,7 @@ It:
 1. Starts the dev Postgres container with `docker compose up -d --wait db` (`127.0.0.1:5433`, shared by every run).
 2. Creates a fresh database `punchlist_verify_<RUN_ID>` in it, so runs never share data.
 3. Builds `punchlist-server` and `pl` with `SQLX_OFFLINE=true`.
-4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) and `PUNCHLIST_BIND` on a free port, in its own process group. The server runs migrations at start.
+4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) `PUNCHLIST_BIND` on a free port (on `PUNCHLIST_VERIFY_HOST` when set, else 127.0.0.1), `PUNCHLIST_WEB_DIR` on the run's own directory linking `web/dist`, and `PUNCHLIST_DEV_VITE=0`, in its own process group. The server runs migrations at start.
 5. Waits for `listening on http://127.0.0.1:<port>` in the server log (up to 60 s).
 6. Runs `punchlist-server bootstrap --person "Verify Person" --repository gannonh/punchlist-sandbox`, which creates workspace `Punchlist` (prefix `PL`), the sandbox repository and one person actor, and writes the `pl` config with that person's token.
 
@@ -70,6 +70,27 @@ $C sql "$RUN" "SELECT from_status, to_status, actor_id FROM transition ORDER BY 
 $C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"
 $C sql "$RUN" "SELECT id, name, role FROM actor"
 ```
+
+## Web app
+
+The run's server serves the build in `web/dist` at `SERVER_URL`. Build it first; `up` links the build, so a rebuild shows on reload:
+
+```sh
+pnpm build
+RUN=$(PUNCHLIST_VERIFY_HOST=$(tailscale ip -4) $C up)   # reachable from the Mac mini; plain `$C up` for headless checks on sartre
+URL=$($C sign-in-url "$RUN")                           # a page that signs the browser in as the run's person
+```
+
+`sign-in-url` writes a page with a random name into the run's web directory and prints its URL. The page posts the person's token to `/api/session` and goes to `/`; the token never appears in the URL or the transcript. The page is removed after 2 minutes, so get one per browser.
+
+Drive it one of two ways:
+
+- **T3 Code integrated browser** (it runs on the Mac mini, so the run must be bound to the Tailscale address). Load the tools with ToolSearch `select:mcp__t3-code__preview_open,mcp__t3-code__preview_click,mcp__t3-code__preview_evaluate,mcp__t3-code__preview_snapshot,mcp__t3-code__preview_type,mcp__t3-code__preview_press,mcp__t3-code__preview_resize,mcp__t3-code__preview_recording_start,mcp__t3-code__preview_recording_stop`, then `preview_open` the URL. Assert with `preview_evaluate` on the DOM, not by looking at a screenshot.
+- **Headless Chromium on sartre**, through Playwright from this repository (`node_modules/.pnpm/node_modules/playwright`), for scripted checks and timings.
+
+[features/web-app.md](features/web-app.md) lists the selectors, the keys, the render measure and the recipes, including an In Progress issue without a model call. `pnpm e2e` runs `web/e2e/` against a run of its own.
+
+`pnpm dev` also serves the app from Vite (`127.0.0.1:5173`, proxying `/api`); `PUNCHLIST_VITE_HOST=$(tailscale ip -4) pnpm dev` binds it for the integrated browser. `up` runs `pnpm dev` with `PUNCHLIST_DEV_VITE=0`, so a run starts no Vite.
 
 ## Runners
 
