@@ -12,6 +12,7 @@
 #   control-punchlist runner RUN_ID NAME [ARGS...]  start `pl runner start --name NAME`; wait until it registers
 #   control-punchlist runner-stop RUN_ID NAME       stop that runner
 #   control-punchlist runner-signal RUN_ID NAME SIG send SIG (KILL, STOP, CONT) to that runner's process group
+#   control-punchlist sign-in-url RUN_ID  print a URL that signs a browser in as the run's person, for 2 minutes
 #   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
 set -euo pipefail
 
@@ -67,6 +68,9 @@ cmd_up() {
     port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
   fi
   local url="postgres://punchlist:punchlist@127.0.0.1:$DB_PORT/$db"
+  # PUNCHLIST_VERIFY_HOST binds the server elsewhere, such as sartre's Tailscale address, so a
+  # browser on another machine reaches the web app.
+  local host="${PUNCHLIST_VERIFY_HOST:-127.0.0.1}"
 
   # Written first, so a failure anywhere below can be cleaned up by `down`.
   cat >"$dir/run.env" <<ENV
@@ -76,12 +80,19 @@ EVIDENCE=$EVIDENCE_ROOT/$run_id
 DB=$db
 DATABASE_URL=$url
 PORT=$port
-SERVER_URL=http://127.0.0.1:$port
+SERVER_URL=http://$host:$port
 CONFIG=$dir/config.toml
 ENV
   # Any failure below exits the script; clean up what this run made. Cleared on success.
   # shellcheck disable=SC2064
   trap "echo 'control-punchlist: up failed; cleaning up' >&2; cmd_down '$run_id'" EXIT
+
+  # The run serves the web app's build from its own directory, so `sign-in-url` can add a page
+  # to it. The links follow a rebuild of web/dist.
+  [ -f "$REPO/web/dist/index.html" ] || echo "control-punchlist: no web/dist; run \`pnpm build\` for the web app" >&2
+  mkdir -p "$dir/web"
+  ln -s "$REPO/web/dist/index.html" "$dir/web/index.html"
+  ln -s "$REPO/web/dist/assets" "$dir/web/assets"
 
   (cd "$REPO" && docker compose up -d --wait db) >/dev/null
   psql "$ADMIN_URL" -qc "CREATE DATABASE $db" >/dev/null
@@ -97,7 +108,8 @@ ENV
   if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then export GITHUB_APP_ID="${GITHUB_APP_ID:-5254938}"; fi
 
   # pnpm dev in its own process group so `down` stops exactly this tree.
-  (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="127.0.0.1:$port" \
+  # PUNCHLIST_DEV_VITE=0: the server serves the build; no Vite dev server per run.
+  (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="$host:$port" PUNCHLIST_DEV_VITE=0 PUNCHLIST_WEB_DIR="$dir/web" \
      GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \
      exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
   local pgid=$!
@@ -110,7 +122,7 @@ ENV
   grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
 
   (umask 077 && "$REPO/target/debug/punchlist-server" --database-url "$url" bootstrap \
-     --person "Verify Person" --repository "$SANDBOX_REPOSITORY" --server-url "http://127.0.0.1:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
+     --person "Verify Person" --repository "$SANDBOX_REPOSITORY" --server-url "http://$host:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
     { cat "$dir/bootstrap.err" >&2; die "bootstrap failed"; }
   trap - EXIT
   echo "$run_id"
@@ -277,6 +289,22 @@ cmd_runner_signal() {
   echo "sent SIG$sig to runner $name (pgid $pgid)" >&2
 }
 
+# A page in the run's web directory that posts the person's token to /api/session and goes to
+# the app. Only its random name is printed, so the token stays out of transcripts; it is
+# removed after 2 minutes.
+cmd_sign_in_url() {
+  load "${1:-}"
+  local name; name="sign-in-$(openssl rand -hex 16).html"
+  (umask 077 && python3 -c '
+import json, sys
+token = json.dumps({"token": sys.argv[1]})
+sys.stdout.write("<!doctype html><meta charset=utf-8><title>Signing in</title><script>"
+  "fetch(\"/api/session\",{method:\"POST\",headers:{\"content-type\":\"application/json\"},body:" + json.dumps(token) + "})"
+  ".then(function(r){location.replace(r.ok?\"/\":\"/sign-in\")})</script>")' "$(token)" >"$RUN_DIR/web/$name")
+  (sleep 120; rm -f "$RUN_DIR/web/$name") </dev/null >/dev/null 2>&1 &
+  echo "$SERVER_URL/$name"
+}
+
 cmd_down() {
   load "${1:-}"
   local file
@@ -307,6 +335,7 @@ case "${1:-}" in
   runner) shift; cmd_runner "$@" ;;
   runner-stop) shift; cmd_runner_stop "$@" ;;
   runner-signal) shift; cmd_runner_signal "$@" ;;
+  sign-in-url) shift; cmd_sign_in_url "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
