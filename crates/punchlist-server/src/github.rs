@@ -865,16 +865,18 @@ async fn record_review_threads(
     )
     .execute(&mut *tx)
     .await?;
+    // Only a changed count moves the row.
     let issue = sqlx::query_scalar!(
-        "UPDATE pull_request SET open_threads =
-            (SELECT count(*) FROM review_thread
-             WHERE pull_request_id = $1 AND NOT resolved)::int
-         WHERE id = $1 RETURNING issue_id",
+        "UPDATE pull_request SET open_threads = counted.open
+         FROM (SELECT count(*)::int AS open FROM review_thread
+               WHERE pull_request_id = $1 AND NOT resolved) counted
+         WHERE id = $1 AND open_threads IS DISTINCT FROM counted.open
+         RETURNING issue_id",
         pull_request_id,
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    mark_pull_request_change(tx, issue.as_slice()).await
+    mark_pull_request_change(tx, issue.flatten().as_slice()).await
 }
 
 /// Records a pull request from a payload, unless a newer payload was already applied, and
@@ -929,14 +931,14 @@ async fn record_pull_request(
     // Two payloads that are both the first to record it closed wait on the workspace lock
     // above instead, so the second still reads the first's row.
     let was = sqlx::query!(
-        "SELECT state, issue_id FROM pull_request WHERE repository_id = $1 AND number = $2
-         FOR UPDATE",
+        "SELECT state, issue_id, updated_at FROM pull_request
+         WHERE repository_id = $1 AND number = $2 FOR UPDATE",
         repository_id,
         pr.number
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let applied = sqlx::query_scalar!(
+    let applied = sqlx::query!(
         "INSERT INTO pull_request
              (repository_id, number, github_id, title, branch, head_sha, url, author_login,
               state, draft, merge_state, issue_id, github_updated_at)
@@ -960,7 +962,7 @@ async fn record_pull_request(
                                THEN clock_timestamp() ELSE pull_request.updated_at END
          WHERE pull_request.github_updated_at <= EXCLUDED.github_updated_at
            AND pull_request.state <> 'merged'
-         RETURNING id",
+         RETURNING id, updated_at",
         repository_id,
         pr.number,
         pr.id,
@@ -977,7 +979,7 @@ async fn record_pull_request(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(id) = applied else {
+    let Some(applied) = applied else {
         // A payload older than the stored state changes nothing, and nothing changes a merged
         // pull request: it cannot reopen. GitHub's `updated_at` is in whole seconds, so two
         // actions in one second still apply in delivery order; `read_current` covers the one
@@ -991,6 +993,14 @@ async fn record_pull_request(
         .await?;
         return Ok(id);
     };
+    let id = applied.id;
+    // `updated_at` moves only when something the row shows or the gates read changed.
+    if was
+        .as_ref()
+        .is_none_or(|was| was.updated_at != applied.updated_at)
+    {
+        mark_pull_request_change(tx, linked.as_slice()).await?;
+    }
     recompute_checks(tx, repository_id, &pr.head.sha).await?;
     // The issue it named before no longer shows it once it names another.
     let unlinked = was.as_ref().and_then(|was| was.issue_id.clone());
@@ -1451,6 +1461,7 @@ async fn recompute_checks(
                UPDATE pull_request SET checks = $3, checks_total = $4, checks_passed = $5
                WHERE id IN (SELECT id FROM pull_request WHERE repository_id = $1 AND head_sha = $2
                             ORDER BY id FOR UPDATE)
+                 AND (checks, checks_total, checks_passed) IS DISTINCT FROM ($3, $4, $5)
                RETURNING issue_id)
            SELECT DISTINCT issue_id AS "issue_id!" FROM summarized WHERE issue_id IS NOT NULL"#,
         repository_id,

@@ -645,6 +645,48 @@ async fn a_pull_request_opening_turning_ready_and_its_checks_reach_the_open_stre
     assert_eq!(timeline.as_array().unwrap().len(), 1);
 }
 
+/// How many `pull_request` events the log holds, after a sweep.
+async fn pull_request_events(pool: &PgPool) -> usize {
+    write_pull_request_events(pool).await.unwrap();
+    events(pool)
+        .await
+        .iter()
+        .filter(|(_, kind, _)| kind == "pull_request")
+        .count()
+}
+
+#[sqlx::test]
+async fn the_same_pull_request_delivered_twice_writes_one_event(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    create(&router(state.clone()), &person.token, "Fix the thing").await;
+
+    deliver(&state, "pull_request", "d-1", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+    deliver(&state, "pull_request", "d-2", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+    deliver(&state, "pull_request", "d-3", READY, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+}
+
+#[sqlx::test]
+async fn the_same_check_run_delivered_twice_writes_one_event(pool: PgPool) {
+    let person = workspace(&pool, "PL", "Gannon").await;
+    let state = AppState::new(pool.clone()).with_github_webhook_secret(SECRET);
+    create(&router(state.clone()), &person.token, "Fix the thing").await;
+    deliver(&state, "pull_request", "d-pr", OPENED, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 1);
+
+    deliver(&state, "check_run", "d-1", CHECK_RUN, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+    deliver(&state, "check_run", "d-2", CHECK_RUN, |_| {}).await;
+    assert_eq!(pull_request_events(&pool).await, 2);
+    // A conclusion that changes the row's checks is one more.
+    let failed = |payload: &mut Value| payload["check_run"]["conclusion"] = json!("failure");
+    deliver(&state, "check_run", "d-3", CHECK_RUN, failed).await;
+    assert_eq!(pull_request_events(&pool).await, 3);
+}
+
 #[sqlx::test]
 async fn a_pull_request_that_comes_to_name_another_issue_updates_both_rows(pool: PgPool) {
     let person = workspace(&pool, "PL", "Gannon").await;
