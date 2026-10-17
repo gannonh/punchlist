@@ -1,0 +1,498 @@
+$ pl issue create --title Epic:\ issues\ carry\ their\ place
+--- stdout
+PL-1
+--- stderr
+--- exit 0
+
+$ pl issue create --title Slice:\ the\ sheet\ edits\ them
+--- stdout
+PL-2
+--- stderr
+--- exit 0
+
+$ pl issue create --title Task:\ refuse\ a\ cycle
+--- stdout
+PL-3
+--- stderr
+--- exit 0
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"parent":"PL-1"}
+{"row":{"issue":{"id":"PL-2","title":"Slice: the sheet edits them","body":"","status":"backlog","status_name":"Backlog","assignee":null,"labels":[],"parent":"PL-1","project":null,"milestone":null,"created_at":"2026-10-17T15:46:40.904079Z","updated_at":"2026-10-17T15:46:40.989250Z"},"run":{"state":"idle"},"pull_request":null,"gates":null},"seq":4}
+HTTP 200
+
+$ pl issue edit PL-3 --parent PL-2
+--- stdout
+PL-3  parent PL-2 · project none · milestone none
+--- stderr
+--- exit 0
+
+$ psql: SELECT id, parent_id FROM issue ORDER BY number
+--- stdout
+  id  | parent_id 
+------+-----------
+ PL-1 | 
+ PL-2 | PL-1
+ PL-3 | PL-2
+(3 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT seq, issue_id, kind, edited_fields FROM event ORDER BY seq
+--- stdout
+ seq | issue_id |  kind   | edited_fields 
+-----+----------+---------+---------------
+   1 | PL-1     | created | 
+   2 | PL-2     | created | 
+   3 | PL-3     | created | 
+   4 | PL-2     | edited  | {parent}
+   5 | PL-3     | edited  | {parent}
+(5 rows)
+
+--- stderr
+--- exit 0
+
+$ pl project create Punchlist
+--- stdout
+Created project Punchlist.
+--- stderr
+--- exit 0
+
+$ pl project create Groundwork
+--- stdout
+Created project Groundwork.
+--- stderr
+--- exit 0
+
+$ pl milestone create Gate\ 0 --project Punchlist --pass-when pl\ creates\ and\ moves\ an\ issue
+--- stdout
+Created milestone Gate 0 in Punchlist.
+--- stderr
+--- exit 0
+
+$ pl milestone create Gate\ 1 --project Punchlist
+--- stdout
+Created milestone Gate 1 in Punchlist.
+--- stderr
+--- exit 0
+
+$ pl project list
+--- stdout
+Punchlist
+  Gate 0  PASS when pl creates and moves an issue
+  Gate 1
+Groundwork
+  No milestones.
+--- stderr
+--- exit 0
+
+$ pl project create Punchlist
+--- stdout
+--- stderr
+error: a project named Punchlist already exists (422 Unprocessable Entity)
+--- exit 1
+
+$ psql: SELECT p.name AS project, m.name AS milestone, m.pass_when FROM project p LEFT JOIN milestone m ON m.project_id = p.id ORDER BY p.created_at, m.created_at
+--- stdout
+  project   | milestone |           pass_when           
+------------+-----------+-------------------------------
+ Punchlist  | Gate 0    | pl creates and moves an issue
+ Punchlist  | Gate 1    | 
+ Groundwork |           | 
+(3 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT count(*) FROM project
+--- stdout
+ count 
+-------
+     2
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue create --title Story:\ set\ and\ clear\ with\ pl
+--- stdout
+PL-4
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-4 --parent PL-1 --project Punchlist --milestone Gate\ 0
+--- stdout
+PL-4  parent PL-1 · project Punchlist · milestone Gate 0
+--- stderr
+--- exit 0
+
+$ pl issue show PL-4
+--- stdout
+PL-4  Story: set and clear with pl
+Status: Backlog
+Parent: PL-1
+Project: Punchlist
+Milestone: Gate 0
+
+Pull requests
+  None linked.
+
+Proof
+  None attached.
+
+Timeline
+  2026-10-17 15:46:43 UTC  Verify Person (person)  created
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+
+Runs
+  No runs yet.
+--- stderr
+--- exit 0
+
+$ psql: SELECT i.id, i.parent_id, p.name AS project, m.name AS milestone FROM issue i LEFT JOIN project p ON p.id = i.project_id LEFT JOIN milestone m ON m.id = i.milestone_id WHERE i.id = 'PL-4'
+--- stdout
+  id  | parent_id |  project  | milestone 
+------+-----------+-----------+-----------
+ PL-4 | PL-1      | Punchlist | Gate 0
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-4 --no-parent --no-project
+--- stdout
+PL-4  parent none · project none · milestone none
+--- stderr
+--- exit 0
+
+$ pl issue show PL-4
+--- stdout
+PL-4  Story: set and clear with pl
+Status: Backlog
+
+Pull requests
+  None linked.
+
+Proof
+  None attached.
+
+Timeline
+  2026-10-17 15:46:43 UTC  Verify Person (person)  created
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+
+Runs
+  No runs yet.
+--- stderr
+--- exit 0
+
+$ psql: SELECT id, parent_id, project_id, milestone_id FROM issue WHERE id = 'PL-4'
+--- stdout
+  id  | parent_id | project_id | milestone_id 
+------+-----------+------------+--------------
+ PL-4 |           |            | 
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT seq, issue_id, kind, edited_fields FROM event WHERE issue_id = 'PL-4' ORDER BY seq
+--- stdout
+ seq | issue_id |  kind   |       edited_fields        
+-----+----------+---------+----------------------------
+   6 | PL-4     | created | 
+   7 | PL-4     | edited  | {parent,project,milestone}
+   8 | PL-4     | edited  | {parent,project,milestone}
+(3 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event
+--- stdout
+ max 
+-----
+   8
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-1 --parent PL-3
+--- stdout
+--- stderr
+error: PL-3 is under PL-1 (PL-1 → PL-2 → PL-3), so it cannot be PL-1's parent (422 Unprocessable Entity)
+--- exit 1
+
+$ pl issue edit PL-1 --parent PL-1
+--- stdout
+--- stderr
+error: PL-1 cannot be its own parent (422 Unprocessable Entity)
+--- exit 1
+
+$ psql: SELECT id, parent_id FROM issue ORDER BY number
+--- stdout
+  id  | parent_id 
+------+-----------
+ PL-1 | 
+ PL-2 | PL-1
+ PL-3 | PL-2
+ PL-4 | 
+(4 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event
+--- stdout
+ max 
+-----
+   8
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT w.issue_prefix, p.name AS project, p.id AS project_id, m.name AS milestone, m.id AS milestone_id FROM project p JOIN workspace w ON w.id = p.workspace_id LEFT JOIN milestone m ON m.project_id = p.id ORDER BY p.created_at, m.created_at
+--- stdout
+ issue_prefix |  project   |              project_id              | milestone |             milestone_id             
+--------------+------------+--------------------------------------+-----------+--------------------------------------
+ PL           | Punchlist  | fb6488f9-cf07-4ca0-81ba-663beb209f7f | Gate 0    | e48ec792-5ef6-44af-8cac-6764e600028b
+ PL           | Punchlist  | fb6488f9-cf07-4ca0-81ba-663beb209f7f | Gate 1    | 0fe0c254-bba9-4e04-b799-f3d7ec23450a
+ PL           | Groundwork | 3f7c87d2-517f-4619-b6a6-626e51fcb0b4 |           | 
+ OT           | Theirs     | 600d7b2c-0075-4d25-851e-9c760d1e55a8 | Gate 0    | 2a63dc4c-e0eb-4b77-8295-b65a4fdf8852
+(4 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event WHERE workspace_id = (SELECT workspace_id FROM issue WHERE id = 'PL-2')
+--- stdout
+ max 
+-----
+   8
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"parent":"OT-1"}
+{"code":"invalid","message":"no issue OT-1 in this workspace"} HTTP 422
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"600d7b2c-0075-4d25-851e-9c760d1e55a8"}
+{"code":"invalid","message":"no project 600d7b2c-0075-4d25-851e-9c760d1e55a8 in this workspace"} HTTP 422
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"fb6488f9-cf07-4ca0-81ba-663beb209f7f","milestone":"2a63dc4c-e0eb-4b77-8295-b65a4fdf8852"}
+{"code":"invalid","message":"no milestone 2a63dc4c-e0eb-4b77-8295-b65a4fdf8852 in this workspace"} HTTP 422
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"project":"3f7c87d2-517f-4619-b6a6-626e51fcb0b4","milestone":"e48ec792-5ef6-44af-8cac-6764e600028b"}
+{"code":"invalid","message":"milestone Gate 0 is in project Punchlist; give PL-2 that project to set it"} HTTP 422
+
+$ curl -X PATCH http://127.0.0.1:54785/api/issues/PL-2 -d {"milestone":"e48ec792-5ef6-44af-8cac-6764e600028b"}
+{"code":"invalid","message":"milestone Gate 0 is in project Punchlist; give PL-2 that project to set it"} HTTP 422
+
+$ psql: SELECT max(seq) FROM event WHERE workspace_id = (SELECT workspace_id FROM issue WHERE id = 'PL-2')
+--- stdout
+ max 
+-----
+   8
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT id, parent_id, project_id, milestone_id FROM issue WHERE id = 'PL-2'
+--- stdout
+  id  | parent_id | project_id | milestone_id 
+------+-----------+------------+--------------
+ PL-2 | PL-1      |            | 
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-2 --project Punchlist --milestone Gate\ 0
+--- stdout
+PL-2  parent PL-1 · project Punchlist · milestone Gate 0
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-2 --project Groundwork
+--- stdout
+PL-2  parent PL-1 · project Groundwork · milestone none
+--- stderr
+--- exit 0
+
+$ psql: SELECT i.id, p.name AS project, i.milestone_id FROM issue i LEFT JOIN project p ON p.id = i.project_id WHERE i.id = 'PL-2'
+--- stdout
+  id  |  project   | milestone_id 
+------+------------+--------------
+ PL-2 | Groundwork | 
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT seq, issue_id, kind, edited_fields FROM event WHERE issue_id = 'PL-2' ORDER BY seq
+--- stdout
+ seq | issue_id |  kind   |    edited_fields    
+-----+----------+---------+---------------------
+   2 | PL-2     | created | 
+   4 | PL-2     | edited  | {parent}
+   9 | PL-2     | edited  | {project,milestone}
+  10 | PL-2     | edited  | {project,milestone}
+(4 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT coalesce(project_id::text, 'null') FROM issue WHERE id = 'PL-4'
+--- stdout
+ coalesce 
+----------
+ null
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue show PL-4
+--- stdout
+PL-4  Story: set and clear with pl
+Status: Backlog
+Project: Punchlist
+Milestone: Gate 0
+
+Pull requests
+  None linked.
+
+Proof
+  None attached.
+
+Timeline
+  2026-10-17 15:46:43 UTC  Verify Person (person)  created
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 15:46:54 UTC  Verify Person (person)  edited project
+  2026-10-17 15:46:56 UTC  Verify Person (person)  edited milestone
+
+Runs
+  No runs yet.
+--- stderr
+--- exit 0
+
+$ psql: SELECT p.name || ' / ' || m.name FROM issue i JOIN project p ON p.id = i.project_id JOIN milestone m ON m.id = i.milestone_id WHERE i.id = 'PL-4'
+--- stdout
+      ?column?      
+--------------------
+ Punchlist / Gate 0
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT coalesce(parent_id, 'null') FROM issue WHERE id = 'PL-4'
+--- stdout
+ coalesce 
+----------
+ null
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event
+--- stdout
+ max 
+-----
+  14
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event
+--- stdout
+ max 
+-----
+  14
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue edit PL-4 --milestone Gate\ 1
+--- stdout
+PL-4  parent none · project Punchlist · milestone Gate 1
+--- stderr
+--- exit 0
+
+$ psql: SELECT max(seq) FROM event
+--- stdout
+ max 
+-----
+  15
+(1 row)
+
+--- stderr
+--- exit 0
+
+$ pl issue show PL-4
+--- stdout
+PL-4  Story: set and clear with pl
+Status: Backlog
+Parent: PL-1
+Project: Punchlist
+Milestone: Gate 1
+
+Pull requests
+  None linked.
+
+Proof
+  None attached.
+
+Timeline
+  2026-10-17 15:46:43 UTC  Verify Person (person)  created
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 15:46:43 UTC  Verify Person (person)  edited parent, project, milestone
+  2026-10-17 15:46:54 UTC  Verify Person (person)  edited project
+  2026-10-17 15:46:56 UTC  Verify Person (person)  edited milestone
+  2026-10-17 15:47:03 UTC  Verify Person (person)  edited parent
+  2026-10-17 15:47:06 UTC  Verify Person (person)  edited parent
+  2026-10-17 15:47:15 UTC  Verify Person (person)  edited milestone
+  2026-10-17 15:47:17 UTC  Verify Person (person)  edited parent
+
+Runs
+  No runs yet.
+--- stderr
+--- exit 0
+
+$ psql: SELECT i.id, i.parent_id, p.name AS project, m.name AS milestone FROM issue i LEFT JOIN project p ON p.id = i.project_id LEFT JOIN milestone m ON m.id = i.milestone_id ORDER BY i.number
+--- stdout
+  id  | parent_id |  project   | milestone 
+------+-----------+------------+-----------
+ PL-1 |           |            | 
+ OT-1 |           |            | 
+ PL-2 | PL-1      | Groundwork | 
+ PL-3 | PL-2      |            | 
+ PL-4 | PL-1      | Punchlist  | Gate 1
+(5 rows)
+
+--- stderr
+--- exit 0
+
+$ psql: SELECT seq, issue_id, kind, edited_fields FROM event WHERE seq > 10 ORDER BY seq
+--- stdout
+ seq | issue_id |  kind  | edited_fields 
+-----+----------+--------+---------------
+  11 | PL-4     | edited | {project}
+  12 | PL-4     | edited | {milestone}
+  13 | PL-4     | edited | {parent}
+  14 | PL-4     | edited | {parent}
+  15 | PL-4     | edited | {milestone}
+  16 | PL-4     | edited | {parent}
+(6 rows)
+
+--- stderr
+--- exit 0
+

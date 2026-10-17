@@ -1,0 +1,52 @@
+$ pl issue create --title Epic:\ issues\ carry\ their\ place
+--- stdout
+PL-1
+--- stderr
+--- exit 0
+
+$ pl issue create --title Slice:\ the\ sheet\ edits\ them
+--- stdout
+PL-2
+--- stderr
+--- exit 0
+
+$ pl issue create --title Task:\ refuse\ a\ cycle
+--- stdout
+PL-3
+--- stderr
+--- exit 0
+
+$ curl -X PATCH http://127.0.0.1:41557/api/issues/PL-2 -d {"parent":"PL-1"}
+{"row":{"issue":{"id":"PL-2","title":"Slice: the sheet edits them","body":"","status":"backlog","status_name":"Backlog","assignee":null,"labels":[],"created_at":"2026-10-17T15:43:35.433133Z","updated_at":"2026-10-17T15:43:35.433133Z"},"run":{"state":"idle"},"pull_request":null,"gates":null},"seq":3}
+HTTP 200
+
+$ pl issue edit PL-3 --parent PL-2
+--- stdout
+--- stderr
+error: unrecognized subcommand 'edit'
+
+Usage: pl issue [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+--- exit 2
+
+$ psql: SELECT id, parent_id FROM issue ORDER BY number
+--- stdout
+--- stderr
+ERROR:  column "parent_id" does not exist
+LINE 1: SELECT id, parent_id FROM issue ORDER BY number
+                   ^
+--- exit 1
+
+$ psql: SELECT seq, issue_id, kind, edited_fields FROM event ORDER BY seq
+--- stdout
+ seq | issue_id |  kind   | edited_fields 
+-----+----------+---------+---------------
+   1 | PL-1     | created | 
+   2 | PL-2     | created | 
+   3 | PL-3     | created | 
+(3 rows)
+
+--- stderr
+--- exit 0
+

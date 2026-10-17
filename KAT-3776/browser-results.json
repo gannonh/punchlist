@@ -1,0 +1,182 @@
+[
+  {
+    "id": 6,
+    "what": "Project select while the PATCH is held",
+    "actual": "Punchlist",
+    "expected": "Punchlist",
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "stored project_id while held",
+    "actual": "null",
+    "expected": "null",
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "Milestone select",
+    "actual": "Gate 0",
+    "expected": "Gate 0",
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "PASS when text",
+    "actual": "PASS when pl creates and moves an issue",
+    "expected": "PASS when pl creates and moves an issue",
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "after reload",
+    "actual": [
+      "Punchlist",
+      "Gate 0"
+    ],
+    "expected": [
+      "Punchlist",
+      "Gate 0"
+    ],
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "pl issue show",
+    "actual": true,
+    "expected": true,
+    "pass": true
+  },
+  {
+    "id": 6,
+    "what": "stored row",
+    "actual": "Punchlist / Gate 0",
+    "expected": "Punchlist / Gate 0",
+    "pass": true
+  },
+  {
+    "id": 7,
+    "what": "Parent field",
+    "actual": "PL-1",
+    "expected": "PL-1",
+    "pass": true
+  },
+  {
+    "id": 7,
+    "what": "Parent after reload",
+    "actual": "PL-1",
+    "expected": "PL-1",
+    "pass": true
+  },
+  {
+    "id": 7,
+    "what": "Parent after clearing",
+    "actual": "",
+    "expected": "",
+    "pass": true
+  },
+  {
+    "id": 7,
+    "what": "stored parent_id after clearing",
+    "actual": "null",
+    "expected": "null",
+    "pass": true
+  },
+  {
+    "id": 8,
+    "what": "toast",
+    "actual": "PL-1 was not changed. Refused (invalid): PL-3 is under PL-1 (PL-1 → PL-2 → PL-3), so it cannot be PL-1's parent",
+    "expected": "PL-1 was not changed. Refused (invalid): PL-3 is under PL-1 (PL-1 → PL-2 → PL-3), so it cannot be PL-1's parent",
+    "pass": true
+  },
+  {
+    "id": 8,
+    "what": "Parent field after the refusal",
+    "actual": "",
+    "expected": "",
+    "pass": true
+  },
+  {
+    "id": 8,
+    "what": "max(seq) unchanged",
+    "actual": "14",
+    "expected": "14",
+    "pass": true
+  },
+  {
+    "id": 9,
+    "what": "Milestone select after pl edit",
+    "actual": "Gate 1",
+    "expected": "Gate 1",
+    "pass": true
+  },
+  {
+    "id": 9,
+    "what": "shown within 2000 ms",
+    "actual": true,
+    "expected": true,
+    "pass": true,
+    "actual_ms": 75
+  },
+  {
+    "id": 9,
+    "what": "data-last-seq equals max(seq)",
+    "actual": "15",
+    "expected": "15",
+    "pass": true
+  },
+  {
+    "id": 10,
+    "what": "page scrollWidth <= clientWidth",
+    "actual": true,
+    "expected": true,
+    "pass": true
+  },
+  {
+    "id": 10,
+    "what": "sheet scrollWidth <= clientWidth",
+    "actual": true,
+    "expected": true,
+    "pass": true,
+    "widths": {
+      "page": [
+        390,
+        390
+      ],
+      "sheet": [
+        389,
+        389
+      ]
+    }
+  },
+  {
+    "id": 10,
+    "what": "Parent, Project and Milestone visible",
+    "actual": [
+      true,
+      true,
+      true
+    ],
+    "expected": [
+      true,
+      true,
+      true
+    ],
+    "pass": true
+  },
+  {
+    "id": 10,
+    "what": "values",
+    "actual": [
+      "PL-1",
+      "Punchlist",
+      "Gate 1"
+    ],
+    "expected": [
+      "PL-1",
+      "Punchlist",
+      "Gate 1"
+    ],
+    "pass": true
+  }
+]
