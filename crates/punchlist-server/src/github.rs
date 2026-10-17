@@ -141,6 +141,10 @@ pub(crate) struct WorkflowJob {
     /// The git blob sha of the same path on the default branch when the job was read; `None`
     /// when the default branch has no file there.
     pub default_sha: Option<String>,
+    /// The bases other than the default branch that a pull request from its run's head branch
+    /// has been into; `None` when no pull request from a branch of the repository is behind
+    /// the run. `CheckRunEvidence::workflow_other_bases`.
+    pub other_bases: Option<Vec<String>>,
 }
 
 impl WorkflowJob {
@@ -603,7 +607,7 @@ pub(crate) async fn process(
 /// gates read (a redelivery, one of a burst as a matrix finishes) writes nothing, so it does
 /// not look like a write to a request in flight; a read always stamps, which is what orders
 /// it against the next read. A read also records the workflow job behind the run (`job`), or
-/// that it found none; a delivery knows neither and leaves the three columns alone.
+/// that it found none; a delivery knows neither and leaves its `workflow_` columns alone.
 // ponytail: one round trip per run, up to the page cap (1000); one `UNNEST` insert does it in
 // one when a commit has that many.
 async fn record_check_run(
@@ -617,8 +621,10 @@ async fn record_check_run(
     sqlx::query!(
         "INSERT INTO check_run (id, repository_id, head_sha, name, status, conclusion,
                                 check_suite_id, updated_at, app,
-                                workflow_path, workflow_sha, workflow_default_sha)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9, $10, $11, $12)
+                                workflow_path, workflow_sha, workflow_default_sha,
+                                workflow_other_bases)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, clock_timestamp()), $9, $10, $11, $12,
+                 $13)
          ON CONFLICT (id) DO UPDATE SET head_sha = EXCLUDED.head_sha,
              name = EXCLUDED.name, status = EXCLUDED.status,
              conclusion = EXCLUDED.conclusion,
@@ -631,6 +637,9 @@ async fn record_check_run(
              workflow_default_sha = CASE WHEN $8::timestamptz IS NULL
                                          THEN check_run.workflow_default_sha
                                          ELSE EXCLUDED.workflow_default_sha END,
+             workflow_other_bases = CASE WHEN $8::timestamptz IS NULL
+                                         THEN check_run.workflow_other_bases
+                                         ELSE EXCLUDED.workflow_other_bases END,
              updated_at = COALESCE($8, clock_timestamp())
          WHERE CASE WHEN $8::timestamptz IS NOT NULL THEN check_run.updated_at <= $8
                ELSE (CASE check_run.status WHEN 'completed' THEN 2 WHEN 'in_progress' THEN 1
@@ -655,6 +664,7 @@ async fn record_check_run(
         job.map(|job| job.path.as_str()),
         job.and_then(|job| job.sha.as_deref()),
         job.and_then(|job| job.default_sha.as_deref()),
+        job.and_then(|job| job.other_bases.as_deref()),
     )
     .execute(&mut *tx)
     .await?;
@@ -1391,7 +1401,7 @@ pub(crate) async fn newest_check_runs(
         CheckRunEvidence,
         "SELECT DISTINCT ON (c.check_suite_id, c.app, c.name)
                 c.name, c.status, c.conclusion, c.app,
-                c.workflow_path, c.workflow_sha, c.workflow_default_sha
+                c.workflow_path, c.workflow_sha, c.workflow_default_sha, c.workflow_other_bases
          FROM check_run c WHERE c.repository_id = $1 AND c.head_sha = $2
            -- Whatever `workflow_path` either has: a run with no suite has no job read for it.
            AND NOT (c.check_suite_id IS NULL AND EXISTS (

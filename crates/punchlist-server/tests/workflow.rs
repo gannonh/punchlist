@@ -53,6 +53,18 @@ struct Repo {
     actions_reads: usize,
     /// That file's blob at any commit, and on the default branch.
     workflow_blobs: (Option<&'static str>, Option<&'static str>),
+    /// Every workflow run's head branch and the repository it is in (`full_name`): #12's
+    /// branch here, unless a test says otherwise.
+    run_head: (String, String),
+    /// The pull requests from each branch as GraphQL lists them (`branch_pull`); #12's branch
+    /// has #12, into `main`, unless a test says otherwise.
+    branch_pulls: HashMap<String, Vec<Value>>,
+    /// The branches whose pull requests were asked for, in order.
+    branches_asked: Vec<String>,
+    /// What the branch pull request query answers instead, status and body.
+    branch_pulls_answer: Option<(StatusCode, Value)>,
+    /// The branch pull request query reports a next page of pull requests.
+    branch_pulls_more: bool,
     down: bool,
     graphql_down: bool,
     hold: Option<Arc<Barrier>>,
@@ -70,10 +82,27 @@ async fn held(hold: Option<Arc<Barrier>>) {
 
 type FakeGithub = Arc<Mutex<Repo>>;
 
+/// The fixture pull request #12's branch.
+const BRANCH: &str = "feature/pl-1-fix-the-thing";
+
+/// A pull request from a branch as GraphQL's `pullRequests(headRefName:)` lists it: into
+/// `base`, after the base changes `changes` (from, to), from a fork when `cross`.
+fn branch_pull(base: &str, changes: &[(&str, &str)], cross: bool) -> Value {
+    let changes: Vec<Value> = (changes.iter())
+        .map(|(from, to)| json!({"previousRefName": from, "currentRefName": to}))
+        .collect();
+    json!({"baseRefName": base, "isCrossRepository": cross,
+           "timelineItems": {"pageInfo": {"hasNextPage": false}, "nodes": changes}})
+}
+
 /// A fake of the GitHub endpoints the workflow load and the pull request refresh call, on a
 /// free port.
 async fn fake_github() -> (FakeGithub, String) {
-    let repo: FakeGithub = Arc::default();
+    let repo: FakeGithub = Arc::new(Mutex::new(Repo {
+        run_head: (BRANCH.into(), "gannonh/punchlist".into()),
+        branch_pulls: HashMap::from([(BRANCH.into(), vec![branch_pull("main", &[], false)])]),
+        ..Repo::default()
+    }));
     let app = Router::new()
         .route(
             "/repos/{owner}/{name}",
@@ -153,10 +182,12 @@ async fn fake_github() -> (FakeGithub, String) {
                     .filter(|suite| !suite.is_null() && !repo.jobs.is_empty())
                     .collect();
                 suites.dedup();
+                let (branch, repository) = &repo.run_head;
                 let runs: Vec<Value> = (suites.iter())
                     .map(|suite| {
                         json!({"id": suite, "path": ".github/workflows/ci.yml",
-                               "check_suite_id": suite})
+                               "check_suite_id": suite, "head_branch": branch,
+                               "head_repository": {"full_name": repository}})
                     })
                     .collect();
                 let answer = json!({"total_count": runs.len(), "workflow_runs": runs});
@@ -183,11 +214,26 @@ async fn fake_github() -> (FakeGithub, String) {
                 },
             ),
         )
-        // GraphQL `reviewThreads`, two to a page; the cursor is the next thread's index.
+        // GraphQL `reviewThreads`, two to a page; the cursor is the next thread's index. Or the
+        // pull requests from a branch.
         .route(
             "/graphql",
             post(
                 |State(repo): State<FakeGithub>, axum::Json(query): axum::Json<Value>| async move {
+                    if query["query"].as_str().unwrap().contains("headRefName") {
+                        let mut repo = repo.lock().unwrap();
+                        let branch = query["variables"]["branch"].as_str().unwrap().to_string();
+                        let pulls = repo.branch_pulls.get(&branch).cloned().unwrap_or_default();
+                        repo.branches_asked.push(branch);
+                        if let Some((status, body)) = repo.branch_pulls_answer.clone() {
+                            return (status, axum::Json(body));
+                        }
+                        let more = repo.branch_pulls_more;
+                        let pulls = json!({"pageInfo": {"hasNextPage": more}, "nodes": pulls});
+                        let data = json!({"repository": {"defaultBranchRef": {"name": "main"},
+                                                         "pullRequests": pulls}});
+                        return (StatusCode::OK, axum::Json(json!({"data": data})));
+                    }
                     let (data, hold) = {
                         let repo = repo.lock().unwrap();
                         if repo.down || repo.graphql_down {
@@ -3149,7 +3195,8 @@ async fn a_required_actions_check_needs_a_runner_and_the_default_branchs_workflo
         body["evidence"]["pull_requests"][0]["check_runs"],
         json!([{"name": "check", "status": "completed", "conclusion": "success",
                 "app": "github-actions", "workflow_path": ".github/workflows/ci.yml",
-                "workflow_sha": "0000000", "workflow_default_sha": "13de2e3"}])
+                "workflow_sha": "0000000", "workflow_default_sha": "13de2e3",
+                "workflow_other_bases": []}])
     );
     // A delivery of the run leaves what the read recorded.
     let differ = Some("0000000 13de2e3".to_string());
@@ -3187,6 +3234,197 @@ async fn a_required_actions_check_needs_a_runner_and_the_default_branchs_workflo
         repo.check_runs.push(listed(4, "success"));
         repo.jobs = vec![listed_job(4, "check", Some("success"), true)];
     }
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_counts_only_from_a_branch_whose_pull_requests_were_into_the_default_branch(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_in_agent_review(&s).await;
+    put_workflow(
+        &s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(&s, "push", "push-1", PUSH).await;
+    // A job that passed on a runner from the default branch's workflow file.
+    {
+        let mut repo = s.github.lock().unwrap();
+        let mut run = listed_run(3, 3112233445, "check", "success");
+        run["app"] = json!({"slug": "github-actions"});
+        repo.pulls = vec![ready_with_merge_state("clean")];
+        repo.check_runs = vec![run];
+        repo.jobs = vec![listed_job(3, "check", Some("success"), true)];
+        repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    }
+    let refused = |why: &str| {
+        format!(
+            "1 of 1 required checks have no successful run on 6dcb09b; a pull request's run takes \
+             its workflow file from its base branch, so a check counts only from a branch of this \
+             repository whose every pull request has been into the default branch: push this \
+             work to a new branch and open its pull request into the default branch: `check` \
+             from `github-actions` ({why})"
+        )
+    };
+    let into_agent_base = refused("it may have run for a pull request into `agent-base`");
+    let recorded = || async {
+        sqlx::query_scalar::<_, Option<Vec<String>>>(
+            "SELECT workflow_other_bases FROM check_run WHERE id = 3",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let pulls = |pulls: Vec<Value>| {
+        (s.github.lock().unwrap().branch_pulls).insert(BRANCH.into(), pulls);
+    };
+
+    // A second pull request from the branch, since closed, was into a branch the agent pushed:
+    // GitHub does not say which of the two the run was for.
+    pulls(vec![
+        branch_pull("main", &[], false),
+        branch_pull("agent-base", &[], false),
+    ]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], into_agent_base);
+    assert_eq!(recorded().await, Some(vec!["agent-base".to_string()]));
+    assert_eq!(s.github.lock().unwrap().branches_asked, [BRANCH]);
+
+    // The issue's own pull request was opened into it, and retargeted to the default branch.
+    pulls(vec![branch_pull("main", &[("agent-base", "main")], false)]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], into_agent_base);
+
+    // The run is from another branch at the head commit, whose pull request is into it.
+    s.github.lock().unwrap().run_head.0 = "copy".into();
+    pulls(vec![branch_pull("main", &[], false)]);
+    (s.github.lock().unwrap().branch_pulls)
+        .insert("copy".into(), vec![branch_pull("agent-base", &[], false)]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["reason"], into_agent_base);
+    assert_eq!(
+        s.github.lock().unwrap().branches_asked.last().unwrap(),
+        "copy"
+    );
+
+    // The run is from a fork's branch: no pull request from a branch here was its.
+    s.github.lock().unwrap().run_head = (BRANCH.into(), "someone/punchlist".into());
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["reason"],
+        refused("it ran for no pull request from a branch of this repository")
+    );
+    assert_eq!(recorded().await, None);
+
+    // Every pull request from the branch has only been into the default branch, and a fork's
+    // from a branch of that name is another branch's: accepted.
+    s.github.lock().unwrap().run_head.1 = "gannonh/punchlist".into();
+    pulls(vec![
+        branch_pull("main", &[], false),
+        branch_pull("agent-base", &[], true),
+    ]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(recorded().await, Some(vec![]));
+}
+
+/// An issue in Agent Review whose pull request is ready, with one required GitHub Actions check
+/// that passed from a job a runner ran, so only the read of the branch's pull requests decides.
+async fn issue_with_a_passing_required_actions_check(s: &Setup) -> String {
+    let codex = issue_in_agent_review(s).await;
+    put_workflow(
+        s,
+        "b",
+        PRD_WORKFLOW.to_string() + "\n[gate.ci_green]\nrequired = [\"check\"]\n",
+    );
+    deliver(s, "push", "push-1", PUSH).await;
+    let mut repo = s.github.lock().unwrap();
+    let mut run = listed_run(3, 3112233445, "check", "success");
+    run["app"] = json!({"slug": "github-actions"});
+    repo.pulls = vec![ready_with_merge_state("clean")];
+    repo.check_runs = vec![run];
+    repo.jobs = vec![listed_job(3, "check", Some("success"), true)];
+    repo.workflow_blobs = (Some("13de2e3"), Some("13de2e3"));
+    codex
+}
+
+async fn assert_branch_pulls_unreadable(s: &Setup, codex: &str) {
+    let (status, body) = request_human_review(s, codex).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "code": "github_unreadable",
+            "message": "GitHub could not be read, so the gates for PL-1 were not checked \
+                        and it did not move; request again",
+        })
+    );
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_the_branch_pull_requests_cannot_be_read(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+
+    // The query fails: GitHub answers 502.
+    s.github.lock().unwrap().branch_pulls_answer = Some((StatusCode::BAD_GATEWAY, json!({})));
+    assert_branch_pulls_unreadable(&s, &codex).await;
+    // The query answers 200 with GraphQL errors and no data.
+    s.github.lock().unwrap().branch_pulls_answer = Some((
+        StatusCode::OK,
+        json!({"errors": [{"message": "rate limited"}]}),
+    ));
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    // Read again, the same request is accepted.
+    s.github.lock().unwrap().branch_pulls_answer = None;
+    (s.github.lock().unwrap().branch_pulls)
+        .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_the_branch_has_more_pull_requests_than_one_page(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.branch_pulls
+            .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
+        repo.branch_pulls_more = true;
+    }
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    s.github.lock().unwrap().branch_pulls_more = false;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_required_actions_check_is_refused_when_a_pull_request_changed_its_base_more_than_one_page(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let codex = issue_with_a_passing_required_actions_check(&s).await;
+    let mut pull = branch_pull("main", &[], false);
+    pull["timelineItems"]["pageInfo"]["hasNextPage"] = json!(true);
+    (s.github.lock().unwrap().branch_pulls).insert(BRANCH.into(), vec![pull]);
+    assert_branch_pulls_unreadable(&s, &codex).await;
+
+    (s.github.lock().unwrap().branch_pulls)
+        .insert(BRANCH.into(), vec![branch_pull("main", &[], false)]);
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }

@@ -180,6 +180,14 @@ pub struct CheckRunEvidence {
     /// default branch has no such file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_default_sha: Option<String>,
+    /// The branches other than the default branch that a pull request from the run's head
+    /// branch has been into, open or closed, earlier bases too. A pull request's run takes its
+    /// workflow file from the head commit merged into the base, and GitHub does not say which
+    /// pull request a run was for, so any of them may have run it. Empty when every one was
+    /// into the default branch; absent when no pull request from a branch of the workspace's
+    /// repository is behind the run, and whenever `workflow_path` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_other_bases: Option<Vec<String>>,
 }
 
 /// A check `ci_green` requires on the head commit: its name and the GitHub App that must have
@@ -192,12 +200,18 @@ pub struct RequiredCheck {
 }
 
 impl CheckRunEvidence {
-    /// Whether a runner ran the job from the default branch's copy of its workflow file. A
-    /// file the default branch does not have is a changed one.
+    /// Whether the job's workflow file at the head commit is the default branch's. A file the
+    /// default branch does not have is a changed one.
+    fn default_file(&self) -> bool {
+        self.workflow_sha.is_some() && self.workflow_sha == self.workflow_default_sha
+    }
+
+    /// Whether a runner ran the job from the default branch's copy of its workflow file, and
+    /// every pull request it can have run for was into the default branch alone.
     fn default_workflow_ran(&self) -> bool {
         self.workflow_path.is_some()
-            && self.workflow_sha.is_some()
-            && self.workflow_sha == self.workflow_default_sha
+            && self.default_file()
+            && (self.workflow_other_bases.as_ref()).is_some_and(Vec::is_empty)
     }
 
     /// Whether the run passed: completed with success, neutral or skipped. `None` while it
@@ -430,12 +444,21 @@ const WORKFLOW_DIFFERS: &str = "a check counts only when its workflow file is th
      branch's: bring this branch's copy up to date with the default branch, and a person merges \
      a real workflow change there first";
 
+/// Appended to `ci_green`'s sentence when a required check's run may have been for a pull
+/// request into another base, or for none from a branch of this repository. A branch's pull
+/// requests stay on it, closed or retargeted, so the way out is a new branch.
+const OTHER_BASE: &str = "a pull request's run takes its workflow file from its base branch, so \
+     a check counts only from a branch of this repository whose every pull request has been into \
+     the default branch: push this work to a new branch and open its pull request into the \
+     default branch";
+
 /// A required check that is not satisfied.
 struct Unsatisfied {
     /// The check, its app and why: `` `test` from `github-actions` (failure) ``.
     named: String,
-    /// The why is a workflow file that is not the default branch's (`WORKFLOW_DIFFERS`).
-    workflow_differs: bool,
+    /// What to do about the why, when it is one Punchlist can say: `WORKFLOW_DIFFERS` or
+    /// `OTHER_BASE`.
+    advice: Option<&'static str>,
 }
 
 /// Why a required check is not satisfied, or `None` when it is: a run of its name from its app
@@ -443,10 +466,11 @@ struct Unsatisfied {
 /// false reports `skipped` with nothing run.
 ///
 /// A GitHub Actions check needs more, as an agent that can push decides what Actions runs on
-/// its branch: the successful run is a job a runner took (`workflow_path`), and that job's
-/// workflow file at the head commit is the default branch's. Every successful run of the name
-/// has to be one: two workflows may each have a job of it, and the unchanged one's run does
-/// not stand in for the changed one's.
+/// its branch: the successful run is a job a runner took (`workflow_path`), that job's
+/// workflow file at the head commit is the default branch's, and every pull request it can
+/// have run for was only ever into the default branch (`workflow_other_bases`). Every
+/// successful run of the name has to be one: two workflows may each have a job of it, and the
+/// unchanged one's run does not stand in for the changed one's.
 fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsatisfied> {
     let named: Vec<_> = runs.iter().filter(|run| run.name == check.name).collect();
     let owned: Vec<_> = (named.iter())
@@ -458,7 +482,7 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
     // The first successful run that does not count, for GitHub Actions.
     let uncounted =
         (succeeded.iter()).find(|run| check.app == GITHUB_ACTIONS && !run.default_workflow_ran());
-    let mut workflow_differs = false;
+    let mut advice = None;
     let why = match (owned.first(), succeeded.is_empty(), uncounted) {
         _ if named.is_empty() => "no run".to_string(),
         (None, _, _) => {
@@ -476,14 +500,23 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
         }
         (Some(run), true, _) => run.conclusion.clone().unwrap_or(run.status.clone()),
         (Some(_), false, None) => return None,
-        (Some(_), false, Some(run)) => match &run.workflow_path {
-            None => "no workflow job ran it".to_string(),
-            Some(path) => {
-                workflow_differs = true;
+        (Some(_), false, Some(run)) => match (&run.workflow_path, &run.workflow_other_bases) {
+            (None, _) => "no workflow job ran it".to_string(),
+            (Some(path), _) if !run.default_file() => {
+                advice = Some(WORKFLOW_DIFFERS);
                 format!(
                     "its workflow file {} differs from the default branch's",
                     backticked(path)
                 )
+            }
+            (Some(_), None) => {
+                advice = Some(OTHER_BASE);
+                "it ran for no pull request from a branch of this repository".to_string()
+            }
+            (Some(_), Some(bases)) => {
+                advice = Some(OTHER_BASE);
+                let bases = bases.iter().map(|base| backticked(base)).collect();
+                format!("it may have run for a pull request into {}", capped(bases))
             }
         },
     };
@@ -493,7 +526,7 @@ fn unsatisfied(check: &RequiredCheck, runs: &[CheckRunEvidence]) -> Option<Unsat
             backticked(&check.name),
             backticked(&check.app)
         ),
-        workflow_differs,
+        advice,
     })
 }
 
@@ -529,8 +562,10 @@ fn ci_green(pr: &PullRequestEvidence, required: &[RequiredCheck]) -> Result<Stri
             unsatisfied.len(),
             required.len()
         );
-        if unsatisfied.iter().any(|check| check.workflow_differs) {
-            reason = format!("{reason}; {WORKFLOW_DIFFERS}");
+        for advice in [WORKFLOW_DIFFERS, OTHER_BASE] {
+            if unsatisfied.iter().any(|check| check.advice == Some(advice)) {
+                reason = format!("{reason}; {advice}");
+            }
         }
         Err((
             reason,
@@ -900,10 +935,12 @@ mod tests {
                 status: status.into(),
                 conclusion: conclusion.map(String::from),
                 app: Some("github-actions".into()),
-                // A job a runner took, from the default branch's copy of `ci.yml`.
+                // A job a runner took, from the default branch's copy of `ci.yml`, on a branch
+                // whose pull requests were all into the default branch.
                 workflow_path: Some(".github/workflows/ci.yml".into()),
                 workflow_sha: Some("13de2e3".into()),
                 workflow_default_sha: Some("13de2e3".into()),
+                workflow_other_bases: Some(Vec::new()),
             })
             .collect();
         pr.review_threads = (threads.iter())
@@ -1121,6 +1158,89 @@ mod tests {
         assert!(Gate::CiGreen.evaluate(&evidence, &vercel).passed);
         // An unrequired check is too.
         assert!(Gate::CiGreen.evaluate(&evidence, &[]).passed);
+    }
+
+    #[test]
+    fn a_required_actions_check_counts_only_from_a_branch_whose_pull_requests_were_into_the_default_branch()
+     {
+        let required = |names: &[&str]| {
+            (names.iter())
+                .map(|name| RequiredCheck {
+                    name: name.to_string(),
+                    app: "github-actions".into(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let judged = |bases: Option<&[&str]>| {
+            let mut evidence = reviewed(&[PASSED], "clean", &[]);
+            evidence.pull_requests[0].check_runs[0].workflow_other_bases =
+                bases.map(|bases| bases.iter().map(|base| base.to_string()).collect());
+            let result = Gate::CiGreen.evaluate(&evidence, &required(&["test"]));
+            (result.passed, result.reason, result.outside)
+        };
+        let other_base = "1 of 1 required checks have no successful run on 3f2a1c4; a pull \
+             request's run takes its workflow file from its base branch, so a check counts only \
+             from a branch of this repository whose every pull request has been into the default \
+             branch: push this work to a new branch and open its pull request into the default \
+             branch";
+        assert_eq!(
+            judged(Some(&[])),
+            (true, "1 of 1 checks passed on 3f2a1c4".into(), vec![])
+        );
+        // A pull request from the branch was into another base, or still is: its run took that
+        // base's workflow file. The base is its pusher's text.
+        assert_eq!(
+            judged(Some(&["agent-base"])),
+            (
+                false,
+                other_base.into(),
+                vec![
+                    "`test` from `github-actions` (it may have run for a pull request into \
+                     `agent-base`)"
+                        .into()
+                ]
+            )
+        );
+        assert_eq!(
+            judged(Some(&["a`b\nc", "d", "e", "f", "g", "h"])).2,
+            [
+                "`test` from `github-actions` (it may have run for a pull request into `abc`, `d`, \
+              `e`, `f`, `g`, and 1 more)"
+            ]
+        );
+        // No pull request from a branch of this repository: a fork's run, say.
+        assert_eq!(
+            judged(None),
+            (
+                false,
+                other_base.into(),
+                vec![
+                    "`test` from `github-actions` (it ran for no pull request from a branch of \
+                     this repository)"
+                        .into()
+                ]
+            )
+        );
+        // Two required checks, refused for the two reasons: each says what to do, in one order.
+        let mut evidence = reviewed(
+            &[("lint", "completed", Some("success")), PASSED],
+            "clean",
+            &[],
+        );
+        let runs = &mut evidence.pull_requests[0].check_runs;
+        runs[0].workflow_other_bases = Some(vec!["agent-base".into()]);
+        runs[1].workflow_sha = Some("0000000".into());
+        let result = Gate::CiGreen.evaluate(&evidence, &required(&["lint", "test"]));
+        assert_eq!(
+            result.reason,
+            "2 of 2 required checks have no successful run on 3f2a1c4; a check counts only when \
+             its workflow file is the default branch's: bring this branch's copy up to date with \
+             the default branch, and a person merges a real workflow change there first; a pull \
+             request's run takes its workflow file from its base branch, so a check counts only \
+             from a branch of this repository whose every pull request has been into the default \
+             branch: push this work to a new branch and open its pull request into the default \
+             branch"
+        );
     }
 
     #[test]
