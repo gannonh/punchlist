@@ -219,6 +219,19 @@ describe('the cache', () => {
     expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Old', labels: ['c'], status: 'todo' })
   })
 
+  test('a refused edit puts back the parent, project and milestone it changed', () => {
+    const punchlist = { id: 'p1', name: 'Punchlist' }
+    const before = row('PL-2', { parent: null, project: punchlist, milestone: { id: 'm1', name: 'Gate 0' } })
+    const edited = { ...before.issue, parent: 'PL-1', project: { id: 'p2', name: 'Groundwork' }, milestone: null }
+    const cache = fromList({ issues: [{ ...before, issue: edited }], last_event_seq: 4 })
+    const reverted = revertEdit(cache, before.issue, edited, ['parent', 'project', 'milestone'], 4)
+    expect(reverted.rows[0]?.issue).toMatchObject({
+      parent: null,
+      project: punchlist,
+      milestone: { id: 'm1', name: 'Gate 0' },
+    })
+  })
+
   test('a refused edit leaves a row the server sent since, even one with the same value', () => {
     const before = row('PL-1', { title: 'Old' })
     const edited = { ...before.issue, title: 'Mine' }

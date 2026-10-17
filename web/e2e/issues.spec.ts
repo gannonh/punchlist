@@ -181,3 +181,62 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   )
   expect(stored.status).toBe('in_progress')
 })
+
+test('set a parent, project and milestone in the sheet, and roll back a parent cycle', async ({ page, request }) => {
+  const person = bearer(personToken())
+  const create = async (title: string) =>
+    (
+      await ok<{ row: { issue: { id: string } } }>(
+        await request.post('/api/issues', { headers: person, data: { title, body: '' } }),
+      )
+    ).row.issue.id
+  const top = await create('Top of the tree')
+  const child = await create('Under the top')
+  const name = `Project of ${top}`
+  const project = await ok<{ id: string }>(await request.post('/api/projects', { headers: person, data: { name } }))
+  await ok(
+    await request.post(`/api/projects/${project.id}/milestones`, {
+      headers: person,
+      data: { name: 'Gate 0', pass_when: 'the tree shows in the sheet' },
+    }),
+  )
+  await signIn(page)
+
+  let sheet = await openSheet(page, child)
+  await sheet.getByLabel('Parent').fill(top)
+  await sheet.getByLabel('Parent').press('Enter')
+  await expect(sheet.getByText('Top of the tree')).toBeVisible()
+  // Held, so what the select shows is the optimistic edit.
+  let release: () => void = () => undefined
+  const held = new Promise<void>((resolve) => (release = resolve))
+  await page.route(`**/api/issues/${child}`, async (route) => {
+    if (route.request().method() === 'PATCH') await held
+    await route.continue()
+  })
+  await sheet.getByLabel('Project').click()
+  await page.getByRole('option', { name }).click()
+  await expect(sheet.getByLabel('Project')).toHaveText(name)
+  release()
+  await sheet.getByLabel('Milestone').click()
+  await page.getByRole('option', { name: 'Gate 0' }).click()
+  await expect(sheet.getByText('PASS when the tree shows in the sheet')).toBeVisible()
+  await page.unroute(`**/api/issues/${child}`)
+  await page.reload()
+  sheet = await openSheet(page, child)
+  await expect(sheet.getByLabel('Parent')).toHaveValue(top)
+  await expect(sheet.getByLabel('Project')).toHaveText(name)
+  await expect(sheet.getByLabel('Milestone')).toHaveText('Gate 0')
+  await page.keyboard.press('Escape')
+
+  sheet = await openSheet(page, top)
+  await sheet.getByLabel('Parent').fill(child)
+  await sheet.getByLabel('Parent').press('Enter')
+  await expect(
+    page.getByText(
+      `${top} was not changed. Refused (invalid): ${child} is under ${top} (${top} → ${child}), so it cannot be ${top}'s parent`,
+    ),
+  ).toBeVisible()
+  await expect(sheet.getByLabel('Parent')).toHaveValue('')
+  const stored = await ok<{ parent: string | null }>(await request.get(`/api/issues/${top}`, { headers: person }))
+  expect(stored.parent).toBeNull()
+})
