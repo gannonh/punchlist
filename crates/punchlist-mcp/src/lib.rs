@@ -365,6 +365,9 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: None,
         }
     }

@@ -879,13 +879,17 @@ const MAX_LABELS: usize = 20;
 const MAX_LABEL_CHARS: usize = 50;
 
 /// A `PATCH` request, parsed: the title trimmed and not empty, the labels trimmed, each
-/// neither empty nor too long, duplicates dropped in order.
+/// neither empty nor too long, duplicates dropped in order, and the parent trimmed and not
+/// empty.
 #[derive(Debug, PartialEq)]
 struct Edit {
     title: Option<String>,
     body: Option<String>,
     labels: Option<Vec<String>>,
     assignee: Option<Option<Uuid>>,
+    parent: Option<Option<String>>,
+    project: Option<Option<Uuid>>,
+    milestone: Option<Option<Uuid>>,
 }
 
 fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
@@ -918,18 +922,70 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         }
         None => None,
     };
+    let parent = match request.parent {
+        Some(Some(parent)) if parent.trim().is_empty() => {
+            return Err(ApiError::Invalid(
+                "a parent is an issue id such as PL-1, or null for none".into(),
+            ));
+        }
+        parent => parent.map(|p| p.map(|p| p.trim().to_string())),
+    };
     Ok(Edit {
         title,
         body: request.body,
         labels,
         assignee: request.assignee,
+        parent,
+        project: request.project,
+        milestone: request.milestone,
     })
 }
 
-/// Edit an issue's title, body, labels or assignee. Only the fields that change are
-/// written, with one `edited` event naming them; a request that changes nothing writes
-/// nothing and answers the workspace's latest sequence number. Nobody in a role the issue's
-/// status locks may edit it.
+/// Refuses a parent that is not an issue of the workspace, or that is the issue itself or
+/// one of the issues under it. The caller holds the workspace lock, which every edit takes
+/// first, so no other edit can close a cycle meanwhile.
+async fn check_parent(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    id: &str,
+    parent: &str,
+) -> Result<(), ApiError> {
+    if parent == id {
+        return Err(ApiError::Invalid(format!("{id} cannot be its own parent")));
+    }
+    // The parent, then each issue above it.
+    let above = sqlx::query_scalar!(
+        r#"WITH RECURSIVE above (id, parent_id, depth) AS (
+               SELECT id, parent_id, 0 FROM issue WHERE id = $1 AND workspace_id = $2
+               UNION ALL
+               SELECT i.id, i.parent_id, above.depth + 1
+               FROM issue i JOIN above ON i.id = above.parent_id
+           ) CYCLE id SET looped USING path
+           SELECT id AS "id!" FROM above WHERE NOT looped ORDER BY depth"#,
+        parent,
+        workspace_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if above.is_empty() {
+        return Err(ApiError::Invalid(format!(
+            "no issue {parent} in this workspace"
+        )));
+    }
+    if let Some(at) = above.iter().position(|issue| issue == id) {
+        let chain: Vec<&str> = above[..=at].iter().rev().map(String::as_str).collect();
+        return Err(ApiError::Invalid(format!(
+            "{parent} is under {id} ({}), so it cannot be {id}'s parent",
+            chain.join(" → ")
+        )));
+    }
+    Ok(())
+}
+
+/// Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+/// fields that change are written, with one `edited` event naming them; a request that
+/// changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
+/// in a role the issue's status locks may edit it.
 #[utoipa::path(
     patch,
     path = "/api/issues/{id}",
@@ -941,7 +997,7 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         (status = 403, body = ErrorBody, description = "An agent edited another issue than its run's."),
         (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
-        (status = 422, body = ErrorBody, description = "An empty title, a bad label, or an assignee that is not a person or agent of the workspace."),
+        (status = 422, body = ErrorBody, description = "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project."),
     )
 )]
 async fn update_issue(
@@ -954,8 +1010,8 @@ async fn update_issue(
     let mut tx = state.pool.begin().await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let current = sqlx::query!(
-        "SELECT status, title, body, labels, assignee_id FROM issue
-         WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        "SELECT status, title, body, labels, assignee_id, parent_id, project_id, milestone_id
+         FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
         id,
         actor.workspace_id,
     )
@@ -982,6 +1038,53 @@ async fn update_issue(
             )));
         }
     }
+    if let Some(Some(parent)) = &edit.parent {
+        check_parent(&mut tx, actor.workspace_id, &id, parent).await?;
+    }
+    if let Some(Some(project)) = edit.project {
+        let found = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM project WHERE id = $1 AND workspace_id = $2)
+                   AS "found!""#,
+            project,
+            actor.workspace_id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !found {
+            return Err(ApiError::Invalid(format!(
+                "no project {project} in this workspace"
+            )));
+        }
+    }
+    let parent = edit.parent.unwrap_or_else(|| current.parent_id.clone());
+    let project = edit.project.unwrap_or(current.project_id);
+    let milestone = match edit.milestone {
+        Some(Some(milestone)) => {
+            let found = sqlx::query!(
+                r#"SELECT m.name, m.project_id, p.name AS project_name
+                   FROM milestone m JOIN project p ON p.id = m.project_id
+                   WHERE m.id = $1 AND p.workspace_id = $2"#,
+                milestone,
+                actor.workspace_id,
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                ApiError::Invalid(format!("no milestone {milestone} in this workspace"))
+            })?;
+            if project != Some(found.project_id) {
+                return Err(ApiError::Invalid(format!(
+                    "milestone {} is in project {}; give {id} that project to set it",
+                    found.name, found.project_name
+                )));
+            }
+            Some(milestone)
+        }
+        Some(None) => None,
+        // A milestone is in its project, so a new project leaves none.
+        None if project != current.project_id => None,
+        None => current.milestone_id,
+    };
     let title = edit.title.filter(|t| *t != current.title);
     let body = edit.body.filter(|b| *b != current.body);
     let labels = edit.labels.filter(|l| *l != current.labels);
@@ -991,6 +1094,9 @@ async fn update_issue(
         ("body", body.is_some()),
         ("labels", labels.is_some()),
         ("assignee", assignee.is_some()),
+        ("parent", parent != current.parent_id),
+        ("project", project != current.project_id),
+        ("milestone", milestone != current.milestone_id),
     ]
     .into_iter()
     .filter_map(|(field, changed)| changed.then_some(field))
@@ -1007,7 +1113,7 @@ async fn update_issue(
             "UPDATE issue SET title = coalesce($2, title), body = coalesce($3, body),
                     labels = coalesce($4, labels),
                     assignee_id = CASE WHEN $5 THEN $6 ELSE assignee_id END,
-                    updated_at = now()
+                    parent_id = $7, project_id = $8, milestone_id = $9, updated_at = now()
              WHERE id = $1",
             id,
             title,
@@ -1015,6 +1121,9 @@ async fn update_issue(
             labels.as_deref(),
             assignee.is_some(),
             assignee.flatten(),
+            parent,
+            project,
+            milestone,
         )
         .execute(&mut *tx)
         .await?;
@@ -1044,6 +1153,9 @@ mod tests {
                 body: None,
                 labels: Some(vec!["ui".into(), "bug".into()]),
                 assignee: None,
+                parent: None,
+                project: None,
+                milestone: None,
             }
         );
         let refused = |request: UpdateIssue| parse_edit(request).unwrap_err().to_string();

@@ -589,3 +589,261 @@ async fn each_status_names_its_dispatch_and_whether_it_is_closed(pool: PgPool) {
         ]
     );
 }
+
+/// Creates a project, or with `project` a milestone in it, and returns its id.
+async fn create_placement(app: &Router, token: &str, project: Option<&str>, body: Value) -> String {
+    let uri = match project {
+        Some(id) => format!("/api/projects/{id}/milestones"),
+        None => "/api/projects".to_string(),
+    };
+    let (status, created) = call(app, token, "POST", &uri, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created["id"].as_str().unwrap().to_string()
+}
+
+#[sqlx::test]
+async fn projects_and_milestones_are_created_and_listed(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    let other = workspace(&pool, "OT", "Ola").await;
+    let punchlist =
+        create_placement(&app, &person.token, None, json!({"name": " Punchlist "})).await;
+    let groundwork =
+        create_placement(&app, &person.token, None, json!({"name": "Groundwork"})).await;
+    let gate0 = create_placement(
+        &app,
+        &person.token,
+        Some(&punchlist),
+        json!({"name": "Gate 0", "pass_when": "pl creates and moves an issue "}),
+    )
+    .await;
+    let gate1 = create_placement(
+        &app,
+        &person.token,
+        Some(&punchlist),
+        json!({"name": "Gate 1"}),
+    )
+    .await;
+    create_placement(&app, &other.token, None, json!({"name": "Theirs"})).await;
+
+    let (status, list) = call(&app, &person.token, "GET", "/api/projects", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list,
+        json!({"projects": [
+            {"id": punchlist, "name": "Punchlist", "milestones": [
+                {"id": gate0, "name": "Gate 0", "pass_when": "pl creates and moves an issue"},
+                {"id": gate1, "name": "Gate 1", "pass_when": ""},
+            ]},
+            {"id": groundwork, "name": "Groundwork", "milestones": []},
+        ]})
+    );
+
+    let refused = [
+        (
+            "/api/projects".to_string(),
+            json!({"name": "Punchlist"}),
+            "a project named Punchlist already exists".to_string(),
+        ),
+        (
+            "/api/projects".to_string(),
+            json!({"name": " "}),
+            "a project needs a name".to_string(),
+        ),
+        (
+            "/api/projects".to_string(),
+            json!({"name": "x".repeat(101)}),
+            "a project name is at most 100 characters".to_string(),
+        ),
+        (
+            format!("/api/projects/{punchlist}/milestones"),
+            json!({"name": "Gate 0"}),
+            "project Punchlist already has a milestone named Gate 0".to_string(),
+        ),
+    ];
+    for (uri, body, message) in refused {
+        let (status, answer) = call(&app, &person.token, "POST", &uri, Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer, json!({"code": "invalid", "message": message}));
+    }
+    // A name one project's milestone has is free in another project.
+    create_placement(
+        &app,
+        &person.token,
+        Some(&groundwork),
+        json!({"name": "Gate 0"}),
+    )
+    .await;
+    let (status, answer) = call(
+        &app,
+        &other.token,
+        "POST",
+        &format!("/api/projects/{punchlist}/milestones"),
+        Some(json!({"name": "Mine"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+    assert_eq!(
+        answer,
+        json!({"code": "not_found", "message": format!("project {punchlist} not found")})
+    );
+}
+
+#[sqlx::test]
+async fn an_edit_sets_and_clears_the_parent_project_and_milestone(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    create(&app, &person.token, "Epic").await;
+    create(&app, &person.token, "Slice").await;
+    let punchlist = create_placement(&app, &person.token, None, json!({"name": "Punchlist"})).await;
+    let groundwork =
+        create_placement(&app, &person.token, None, json!({"name": "Groundwork"})).await;
+    let gate0 = create_placement(
+        &app,
+        &person.token,
+        Some(&punchlist),
+        json!({"name": "Gate 0"}),
+    )
+    .await;
+
+    let (status, placed) = patch(
+        &app,
+        &person.token,
+        "PL-2",
+        json!({"parent": " PL-1 ", "project": punchlist, "milestone": gate0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{placed}");
+    assert_eq!(placed["seq"], 3);
+    let issue = &placed["row"]["issue"];
+    assert_eq!(issue["parent"], "PL-1");
+    assert_eq!(
+        issue["project"],
+        json!({"id": punchlist, "name": "Punchlist"})
+    );
+    assert_eq!(issue["milestone"], json!({"id": gate0, "name": "Gate 0"}));
+    let (_, shown) = call(&app, &person.token, "GET", "/api/issues/PL-2", None).await;
+    assert_eq!(
+        (
+            &shown["parent"],
+            &shown["project"]["name"],
+            &shown["milestone"]["name"]
+        ),
+        (&json!("PL-1"), &json!("Punchlist"), &json!("Gate 0"))
+    );
+
+    // Another project leaves no milestone, since a milestone is in its project.
+    let (_, moved) = patch(&app, &person.token, "PL-2", json!({"project": groundwork})).await;
+    assert_eq!(moved["row"]["issue"]["project"]["name"], "Groundwork");
+    assert_eq!(moved["row"]["issue"]["milestone"], Value::Null);
+    let (_, cleared) = patch(
+        &app,
+        &person.token,
+        "PL-2",
+        json!({"parent": null, "project": null, "milestone": null}),
+    )
+    .await;
+    assert_eq!(cleared["seq"], 5);
+    let issue = &cleared["row"]["issue"];
+    assert_eq!(
+        (&issue["parent"], &issue["project"], &issue["milestone"]),
+        (&Value::Null, &Value::Null, &Value::Null)
+    );
+    let (_, same) = patch(&app, &person.token, "PL-2", json!({"parent": null})).await;
+    assert_eq!(same["seq"], 5);
+
+    let stored: (Option<String>, Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as("SELECT parent_id, project_id, milestone_id FROM issue WHERE id = 'PL-2'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, (None, None, None));
+    let fields = |f: &[&str]| Some(f.iter().map(|f| f.to_string()).collect());
+    assert_eq!(
+        events(&pool).await[2..],
+        [
+            (
+                3,
+                "edited".to_string(),
+                fields(&["parent", "project", "milestone"])
+            ),
+            (4, "edited".to_string(), fields(&["project", "milestone"])),
+            (5, "edited".to_string(), fields(&["parent", "project"])),
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn a_parent_cycle_and_anything_outside_the_workspace_or_project_are_refused(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    let other = workspace(&pool, "OT", "Ola").await;
+    for title in ["Top", "Middle", "Bottom"] {
+        create(&app, &person.token, title).await;
+    }
+    for (child, parent) in [("PL-2", "PL-1"), ("PL-3", "PL-2")] {
+        let (status, body) = patch(&app, &person.token, child, json!({"parent": parent})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let punchlist = create_placement(&app, &person.token, None, json!({"name": "Punchlist"})).await;
+    let groundwork =
+        create_placement(&app, &person.token, None, json!({"name": "Groundwork"})).await;
+    let gate0 = create_placement(
+        &app,
+        &person.token,
+        Some(&punchlist),
+        json!({"name": "Gate 0"}),
+    )
+    .await;
+    create(&app, &other.token, "Theirs").await;
+    let theirs = create_placement(&app, &other.token, None, json!({"name": "Theirs"})).await;
+    let their_gate =
+        create_placement(&app, &other.token, Some(&theirs), json!({"name": "Gate 0"})).await;
+    let before = events(&pool).await.len();
+
+    let refused = [
+        (
+            json!({"parent": "PL-3"}),
+            "PL-3 is under PL-1 (PL-1 → PL-2 → PL-3), so it cannot be PL-1's parent".to_string(),
+        ),
+        (
+            json!({"parent": "PL-1"}),
+            "PL-1 cannot be its own parent".to_string(),
+        ),
+        (
+            json!({"parent": "OT-1"}),
+            "no issue OT-1 in this workspace".to_string(),
+        ),
+        (
+            json!({"parent": " "}),
+            "a parent is an issue id such as PL-1, or null for none".to_string(),
+        ),
+        (
+            json!({"project": theirs}),
+            format!("no project {theirs} in this workspace"),
+        ),
+        (
+            json!({"project": punchlist, "milestone": their_gate}),
+            format!("no milestone {their_gate} in this workspace"),
+        ),
+        (
+            json!({"milestone": gate0}),
+            "milestone Gate 0 is in project Punchlist; give PL-1 that project to set it"
+                .to_string(),
+        ),
+        (
+            json!({"project": groundwork, "milestone": gate0}),
+            "milestone Gate 0 is in project Punchlist; give PL-1 that project to set it"
+                .to_string(),
+        ),
+    ];
+    for (body, message) in refused {
+        let (status, answer) = patch(&app, &person.token, "PL-1", body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer, json!({"code": "invalid", "message": message}));
+    }
+    let top: (Option<String>, Option<Uuid>) =
+        sqlx::query_as("SELECT parent_id, project_id FROM issue WHERE id = 'PL-1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(top, (None, None));
+    assert_eq!(events(&pool).await.len(), before);
+}

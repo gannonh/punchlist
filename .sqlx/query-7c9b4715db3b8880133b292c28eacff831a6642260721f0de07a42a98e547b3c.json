@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT status, title, body, labels, assignee_id FROM issue\n         WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+  "query": "SELECT status, title, body, labels, assignee_id, parent_id, project_id, milestone_id\n         FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,39 @@
             "name": "assignee_id"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "parent_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "parent_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "project_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "project_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "milestone_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "milestone_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -70,8 +103,11 @@
       false,
       false,
       false,
+      true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "0111f04b7c3ac7c1c4702eb543908ad59e766b4f01afdeead517e8f66906fdfb"
+  "hash": "7c9b4715db3b8880133b292c28eacff831a6642260721f0de07a42a98e547b3c"
 }

@@ -3,8 +3,8 @@
 
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ChecksState, GateSummary, Issue, IssueRow, PullRequestState, PullRequestStatus,
-    PullRequestSummary, RunSummary, plain_pull_request_url,
+    ChecksState, GateSummary, Issue, IssueRow, MilestoneRef, ProjectRef, PullRequestState,
+    PullRequestStatus, PullRequestSummary, RunSummary, plain_pull_request_url,
 };
 use punchlist_core::display_name;
 use uuid::Uuid;
@@ -71,6 +71,11 @@ struct Loaded {
     labels: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    parent_id: Option<String>,
+    project_id: Option<Uuid>,
+    project_name: Option<String>,
+    milestone_id: Option<Uuid>,
+    milestone_name: Option<String>,
     assignee_id: Option<Uuid>,
     assignee_name: Option<String>,
     assignee_role: Option<String>,
@@ -100,6 +105,8 @@ async fn load(
     let rows = sqlx::query_as!(
         Loaded,
         r#"SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,
+                  i.parent_id, p.id AS "project_id?", p.name AS "project_name?",
+                  m.id AS "milestone_id?", m.name AS "milestone_name?",
                   a.id AS "assignee_id?", a.name AS "assignee_name?",
                   a.role AS "assignee_role?", a.kind AS "assignee_kind?",
                   running.agent AS "running_agent?", running.started_at AS "running_since?",
@@ -109,6 +116,8 @@ async fn load(
                   pr.number AS "pr_number?", pr.state AS "pr_state?", pr.draft AS "pr_draft?",
                   pr.checks AS "pr_checks?", pr.url AS "pr_url?"
            FROM issue i
+           LEFT JOIN project p ON p.id = i.project_id
+           LEFT JOIN milestone m ON m.id = i.milestone_id
            LEFT JOIN actor a ON a.id = i.assignee_id
            LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'
            LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL
@@ -184,6 +193,10 @@ fn parse(row: Loaded) -> sqlx::Result<(Issue, RunSummary, Option<PullRequestSumm
         status: row.status,
         assignee,
         labels: row.labels,
+        parent: row.parent_id,
+        project: (row.project_id.zip(row.project_name)).map(|(id, name)| ProjectRef { id, name }),
+        milestone: (row.milestone_id.zip(row.milestone_name))
+            .map(|(id, name)| MilestoneRef { id, name }),
         created_at: row.created_at,
         updated_at: row.updated_at,
         waiting_on_person: None,

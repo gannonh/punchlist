@@ -270,7 +270,7 @@
         }
       },
       "patch": {
-        "summary": "Edit an issue's title, body, labels or assignee. Only the fields that change are\nwritten, with one `edited` event naming them; a request that changes nothing writes\nnothing and answers the workspace's latest sequence number. Nobody in a role the issue's\nstatus locks may edit it.",
+        "summary": "Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the\nfields that change are written, with one `edited` event naming them; a request that\nchanges nothing writes nothing and answers the workspace's latest sequence number. Nobody\nin a role the issue's status locks may edit it.",
         "operationId": "update_issue",
         "parameters": [
           {
@@ -342,7 +342,7 @@
             }
           },
           "422": {
-            "description": "An empty title, a bad label, or an assignee that is not a person or agent of the workspace.",
+            "description": "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project.",
             "content": {
               "application/json": {
                 "schema": {
@@ -880,6 +880,143 @@
           },
           "409": {
             "description": "Refused; the message names the rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "summary": "List the workspace's projects, oldest first, each with its milestones, oldest first.",
+        "operationId": "list_projects",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a project in the workspace.",
+        "operationId": "create_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An empty or long name, or one the workspace already has.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/milestones": {
+      "post": {
+        "summary": "Create a milestone in one of the workspace's projects.",
+        "operationId": "create_milestone",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The project's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMilestone"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An empty or long name, or one the project already has.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2096,6 +2233,36 @@
           }
         }
       },
+      "CreateMilestone": {
+        "type": "object",
+        "description": "`POST /api/projects/{id}/milestones`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Trimmed, 1 to 100 characters, unique in the project."
+          },
+          "pass_when": {
+            "type": "string",
+            "description": "What must be true for the milestone to pass."
+          }
+        }
+      },
+      "CreateProject": {
+        "type": "object",
+        "description": "`POST /api/projects`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Trimmed, 1 to 100 characters, unique in the workspace."
+          }
+        }
+      },
       "CreatedAgent": {
         "type": "object",
         "description": "The response to `POST /api/actors`.",
@@ -2341,7 +2508,7 @@
                 "items": {
                   "type": "string"
                 },
-                "description": "Among `title`, `body`, `labels` and `assignee`, in that order."
+                "description": "Among `title`, `body`, `labels`, `assignee`, `parent`, `project` and `milestone`, in\nthat order."
               },
               "kind": {
                 "type": "string",
@@ -2636,6 +2803,34 @@
             },
             "description": "In the order they were set."
           },
+          "milestone": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MilestoneRef",
+                "description": "One of `project`'s milestones."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The parent issue's id, such as `PL-1`; `None` when the issue has none."
+          },
+          "project": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProjectRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "type": "string",
             "description": "The workflow's status key, such as `in_progress`."
@@ -2804,6 +2999,43 @@
           }
         }
       },
+      "Milestone": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "pass_when"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pass_when": {
+            "type": "string",
+            "description": "What must be true for the milestone to pass; empty when nobody wrote it."
+          }
+        }
+      },
+      "MilestoneRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "MoveIssue": {
         "type": "object",
         "description": "`POST /api/issues/{id}/transitions`.",
@@ -2837,6 +3069,62 @@
               "null"
             ],
             "description": "Set when the move put the issue in Start under an active workflow version that fails\nvalidation, so no runner can claim it: the validation problem."
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "milestones"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "milestones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Milestone"
+            },
+            "description": "Oldest first."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectList": {
+        "type": "object",
+        "description": "`GET /api/projects`.",
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            },
+            "description": "Oldest first."
+          }
+        }
+      },
+      "ProjectRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -3690,6 +3978,29 @@
               "type": "string"
             },
             "description": "Each trimmed, 1 to 50 characters; at most 20, duplicates dropped."
+          },
+          "milestone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A milestone of the project the issue has after the edit, or `null` for none."
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An issue id of the workspace, such as `PL-1`, or `null` for none. Neither the issue\nitself nor one of the issues under it."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A project's id, or `null` for none. A change of project clears the milestone, unless\nthe same request sets one."
           },
           "title": {
             "type": "string"
