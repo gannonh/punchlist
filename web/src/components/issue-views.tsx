@@ -1,9 +1,22 @@
 // The two approved layouts (prototypes/issue-list/): the grouped list and the board.
-import { memo } from 'react'
+import { memo, useLayoutEffect } from 'react'
 import { Lock } from 'lucide-react'
 import { cn } from 'cn'
 import { Assignee, Gates, Labels, LockBadge, PullRequest, Run, StatusDot, TransitionNote } from '@/components/atoms'
 import { peopleOnly, rowView, type Group, type IssueRow, type Transition, type Transitions } from '@/model/issues'
+
+/**
+ * Records a `pl:render` measure for each commit of the list or the board, from the start of the view's render to
+ * its DOM being updated, so a live check reads `performance.getEntriesByName('pl:render')`.
+ */
+function useRenderMeasure(layout: 'list' | 'board', groups: Group[]) {
+  const start = `pl:render-start:${layout}`
+  performance.mark(start)
+  useLayoutEffect(() => {
+    const rows = groups.reduce((n, group) => n + group.rows.length, 0)
+    performance.measure('pl:render', { start, detail: { layout, rows } })
+  })
+}
 
 interface RowProps {
   row: IssueRow
@@ -110,13 +123,14 @@ interface ViewProps {
 }
 
 export function ListView({ groups, selected, transitions, now, onPick, onDismiss }: ViewProps) {
+  useRenderMeasure('list', groups)
   return (
     <div data-layout="list">
       {groups
         .filter((group) => group.rows.length > 0)
         .map((group) => (
           <section key={group.status.key} className="mb-3.5" data-group={group.status.key}>
-            <div className="sticky top-0 z-2 bg-background px-2 py-1.5">
+            <div className="px-2 py-1.5">
               <GroupHead group={group} />
             </div>
             <div className="overflow-hidden rounded-lg border bg-card" role="listbox" aria-label={group.status.name}>
@@ -144,6 +158,7 @@ export function BoardView({
   ...props
 }: ViewProps & { column: string; onColumn: (key: string) => void }) {
   const { groups, selected, transitions, now, onPick, onDismiss } = props
+  useRenderMeasure('board', groups)
   return (
     <div data-layout="board">
       {/* On a narrow screen the board shows one column at a time, chosen from this strip. */}

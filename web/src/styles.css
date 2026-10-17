@@ -83,10 +83,6 @@
   * {
     @apply border-border outline-ring/50;
   }
-  html,
-  body {
-    overflow-x: hidden;
-  }
   body {
     @apply bg-background font-sans text-body text-foreground antialiased;
     line-height: 1.45;

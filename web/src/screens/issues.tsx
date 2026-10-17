@@ -86,15 +86,6 @@ function useNow(): Date {
   return now
 }
 
-/** Records `pl:render` for each commit of the list or board: from this render's start to the DOM being updated. */
-function useRenderMeasure(layout: Layout, rows: number) {
-  const start = `pl:render-start:${layout}`
-  performance.mark(start)
-  useLayoutEffect(() => {
-    performance.measure('pl:render', { start, detail: { layout, rows } })
-  })
-}
-
 export function IssuesScreen({
   workspaceId,
   me,
@@ -138,8 +129,6 @@ export function IssuesScreen({
   useLayoutEffect(() => {
     currentRef.current = current
   })
-
-  useRenderMeasure(layout, visible.length)
 
   useEffect(() => {
     if (current) document.querySelector(`[data-issue="${current}"]`)?.scrollIntoView({ block: 'nearest' })
