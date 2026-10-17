@@ -224,7 +224,7 @@ export function IssuesScreen({
   const viewProps = { groups, selected: current, transitions, now, onPick: pick, onDismiss: dismiss }
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
       <header className="sticky top-0 z-5 flex flex-wrap items-center gap-x-3.5 gap-y-2.5 border-b bg-background px-3 py-2 sm:px-4 sm:py-2.5">
         <div className="flex items-center gap-2 text-lead font-semibold">Punchlist</div>
         <div className="inline-flex rounded-lg border bg-card p-0.5" role="group" aria-label="Layout">

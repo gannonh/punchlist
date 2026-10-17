@@ -12,6 +12,7 @@ A signed-in person opens the server's URL and sees the workspace's issues groupe
 - `web-create`: `New issue` opens a dialog (Title, Body); `Create issue` adds the row to Backlog when the server answers.
 - `web-edit`: the side sheet edits Title and Labels (Enter or blur saves) and Assignee. Edits show at once; a refused edit puts the old value back and toasts `<id> was not changed. Refused (<code>): <message>`.
 - `web-transition`: a status change is not optimistic. The row shows `[data-transition=pending]` `Moving to <Status>…` until the server answers, then either moves or shows `[data-transition=refused]` `<Status>: Refused (<code>): <message>` (for `gate_failed`: `Refused (gate_failed): gate <gate> failed: <reason>`), and stays where it was.
+- `data-last-seq` on the screen's root element is the last event sequence the app's cache applied, from the list or the stream. Compare it to `SELECT max(seq) FROM event`.
 - `web-perf`: each commit of the list or board records a `pl:render` measure (`detail: {layout, rows}`), from the start of the view's render to its DOM update. Layout and paint are not included.
 
 ## How to get to it (user POV)
