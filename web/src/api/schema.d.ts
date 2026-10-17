@@ -599,6 +599,15 @@ export interface components {
              */
             workflow_default_sha?: string | null;
             /**
+             * @description The branches other than the default branch that a pull request from the run's head
+             *     branch has been into, open or closed, earlier bases too. A pull request's run takes its
+             *     workflow file from the head commit merged into the base, and GitHub does not say which
+             *     pull request a run was for, so any of them may have run it. Empty when every one was
+             *     into the default branch; absent when no pull request from a branch of the workspace's
+             *     repository is behind the run, and wherever `workflow_path` is.
+             */
+            workflow_other_bases?: string[] | null;
+            /**
              * @description The workflow file of the GitHub Actions job behind the run, such as
              *     `.github/workflows/ci.yml`, when a gated request's read of GitHub found one that a runner
              *     took. Absent for another app's run, for a check run that no job ran (anything with

@@ -155,6 +155,25 @@ fn review_threads_query() -> String {
     )
 }
 
+/// Every pull request from a branch of the repository, open or closed, with its base and its
+/// base changes; a fork's has `isCrossRepository`. A page of each, which `other_bases` checks.
+const BRANCH_PULL_REQUESTS_QUERY: &str =
+    "query($owner: String!, $name: String!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    pullRequests(headRefName: $branch, first: 100, states: [OPEN, CLOSED, MERGED]) {
+      pageInfo { hasNextPage }
+      nodes {
+        baseRefName isCrossRepository
+        timelineItems(itemTypes: [BASE_REF_CHANGED_EVENT], first: 100) {
+          pageInfo { hasNextPage }
+          nodes { ... on BaseRefChangedEvent { previousRefName currentRefName } }
+        }
+      }
+    }
+  }
+}";
+
 /// A repository's default branch and the commit at its head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Head {
@@ -382,9 +401,12 @@ impl GithubClient {
     ///
     /// The jobs are each run's latest attempt (GitHub's default filter), so while a rerun waits
     /// for a runner no job stands behind the commit's runs of that name, and none counts.
-    // ponytail: one request for the runs, one per run in `suites` for its jobs and two per
-    // workflow file, each list within `pages`' cap. Cache the default branch's blobs per
-    // request if a refresh over many pull requests makes this cost.
+    ///
+    /// Each job also has the other bases its run can have merged the commit into
+    /// (`other_bases`), from its run's head branch: a run names no pull request of its own.
+    // ponytail: one request for the runs, one per run in `suites` for its jobs, two per
+    // workflow file and one per head branch, each list within `pages`' cap. Cache the default
+    // branch's blobs per request if a refresh over many pull requests makes this cost.
     pub(crate) async fn workflow_jobs(
         &self,
         owner: &str,
@@ -398,6 +420,16 @@ impl GithubClient {
             path: String,
             #[serde(default)]
             check_suite_id: Option<i64>,
+            /// The branch of the run's event: for a pull request's run, its head branch.
+            #[serde(default)]
+            head_branch: Option<String>,
+            /// Where that branch is: a fork's, for a pull request from one.
+            #[serde(default)]
+            head_repository: Option<RunRepository>,
+        }
+        #[derive(Deserialize)]
+        struct RunRepository {
+            full_name: String,
         }
         #[derive(Deserialize)]
         struct Job {
@@ -410,10 +442,12 @@ impl GithubClient {
             runner_id: Option<i64>,
         }
         let token = self.token(owner, name).await?;
+        let repository = format!("{owner}/{name}");
         let runs = format!("/repos/{owner}/{name}/actions/runs?head_sha={sha}");
         let runs: Vec<Run> = self.pages(&token, &runs, "workflow_runs").await?;
         let mut jobs = HashMap::new();
         let mut blobs: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let mut bases: HashMap<String, Option<Vec<String>>> = HashMap::new();
         let in_suites = |run: &Run| run.check_suite_id.is_some_and(|id| suites.contains(&id));
         for run in runs.into_iter().filter(in_suites) {
             let listed = format!(
@@ -423,16 +457,31 @@ impl GithubClient {
             let listed: Vec<Job> = self.pages(&token, &listed, "jobs").await?;
             // A hosted runner's id is a large number; 0 is not one.
             let ran = |job: &Job| job.runner_id.unwrap_or(0) != 0;
+            // A branch of a fork, or none, has no pull request here that the run was for.
+            let branch = (run.head_branch.as_ref()).filter(|_| {
+                (run.head_repository.as_ref())
+                    .is_some_and(|head| head.full_name.eq_ignore_ascii_case(&repository))
+            });
             for job in listed.into_iter().filter(ran) {
                 let blob = match blobs.get(&run.path) {
                     Some(blob) => blob.clone(),
                     None => {
-                        let repository = format!("{owner}/{name}");
                         let at = |r| self.blob(&token, &repository, &run.path, r);
                         let blob = (at(Some(sha)).await?, at(None).await?);
                         blobs.insert(run.path.clone(), blob.clone());
                         blob
                     }
+                };
+                let other_bases = match branch {
+                    None => None,
+                    Some(branch) => match bases.get(branch) {
+                        Some(other) => other.clone(),
+                        None => {
+                            let other = self.other_bases(&token, owner, name, branch).await?;
+                            bases.insert(branch.clone(), other.clone());
+                            other
+                        }
+                    },
                 };
                 jobs.insert(
                     job.id,
@@ -443,11 +492,99 @@ impl GithubClient {
                         path: run.path.clone(),
                         sha: blob.0,
                         default_sha: blob.1,
+                        other_bases,
                     },
                 );
             }
         }
         Ok(jobs)
+    }
+
+    /// The bases other than the default branch that the pull requests from `branch` of this
+    /// repository have been into, open or closed, each one's earlier bases too (GraphQL's
+    /// `BaseRefChangedEvent`), sorted; `None` when no pull request is from it. A pull request's
+    /// run takes its workflow file from the head commit merged into its base, so these are every
+    /// base a run from the branch can have had. More than a page of pull requests, or of one's
+    /// base changes, is an error: a list cut short could leave a base out.
+    async fn other_bases(
+        &self,
+        token: &str,
+        owner: &str,
+        name: &str,
+        branch: &str,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Repository {
+            default_branch_ref: Option<Named>,
+            pull_requests: Nodes<PullRequest>,
+        }
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Nodes<T> {
+            page_info: PageInfo,
+            nodes: Vec<T>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PullRequest {
+            base_ref_name: String,
+            is_cross_repository: bool,
+            timeline_items: Nodes<BaseChange>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BaseChange {
+            previous_ref_name: String,
+            current_ref_name: String,
+        }
+        let query = serde_json::json!({
+            "query": BRANCH_PULL_REQUESTS_QUERY,
+            "variables": {"owner": owner, "name": name, "branch": branch},
+        });
+        let mut answer: serde_json::Value = self
+            .send(token, reqwest::Method::POST, "/graphql", Some(&query))
+            .await?
+            .json()
+            .await?;
+        let Some(repository) = answer
+            .pointer_mut("/data/repository")
+            .map(serde_json::Value::take)
+        else {
+            anyhow::bail!(
+                "GitHub GraphQL has no pull requests from {branch:?}: {}",
+                answer["errors"]
+            );
+        };
+        let repository: Repository = serde_json::from_value(repository)?;
+        let default = (repository.default_branch_ref)
+            .context("GitHub GraphQL names no default branch")?
+            .name;
+        let pulls = repository.pull_requests;
+        anyhow::ensure!(
+            !pulls.page_info.has_next_page,
+            "more pull requests are from {branch:?} than are read"
+        );
+        let mut other = BTreeSet::new();
+        let mut any = false;
+        for pr in pulls.nodes.into_iter().filter(|pr| !pr.is_cross_repository) {
+            let changes = pr.timeline_items;
+            anyhow::ensure!(
+                !changes.page_info.has_next_page,
+                "a pull request from {branch:?} changed its base more often than is read"
+            );
+            any = true;
+            other.insert(pr.base_ref_name);
+            for change in changes.nodes {
+                other.extend([change.previous_ref_name, change.current_ref_name]);
+            }
+        }
+        other.remove(&default);
+        Ok(any.then(|| other.into_iter().collect()))
     }
 
     /// Every item of a REST list that answers `{"total_count": n, "<key>": [...]}`, a page of
