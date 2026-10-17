@@ -1037,6 +1037,9 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
         };
         let mut moved = EventDetail::transition(
@@ -1147,6 +1150,9 @@ mod tests {
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);

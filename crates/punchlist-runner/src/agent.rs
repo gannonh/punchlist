@@ -550,6 +550,9 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             updated_at: now,
             assignee: None,
             labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
             waiting_on_person: None,
         }
     }
