@@ -3,9 +3,10 @@
 
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
-    CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist, Heartbeat, HeartbeatReply, Issue,
-    IssueList, IssueWritten, Lease, MoveIssue, Moved, PROOF_TYPES, Proof, ProofKind, PullRequest,
-    PullRequestsNow, RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList,
+    CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist,
+    Heartbeat, HeartbeatReply, Issue, IssueList, IssueWritten, Lease, Milestone, MoveIssue, Moved,
+    PROOF_TYPES, Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow,
+    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, UpdateIssue,
     WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
@@ -68,6 +69,33 @@ impl Client {
 
     pub async fn get_issue(&self, id: &str) -> Result<Issue, ClientError> {
         self.send::<(), _>(Method::GET, &["issues", id], None).await
+    }
+
+    /// Edits an issue's fields; an absent field is left as it is.
+    pub async fn update_issue(
+        &self,
+        id: &str,
+        request: &UpdateIssue,
+    ) -> Result<IssueWritten, ClientError> {
+        self.send(Method::PATCH, &["issues", id], Some(request))
+            .await
+    }
+
+    pub async fn list_projects(&self) -> Result<ProjectList, ClientError> {
+        self.send::<(), _>(Method::GET, &["projects"], None).await
+    }
+
+    pub async fn create_project(&self, request: &CreateProject) -> Result<Project, ClientError> {
+        self.send(Method::POST, &["projects"], Some(request)).await
+    }
+
+    pub async fn create_milestone(
+        &self,
+        project_id: &str,
+        request: &CreateMilestone,
+    ) -> Result<Milestone, ClientError> {
+        let path = ["projects", project_id, "milestones"];
+        self.send(Method::POST, &path, Some(request)).await
     }
 
     pub async fn move_issue(&self, id: &str, to: &str) -> Result<Moved, ClientError> {

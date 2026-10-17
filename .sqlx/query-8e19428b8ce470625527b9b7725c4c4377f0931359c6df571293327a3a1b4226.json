@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,\n                  a.id AS \"assignee_id?\", a.name AS \"assignee_name?\",\n                  a.role AS \"assignee_role?\", a.kind AS \"assignee_kind?\",\n                  running.agent AS \"running_agent?\", running.started_at AS \"running_since?\",\n                  waiting.agent AS \"queued_agent?\",\n                  last.agent AS \"last_agent?\", last.outcome AS \"last_outcome?\",\n                  last.finished_at AS \"last_finished_at?\", last.reason AS \"last_reason?\",\n                  pr.number AS \"pr_number?\", pr.state AS \"pr_state?\", pr.draft AS \"pr_draft?\",\n                  pr.checks AS \"pr_checks?\", pr.url AS \"pr_url?\"\n           FROM issue i\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'\n           LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL\n           LEFT JOIN LATERAL (\n               SELECT r.agent, r.outcome, r.finished_at,\n                      (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id\n                       ORDER BY t.attempt DESC LIMIT 1) AS reason\n               FROM run r WHERE r.issue_id = i.id AND r.status = i.status\n               ORDER BY r.started_at DESC LIMIT 1) last ON true\n           LEFT JOIN LATERAL (\n               SELECT p.number, p.state, p.draft, p.checks, p.url FROM pull_request p\n               WHERE p.issue_id = i.id ORDER BY p.number DESC LIMIT 1) pr ON true\n           WHERE i.workspace_id = $1 AND ($2::text[] IS NULL OR i.id = ANY($2))\n           ORDER BY i.number",
+  "query": "SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,\n                  i.parent_id, p.id AS \"project_id?\", p.name AS \"project_name?\",\n                  m.id AS \"milestone_id?\", m.name AS \"milestone_name?\",\n                  a.id AS \"assignee_id?\", a.name AS \"assignee_name?\",\n                  a.role AS \"assignee_role?\", a.kind AS \"assignee_kind?\",\n                  running.agent AS \"running_agent?\", running.started_at AS \"running_since?\",\n                  waiting.agent AS \"queued_agent?\",\n                  last.agent AS \"last_agent?\", last.outcome AS \"last_outcome?\",\n                  last.finished_at AS \"last_finished_at?\", last.reason AS \"last_reason?\",\n                  pr.number AS \"pr_number?\", pr.state AS \"pr_state?\", pr.draft AS \"pr_draft?\",\n                  pr.checks AS \"pr_checks?\", pr.url AS \"pr_url?\"\n           FROM issue i\n           LEFT JOIN project p ON p.id = i.project_id\n           LEFT JOIN milestone m ON m.id = i.milestone_id\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'\n           LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL\n           LEFT JOIN LATERAL (\n               SELECT r.agent, r.outcome, r.finished_at,\n                      (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id\n                       ORDER BY t.attempt DESC LIMIT 1) AS reason\n               FROM run r WHERE r.issue_id = i.id AND r.status = i.status\n               ORDER BY r.started_at DESC LIMIT 1) last ON true\n           LEFT JOIN LATERAL (\n               SELECT p.number, p.state, p.draft, p.checks, p.url FROM pull_request p\n               WHERE p.issue_id = i.id ORDER BY p.number DESC LIMIT 1) pr ON true\n           WHERE i.workspace_id = $1 AND ($2::text[] IS NULL OR i.id = ANY($2))\n           ORDER BY i.number",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,61 @@
       },
       {
         "ordinal": 7,
+        "name": "parent_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "parent_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "project_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "project",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "project_name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "milestone_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "milestone_name?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
         "name": "assignee_id?",
         "type_info": "Uuid",
         "origin": {
@@ -92,7 +147,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 13,
         "name": "assignee_name?",
         "type_info": "Text",
         "origin": {
@@ -103,7 +158,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 14,
         "name": "assignee_role?",
         "type_info": "Text",
         "origin": {
@@ -114,7 +169,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 15,
         "name": "assignee_kind?",
         "type_info": "Text",
         "origin": {
@@ -125,7 +180,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 16,
         "name": "running_agent?",
         "type_info": "Text",
         "origin": {
@@ -136,7 +191,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 17,
         "name": "running_since?",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +202,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 18,
         "name": "queued_agent?",
         "type_info": "Text",
         "origin": {
@@ -158,7 +213,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 19,
         "name": "last_agent?",
         "type_info": "Text",
         "origin": {
@@ -169,7 +224,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 20,
         "name": "last_outcome?",
         "type_info": "Text",
         "origin": {
@@ -180,7 +235,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 21,
         "name": "last_finished_at?",
         "type_info": "Timestamptz",
         "origin": {
@@ -191,13 +246,13 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 22,
         "name": "last_reason?",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 18,
+        "ordinal": 23,
         "name": "pr_number?",
         "type_info": "Int8",
         "origin": {
@@ -208,7 +263,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 24,
         "name": "pr_state?",
         "type_info": "Text",
         "origin": {
@@ -219,7 +274,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 25,
         "name": "pr_draft?",
         "type_info": "Bool",
         "origin": {
@@ -230,7 +285,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 26,
         "name": "pr_checks?",
         "type_info": "Text",
         "origin": {
@@ -241,7 +296,7 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 27,
         "name": "pr_url?",
         "type_info": "Text",
         "origin": {
@@ -266,23 +321,28 @@
       false,
       false,
       false,
-      false,
-      false,
-      false,
       true,
-      false,
-      false,
-      false,
-      false,
-      false,
       true,
-      null,
-      false,
-      false,
-      false,
-      false,
-      false
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "ef1a84a249178e33fba782e7a9bc37bb87ac3b4dbc1a1d09de3b7acbd8e819a9"
+  "hash": "8e19428b8ce470625527b9b7725c4c4377f0931359c6df571293327a3a1b4226"
 }

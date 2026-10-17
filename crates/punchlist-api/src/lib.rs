@@ -40,6 +40,14 @@ pub struct Issue {
     /// In the order they were set.
     #[serde(default)]
     pub labels: Vec<String>,
+    /// The parent issue's id, such as `PL-1`; `None` when the issue has none.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub project: Option<ProjectRef>,
+    /// One of `project`'s milestones.
+    #[serde(default)]
+    pub milestone: Option<MilestoneRef>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Why the issue waits on a person, when it does: every run this entry into its status
@@ -47,6 +55,18 @@ pub struct Issue {
     /// every other response that carries an issue leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on_person: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectRef {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MilestoneRef {
+    pub id: Uuid,
+    pub name: String,
 }
 
 /// An issue as the list and the board show it: the issue, its run, its newest pull request
@@ -157,6 +177,32 @@ pub struct UpdateIssue {
     )]
     #[schema(value_type = Option<Uuid>, nullable = true)]
     pub assignee: Option<Option<Uuid>>,
+    /// An issue id of the workspace, such as `PL-1`, or `null` for none. Neither the issue
+    /// itself nor one of the issues under it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    #[schema(value_type = Option<String>, nullable = true)]
+    pub parent: Option<Option<String>>,
+    /// A project's id, or `null` for none. A change of project clears the milestone, unless
+    /// the same request sets one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    #[schema(value_type = Option<Uuid>, nullable = true)]
+    pub project: Option<Option<Uuid>>,
+    /// A milestone of the project the issue has after the edit, or `null` for none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    #[schema(value_type = Option<Uuid>, nullable = true)]
+    pub milestone: Option<Option<Uuid>>,
 }
 
 /// A field that is present, `null` or not, as `Some`; serde's default leaves an absent one
@@ -302,7 +348,8 @@ pub enum EventDetail {
     },
     Created,
     Edited {
-        /// Among `title`, `body`, `labels` and `assignee`, in that order.
+        /// Among `title`, `body`, `labels`, `assignee`, `parent`, `project` and `milestone`, in
+        /// that order.
         fields: Vec<String>,
     },
     /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`
@@ -328,6 +375,46 @@ impl EventDetail {
             delivery_id: None,
         }
     }
+}
+
+/// `POST /api/projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateProject {
+    /// Trimmed, 1 to 100 characters, unique in the workspace.
+    pub name: String,
+}
+
+/// `POST /api/projects/{id}/milestones`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateMilestone {
+    /// Trimmed, 1 to 100 characters, unique in the project.
+    pub name: String,
+    /// What must be true for the milestone to pass.
+    #[serde(default)]
+    pub pass_when: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Project {
+    pub id: Uuid,
+    pub name: String,
+    /// Oldest first.
+    pub milestones: Vec<Milestone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Milestone {
+    pub id: Uuid,
+    pub name: String,
+    /// What must be true for the milestone to pass; empty when nobody wrote it.
+    pub pass_when: String,
+}
+
+/// `GET /api/projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectList {
+    /// Oldest first.
+    pub projects: Vec<Project>,
 }
 
 /// `POST /api/runners`, with a person's token. Registers a runner and creates its actor, or

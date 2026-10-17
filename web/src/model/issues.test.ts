@@ -7,6 +7,7 @@ import {
   fromList,
   groupByStatus,
   refusalText,
+  replaceRow,
   revertEdit,
   rowView,
   type IssueRow,
@@ -14,6 +15,7 @@ import {
 } from './issues'
 
 const now = new Date('2026-10-16T12:00:00Z')
+const RUNNING = { state: 'running', agent: 'claude-code', since: '2026-10-16T11:00:00Z' } as const
 
 function row(id: string, overrides: Partial<IssueRow['issue']> = {}, rest: Partial<IssueRow> = {}): IssueRow {
   return {
@@ -211,21 +213,80 @@ describe('the cache', () => {
   test('a refused edit puts back only its own fields, where nothing changed them since', () => {
     const before = row('PL-1', { title: 'Old', labels: ['a'] })
     const edited = { ...before.issue, title: 'Mine', labels: ['b'] }
-    const since = fromList({
-      issues: [row('PL-1', { title: 'Mine', labels: ['c'], status: 'todo', status_name: 'Todo' })],
-      last_event_seq: 4,
-    })
-    const reverted = revertEdit(since, before.issue, edited, ['title', 'labels'], 4)
+    const since = replaceRow(fromList({ issues: [before], last_event_seq: 4 }), 'PL-1', (r) => ({
+      ...r,
+      issue: { ...r.issue, title: 'Mine', labels: ['c'], status: 'todo', status_name: 'Todo' },
+    }))
+    const reverted = revertEdit(since, edited, ['title', 'labels'], 4)
     expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Old', labels: ['c'], status: 'todo' })
+  })
+
+  test('a refused edit puts back the parent, project and milestone it changed', () => {
+    const punchlist = { id: 'p1', name: 'Punchlist' }
+    const before = row('PL-2', { parent: null, project: punchlist, milestone: { id: 'm1', name: 'Gate 0' } })
+    const edited = { ...before.issue, parent: 'PL-1', project: { id: 'p2', name: 'Groundwork' }, milestone: null }
+    const cache = replaceRow(fromList({ issues: [before], last_event_seq: 4 }), 'PL-2', (r) => ({
+      ...r,
+      issue: edited,
+    }))
+    const reverted = revertEdit(cache, edited, ['parent', 'project', 'milestone'], 4)
+    expect(reverted.rows[0]?.issue).toMatchObject({
+      parent: null,
+      project: punchlist,
+      milestone: { id: 'm1', name: 'Gate 0' },
+    })
   })
 
   test('a refused edit leaves a row the server sent since, even one with the same value', () => {
     const before = row('PL-1', { title: 'Old' })
     const edited = { ...before.issue, title: 'Mine' }
-    const cache = applyStream(fromList({ issues: [row('PL-1', { title: 'Mine' })], last_event_seq: 4 }), {
+    const cache = applyStream(fromList({ issues: [row('PL-1', { title: 'Old' })], last_event_seq: 4 }), {
       event: event(5, 'PL-1'),
       row: row('PL-1', { title: 'Mine' }),
     })
-    expect(revertEdit(cache, before.issue, edited, ['title'], 4).rows[0]?.issue.title).toBe('Mine')
+    expect(revertEdit(cache, edited, ['title'], 4).rows[0]?.issue.title).toBe('Mine')
+  })
+
+  test('a row event for a run, arriving while an edit is pending, is what a refused edit shows', () => {
+    const punchlist = { id: 'p1', name: 'Punchlist' }
+    const before = row('PL-1', { title: 'Old', parent: null, project: punchlist })
+    const seq = 4
+    const edited = { ...before.issue, title: 'Mine', parent: 'PL-9' }
+    const pending = replaceRow(fromList({ issues: [before], last_event_seq: seq }), 'PL-1', (r) => ({ ...r, issue: edited }))
+    // A `run` event: its row has the run's new state and a title another editor set; it is the server's row.
+    const streamed = applyStream(pending, {
+      event: event(5, 'PL-1'),
+      row: row('PL-1', { title: 'Theirs', parent: null, project: punchlist }, { run: RUNNING }),
+    })
+    expect(streamed.rows[0]?.issue).toMatchObject({ title: 'Theirs', parent: null })
+    const reverted = revertEdit(streamed, edited, ['title', 'parent'], seq)
+    expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Theirs', parent: null, project: punchlist })
+    expect(reverted.rows[0]?.run).toEqual(RUNNING)
+    expect(reverted.confirmed['PL-1']?.title).toBe('Theirs')
+  })
+
+  // Two edits to one field made while the first is in flight, settled oldest first, as queries.ts runs them.
+  function stackedParentEdits() {
+    let cache = fromList({ issues: [row('PL-2', { parent: null })], last_event_seq: 4 })
+    const edit = (parent: string) => {
+      const edited = { ...row('PL-2', { ...cache.rows[0]?.issue }).issue, parent }
+      cache = replaceRow(cache, 'PL-2', (r) => ({ ...r, issue: edited }))
+      return { edited, seq: cache.rowSeq['PL-2'] ?? -1 }
+    }
+    return { first: edit('PL-3'), second: edit('PL-1'), cache: () => cache, set: (c: typeof cache) => (cache = c) }
+  }
+
+  test('two stacked edits to one field, both refused oldest first, show the server value', () => {
+    const s = stackedParentEdits()
+    for (const e of [s.first, s.second]) s.set(revertEdit(s.cache(), e.edited, ['parent'], e.seq))
+    expect(s.cache().rows[0]?.issue.parent).toBe(null)
+  })
+
+  test('two stacked edits to one field, the first refused and the second accepted, show the second', () => {
+    const s = stackedParentEdits()
+    s.set(revertEdit(s.cache(), s.first.edited, ['parent'], s.first.seq))
+    expect(s.cache().rows[0]?.issue.parent).toBe('PL-1')
+    s.set(applyWrite(s.cache(), { seq: 6, row: row('PL-2', { parent: 'PL-1' }) }))
+    expect(s.cache().rows[0]?.issue.parent).toBe('PL-1')
   })
 })

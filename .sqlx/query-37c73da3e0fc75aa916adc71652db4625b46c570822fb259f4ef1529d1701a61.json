@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE issue SET title = coalesce($2, title), body = coalesce($3, body),\n                    labels = coalesce($4, labels),\n                    assignee_id = CASE WHEN $5 THEN $6 ELSE assignee_id END,\n                    parent_id = $7, project_id = $8, milestone_id = $9, updated_at = now()\n             WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "TextArray",
+        "Bool",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "37c73da3e0fc75aa916adc71652db4625b46c570822fb259f4ef1529d1701a61"
+}

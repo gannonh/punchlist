@@ -1,4 +1,5 @@
-// The side sheet Enter opens: the issue's fields, with title, labels and assignee editable.
+// The side sheet Enter opens: the issue's fields, with title, assignee, labels, parent, project and milestone
+// editable.
 import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,9 +17,10 @@ import {
   type StatusInfo,
   type Transition,
 } from '@/model/issues'
-import type { Edit } from '@/lib/queries'
+import { useIssues, useProjects, type Edit } from '@/lib/queries'
 
 const UNASSIGNED = 'unassigned'
+const NONE = 'none'
 
 /** An input that saves on Enter or blur when its value changed. Keyed by the saved value, so a rollback shows. */
 function SavedInput({
@@ -26,11 +28,13 @@ function SavedInput({
   label,
   onSave,
   allowEmpty = false,
+  placeholder,
 }: {
   value: string
   label: string
   onSave: (value: string) => void
   allowEmpty?: boolean
+  placeholder?: string
 }) {
   const save = (input: HTMLInputElement) => {
     const next = input.value.trim()
@@ -42,6 +46,7 @@ function SavedInput({
       key={value}
       defaultValue={value}
       aria-label={label}
+      placeholder={placeholder}
       className="h-8"
       onBlur={(event) => {
         save(event.currentTarget)
@@ -133,6 +138,11 @@ function SheetBody({
   onMove: (status: StatusInfo) => void
   onDismiss: () => void
 }) {
+  const { issue } = row
+  const projects = useProjects().data ?? []
+  const parentTitle = useIssues().data?.rows.find((other) => other.issue.id === issue.parent)?.issue.title
+  const milestones = projects.find((project) => project.id === issue.project?.id)?.milestones ?? []
+  const passWhen = milestones.find((milestone) => milestone.id === issue.milestone?.id)?.pass_when
   return (
     <>
       <SheetDescription className="font-mono text-meta text-ink-3">{view.id}</SheetDescription>
@@ -199,6 +209,63 @@ function SheetBody({
               })
             }}
           />
+        </Field>
+        <Field label="Parent">
+          <SavedInput
+            value={issue.parent ?? ''}
+            label="Parent"
+            placeholder="None"
+            allowEmpty
+            onSave={(parent) => {
+              onEdit({ id: view.id, parent: parent || null })
+            }}
+          />
+          {parentTitle && <div className="truncate text-meta text-ink-3">{parentTitle}</div>}
+        </Field>
+        <Field label="Project">
+          <Select
+            value={issue.project?.id ?? NONE}
+            onValueChange={(id) => {
+              const chosen = projects.find((project) => project.id === id)
+              // A milestone is in its project, so another project leaves none.
+              onEdit({ id: view.id, project: chosen ? { id: chosen.id, name: chosen.name } : null, milestone: null })
+            }}
+          >
+            <SelectTrigger size="sm" className="w-full" aria-label="Project">
+              <SelectValue>{issue.project?.name ?? 'No project'}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE}>No project</SelectItem>
+              {projects.map((project) => (
+                <SelectItem key={project.id} value={project.id}>
+                  {project.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field label="Milestone">
+          <Select
+            value={issue.milestone?.id ?? NONE}
+            disabled={!issue.project}
+            onValueChange={(id) => {
+              const chosen = milestones.find((milestone) => milestone.id === id)
+              onEdit({ id: view.id, milestone: chosen ? { id: chosen.id, name: chosen.name } : null })
+            }}
+          >
+            <SelectTrigger size="sm" className="w-full" aria-label="Milestone">
+              <SelectValue>{issue.milestone?.name ?? 'No milestone'}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NONE}>No milestone</SelectItem>
+              {milestones.map((milestone) => (
+                <SelectItem key={milestone.id} value={milestone.id}>
+                  {milestone.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {passWhen && <div className="text-meta text-ink-3">PASS when {passWhen}</div>}
         </Field>
         <Field label="Run">
           <Run view={view.run} detail />
