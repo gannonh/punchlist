@@ -15,6 +15,7 @@ import {
 } from './issues'
 
 const now = new Date('2026-10-16T12:00:00Z')
+const RUNNING = { state: 'running', agent: 'claude-code', since: '2026-10-16T11:00:00Z' } as const
 
 function row(id: string, overrides: Partial<IssueRow['issue']> = {}, rest: Partial<IssueRow> = {}): IssueRow {
   return {
@@ -244,6 +245,24 @@ describe('the cache', () => {
       row: row('PL-1', { title: 'Mine' }),
     })
     expect(revertEdit(cache, edited, ['title'], 4).rows[0]?.issue.title).toBe('Mine')
+  })
+
+  test('a row event for a run, arriving while an edit is pending, is what a refused edit shows', () => {
+    const punchlist = { id: 'p1', name: 'Punchlist' }
+    const before = row('PL-1', { title: 'Old', parent: null, project: punchlist })
+    const seq = 4
+    const edited = { ...before.issue, title: 'Mine', parent: 'PL-9' }
+    const pending = replaceRow(fromList({ issues: [before], last_event_seq: seq }), 'PL-1', (r) => ({ ...r, issue: edited }))
+    // A `run` event: its row has the run's new state and a title another editor set; it is the server's row.
+    const streamed = applyStream(pending, {
+      event: event(5, 'PL-1'),
+      row: row('PL-1', { title: 'Theirs', parent: null, project: punchlist }, { run: RUNNING }),
+    })
+    expect(streamed.rows[0]?.issue).toMatchObject({ title: 'Theirs', parent: null })
+    const reverted = revertEdit(streamed, edited, ['title', 'parent'], seq)
+    expect(reverted.rows[0]?.issue).toMatchObject({ title: 'Theirs', parent: null, project: punchlist })
+    expect(reverted.rows[0]?.run).toEqual(RUNNING)
+    expect(reverted.confirmed['PL-1']?.title).toBe('Theirs')
   })
 
   // Two edits to one field made while the first is in flight, settled oldest first, as queries.ts runs them.
