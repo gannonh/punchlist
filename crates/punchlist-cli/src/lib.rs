@@ -1214,6 +1214,8 @@ mod tests {
                     key: key.into(),
                     name: key.into(),
                     locked_to: Vec::new(),
+                    dispatch: None,
+                    closed: false,
                 })
                 .to_vec(),
             refused: None,

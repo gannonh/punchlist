@@ -864,6 +864,10 @@ pub struct StatusInfo {
     pub name: String,
     /// The roles that may not act on an issue in it, from the workflow's `[lock]`.
     pub locked_to: Vec<Role>,
+    /// The agent a runner starts when an issue enters it, such as `claude-code`.
+    pub dispatch: Option<String>,
+    /// No transition leaves it, as with Done and Canceled. The list hides these by default.
+    pub closed: bool,
 }
 
 /// A pushed `workflow.toml` the server refused to load.

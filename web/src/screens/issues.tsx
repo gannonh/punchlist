@@ -1,12 +1,20 @@
 // The home screen: the approved issue list prototype, against the cached list.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { useNavigate } from '@tanstack/react-router'
-import { Plus } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { BoardView, ListView } from '@/components/issue-views'
-import { IssueSheet } from '@/components/issue-sheet'
-import { NewIssue } from '@/components/new-issue'
-import { StatusMenu } from '@/components/status-menu'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { BoardView, ListView } from "@/components/issue-views";
+import { IssueSheet } from "@/components/issue-sheet";
+import { NewIssue } from "@/components/new-issue";
+import { StatusMenu } from "@/components/status-menu";
 import {
   AGENT_NAMES,
   filterRows,
@@ -16,7 +24,7 @@ import {
   type Group,
   type StatusInfo,
   type Who,
-} from '@/model/issues'
+} from "@/model/issues";
 import {
   useActors,
   useEditIssue,
@@ -25,65 +33,78 @@ import {
   useSignOut,
   useTransitions,
   useWorkflow,
-} from '@/lib/queries'
+} from "@/lib/queries";
 
-export type Layout = 'list' | 'board'
+export type Layout = "list" | "board";
 
-const NARROW = '(max-width: 767px)'
+const NARROW = "(max-width: 767px)";
 const subscribeNarrow = (notify: () => void) => {
-  const query = window.matchMedia(NARROW)
-  query.addEventListener('change', notify)
+  const query = window.matchMedia(NARROW);
+  query.addEventListener("change", notify);
   return () => {
-    query.removeEventListener('change', notify)
-  }
-}
-const useNarrow = () => useSyncExternalStore(subscribeNarrow, () => window.matchMedia(NARROW).matches)
+    query.removeEventListener("change", notify);
+  };
+};
+const useNarrow = () =>
+  useSyncExternalStore(
+    subscribeNarrow,
+    () => window.matchMedia(NARROW).matches,
+  );
 
 /** The order j and k walk: every visible issue in group order, or on a narrow board the shown column's. */
-function navOrder(groups: Group[], layout: Layout, narrow: boolean, column: string): string[] {
-  const shown = layout === 'board' && narrow ? groups.filter((g) => g.status.key === column) : groups
-  return shown.flatMap((g) => g.rows.map((row) => row.issue.id))
+function navOrder(
+  groups: Group[],
+  layout: Layout,
+  narrow: boolean,
+  column: string,
+): string[] {
+  const shown =
+    layout === "board" && narrow
+      ? groups.filter((g) => g.status.key === column)
+      : groups;
+  return shown.flatMap((g) => g.rows.map((row) => row.issue.id));
 }
 
 const inField = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
-  (target.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName))
+  (target.isContentEditable ||
+    ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName));
 
 const SHORTCUTS: Record<Layout, [string, string][]> = {
   list: [
-    ['j', 'next issue'],
-    ['k', 'previous issue'],
-    ['Enter', 'open issue'],
-    ['s', 'change status'],
-    ['/', 'filter'],
-    ['1 2', 'switch layout'],
-    ['Esc', 'close'],
+    ["j", "next issue"],
+    ["k", "previous issue"],
+    ["Enter", "open issue"],
+    ["s", "change status"],
+    ["/", "filter"],
+    ["1 2", "switch layout"],
+    ["Esc", "close"],
   ],
   board: [
-    ['j', 'next issue'],
-    ['k', 'previous issue'],
-    ['Enter', 'open issue'],
-    ['s', 'change status'],
-    ['h', 'move issue left'],
-    ['l', 'move issue right'],
-    ['/', 'filter'],
-    ['1 2', 'switch layout'],
-    ['Esc', 'close'],
+    ["j", "next issue"],
+    ["k", "previous issue"],
+    ["Enter", "open issue"],
+    ["s", "change status"],
+    ["h", "move issue left"],
+    ["l", "move issue right"],
+    ["/", "filter"],
+    ["1 2", "switch layout"],
+    ["Esc", "close"],
   ],
-}
+};
 
 /** The time ages are shown against, a new one each 30 seconds. */
 function useNow(): Date {
-  const [now, setNow] = useState(() => new Date())
+  const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const timer = setInterval(() => {
-      setNow(new Date())
-    }, 30_000)
+      setNow(new Date());
+    }, 30_000);
     return () => {
-      clearInterval(timer)
-    }
-  }, [])
-  return now
+      clearInterval(timer);
+    };
+  }, []);
+  return now;
 }
 
 export function IssuesScreen({
@@ -92,154 +113,231 @@ export function IssuesScreen({
   layout,
   onLayout,
 }: {
-  workspaceId: string
-  me: string
-  layout: Layout
-  onLayout: (layout: Layout) => void
+  workspaceId: string;
+  me: string;
+  layout: Layout;
+  onLayout: (layout: Layout) => void;
 }) {
-  const issues = useIssues()
-  const workflow = useWorkflow()
-  const actors = useActors()
-  const edit = useEditIssue()
-  const signOut = useSignOut()
-  const navigate = useNavigate()
-  const { transitions, request, dismiss } = useTransitions()
-  useEventStream(workspaceId, issues.isSuccess)
+  const issues = useIssues();
+  const workflow = useWorkflow();
+  const actors = useActors();
+  const edit = useEditIssue();
+  const signOut = useSignOut();
+  const navigate = useNavigate();
+  const { transitions, request, dismiss } = useTransitions();
+  useEventStream(workspaceId, issues.isSuccess);
 
-  const [filter, setFilter] = useState<Filter>({ text: '', who: '' })
-  const [selected, setSelected] = useState<string | null>(null)
-  const [column, setColumn] = useState<string | null>(null)
-  const [sheet, setSheet] = useState<string | null>(null)
-  const [menu, setMenu] = useState<{ id: string; left: number; top: number } | null>(null)
-  const [creating, setCreating] = useState(false)
-  const search = useRef<HTMLInputElement>(null)
-  const narrow = useNarrow()
+  const [filter, setFilter] = useState<Filter>({ text: "", who: "" });
+  const [selected, setSelected] = useState<string | null>(null);
+  const [column, setColumn] = useState<string | null>(null);
+  const [sheet, setSheet] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{
+    id: string;
+    left: number;
+    top: number;
+  } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [hideClosed, setHideClosed] = useState(true);
+  const search = useRef<HTMLInputElement>(null);
+  const narrow = useNarrow();
 
-  const statuses = useMemo(() => workflow.data?.statuses ?? [], [workflow.data])
-  const rows = useMemo(() => issues.data?.rows ?? [], [issues.data])
-  const visible = useMemo(() => filterRows(rows, filter), [rows, filter])
-  const groups = useMemo(() => groupByStatus(visible, statuses), [visible, statuses])
-  const shownColumn = column ?? groups.find((g) => g.rows.length > 0)?.status.key ?? statuses[0]?.key ?? ''
-  const order = useMemo(() => navOrder(groups, layout, narrow, shownColumn), [groups, layout, narrow, shownColumn])
-  const current = selected !== null && order.includes(selected) ? selected : (order[0] ?? null)
-  const rowById = useCallback((id: string | null) => rows.find((row) => row.issue.id === id), [rows])
-  const statusByKey = useCallback((key: string | undefined) => statuses.find((s) => s.key === key), [statuses])
-  const now = useNow()
-  const currentRef = useRef(current)
+  const statuses = useMemo(
+    () => workflow.data?.statuses ?? [],
+    [workflow.data],
+  );
+  const rows = useMemo(() => issues.data?.rows ?? [], [issues.data]);
+  const closed = useMemo(
+    () => statuses.filter((status) => status.closed),
+    [statuses],
+  );
+  const visible = useMemo(() => {
+    const shown = filterRows(rows, filter);
+    return hideClosed
+      ? shown.filter(
+          (row) => !closed.some((status) => status.key === row.issue.status),
+        )
+      : shown;
+  }, [rows, filter, hideClosed, closed]);
+  const groups = useMemo(
+    () => groupByStatus(visible, statuses),
+    [visible, statuses],
+  );
+  const shownColumn =
+    column ??
+    groups.find((g) => g.rows.length > 0)?.status.key ??
+    statuses[0]?.key ??
+    "";
+  const order = useMemo(
+    () => navOrder(groups, layout, narrow, shownColumn),
+    [groups, layout, narrow, shownColumn],
+  );
+  const current =
+    selected !== null && order.includes(selected)
+      ? selected
+      : (order[0] ?? null);
+  const rowById = useCallback(
+    (id: string | null) => rows.find((row) => row.issue.id === id),
+    [rows],
+  );
+  const statusByKey = useCallback(
+    (key: string | undefined) => statuses.find((s) => s.key === key),
+    [statuses],
+  );
+  const now = useNow();
+  const currentRef = useRef(current);
   useLayoutEffect(() => {
-    currentRef.current = current
-  })
+    currentRef.current = current;
+  });
 
   useEffect(() => {
-    if (current) document.querySelector(`[data-issue="${current}"]`)?.scrollIntoView({ block: 'nearest' })
-  }, [current])
+    if (current)
+      document
+        .querySelector(`[data-issue="${current}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+  }, [current]);
 
   const move = useCallback(
     async (id: string, to: StatusInfo) => {
-      const moved = await request(id, to)
-      if (moved && layout === 'board' && narrow) setColumn(to.key)
+      const moved = await request(id, to);
+      if (moved && layout === "board" && narrow) setColumn(to.key);
     },
     [request, layout, narrow],
-  )
+  );
 
   // Reads the selection through a ref, so a new selection does not re-render every row.
   const pick = useCallback((id: string) => {
-    if (id === currentRef.current) setSheet(id)
-    else setSelected(id)
-  }, [])
+    if (id === currentRef.current) setSheet(id);
+    else setSelected(id);
+  }, []);
 
   const openMenu = useCallback((id: string) => {
-    const rect = document.querySelector(`[data-issue="${id}"]`)?.getBoundingClientRect()
-    setMenu({ id, left: (rect?.left ?? 20) + 12, top: rect?.bottom ?? 80 })
-  }, [])
+    const rect = document
+      .querySelector(`[data-issue="${id}"]`)
+      ?.getBoundingClientRect();
+    setMenu({ id, left: (rect?.left ?? 20) + 12, top: rect?.bottom ?? 80 });
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (inField(event.target)) {
-        if (event.key === 'Escape') (event.target as HTMLElement).blur()
-        return
+        if (event.key === "Escape") (event.target as HTMLElement).blur();
+        return;
       }
-      if (sheet || menu || creating) return
+      if (sheet || menu || creating) return;
       const step = (delta: number) => {
-        if (order.length === 0) return
-        const index = Math.max(0, current ? order.indexOf(current) : 0)
-        setSelected(order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null)
-      }
+        if (order.length === 0) return;
+        const index = Math.max(0, current ? order.indexOf(current) : 0);
+        setSelected(
+          order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null,
+        );
+      };
       const shift = (delta: number) => {
-        const row = rowById(current)
-        const to = row && neighbourStatus(statuses, row.issue.status, delta)
-        if (row && to && transitions[row.issue.id]?.state !== 'pending') void move(row.issue.id, to)
-      }
+        const row = rowById(current);
+        const to = row && neighbourStatus(statuses, row.issue.status, delta);
+        if (row && to && transitions[row.issue.id]?.state !== "pending")
+          void move(row.issue.id, to);
+      };
       const keys: Record<string, (() => void) | undefined> = {
         j: () => {
-          step(1)
+          step(1);
         },
         ArrowDown: () => {
-          step(1)
+          step(1);
         },
         k: () => {
-          step(-1)
+          step(-1);
         },
         ArrowUp: () => {
-          step(-1)
+          step(-1);
         },
         Enter: () => {
-          if (current) setSheet(current)
+          if (current) setSheet(current);
         },
         s: () => {
-          if (current) openMenu(current)
+          if (current) openMenu(current);
         },
-        '/': () => search.current?.focus(),
-        '1': () => {
-          onLayout('list')
+        "/": () => search.current?.focus(),
+        "1": () => {
+          onLayout("list");
         },
-        '2': () => {
-          onLayout('board')
+        "2": () => {
+          onLayout("board");
         },
-        ...(layout === 'board' && {
+        ...(layout === "board" && {
           h: () => {
-            shift(-1)
+            shift(-1);
           },
           l: () => {
-            shift(1)
+            shift(1);
           },
         }),
-      }
-      const action = keys[event.key]
+      };
+      const action = keys[event.key];
       if (action) {
-        event.preventDefault()
-        action()
+        event.preventDefault();
+        action();
       }
-    }
-    document.addEventListener('keydown', onKey)
+    };
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout])
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [
+    sheet,
+    menu,
+    creating,
+    order,
+    current,
+    layout,
+    statuses,
+    transitions,
+    rowById,
+    move,
+    openMenu,
+    onLayout,
+  ]);
 
-  const filtered = filter.text !== '' || filter.who !== ''
-  const menuRow = rowById(menu?.id ?? null)
-  const sheetRow = rowById(sheet)
-  const viewProps = { groups, selected: current, transitions, now, onPick: pick, onDismiss: dismiss }
+  const filtered = filter.text !== "" || filter.who !== "";
+  const menuRow = rowById(menu?.id ?? null);
+  const sheetRow = rowById(sheet);
+  const viewProps = {
+    groups,
+    selected: current,
+    transitions,
+    now,
+    onPick: pick,
+    onDismiss: dismiss,
+  };
 
   return (
-    <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
+    <div
+      className="flex min-h-screen flex-col"
+      data-last-seq={issues.data?.lastSeq}
+    >
       <header className="sticky top-0 z-5 flex flex-wrap items-center gap-x-3.5 gap-y-2.5 border-b bg-background px-3 py-2 sm:px-4 sm:py-2.5">
-        <div className="flex items-center gap-2 text-lead font-semibold">Punchlist</div>
-        <div className="inline-flex rounded-lg border bg-card p-0.5" role="group" aria-label="Layout">
-          {(['list', 'board'] as const).map((key, index) => (
+        <div className="flex items-center gap-2 text-lead font-semibold">
+          Punchlist
+        </div>
+        <div
+          className="inline-flex rounded-lg border bg-card p-0.5"
+          role="group"
+          aria-label="Layout"
+        >
+          {(["list", "board"] as const).map((key, index) => (
             <button
               key={key}
               type="button"
               aria-pressed={layout === key}
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1.25 text-muted-foreground aria-pressed:bg-foreground aria-pressed:text-card"
               onClick={() => {
-                onLayout(key)
+                onLayout(key);
               }}
             >
-              <kbd className="hidden opacity-75 in-aria-pressed:border-white/35 in-aria-pressed:bg-transparent in-aria-pressed:text-card sm:inline-block">{index + 1}</kbd>
-              {key === 'list' ? 'List' : 'Board'}
+              <kbd className="hidden opacity-75 in-aria-pressed:border-white/35 in-aria-pressed:bg-transparent in-aria-pressed:text-card sm:inline-block">
+                {index + 1}
+              </kbd>
+              {key === "list" ? "List" : "Board"}
             </button>
           ))}
         </div>
@@ -252,7 +350,7 @@ export function IssuesScreen({
             value={filter.text}
             className="h-7.5 flex-[1_1_120px] rounded-md border bg-card px-2 py-1.25 focus:outline-2 focus:outline-offset-1 focus:outline-ring sm:w-45 sm:flex-none"
             onChange={(event) => {
-              setFilter((f) => ({ ...f, text: event.target.value }))
+              setFilter((f) => ({ ...f, text: event.target.value }));
             }}
           />
           <select
@@ -260,7 +358,7 @@ export function IssuesScreen({
             value={filter.who}
             className="h-7.5 rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
             onChange={(event) => {
-              setFilter((f) => ({ ...f, who: event.target.value as Who }))
+              setFilter((f) => ({ ...f, who: event.target.value as Who }));
             }}
           >
             <option value="">Everyone</option>
@@ -273,6 +371,18 @@ export function IssuesScreen({
             ))}
             <option value="none">Unassigned</option>
           </select>
+          {closed.length > 0 && (
+            <label className="flex items-center gap-1.5 text-meta text-ink-3">
+              <input
+                type="checkbox"
+                checked={hideClosed}
+                onChange={(event) => {
+                  setHideClosed(event.target.checked);
+                }}
+              />
+              hide {closed.map((status) => status.name).join(" and ")}
+            </label>
+          )}
           <span className="text-meta text-ink-3" data-count>
             {visible.length} of {rows.length}
           </span>
@@ -280,7 +390,7 @@ export function IssuesScreen({
             size="sm"
             className="h-7.5"
             onClick={() => {
-              setCreating(true)
+              setCreating(true);
             }}
           >
             <Plus /> New issue
@@ -290,7 +400,9 @@ export function IssuesScreen({
             className="cursor-pointer text-meta text-ink-3 hover:text-foreground"
             title={`Signed in as ${me}`}
             onClick={() => {
-              signOut.mutate(undefined, { onSuccess: () => void navigate({ to: '/sign-in' }) })
+              signOut.mutate(undefined, {
+                onSuccess: () => void navigate({ to: "/sign-in" }),
+              });
             }}
           >
             Sign out
@@ -315,15 +427,16 @@ export function IssuesScreen({
               {filtered
                 ? filter.text
                   ? `No issues match “${filter.text}”.`
-                  : 'No issues match these filters.'
-                : 'There are no issues yet.'}{' '}
-              Issues appear here as the runner picks them up and moves them through the workflow.
+                  : "No issues match these filters."
+                : "There are no issues yet."}{" "}
+              Issues appear here as the runner picks them up and moves them
+              through the workflow.
             </p>
             {filtered ? (
               <Button
                 variant="outline"
                 onClick={() => {
-                  setFilter({ text: '', who: '' })
+                  setFilter({ text: "", who: "" });
                 }}
               >
                 Clear filters
@@ -331,34 +444,39 @@ export function IssuesScreen({
             ) : (
               <Button
                 onClick={() => {
-                  setCreating(true)
+                  setCreating(true);
                 }}
               >
                 New issue
               </Button>
             )}
           </section>
-        ) : layout === 'list' ? (
+        ) : layout === "list" ? (
           <ListView {...viewProps} />
         ) : (
           <BoardView
             {...viewProps}
             column={shownColumn}
             onColumn={(key) => {
-              setColumn(key)
-              setSelected(null)
+              setColumn(key);
+              setSelected(null);
             }}
           />
         )}
       </main>
 
       <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
-        <span className="font-semibold text-foreground">{layout === 'list' ? 'List' : 'Board'} shortcuts</span>
+        <span className="font-semibold text-foreground">
+          {layout === "list" ? "List" : "Board"} shortcuts
+        </span>
         {SHORTCUTS[layout].map(([keys, what]) => (
-          <span key={what} className="inline-flex items-center gap-1.25 whitespace-nowrap">
-            {keys.split(' ').map((key) => (
+          <span
+            key={what}
+            className="inline-flex items-center gap-1.25 whitespace-nowrap"
+          >
+            {keys.split(" ").map((key) => (
               <kbd key={key}>{key}</kbd>
-            ))}{' '}
+            ))}{" "}
             {what}
           </span>
         ))}
@@ -371,10 +489,10 @@ export function IssuesScreen({
           statuses={statuses}
           open
           onOpenChange={(open) => {
-            if (!open) setMenu(null)
+            if (!open) setMenu(null);
           }}
           onChoose={(to) => {
-            void move(menu.id, to)
+            void move(menu.id, to);
           }}
         >
           <span
@@ -393,16 +511,16 @@ export function IssuesScreen({
         transition={sheet ? transitions[sheet] : undefined}
         now={now}
         onClose={() => {
-          setSheet(null)
+          setSheet(null);
         }}
         onEdit={(change) => {
-          edit.mutate(change)
+          edit.mutate(change);
         }}
         onMove={(to) => {
-          if (sheet) void move(sheet, to)
+          if (sheet) void move(sheet, to);
         }}
         onDismiss={() => {
-          if (sheet) dismiss(sheet)
+          if (sheet) dismiss(sheet);
         }}
       />
 
@@ -410,9 +528,9 @@ export function IssuesScreen({
         open={creating}
         onOpenChange={setCreating}
         onCreated={(id) => {
-          setSelected(id)
+          setSelected(id);
         }}
       />
     </div>
-  )
+  );
 }

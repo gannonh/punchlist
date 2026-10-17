@@ -537,3 +537,33 @@ async fn the_web_app_is_served_beside_the_api(pool: PgPool) {
         (StatusCode::OK, json!(0))
     );
 }
+
+#[sqlx::test]
+async fn each_status_names_its_dispatch_and_whether_it_is_closed(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    let (status, body) = call(&app, &person.token, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let statuses: Vec<_> = (body["statuses"].as_array().unwrap().iter())
+        .map(|s| {
+            (
+                s["key"].as_str().unwrap(),
+                s["dispatch"].clone(),
+                s["closed"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("backlog", Value::Null, json!(false)),
+            ("todo", Value::Null, json!(false)),
+            ("start", Value::Null, json!(false)),
+            ("in_progress", json!("claude-code"), json!(false)),
+            ("agent_review", json!("codex"), json!(false)),
+            ("human_review", Value::Null, json!(false)),
+            ("merging", Value::Null, json!(false)),
+            ("done", Value::Null, json!(true)),
+            ("canceled", Value::Null, json!(true)),
+        ]
+    );
+}

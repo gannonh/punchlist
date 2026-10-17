@@ -317,6 +317,11 @@ async fn show_workflow(
                     .find(|(locked, _)| locked == status)
                     .map(|(_, roles)| roles.clone())
                     .unwrap_or_default(),
+                dispatch: workflow
+                    .dispatch_for(status.as_str())
+                    .map(|d| d.agent.clone()),
+                closed: !(workflow.transitions().iter())
+                    .any(|transition| transition.from.contains(status)),
             })
             .collect(),
         refused: refused

@@ -33,9 +33,9 @@ function row(id: string, overrides: Partial<IssueRow['issue']> = {}, rest: Parti
 }
 
 const statuses: StatusInfo[] = [
-  { key: 'todo', name: 'Todo', locked_to: [] },
-  { key: 'in_progress', name: 'In Progress', locked_to: [] },
-  { key: 'human_review', name: 'Human Review', locked_to: ['agent', 'runner'] },
+  { key: 'todo', name: 'Todo', locked_to: [], closed: false },
+  { key: 'in_progress', name: 'In Progress', locked_to: [], closed: false },
+  { key: 'human_review', name: 'Human Review', locked_to: ['agent', 'runner'], closed: false },
 ]
 
 describe('rowView', () => {

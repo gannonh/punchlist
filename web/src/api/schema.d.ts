@@ -1299,6 +1299,10 @@ export interface components {
             token: string;
         };
         StatusInfo: {
+            /** @description No transition leaves it, as with Done and Canceled. The list hides these by default. */
+            closed: boolean;
+            /** @description The agent a runner starts when an issue enters it, such as `claude-code`. */
+            dispatch?: string | null;
             /** @description The status key, such as `in_progress`. */
             key: string;
             /** @description The roles that may not act on an issue in it, from the workflow's `[lock]`. */
