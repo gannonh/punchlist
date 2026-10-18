@@ -14,8 +14,9 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use punchlist_core::Workflow;
 use punchlist_server::{
-    AppState, Bootstrap, Bootstrapped, GithubClient, ProofStore, bootstrap, router,
-    run_jobs_until_idle, warn_invalid_workflows, write_pull_request_events,
+    AppState, Bootstrap, Bootstrapped, GithubClient, ProofStore, bootstrap,
+    queue_workflow_loads_at_start, router, run_jobs_until_idle, warn_invalid_workflows,
+    write_pull_request_events,
 };
 use serde_json::{Value, json};
 use sha2::Sha256;
@@ -1749,6 +1750,91 @@ async fn a_push_loads_the_workflow_and_an_invalid_one_is_refused(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(jobs, 2);
+}
+
+/// The active version's hash and commit, and how many versions and events are stored.
+async fn workflow_state(pool: &PgPool) -> (String, String, i64, i64) {
+    let active = sqlx::query!(
+        "SELECT v.hash, v.commit_sha FROM workspace w
+         JOIN workflow_version v ON v.id = w.workflow_version_id"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let events = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM event"#)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (
+        active.hash,
+        active.commit_sha,
+        workflow_versions(pool).await,
+        events,
+    )
+}
+
+async fn start_server(s: &Setup) {
+    queue_workflow_loads_at_start(&s.state.pool, uuid::Uuid::new_v4())
+        .await
+        .unwrap();
+    run_jobs_until_idle(&s.state).await.unwrap();
+}
+
+#[sqlx::test]
+async fn a_start_loads_a_push_the_server_missed_and_changes_nothing_otherwise(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_that_finishes_on_merge(&s).await;
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "X"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (first, _, _, events) = workflow_state(&pool).await;
+
+    s.github.lock().unwrap().sha = "b".repeat(40);
+    start_server(&s).await;
+    assert_eq!(
+        workflow_state(&pool).await,
+        (first.clone(), "a".repeat(40), 1, events)
+    );
+
+    let first_file = {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "c".repeat(40);
+        let file = repo.files["workflow.toml"].clone();
+        repo.files.insert(
+            "workflow.toml".into(),
+            file.replace("max_concurrent = 5", "max_concurrent = 4"),
+        );
+        file
+    };
+    start_server(&s).await;
+    let (second, commit, versions, after) = workflow_state(&pool).await;
+    assert_ne!(second, first);
+    assert_eq!((commit, versions, after), ("c".repeat(40), 2, events + 1));
+
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "d".repeat(40);
+        repo.files.insert("workflow.toml".into(), first_file);
+    }
+    start_server(&s).await;
+    assert_eq!(
+        workflow_state(&pool).await,
+        (first, "d".repeat(40), 2, events + 2)
+    );
+    let jobs = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "n!" FROM job
+           WHERE idempotency_key LIKE 'workflow_load:start:%' AND state = 'done'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 3);
 }
 
 /// Loads the PRD workflow with `gate` on its `on = "<event>"` transition, puts PL-1 in
