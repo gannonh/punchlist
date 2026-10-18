@@ -20,6 +20,7 @@ import {
   type StatusInfo,
   type StreamItem,
   type Transitions,
+  workflowStale,
 } from '@/model/issues'
 
 export const sessionQuery = queryOptions({
@@ -80,16 +81,13 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
-      const statuses = client.getQueryData(workflowQuery.queryKey)?.statuses
-      if (
-        item.event.detail.kind === 'workflow' ||
-        (statuses && !statuses.some((status) => status.key === item.row.issue.status))
-      ) {
-        void client.invalidateQueries({ queryKey: workflowQuery.queryKey })
+      // A load writes one `workflow` message per issue; they share one read of the workflow.
+      if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
+        void client.invalidateQueries({ queryKey: workflowQuery.queryKey }, { cancelRefetch: false })
       }
     })
     // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
-    // ends. Read the session and a fresh list, then open it again; a signed-out session shows the sign-in page.
+    // ends. Read the session, a fresh list and the workflow, then open it again; a signed-out session shows the sign-in page.
     // The wait doubles from 2 s to at most 60 s while the stream keeps closing, and resets once an event arrives.
     source.addEventListener('error', () => {
       if (source.readyState !== EventSource.CLOSED) return
@@ -99,6 +97,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
         void Promise.allSettled([
           client.refetchQueries({ queryKey: sessionQuery.queryKey }),
           client.refetchQueries({ queryKey: issuesQuery.queryKey }),
+          client.refetchQueries({ queryKey: workflowQuery.queryKey }),
         ]).then(() => {
           setOpened((count) => count + 1)
         })

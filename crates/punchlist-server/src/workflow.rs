@@ -289,8 +289,9 @@ pub(crate) async fn load(
     .await?;
     // A different version can change every row's gates and status names, so the open app
     // is told each row changed.
-    // ponytail: one event per issue per workflow change. Upgrade path: events only for the
-    // issues whose row changed.
+    // ponytail: one event per issue per workflow change, written under the workspace lock, so
+    // a load costs O(issues) statements and event rows. Upgrade path: one workspace-level stream
+    // message on which the app refetches the list and the workflow once.
     if previous != Some(version_id) {
         let issues = sqlx::query_scalar!(
             "SELECT id FROM issue WHERE workspace_id = $1 ORDER BY id",

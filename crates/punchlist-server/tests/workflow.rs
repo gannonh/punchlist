@@ -4402,4 +4402,15 @@ async fn loading_a_different_workflow_writes_one_event_per_issue_and_nothing_els
         .map(|event| event["detail"]["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["created"]);
+
+    // Going back to the first version, whose row already exists, writes two more.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "e".repeat(40);
+        repo.files
+            .insert("workflow.toml".into(), PRD_WORKFLOW.into());
+    }
+    deliver(&s, "push", "push-5", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 2);
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 6)]);
 }

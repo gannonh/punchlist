@@ -49,8 +49,8 @@ pub(crate) async fn next_event_seq(
     .await
 }
 
-/// Writes an event that says only that the issue's row changed: `run`, `pull_request` or
-/// `proof`. The caller took the workspace's lock first, as the lock order has it.
+/// Writes an event that says only that the issue's row changed: `run`, `pull_request`, `proof`
+/// or `workflow`. The caller took the workspace's lock first, as the lock order has it.
 pub(crate) async fn record_row_event(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,

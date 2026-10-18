@@ -239,6 +239,11 @@ export function applyStream(cache: IssueCache, item: StreamItem): IssueCache {
   return { ...upsert(cache, item.row, item.event.seq), lastSeq: item.event.seq }
 }
 
+/** Whether a stream message means the cached workflow is out of date: a workflow load, or a status it lacks. */
+export const workflowStale = (item: StreamItem, statuses: readonly StatusInfo[] | undefined): boolean =>
+  item.event.detail.kind === 'workflow' ||
+  (statuses !== undefined && !statuses.some((status) => status.key === item.row.issue.status))
+
 /** A write's answer: its row, unless the cache already holds a newer one. */
 export const applyWrite = (cache: IssueCache, written: IssueWritten): IssueCache =>
   upsert(cache, written.row, written.seq)
