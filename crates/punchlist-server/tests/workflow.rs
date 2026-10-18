@@ -4398,11 +4398,8 @@ async fn loading_a_different_workflow_writes_one_event_per_issue_and_nothing_els
     assert_eq!(workflow_versions(&pool).await, 2);
     assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 4)]);
     let (_, timeline) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
-    let kinds: Vec<&str> = timeline["events"]
-        .as_array()
-        .unwrap_or_else(|| timeline.as_array().unwrap())
-        .iter()
-        .map(|e| e["detail"]["kind"].as_str().unwrap())
+    let kinds: Vec<&str> = (timeline.as_array().unwrap().iter())
+        .map(|event| event["detail"]["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["created"]);
 }

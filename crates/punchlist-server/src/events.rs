@@ -213,7 +213,8 @@ impl TryFrom<EventRow> for Event {
 
 /// The workspace's events after `after`, in sequence order, at most `limit` of them: every
 /// event, as the stream reads them, or with `issue_id` that issue's timeline, which leaves out
-/// the `run`, `pull_request`, `proof` and `workflow` events that only tell the stream its row changed.
+/// the `run`, `pull_request`, `proof` and `workflow` events that only tell the stream its row
+/// changed.
 pub(crate) async fn events(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,

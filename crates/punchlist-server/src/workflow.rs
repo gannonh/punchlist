@@ -298,7 +298,7 @@ pub(crate) async fn load(
         )
         .fetch_all(&mut *tx)
         .await?;
-        // No issue, no actor made for nothing.
+        // `github_actor` creates the actor, so a workspace without issues gets none.
         if !issues.is_empty() {
             let github = crate::github::github_actor(&mut *tx, workspace_id, None).await?;
             for issue_id in &issues {
