@@ -1,7 +1,7 @@
 use axum::extract::FromRequestParts;
-use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, Method};
 use percent_encoding::percent_decode_str;
 use punchlist_core::Role;
 use sha2::{Digest, Sha256};
@@ -137,9 +137,12 @@ impl FromRequestParts<AppState> for Actor {
             )));
         }
         // An agent reaches only issues: a run's agent its run's issue, `/api/issues/<id>` and
-        // below, and a standalone agent any issue of its workspace. Every other endpoint, such
-        // as creating issues or reading the rest of the workspace, is for people and runners.
-        if role == Role::Agent {
+        // below, and a standalone agent any issue of its workspace, and who it is
+        // (`GET /api/session`), so the web app can show an issue as that agent. Every other
+        // endpoint, such as creating issues or reading the rest of the workspace, is for
+        // people and runners.
+        let own_session = parts.method == Method::GET && parts.uri.path() == "/api/session";
+        if role == Role::Agent && !(row.run_id.is_none() && own_session) {
             match (row.run_id, row.issue_id.as_deref()) {
                 (Some(_), own) if issue_id.is_none() || issue_id != own => {
                     return Err(ApiError::Forbidden(format!(

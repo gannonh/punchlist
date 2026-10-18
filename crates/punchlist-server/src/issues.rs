@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
-    IssueWritten, MoveIssue, Moved, UpdateIssue,
+    IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
 };
 use punchlist_core::{
     Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence, PullRequestState,
@@ -24,14 +24,14 @@ use crate::github::{
 };
 use crate::rows::{issue, issue_rows};
 use crate::runs::RUNS_PER_ENTRY;
-use crate::workflow::{active_workflow, lock_workspace, stored_workflow};
+use crate::workflow::{active_workflow, lock_workspace, status_info, stored_workflow};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create_issue, list_issues))
         .routes(routes!(get_issue, update_issue))
-        .routes(routes!(move_issue))
+        .routes(routes!(move_issue, issue_transitions))
         .routes(routes!(issue_events))
         .routes(routes!(issue_gates))
         .routes(routes!(add_comment))
@@ -367,8 +367,24 @@ pub(crate) async fn check_move(
     from: &str,
     to: &str,
 ) -> Result<Vec<GateResult>, ApiError> {
-    let transition = workflow.check_transition(from, to, actor.role)?;
-    check_gates(tx, workflow, transition, &actor.name, id, from, None).await
+    judge_move(tx, workflow, actor.role, id, from, to)
+        .await
+        .inspect_err(|error| log_gate_refusal(id, &actor.name, error))
+}
+
+/// `check_move`'s rules, read only and not logged: what a request by `role` would get. The
+/// transitions list (`issue_transitions`) and every requested move both judge with this, so
+/// the two agree on the same rows.
+async fn judge_move(
+    conn: &mut sqlx::PgConnection,
+    workflow: &Workflow,
+    role: Role,
+    id: &str,
+    from: &str,
+    to: &str,
+) -> Result<Vec<GateResult>, ApiError> {
+    let transition = workflow.check_transition(from, to, role)?;
+    judge_gates(conn, workflow, transition, id, from, None).await
 }
 
 /// Evaluates a transition's gates over the issue's recorded evidence, for a requested move
@@ -379,6 +395,25 @@ pub(crate) async fn check_gates(
     workflow: &Workflow,
     transition: &Transition,
     actor_name: &str,
+    id: &str,
+    from: &str,
+    closed_pull_request: Option<i64>,
+) -> Result<Vec<GateResult>, ApiError> {
+    judge_gates(tx, workflow, transition, id, from, closed_pull_request)
+        .await
+        .inspect_err(|error| log_gate_refusal(id, actor_name, error))
+}
+
+fn log_gate_refusal(id: &str, actor_name: &str, error: &ApiError) {
+    if let ApiError::GateFailed(failure) = error {
+        tracing::info!(issue = id, actor = %actor_name, "refused: {}", failure.refusal);
+    }
+}
+
+async fn judge_gates(
+    tx: &mut sqlx::PgConnection,
+    workflow: &Workflow,
+    transition: &Transition,
     id: &str,
     from: &str,
     closed_pull_request: Option<i64>,
@@ -395,7 +430,6 @@ pub(crate) async fn check_gates(
             gate: failed.gate.clone(),
             reason: failed.text(),
         };
-        tracing::info!(issue = id, actor = %actor_name, "refused: {refusal}");
         return Err(ApiError::GateFailed(Box::new(GateFailure {
             refusal,
             evidence,
@@ -728,6 +762,67 @@ async fn issue_gates(
         gates,
     })
     .into_response())
+}
+
+/// The transitions that can be requested from the issue's status, each with the verdict the
+/// caller's request would get: the same rules and gates `POST /api/issues/{id}/transitions`
+/// checks, over the evidence recorded now. Nothing is read from GitHub and nothing is
+/// written, so a request, which reads GitHub first, can still answer differently.
+#[utoipa::path(
+    get,
+    path = "/api/issues/{id}/transitions",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = TransitionList),
+        (status = 401, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+    )
+)]
+async fn issue_transitions(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Json<TransitionList>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let from = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let status = workflow.status(&from).ok_or_else(|| {
+        sqlx::Error::Decode(format!("issue {id} is in `{from}`, not in its workflow").into())
+    })?;
+    let mut transitions = Vec::new();
+    for transition in workflow.requestable(&from) {
+        let to = transition.to.as_str();
+        let verdict = match judge_move(&mut conn, &workflow, actor.role, &id, &from, to).await {
+            Ok(_) => Verdict::Allowed,
+            Err(ApiError::GateFailed(failure)) => Verdict::Blocked(
+                (failure.gates.into_iter())
+                    .find(|result| !result.passed)
+                    .expect("a gate failure has a failed gate"),
+            ),
+            Err(ApiError::Refused(refusal)) => Verdict::Refused {
+                code: refusal.code().to_string(),
+                message: refusal.to_string(),
+            },
+            Err(error) => return Err(error),
+        };
+        transitions.push(TransitionOption {
+            to: status_info(&workflow, &transition.to),
+            by: transition.by.clone(),
+            verdict,
+        });
+    }
+    Ok(Json(TransitionList {
+        status: status_info(&workflow, status),
+        viewer_locked: workflow.check_unlocked(&from, actor.role).is_err(),
+        transitions,
+    }))
 }
 
 /// Writes a comment and its event.

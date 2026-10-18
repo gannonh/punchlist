@@ -235,8 +235,9 @@ async fn try_claim(
         }
     };
     let leased = sqlx::query!(
-        "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at)
-         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))
+        "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at, model)
+         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5),
+                 (SELECT n.models ->> r.agent FROM runner n, run r WHERE n.id = $3 AND r.id = $1))
          RETURNING lease_expires_at, session_id",
         run_id,
         id,
@@ -977,6 +978,7 @@ struct RunRow {
     started_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
     attempt: i32,
+    model: Option<String>,
     runner_id: Uuid,
     runner_name: String,
     failure_reason: Option<String>,
@@ -1014,7 +1016,7 @@ async fn load_runs(
     let rows = sqlx::query_as!(
         RunRow,
         r#"SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,
-                  a.attempt AS "attempt!", a.runner_id AS "runner_id!",
+                  a.attempt AS "attempt!", a.model, a.runner_id AS "runner_id!",
                   n.name AS "runner_name!", a.failure_reason, a.duration_ms,
                   a.input_tokens, a.output_tokens
            FROM run r
@@ -1034,8 +1036,9 @@ async fn load_runs(
     let run_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
     let mut attempts: HashMap<Uuid, Vec<AttemptInfo>> = HashMap::new();
     for row in sqlx::query!(
-        "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state,
-                a.failure_reason, a.started_at, a.finished_at
+        "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state, a.model,
+                a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,
+                a.output_tokens
          FROM attempt a JOIN runner n ON n.id = a.runner_id
          WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
         &run_ids,
@@ -1045,10 +1048,14 @@ async fn load_runs(
     {
         attempts.entry(row.run_id).or_default().push(AttemptInfo {
             attempt: row.attempt,
+            model: row.model,
             runner: RunnerRef {
                 id: row.runner_id,
                 name: row.runner_name,
             },
+            duration_ms: row.duration_ms,
+            input_tokens: row.input_tokens,
+            output_tokens: row.output_tokens,
             state: parse_outcome(&row.state)?,
             failure_reason: row.failure_reason,
             started_at: row.started_at,
@@ -1078,6 +1085,7 @@ async fn load_runs(
             started_at: row.started_at,
             finished_at: row.finished_at,
             attempt: row.attempt,
+            model: row.model,
             runner: RunnerRef {
                 id: row.runner_id,
                 name: row.runner_name,

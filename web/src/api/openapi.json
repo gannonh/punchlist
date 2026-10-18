@@ -826,6 +826,50 @@
       }
     },
     "/api/issues/{id}/transitions": {
+      "get": {
+        "summary": "The transitions that can be requested from the issue's status, each with the verdict the\ncaller's request would get: the same rules and gates `POST /api/issues/{id}/transitions`\nchecks, over the evidence recorded now. Nothing is read from GitHub and nothing is\nwritten, so a request, which reads GitHub first, can still answer differently.",
+        "operationId": "issue_transitions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransitionList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "summary": "Move an issue to another status. The workflow's lock, role and gate rules are checked,\nand the status, the transition, its gate results and its event are written, in one\ntransaction.",
         "operationId": "move_issue",
@@ -2007,6 +2051,13 @@
             "type": "integer",
             "format": "int32"
           },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
           "failure_reason": {
             "type": [
               "string",
@@ -2019,6 +2070,27 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the runner passed the agent; `None` for the agent's default."
+          },
+          "output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           },
           "runner": {
             "$ref": "#/components/schemas/RunnerRef"
@@ -3298,6 +3370,13 @@
           "branch": {
             "type": "string"
           },
+          "check_runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckRunEvidence"
+            },
+            "description": "The newest check run of each name on the head commit, as `ci_green` reads them. Only\nan issue's pull requests carry them; their names are text from outside the team."
+          },
           "checks": {
             "$ref": "#/components/schemas/ChecksState"
           },
@@ -3493,6 +3572,16 @@
               "type": "string"
             },
             "description": "Agent keys the runner can start, such as `claude-code`."
+          },
+          "models": {
+            "type": "object",
+            "description": "The model the runner passes each agent, by agent key, such as `claude-code` →\n`haiku`. An agent missing here runs its own default model.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "name": {
             "type": "string",
@@ -3738,6 +3827,13 @@
               "$ref": "#/components/schemas/LogLine"
             },
             "description": "The last 20 log lines, oldest first."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the latest attempt's runner passed the agent; `None` for the agent's default."
           },
           "outcome": {
             "$ref": "#/components/schemas/RunOutcome"
@@ -4026,6 +4122,55 @@
           }
         }
       },
+      "TransitionList": {
+        "type": "object",
+        "description": "`GET /api/issues/{id}/transitions`: the moves that can be requested from the issue's\nstatus, each with the verdict the caller's request would get on the evidence recorded now.",
+        "required": [
+          "status",
+          "viewer_locked",
+          "transitions"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/StatusInfo",
+            "description": "The issue's status; `locked_to` are the roles it locks out."
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransitionOption"
+            },
+            "description": "Each transition from `status` that is not made only by an event, in the workflow's order."
+          },
+          "viewer_locked": {
+            "type": "boolean",
+            "description": "The status locks the caller's role out: it can move, comment on and edit nothing here."
+          }
+        }
+      },
+      "TransitionOption": {
+        "type": "object",
+        "required": [
+          "to",
+          "by",
+          "verdict"
+        ],
+        "properties": {
+          "by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            },
+            "description": "The roles that make it."
+          },
+          "to": {
+            "$ref": "#/components/schemas/StatusInfo"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/Verdict"
+          }
+        }
+      },
       "UpdateIssue": {
         "type": "object",
         "description": "`PATCH /api/issues/{id}`. An absent field is left as it is.",
@@ -4076,6 +4221,72 @@
             "type": "string"
           }
         }
+      },
+      "Verdict": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The issue would move.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "allowed"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GateResult",
+                "description": "The first gate that fails (`gate_failed`)."
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "blocked"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "The first gate that fails (`gate_failed`)."
+          },
+          {
+            "type": "object",
+            "description": "The workflow refuses the caller: `code` is the refusal's, such as `locked` or\n`role_not_allowed`, and `message` names the rule.",
+            "required": [
+              "code",
+              "message",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "refused"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "What `POST /api/issues/{id}/transitions` would answer the caller, without the read of\nGitHub a gated request makes first, so a request can still answer differently."
       },
       "WorkflowInfo": {
         "type": "object",

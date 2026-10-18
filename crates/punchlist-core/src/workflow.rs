@@ -811,6 +811,14 @@ impl Workflow {
             .find(|t| t.on.is_none() && !t.gates.is_empty() && t.from.iter().any(|f| f.0 == from))
     }
 
+    /// The transitions an actor can request from `from`, in the file's order: every one
+    /// that leaves `from` and is not made only by an `on` event.
+    pub fn requestable(&self, from: &str) -> impl Iterator<Item = &Transition> {
+        self.transitions
+            .iter()
+            .filter(move |t| t.on.is_none() && t.from.iter().any(|f| f.0 == from))
+    }
+
     /// The transition an event makes from `from`, such as `merging → done` on `pr_merged`.
     /// `None` when the workflow has no transition on that event from that status: the event
     /// is recorded as evidence and the issue stays where it is.
@@ -1172,6 +1180,19 @@ mod tests {
         );
         assert!(workflow.next_gated("human_review").is_none());
         assert!(workflow.next_gated("nowhere").is_none());
+    }
+
+    #[test]
+    fn requestable_transitions_leave_out_event_moves() {
+        let workflow = default_workflow();
+        let to = |from| {
+            (workflow.requestable(from))
+                .map(|t| t.to.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(to("agent_review"), ["human_review"]);
+        assert_eq!(to("merging"), ["todo"]);
+        assert_eq!(to("done"), Vec::<&str>::new());
     }
 
     #[test]

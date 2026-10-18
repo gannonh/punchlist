@@ -428,6 +428,10 @@ pub struct RegisterRunner {
     pub name: String,
     /// Agent keys the runner can start, such as `claude-code`.
     pub agents: Vec<String>,
+    /// The model the runner passes each agent, by agent key, such as `claude-code` →
+    /// `haiku`. An agent missing here runs its own default model.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -686,6 +690,9 @@ pub struct Run {
     pub finished_at: Option<DateTime<Utc>>,
     /// The latest attempt's number, runner, failure reason, duration and tokens.
     pub attempt: i32,
+    /// The model the latest attempt's runner passed the agent; `None` for the agent's default.
+    #[serde(default)]
+    pub model: Option<String>,
     pub runner: RunnerRef,
     pub failure_reason: Option<String>,
     pub duration_ms: Option<i64>,
@@ -703,6 +710,15 @@ pub struct Run {
 pub struct AttemptInfo {
     pub attempt: i32,
     pub runner: RunnerRef,
+    /// The model the runner passed the agent; `None` for the agent's default.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub input_tokens: Option<i64>,
+    #[serde(default)]
+    pub output_tokens: Option<i64>,
     pub state: RunOutcome,
     pub failure_reason: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -775,6 +791,10 @@ pub struct PullRequest {
     /// The issue the branch or title names; `None` when it is unlinked.
     pub issue_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// The newest check run of each name on the head commit, as `ci_green` reads them. Only
+    /// an issue's pull requests carry them; their names are text from outside the team.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_runs: Vec<CheckRunEvidence>,
 }
 
 /// `POST /api/issues/{id}/pull-requests/refresh`: the issue's pull requests and what their
@@ -838,6 +858,40 @@ pub struct GateChecklist {
     pub to_name: String,
     /// In the workflow's order.
     pub gates: Vec<GateResult>,
+}
+
+/// `GET /api/issues/{id}/transitions`: the moves that can be requested from the issue's
+/// status, each with the verdict the caller's request would get on the evidence recorded now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TransitionList {
+    /// The issue's status; `locked_to` are the roles it locks out.
+    pub status: StatusInfo,
+    /// The status locks the caller's role out: it can move, comment on and edit nothing here.
+    pub viewer_locked: bool,
+    /// Each transition from `status` that is not made only by an event, in the workflow's order.
+    pub transitions: Vec<TransitionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TransitionOption {
+    pub to: StatusInfo,
+    /// The roles that make it.
+    pub by: Vec<Role>,
+    pub verdict: Verdict,
+}
+
+/// What `POST /api/issues/{id}/transitions` would answer the caller, without the read of
+/// GitHub a gated request makes first, so a request can still answer differently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Verdict {
+    /// The issue would move.
+    Allowed,
+    /// The first gate that fails (`gate_failed`).
+    Blocked(GateResult),
+    /// The workflow refuses the caller: `code` is the refusal's, such as `locked` or
+    /// `role_not_allowed`, and `message` names the rule.
+    Refused { code: String, message: String },
 }
 
 /// `POST /api/issues/{id}/comments`.

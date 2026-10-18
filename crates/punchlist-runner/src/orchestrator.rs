@@ -135,6 +135,13 @@ pub(crate) async fn run_with_worktrees(
         .register_runner(&RegisterRunner {
             name: config.name.clone(),
             agents: config.agents.clone(),
+            models: [
+                ("claude-code", &config.model),
+                ("codex", &config.codex_model),
+            ]
+            .into_iter()
+            .filter_map(|(agent, model)| Some((agent.to_string(), model.clone()?)))
+            .collect(),
         })
         .await?;
     let runner_id = registered.runner.id.to_string();
@@ -935,6 +942,7 @@ mod tests {
             .register_runner(&RegisterRunner {
                 name: "r1".into(),
                 agents: vec!["claude-code".into()],
+                models: Default::default(),
             })
             .await
             .unwrap();
@@ -1064,6 +1072,7 @@ mod tests {
                         started_at: now,
                         finished_at: Some(now),
                         attempt: 1,
+                        model: None,
                         runner: punchlist_api::RunnerRef {
                             id: RUNNER,
                             name: "sartre".into(),

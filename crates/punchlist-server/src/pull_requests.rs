@@ -13,7 +13,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::Actor;
-use crate::github::refresh_pull_requests;
+use crate::github::{newest_check_runs, refresh_pull_requests};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -67,6 +67,7 @@ impl TryFrom<PullRequestRow> for PullRequest {
             open_threads: row.open_threads,
             issue_id: row.issue_id,
             updated_at: row.updated_at,
+            check_runs: Vec::new(),
         })
     }
 }
@@ -178,10 +179,23 @@ async fn recorded(
     )
     .fetch_all(&mut *conn)
     .await?;
-    Ok(rows
+    let mut pull_requests: Vec<PullRequest> = rows
         .into_iter()
         .map(PullRequest::try_from)
-        .collect::<Result<_, _>>()?)
+        .collect::<Result<_, _>>()?;
+    let heads = sqlx::query!(
+        "SELECT number, repository_id, head_sha FROM pull_request WHERE issue_id = $1",
+        id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for pull_request in &mut pull_requests {
+        if let Some(head) = heads.iter().find(|head| head.number == pull_request.number) {
+            pull_request.check_runs =
+                newest_check_runs(conn, head.repository_id, &head.head_sha).await?;
+        }
+    }
+    Ok(pull_requests)
 }
 
 /// The workspace repository's pull requests that name no issue, newest number first.
