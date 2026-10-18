@@ -22,6 +22,7 @@ import {
   type Transitions,
   workflowStale,
 } from '@/model/issues'
+import type { GateChecklist } from '@/model/issue-page'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -82,6 +83,8 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
+      // An open issue page reads its issue again: its timeline, runs, proof, gates and moves.
+      void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
       if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
@@ -266,3 +269,107 @@ export const useIssues = () => useQuery(issuesQuery)
 export const useWorkflow = () => useQuery(workflowQuery)
 export const useActors = () => useQuery(actorsQuery)
 export const useProjects = () => useQuery(projectsQuery)
+
+/** Every query of one issue's page starts with this key, so one invalidation reads the page again. */
+export const issueKey = (id: string) => ['issue', id] as const
+const path = (id: string) => ({ params: { path: { id } } })
+
+/** The issue page's reads. Each is an issue route, which a standalone agent's token reaches too. */
+export const issuePageQueries = (id: string) => ({
+  issue: queryOptions({
+    queryKey: [...issueKey(id), 'issue'],
+    queryFn: () => call(api.GET('/api/issues/{id}', path(id))),
+  }),
+  events: queryOptions({
+    queryKey: [...issueKey(id), 'events'],
+    queryFn: () => call(api.GET('/api/issues/{id}/events', path(id))),
+  }),
+  runs: queryOptions({
+    queryKey: [...issueKey(id), 'runs'],
+    queryFn: () => call(api.GET('/api/issues/{id}/runs', path(id))),
+  }),
+  proof: queryOptions({
+    queryKey: [...issueKey(id), 'proof'],
+    queryFn: () => call(api.GET('/api/issues/{id}/proof', path(id))),
+  }),
+  // 204 when no move from the status has gates.
+  gates: queryOptions({
+    queryKey: [...issueKey(id), 'gates'],
+    queryFn: async () => (await call<GateChecklist | undefined>(api.GET('/api/issues/{id}/gates', path(id)))) ?? null,
+  }),
+  transitions: queryOptions({
+    queryKey: [...issueKey(id), 'transitions'],
+    queryFn: () => call(api.GET('/api/issues/{id}/transitions', path(id))),
+  }),
+  pullRequests: queryOptions({
+    queryKey: [...issueKey(id), 'pull-requests'],
+    queryFn: () => call(api.GET('/api/issues/{id}/pull-requests', path(id))),
+  }),
+})
+
+/**
+ * A run's whole log. People only: an agent's token cannot read `/api/runs/{id}/log`.
+ * ponytail: a running attempt's log is read again in full every second; past a few thousand lines read only
+ * the new ones, with an `after` cursor on the route or a log stream over Server-Sent Events.
+ */
+export const runLogQuery = (issueId: string, runId: string, live: boolean) =>
+  queryOptions({
+    queryKey: [...issueKey(issueId), 'log', runId],
+    queryFn: async () => (await call(api.GET('/api/runs/{id}/log', path(runId)))).lines,
+    refetchInterval: live ? 1000 : false,
+  })
+
+const refusal = (error: unknown) => (error instanceof ApiError ? refusalText(error.body) : String(error))
+
+/** A comment from the composer; the timeline is read again as soon as it is written. */
+export function useComment(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (body: string) => call(api.POST('/api/issues/{id}/comments', { ...path(id), body: { body } })),
+    onSuccess: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+    onError: (error) => {
+      toast.error(`The comment was not posted. ${refusal(error)}`)
+    },
+  })
+}
+
+/** A file attached as proof, sent as `multipart/form-data`; the server takes its kind from its type. */
+export function useAttachProof(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData()
+      form.append('title', file.name)
+      form.append('file', file)
+      return call(
+        api.POST('/api/issues/{id}/proof', {
+          ...path(id),
+          // openapi-fetch types a binary part as a string; the form carries the file itself.
+          body: { title: file.name, file: '' },
+          bodySerializer: () => form,
+        }),
+      )
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+    onError: (error) => {
+      toast.error(`The file was not attached. ${refusal(error)}`)
+    },
+  })
+}
+
+/** A move requested from the issue page. Not optimistic: the page reads the issue again once it settles. */
+export function useMove(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (to: StatusInfo) =>
+      call(api.POST('/api/issues/{id}/transitions', { ...path(id), body: { to: to.key } })),
+    onSuccess: (moved) => {
+      setIssues(client, (cache) => applyMove(cache, moved))
+      if (moved.warning) toast.warning(moved.warning)
+    },
+    onError: (error, to) => {
+      toast.error(`${id} did not move to ${to.name}. ${refusal(error)}`)
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+  })
+}
