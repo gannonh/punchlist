@@ -7,7 +7,8 @@ The server refuses a move the workflow does not allow and says which rule refuse
 - `refuse-role` names the roles that may make the move: `only a runner makes start → in_progress, not a person` (code `role_not_allowed`).
 - `refuse-missing` refuses a move with no transition: `no transition backlog → done exists in the workflow` (code `no_transition`).
 - `refuse-event-only` refuses a move that only a GitHub event makes: `merging → done happens only on the `pr_merged` event, not on request` (code `event_only`).
-- `refuse-gated` refuses a gated move even for an allowed role, until gates are evaluated (Slice 4): `in_progress → agent_review needs gates pr_open, pr_ready, pr_names_issue, which Punchlist does not evaluate yet` (code `gates_not_evaluated`).
+- `refuse-gated` refuses a gated move, for an allowed role, when a gate fails over the recorded evidence (code `gate_failed`): `gate pr_open failed: no open pull request is linked to PL-1`, followed by every gate's result. [workflow-and-gates.md](workflow-and-gates.md) covers the gates themselves.
+- `refuse-locked` refuses an agent or runner acting on an issue in a status the workflow locks to them: `human_review is locked: an agent cannot act on an issue in it` (code `locked`).
 - `refuse-unknown` refuses a status not in the workflow: ``status `shipped` is not in the workflow`` (code `unknown_status`).
 - `refuse-no-write` leaves the status, `transition` and `event` tables unchanged.
 
@@ -27,10 +28,9 @@ Preconditions:
 - **Missing transition.** Run `$C pl "$RUN" issue move PL-2 done`. Exit `1`, stderr exactly `error: refused: no transition backlog → done exists in the workflow`.
 - **Unknown status.** Run `$C pl "$RUN" issue move PL-2 shipped`. Exit `1`, stderr ``error: refused: status `shipped` is not in the workflow``.
 - **Nothing written.** Run `$C sql "$RUN" "SELECT count(*) FROM transition"` and `$C sql "$RUN" "SELECT id, status FROM issue ORDER BY id"`. The count is unchanged; `PL-1 | start`, `PL-2 | backlog`.
+- **Gated.** Take `PL-1` from Start to In Progress without a model: `$C curl "$RUN" -X POST -H 'content-type: application/json' -d '{"name":"r","agents":["claude-code"]}' "$SERVER_URL/api/runners"`, then `curl -s -X POST -H "Authorization: Bearer <the answer's token>" -H 'content-type: application/json' -d '{}' "$SERVER_URL/api/runs/claim"`. Within the claim's 30-second lease, `PUNCHLIST_AGENT_TOKEN=<the claim's agent_token> $C request-transition "$RUN" PL-1 agent_review`. Exit `1`, first line `Refused (gate_failed): gate pr_open failed: no open pull request is linked to PL-1`, then `Gates:` and one `  <gate>: fail (…)` line each for `pr_open`, `pr_ready` and `pr_names_issue`. `SELECT count(*) FROM transition WHERE to_status = 'agent_review'` is `0`. Keep both tokens out of evidence. An agent from `pl actor create --agent --kind claude-code` ([actors-and-proof.md](actors-and-proof.md)) gets the same refusal, and its token does not lapse.
 
 ## Gotchas
 
-- `refuse-gated` needs an agent actor and an issue in In Progress, which no user path creates in Slice 1. It is covered by `punchlist-core` unit tests; report it as skipped in live checks.
-
-- `refuse-event-only` cannot be reached by a person in Slice 1: the issue would have to be in Merging, and only a person in Human Review can get it there, which needs an agent first. It is covered by `punchlist-core` unit tests; report it as skipped in live checks.
+- `refuse-event-only` needs an issue in Merging, which takes an agent's gated move to Agent Review and Codex's to Human Review over a real pull request ([workflow-and-gates.md](workflow-and-gates.md)). It is covered by `punchlist-core` unit tests; report it as skipped unless the check already has an issue in Merging.
 - `$C pl` passes the exit code through; check it right after the command, before another command overwrites `$?`.

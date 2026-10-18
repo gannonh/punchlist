@@ -109,7 +109,9 @@ ENV
 
   # pnpm dev in its own process group so `down` stops exactly this tree.
   # PUNCHLIST_DEV_VITE=0: the server serves the build; no Vite dev server per run.
+  # PUNCHLIST_PROOF_DIR: uploads stay in the run's directory, which `down` deletes.
   (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="$host:$port" PUNCHLIST_DEV_VITE=0 PUNCHLIST_WEB_DIR="$dir/web" \
+     PUNCHLIST_PROOF_DIR="$dir/proof" \
      GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \
      exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
   local pgid=$!
@@ -126,7 +128,7 @@ ENV
     { cat "$dir/bootstrap.err" >&2; die "bootstrap failed"; }
   trap - EXIT
   echo "$run_id"
-  echo "server  http://127.0.0.1:$port   database $db" >&2
+  echo "server  http://$host:$port   database $db" >&2
   echo "evidence $EVIDENCE_ROOT/$run_id" >&2
 }
 
