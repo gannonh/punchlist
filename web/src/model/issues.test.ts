@@ -185,6 +185,17 @@ describe('the cache', () => {
     expect(ready.lastSeq).toBe(6)
   })
 
+  test('a workflow message replaces the row with its new gate summary', () => {
+    const gates = { to: 'human_review', to_name: 'Human Review', passed: 1, total: 2, first_failed: 'proof_attached' }
+    const cache = fromList({ issues: [row('PL-1', {}, { gates: { ...gates, total: 1 } })], last_event_seq: 4 })
+    const loaded = applyStream(cache, {
+      event: { ...event(5, 'PL-1'), detail: { kind: 'workflow' } },
+      row: row('PL-1', {}, { gates }),
+    })
+    expect(loaded.rows.map((r) => rowView(r, now).gates.text)).toEqual(['1 of 2 gates pass'])
+    expect(loaded.lastSeq).toBe(5)
+  })
+
   test("a write's answer older than the row the stream gave is dropped", () => {
     const cache = applyStream(fromList({ issues: [row('PL-1')], last_event_seq: 1 }), {
       event: event(3, 'PL-1'),

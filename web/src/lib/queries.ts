@@ -81,7 +81,10 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
       const statuses = client.getQueryData(workflowQuery.queryKey)?.statuses
-      if (statuses && !statuses.some((status) => status.key === item.row.issue.status)) {
+      if (
+        item.event.detail.kind === 'workflow' ||
+        (statuses && !statuses.some((status) => status.key === item.row.issue.status))
+      ) {
         void client.invalidateQueries({ queryKey: workflowQuery.queryKey })
       }
     })
