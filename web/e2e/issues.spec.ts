@@ -373,8 +373,9 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
     multipart: { title: 'Screenshot', file: { name: 'shot.png', mimeType: 'image/png', buffer: PNG } },
   })
   expect(upload.status()).toBe(201)
-  await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'human_review' } }))
-  await page.reload()
+  // The page still shows the move blocked by the failure it read; the request reads the evidence again and moves.
+  await expect(move).toHaveAttribute('data-verdict', 'blocked')
+  await move.click()
   await expect(page.locator('[data-notice="agent-locked"]')).toContainText('Agents cannot act on this issue.')
   await expect(page.locator('[data-transition="merging"]')).toHaveAttribute('aria-disabled', 'true')
   await expect(page.getByLabel('New comment')).toBeDisabled()

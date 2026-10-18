@@ -5,6 +5,8 @@ import {
   feedEntries,
   gateSummary,
   moveView,
+  plainPullRequestUrl,
+  proofType,
   specBlocks,
   tokens,
   duration,
@@ -125,7 +127,7 @@ describe('moveView', () => {
   }
   const option = (verdict: TransitionOption['verdict']): TransitionOption => ({ to: human, by: ['agent'], verdict })
 
-  test('a blocked move names its gate, reason and checks', () => {
+  test('a blocked move names its gate, reason and checks, and can still be requested', () => {
     const blocked = option({ kind: 'blocked', ...ciGreen })
     expect(moveView(blocked, false, checklist)).toEqual({
       to: 'human_review',
@@ -136,7 +138,7 @@ describe('moveView', () => {
       text: '1 of 1 checks failed on 0000000',
       gate: 'ci_green',
       names: ['`check` (failure)'],
-      disabled: true,
+      disabled: false,
     })
   })
 
@@ -187,6 +189,25 @@ describe('specBlocks and run facts', () => {
       { kind: 'check', text: 'It works', done: true },
       { kind: 'check', text: 'It is fast', done: false },
       { kind: 'item', text: 'Note' },
+    ])
+  })
+
+  test('a pull request links only to its plain GitHub URL', () => {
+    expect([
+      plainPullRequestUrl(7, 'https://github.com/gannonh/punchlist/pull/7'),
+      plainPullRequestUrl(7, 'https://github.com/gannonh/punchlist/pull/8'),
+      plainPullRequestUrl(7, 'javascript:alert(1)//https://github.com/a/b/pull/7'),
+      plainPullRequestUrl(7, 'https://github.com.evil.example/a/b/pull/7'),
+      plainPullRequestUrl(7, 'https://github.com/../b/pull/7'),
+    ]).toEqual(['https://github.com/gannonh/punchlist/pull/7', null, null, null, null])
+  })
+
+  test("proof takes the server's type from its extension", () => {
+    expect([proofType('run.LOG'), proofType('shot.jpg'), proofType('page.html'), proofType('png')]).toEqual([
+      'text/plain',
+      'image/jpeg',
+      null,
+      null,
     ])
   })
 

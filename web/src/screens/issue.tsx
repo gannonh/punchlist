@@ -28,6 +28,8 @@ import {
   gateSummary,
   gateText,
   moveView,
+  plainPullRequestUrl,
+  PROOF_TYPES,
   specBlocks,
   tokens,
   type ActorMark,
@@ -218,7 +220,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
       number: pr.number,
       state: pr.state === 'open' && pr.draft ? 'draft' : pr.state,
       checks: pr.checks,
-      url: pr.url,
+      url: plainPullRequestUrl(pr.number, pr.url),
     },
   )
 
@@ -456,13 +458,19 @@ function PullRequestPanel({ pr, issueId }: { pr: PullRequestInfo | undefined; is
     )
   const word = pr.state === 'open' && pr.draft ? 'draft' : pr.state
   const runs = pr.check_runs ?? []
+  const url = plainPullRequestUrl(pr.number, pr.url)
+  const name = `#${String(pr.number)} ${pr.title}`
   return (
     <Panel id="pr" title="Pull request" right={<span className="text-ink-3">#{pr.number} {word}</span>}>
       <div className="grid gap-2.5">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <a href={pr.url} target="_blank" rel="noreferrer" className="text-body font-semibold hover:underline wrap-anywhere">
-            #{pr.number} {pr.title}
-          </a>
+          {url ? (
+            <a href={url} target="_blank" rel="noreferrer" className="text-body font-semibold hover:underline wrap-anywhere">
+              {name}
+            </a>
+          ) : (
+            <span className="text-body font-semibold wrap-anywhere">{name}</span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
           <span className="font-mono text-caption text-ink-3 wrap-anywhere">{pr.branch}</span>
@@ -506,7 +514,9 @@ function PullRequestPanel({ pr, issueId }: { pr: PullRequestInfo | undefined; is
   )
 }
 
-const PROOF_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime,.txt,.log,.md,.xml,.pdf'
+const PROOF_ACCEPT = Object.keys(PROOF_TYPES)
+  .map((ext) => `.${ext}`)
+  .join(',')
 
 function ProofPanel({ id, proof, person, locked }: { id: string; proof: Proof[]; person: boolean; locked: boolean }) {
   const attach = useAttachProof(id)

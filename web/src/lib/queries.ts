@@ -22,7 +22,7 @@ import {
   type Transitions,
   workflowStale,
 } from '@/model/issues'
-import type { GateChecklist } from '@/model/issue-page'
+import { proofType, type GateChecklist } from '@/model/issue-page'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -340,7 +340,9 @@ export function useAttachProof(id: string) {
     mutationFn: (file: File) => {
       const form = new FormData()
       form.append('title', file.name)
-      form.append('file', file)
+      // The browser's type for a file can be empty (`.log`) or other than the server's; send the server's.
+      const type = proofType(file.name)
+      form.append('file', type ? file.slice(0, file.size, type) : file, file.name)
       return call(
         api.POST('/api/issues/{id}/proof', {
           ...path(id),

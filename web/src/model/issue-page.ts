@@ -172,7 +172,8 @@ export function moveView(
   if (verdict.kind === 'blocked') {
     const names = [...(verdict.outside ?? [])]
     if (verdict.outside_more) names.push(`and ${String(verdict.outside_more)} more`)
-    return { ...base, state: 'blocked', text: verdict.reason, gate: verdict.gate, names, disabled: true }
+    // The verdict reads the recorded evidence; the request reads GitHub first, so it may pass where this fails.
+    return { ...base, state: 'blocked', text: verdict.reason, gate: verdict.gate, names, disabled: false }
   }
   if (verdict.kind === 'refused' || viewerLocked)
     return {
@@ -210,6 +211,36 @@ const count = (n: number): string => (n < 1000 ? String(n) : `${(n / 1000).toFix
 export function tokens(input: number | null | undefined, output: number | null | undefined): string {
   if (input === null || input === undefined || output === null || output === undefined) return '—'
   return `${count(input)} in · ${count(output)} out`
+}
+
+/** A pull request's URL when it is a plain `https://github.com/<owner>/<repo>/pull/<number>`, as the rows' is. */
+export function plainPullRequestUrl(number: number, url: string): string | null {
+  const parts = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
+  const plain = (part: string | undefined) => part !== undefined && part !== '.' && part !== '..'
+  return parts && plain(parts[1]) && plain(parts[2]) && parts[3] === String(number) ? url : null
+}
+
+/** The content type the server takes for each proof extension (`PROOF_TYPES` in `punchlist-api`). */
+export const PROOF_TYPES: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  txt: 'text/plain',
+  log: 'text/plain',
+  md: 'text/markdown',
+  xml: 'application/xml',
+  pdf: 'application/pdf',
+}
+
+/** A file's proof content type from its extension, in any case, or `null` when proof cannot be one. */
+export function proofType(name: string): string | null {
+  const dot = name.lastIndexOf('.')
+  return dot < 0 ? null : (PROOF_TYPES[name.slice(dot + 1).toLowerCase()] ?? null)
 }
 
 /** `512 B`, `12 KB` or `3.4 MB`. */
