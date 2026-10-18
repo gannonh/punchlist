@@ -73,6 +73,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
   useEffect(() => {
     if (!ready) return
     let retry: ReturnType<typeof setTimeout> | undefined
+    let reread: ReturnType<typeof setTimeout> | undefined
     const after = client.getQueryData(issuesQuery.queryKey)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
@@ -81,9 +82,11 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
-      // A load writes one `workflow` message per issue; they share one read of the workflow.
+      // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
+      // starts after every load they came from committed.
       if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
-        void client.invalidateQueries({ queryKey: workflowQuery.queryKey }, { cancelRefetch: false })
+        clearTimeout(reread)
+        reread = setTimeout(() => void client.invalidateQueries({ queryKey: workflowQuery.queryKey }), 100)
       }
     })
     // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
@@ -105,6 +108,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     })
     return () => {
       clearTimeout(retry)
+      clearTimeout(reread)
       source.close()
     }
   }, [client, workspaceId, ready, opened])
