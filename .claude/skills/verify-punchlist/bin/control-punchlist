@@ -3,6 +3,7 @@
 #
 #   control-punchlist up [RUN_ID]         start Postgres, a fresh database and the server; bootstrap a person
 #   control-punchlist doctor RUN_ID       read-only health check
+#   control-punchlist restart RUN_ID      stop the server and start it again on the same database and port
 #   control-punchlist pl RUN_ID ARGS...   run `pl ARGS...`; record the transcript
 #   control-punchlist get-issue RUN_ID ISSUE  call the MCP tool `get_issue` through `pl mcp`, with no model; record it
 #   control-punchlist request-transition RUN_ID ISSUE TO  call the MCP tool `request_transition` the same way, as PUNCHLIST_AGENT_TOKEN
@@ -49,6 +50,29 @@ record() { # record EVIDENCE_FILE LABEL COMMAND... ; prints stdout/stderr, logs 
   cat "$out"; cat "$err" >&2
   rm -f "$out" "$err"
   return "$code"
+}
+
+start_server() { # start_server DIR DATABASE_URL HOST PORT
+  local dir="$1" url="$2" host="$3" port="$4"
+  # With the App's private key (`with-env $C up`), the server reads `.punchlist/` from the
+  # sandbox's default branch as the Punchlist App.
+  if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then export GITHUB_APP_ID="${GITHUB_APP_ID:-5254938}"; fi
+
+  # pnpm dev in its own process group so `down` stops exactly this tree.
+  # PUNCHLIST_DEV_VITE=0: the server serves the build; no Vite dev server per run.
+  # PUNCHLIST_PROOF_DIR: uploads stay in the run's directory, which `down` deletes.
+  (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="$host:$port" PUNCHLIST_DEV_VITE=0 PUNCHLIST_WEB_DIR="$dir/web" \
+     PUNCHLIST_PROOF_DIR="$dir/proof" \
+     GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \
+     exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
+  local pgid=$!
+  echo "$pgid" >"$dir/server.pgid"
+  for _ in $(seq 1 120); do
+    grep -q "listening on" "$dir/server.log" 2>/dev/null && break
+    kill -0 -- "-$pgid" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
 }
 
 cmd_up() {
@@ -103,25 +127,7 @@ ENV
   # run.env and never printed.
   (umask 077 && printf '%s' "${GITHUB_WEBHOOK_SECRET:-$(openssl rand -hex 32)}" >"$dir/webhook-secret")
 
-  # With the App's private key (`with-env $C up`), the server reads `.punchlist/` from the
-  # sandbox's default branch as the Punchlist App.
-  if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then export GITHUB_APP_ID="${GITHUB_APP_ID:-5254938}"; fi
-
-  # pnpm dev in its own process group so `down` stops exactly this tree.
-  # PUNCHLIST_DEV_VITE=0: the server serves the build; no Vite dev server per run.
-  # PUNCHLIST_PROOF_DIR: uploads stay in the run's directory, which `down` deletes.
-  (cd "$REPO" && DATABASE_URL="$url" PUNCHLIST_BIND="$host:$port" PUNCHLIST_DEV_VITE=0 PUNCHLIST_WEB_DIR="$dir/web" \
-     PUNCHLIST_PROOF_DIR="$dir/proof" \
-     GITHUB_WEBHOOK_SECRET="$(cat "$dir/webhook-secret")" \
-     exec setsid pnpm dev </dev/null >"$dir/server.log" 2>&1) &
-  local pgid=$!
-  echo "$pgid" >"$dir/server.pgid"
-  for _ in $(seq 1 120); do
-    grep -q "listening on" "$dir/server.log" 2>/dev/null && break
-    kill -0 -- "-$pgid" 2>/dev/null || break
-    sleep 0.5
-  done
-  grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
+  start_server "$dir" "$url" "$host" "$port"
 
   (umask 077 && "$REPO/target/debug/punchlist-server" --database-url "$url" bootstrap \
      --person "Verify Person" --repository "$SANDBOX_REPOSITORY" --server-url "http://$host:$port" >"$dir/config.toml" 2>"$dir/bootstrap.err") ||
@@ -307,19 +313,35 @@ sys.stdout.write("<!doctype html><meta charset=utf-8><title>Signing in</title><s
   echo "$SERVER_URL/$name"
 }
 
-cmd_down() {
+# The server down and up again on the same database and port, as after a crash or a deploy.
+# Under `with-env` it starts with the GitHub App's credentials, as `up` does.
+cmd_restart() {
   load "${1:-}"
-  local file
-  for file in "$RUN_DIR"/runner-*.pgid; do
-    [ -f "$file" ] && { kill -CONT -- "-$(cat "$file")" 2>/dev/null || true; stop_group "$(cat "$file")"; }
-  done
+  stop_server
+  # The new log follows the old one, so `listening on` is waited for on its own lines.
+  mv "$RUN_DIR/server.log" "$RUN_DIR/server.log.$(date +%s)"
+  local host="${SERVER_URL#http://}"
+  start_server "$RUN_DIR" "$DATABASE_URL" "${host%:*}" "$PORT"
+  echo "restarted the server of $RUN_ID" >&2
+}
+
+stop_server() {
   local pgid; pgid="$(cat "$RUN_DIR/server.pgid" 2>/dev/null || true)"
   if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
     kill -- "-$pgid" 2>/dev/null || true
     for _ in $(seq 1 20); do kill -0 -- "-$pgid" 2>/dev/null || break; sleep 0.25; done
     kill -9 -- "-$pgid" 2>/dev/null || true
   fi
-  cp "$RUN_DIR/server.log" "$EVIDENCE/server.log" 2>/dev/null || true
+}
+
+cmd_down() {
+  load "${1:-}"
+  local file
+  for file in "$RUN_DIR"/runner-*.pgid; do
+    [ -f "$file" ] && { kill -CONT -- "-$(cat "$file")" 2>/dev/null || true; stop_group "$(cat "$file")"; }
+  done
+  stop_server
+  cp "$RUN_DIR"/server.log* "$EVIDENCE/" 2>/dev/null || true
   psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null 2>&1 || true
   rm -rf "$RUN_DIR"
   echo "stopped $RUN_ID; evidence kept in $EVIDENCE" >&2
@@ -328,6 +350,7 @@ cmd_down() {
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
   pl) shift; cmd_pl "$@" ;;
   curl) shift; cmd_curl "$@" ;;
   get-issue) shift; cmd_get_issue "$@" ;;

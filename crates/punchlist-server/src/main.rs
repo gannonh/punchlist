@@ -2,8 +2,8 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
     AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, expire_leases, openapi,
-    queue_workflow_load, router, warn_invalid_workflows, with_web_app, work_jobs,
-    write_pull_request_events,
+    queue_workflow_load, queue_workflow_loads_at_start, router, warn_invalid_workflows,
+    with_web_app, work_jobs, write_pull_request_events,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -161,7 +161,12 @@ async fn main() -> anyhow::Result<()> {
                 None => tracing::warn!("no GitHub webhook secret; the webhook route answers 503"),
             }
             match github_app_id.zip(github_app_private_key) {
-                Some((id, key)) => state = state.with_github(GithubClient::app(&id, &key)?),
+                Some((id, key)) => {
+                    state = state.with_github(GithubClient::app(&id, &key)?);
+                    queue_workflow_loads_at_start(&state.pool, uuid::Uuid::new_v4())
+                        .await
+                        .context("queue the workflow loads")?;
+                }
                 None => tracing::warn!(
                     "no GitHub App credentials; the workflow cannot load from the repository"
                 ),

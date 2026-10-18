@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO job (kind, idempotency_key, payload)\n         SELECT 'workflow_load', 'workflow_load:start:' || $1::uuid || ':' || id,\n                jsonb_build_object('workspace_id', id)\n         FROM workspace ORDER BY created_at\n         ON CONFLICT (idempotency_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "495879fc4361afb53984fdbbd7d583e58429f7ee659e66e33fe70dd21da24855"
+}

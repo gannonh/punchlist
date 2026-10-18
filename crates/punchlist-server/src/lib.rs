@@ -34,7 +34,7 @@ pub use events::write_pull_request_events;
 pub use github_api::GithubClient;
 pub use jobs::{run_jobs_until_idle, run_next_job, work_jobs};
 pub use runs::expire_leases;
-pub use workflow::{queue_workflow_load, warn_invalid_workflows};
+pub use workflow::{queue_workflow_load, queue_workflow_loads_at_start, warn_invalid_workflows};
 
 /// The migrations in `migrations/`, run when the server starts.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();

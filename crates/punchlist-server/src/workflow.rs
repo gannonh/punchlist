@@ -162,6 +162,23 @@ pub async fn queue_workflow_load(
     Ok(())
 }
 
+/// Queues a load of every workspace's workflow, once per `start`. GitHub does not redeliver
+/// a push that reached a stopped server, so the server reads the default branch when it
+/// starts; a file with the active version's hash changes nothing.
+pub async fn queue_workflow_loads_at_start(pool: &sqlx::PgPool, start: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO job (kind, idempotency_key, payload)
+         SELECT 'workflow_load', 'workflow_load:start:' || $1::uuid || ':' || id,
+                jsonb_build_object('workspace_id', id)
+         FROM workspace ORDER BY created_at
+         ON CONFLICT (idempotency_key) DO NOTHING",
+        start,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Why a workflow that drops statuses issues are in is refused.
 fn dropped_message<'a>(in_use: impl Iterator<Item = (&'a str, i64)>) -> String {
     let in_use: Vec<_> = in_use
@@ -260,10 +277,14 @@ pub(crate) async fn load(
         let reason = dropped_message(dropped.iter().map(|d| (d.status.as_str(), d.issues)));
         return refused(&mut *tx, reason).await;
     }
+    // The active version keeps the commit it was loaded from; an earlier version loaded again
+    // takes the head's.
     let version_id = sqlx::query_scalar!(
         "INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (workspace_id, hash) DO UPDATE SET commit_sha = EXCLUDED.commit_sha
+         ON CONFLICT (workspace_id, hash) DO UPDATE SET commit_sha = CASE
+             WHEN workflow_version.id IN (SELECT workflow_version_id FROM workspace WHERE id = $1)
+             THEN workflow_version.commit_sha ELSE EXCLUDED.commit_sha END
          RETURNING id",
         workspace_id,
         workflow.version(),

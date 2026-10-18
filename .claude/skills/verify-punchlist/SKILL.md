@@ -39,6 +39,8 @@ A live check that says "start with `pnpm dev`" is satisfied by `up`: it launches
 
 Another worktree's Postgres container may already hold `127.0.0.1:5433`, and then `up` fails at `docker compose up` with a port-in-use error. Check with `docker ps --format '{{.Names}} {{.Ports}}' | grep 5433`. Don't stop another worktree's container; give this worktree its own port instead: `export PUNCHLIST_DB_PORT=5434` (any free port) before `up`, `down` and `pnpm check`.
 
+`$C restart "$RUN"` stops the run's server and starts it again on the same database and port, as a crash or a deploy would; the old log moves to `server.log.<time>`. Run it under `with-env` to keep the GitHub App's credentials. A run off port 7879 gets no GitHub deliveries, so a push to the sandbox before `restart` is a push the server missed while down.
+
 ## Doctor
 
 Run this first, and again whenever anything looks off:
