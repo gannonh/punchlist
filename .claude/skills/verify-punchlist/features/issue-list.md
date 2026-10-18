@@ -6,7 +6,7 @@
 
 - `list-empty` prints `No issues.`.
 - `list-rows` prints one aligned row per issue, ordered by number.
-- `list-seq` (API only) returns `last_event_seq`, the workspace's latest event number, read in the same snapshot as the list.
+- `list-seq` (API only) returns `last_event_seq`, the workspace's latest event number of any kind (`created`, `edited`, `transition`, `comment`, `refusal`, `run`, `proof`, `pull_request`, `workflow`), read in the same snapshot as the list.
 
 ## How to get to it (user POV)
 
@@ -27,7 +27,7 @@ Preconditions:
   PL-2  Backlog  Second
   ```
 
-- **Sequence.** `source /tmp/punchlist-verify/$RUN/run.env` and `$C curl "$RUN" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":2`.
+- **Sequence.** `source /tmp/punchlist-verify/$RUN/run.env` and `$C curl "$RUN" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":4` (two `created` events and two `transition` events).
 
 ## Gotchas
 

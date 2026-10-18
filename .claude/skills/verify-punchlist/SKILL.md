@@ -29,11 +29,11 @@ It:
 1. Starts the dev Postgres container with `docker compose up -d --wait db` (`127.0.0.1:5433`, shared by every run).
 2. Creates a fresh database `punchlist_verify_<RUN_ID>` in it, so runs never share data.
 3. Builds `punchlist-server` and `pl` with `SQLX_OFFLINE=true`.
-4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) `PUNCHLIST_BIND` on a free port (on `PUNCHLIST_VERIFY_HOST` when set, else 127.0.0.1), `PUNCHLIST_WEB_DIR` on the run's own directory linking `web/dist`, and `PUNCHLIST_DEV_VITE=0`, in its own process group. The server runs migrations at start.
+4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) `PUNCHLIST_BIND` on a free port (on `PUNCHLIST_VERIFY_HOST` when set, else 127.0.0.1), `PUNCHLIST_WEB_DIR` on the run's own directory linking `web/dist`, `PUNCHLIST_PROOF_DIR` in the run's directory, and `PUNCHLIST_DEV_VITE=0`, in its own process group. The server runs migrations at start.
 5. Waits for `listening on http://127.0.0.1:<port>` in the server log (up to 60 s).
 6. Runs `punchlist-server bootstrap --person "Verify Person" --repository gannonh/punchlist-sandbox`, which creates workspace `Punchlist` (prefix `PL`), the sandbox repository and one person actor, and writes the `pl` config with that person's token.
 
-Instance state lives in `/tmp/punchlist-verify/<RUN_ID>/` (`run.env`, `config.toml`, `server.log`, `server.pgid`). `source /tmp/punchlist-verify/$RUN/run.env` gives `SERVER_URL`, `DATABASE_URL`, `CONFIG` and `EVIDENCE`.
+Instance state lives in `/tmp/punchlist-verify/<RUN_ID>/` (`run.env`, `config.toml`, `server.log`, `server.pgid`, `proof/`). `source /tmp/punchlist-verify/$RUN/run.env` gives `SERVER_URL`, `DATABASE_URL`, `CONFIG` and `EVIDENCE`.
 
 A live check that says "start with `pnpm dev`" is satisfied by `up`: it launches through `pnpm dev`, with only the database and port overridden for isolation. If a check needs the default dev instance itself (`127.0.0.1:7878`, database `punchlist`), first make sure nobody else is using it: `ss -ltnp | grep 7878` must show nothing.
 

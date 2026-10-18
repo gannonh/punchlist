@@ -22,9 +22,9 @@ Preconditions:
 
 - **To Todo.** Run `$C pl "$RUN" issue move PL-1 todo`. Exit `0`, stdout `PL-1  Backlog → Todo`.
 - **To Start.** Run `$C pl "$RUN" issue move PL-1 start`. Exit `0`, stdout `PL-1  Todo → Start`.
-- **Timeline.** Run `$C pl "$RUN" issue show PL-1`. Stdout has `Status: Start` and exactly two timeline lines, each matching `^  \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC  Verify Person \(person\)  ` followed by `Backlog → Todo` on the first and `Todo → Start` on the second.
+- **Timeline.** Run `$C pl "$RUN" issue show PL-1`. Stdout has `Status: Start` and exactly three timeline lines, each matching `^  \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC  Verify Person \(person\)  ` followed by `created`, then `Backlog → Todo`, then `Todo → Start`.
 - **Rows.** Run `$C sql "$RUN" "SELECT from_status, to_status, actor_id FROM transition ORDER BY created_at"` and `$C sql "$RUN" "SELECT id, name, role FROM actor"`. Two rows, `backlog | todo` and `todo | start`, both with the actor id of `Verify Person`.
-- **Events.** Run `$C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"`. Rows `1 | PL-1 | transition` and `2 | PL-1 | transition`, same actor id.
+- **Events.** Run `$C sql "$RUN" "SELECT seq, issue_id, kind, actor_id FROM event ORDER BY seq"`. Rows `1 | PL-1 | created`, `2 | PL-1 | transition` and `3 | PL-1 | transition`, same actor id.
 - **Version.** Run `$C sql "$RUN" "SELECT DISTINCT workflow_version FROM transition"`. One row starting `sha256:`.
 
 ## Gotchas
