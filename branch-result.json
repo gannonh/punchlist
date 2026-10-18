@@ -1,0 +1,106 @@
+{
+ "check1_2": {
+  "before": {
+   "pl1": "0 of 3 gates pass",
+   "pl2": "0 of 3 gates pass",
+   "backlog": "PL-3\nBacklog Threealphabeta\nVP\nVerify Person\nperson\nIdle\nno PR\nno gates"
+  },
+  "aft": {
+   "pl1": "0 of 4 gates pass",
+   "pl2": "0 of 4 gates pass",
+   "backlog": "PL-3\nBacklog Threealphabeta\nVP\nVerify Person\nperson\nIdle\nno PR\nno gates"
+  },
+  "delayMs": [
+   42,
+   43
+  ],
+  "st": {
+   "marker": "m1",
+   "navEntries": 1
+  },
+  "frameNavs": 0,
+  "pass": true
+ },
+ "check9": {
+  "before": "PL-3\nBacklog Threealphabeta\nVP\nVerify Person\nperson\nIdle\nno PR\nno gates",
+  "after": "PL-3\nBacklog Threealphabeta\nVP\nVerify Person\nperson\nIdle\nno PR\nno gates",
+  "pass": true
+ },
+ "check3": {
+  "query": "SELECT e.kind, a.name, count(*) FROM event e JOIN actor a ON a.id = e.actor_id WHERE e.kind = 'workflow' GROUP BY 1,2",
+  "rows": "workflow|GitHub|3",
+  "issueCount": 3,
+  "pass": true
+ },
+ "check7": {
+  "showHasWorkflow": false,
+  "eventsHaveWorkflowKind": false,
+  "eventsStatus": 200,
+  "eventKinds": [
+   null
+  ],
+  "workflowEventsForPL1": "1",
+  "pass": true
+ },
+ "videoSrc": "/tmp/kat-3778-live/video/page@54ff92639fa63427e0d8a27cf32624ad.webm",
+ "check4": {
+  "statusesBefore": "merging",
+  "headerBefore": "Merging",
+  "headerAfter": "Shipping",
+  "delayMs": 136,
+  "st": {
+   "marker": "m1",
+   "navEntries": 1
+  },
+  "frameNavs": 0,
+  "mergingColumnGone": true,
+  "pass": true
+ },
+ "check5": {
+  "eventsBefore": 6,
+  "eventsAfter": 6,
+  "versionsBefore": "3",
+  "versionsAfter": "3",
+  "sameHash": true,
+  "jobsLoaded": "1",
+  "pass": true
+ },
+ "check6": {
+  "eventsBefore": 6,
+  "eventsAfter": 6,
+  "workflowShow": "Version   sha256:45cfdb8d67401b09e8785fea59cc9b03c87be1263e42ba92e27203220df761b4\nCommit    68724acc7d483951896c7e920d3c8848004a3861\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, shipping, done, canceled\nRefused   113e3f56f6ce4c55b3662ac58911f773923465b7: line 26, `transition[3].gates[4]`: unknown gate `no_such_gate`; gates are pr_open, pr_ready, pr_names_issue, ci_green, mergeable, no_open_threads, proof_attached\n",
+  "pass": true
+ },
+ "check8": {
+  "gatesBefore": "0 of 4 gates pass",
+  "gatesAfter": "0 of 5 gates pass",
+  "gatesPL2": "0 of 5 gates pass",
+  "eventsBefore": 6,
+  "eventsAfter": 9,
+  "st": {
+   "marker": "m1",
+   "navEntries": 1
+  },
+  "frameNavs": 0,
+  "serverLog": "5",
+  "pass": true
+ },
+ "check10": {
+  "gatesBefore": "0 of 5 gates pass",
+  "final": {
+   "pl1": "0 of 3 gates pass",
+   "pl2": "0 of 3 gates pass"
+  },
+  "delayMs": 466,
+  "sandboxSha256": "4fa930e9fca28bd4f111eda64fee504cbc6733b12e88f5daf5794e97f09f3d73",
+  "savedSha256": "4fa930e9fca28bd4f111eda64fee504cbc6733b12e88f5daf5794e97f09f3d73",
+  "st": {
+   "marker": "m1",
+   "navEntries": 1
+  },
+  "frameNavs": 0,
+  "hash": "Version   sha256:66fb2c4aa4a81afbf3d962ee1d31049546d10826fe9d0c6a52df30663078b383",
+  "notesLeft": false,
+  "pass": true
+ }
+}

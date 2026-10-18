@@ -1,0 +1,19 @@
+{
+ "before": {
+  "pl1": "0 of 3 gates pass",
+  "pl2": "0 of 3 gates pass"
+ },
+ "aft": {
+  "pl1": "0 of 3 gates pass",
+  "pl2": "0 of 3 gates pass"
+ },
+ "st": {
+  "marker": "m1",
+  "navEntries": 1
+ },
+ "navs": 0,
+ "wfEvents": 0,
+ "versions": "2",
+ "wfshow": "Version   sha256:b35f23c892c5a2cb8546170aa3d59afac549c14e856cb500cfa73bdfed543bc8\nCommit    34b92c33cea02f351d2edfdd50f7ef51dfccc63f\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n",
+ "ok": true
+}
