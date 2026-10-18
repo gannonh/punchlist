@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT workflow_version_id FROM workspace WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "workflow_version_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "workflow_version_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "283f75afbf301036a8beced777ce40083fb62283edf38c6719e7c0f69da22c3d"
+}

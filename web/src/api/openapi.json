@@ -2530,7 +2530,7 @@
           },
           {
             "type": "object",
-            "description": "A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`\nand `proof` say only that the issue's row changed: the event stream carries them, and an\nissue's timeline leaves them out.",
+            "description": "A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,\n`proof` and `workflow` say only that the issue's row changed: the event stream carries them, and an\nissue's timeline leaves them out.",
             "required": [
               "kind"
             ],
@@ -2569,6 +2569,21 @@
                 "type": "string",
                 "enum": [
                   "proof"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The workspace loaded a different workflow version, which can change the gates and status\nnames every row shows.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "workflow"
                 ]
               }
             }

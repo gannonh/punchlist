@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                a.kind AS actor_kind, e.kind,\n                coalesce(t.from_status, r.from_status) AS \"from_status?\",\n                coalesce(t.to_status, r.to_status) AS \"to_status?\",\n                coalesce(t.workflow_version, r.workflow_version) AS \"workflow_version?\",\n                coalesce(t.delivery_id, r.delivery_id) AS \"delivery_id?\",\n                c.body AS \"comment_body?\", r.gate AS \"gate?\", r.reason AS \"reason?\",\n                e.edited_fields\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         LEFT JOIN refusal r ON r.id = e.refusal_id\n         WHERE e.workspace_id = $1 AND e.seq > $3\n           AND ($2::text IS NULL\n                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof')))\n         ORDER BY e.seq\n         LIMIT $4",
+  "query": "SELECT e.seq, e.issue_id, e.created_at,\n                a.id AS actor_id, a.name AS actor_name, a.role AS actor_role,\n                a.kind AS actor_kind, e.kind,\n                coalesce(t.from_status, r.from_status) AS \"from_status?\",\n                coalesce(t.to_status, r.to_status) AS \"to_status?\",\n                coalesce(t.workflow_version, r.workflow_version) AS \"workflow_version?\",\n                coalesce(t.delivery_id, r.delivery_id) AS \"delivery_id?\",\n                c.body AS \"comment_body?\", r.gate AS \"gate?\", r.reason AS \"reason?\",\n                e.edited_fields\n         FROM event e\n         JOIN actor a ON a.id = e.actor_id\n         LEFT JOIN transition t ON t.id = e.transition_id\n         LEFT JOIN comment c ON c.id = e.comment_id\n         LEFT JOIN refusal r ON r.id = e.refusal_id\n         WHERE e.workspace_id = $1 AND e.seq > $3\n           AND ($2::text IS NULL\n                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof', 'workflow')))\n         ORDER BY e.seq\n         LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -187,5 +187,5 @@
       true
     ]
   },
-  "hash": "79d06365e6f13c192b3bd5e53f646b7675dd0a67eb1f40dd9322ffb932728dcd"
+  "hash": "66e05611aff031ac78e054f7e289345346335377afb35d97a43cb517025a1678"
 }

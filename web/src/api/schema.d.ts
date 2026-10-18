@@ -853,6 +853,9 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "proof";
+        } | {
+            /** @enum {string} */
+            kind: "workflow";
         };
         /** @description What the gates read for one issue. */
         Evidence: {

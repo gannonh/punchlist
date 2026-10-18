@@ -352,8 +352,8 @@ pub enum EventDetail {
         /// that order.
         fields: Vec<String>,
     },
-    /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`
-    /// and `proof` say only that the issue's row changed: the event stream carries them, and an
+    /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,
+    /// `proof` and `workflow` say only that the issue's row changed: the event stream carries them, and an
     /// issue's timeline leaves them out.
     Run,
     /// GitHub evidence on the issue's pull requests was recorded: a pull request, the check
@@ -361,6 +361,9 @@ pub enum EventDetail {
     PullRequest,
     /// Proof was attached to the issue.
     Proof,
+    /// The workspace loaded a different workflow version, which can change the gates and status
+    /// names every row shows.
+    Workflow,
 }
 
 impl EventDetail {
