@@ -146,8 +146,9 @@ export interface MoveView {
 }
 
 /**
- * A listed transition as the rail shows it, or null for one the caller's role may not make, which the page
- * hides. A viewer the status locks out sees every move disabled.
+ * A listed transition as the rail shows it. A viewer the status locks out sees every move disabled. A move
+ * the caller's role may not make is shown disabled when it is the next gated move and a gate fails, so a
+ * person watching an agent's move sees what blocks it; otherwise it is null, and the page hides it.
  */
 export function moveView(
   option: TransitionOption,
@@ -155,12 +156,18 @@ export function moveView(
   checklist: GateChecklist | null | undefined,
 ): MoveView | null {
   const { verdict } = option
-  if (verdict.kind === 'refused' && verdict.code === 'role_not_allowed') return null
   const base = {
     to: option.to.key,
     toName: option.to.name,
     peopleOnly: option.to.locked_to.includes('agent'),
     by: `by ${option.by.join(' or ')}`,
+  }
+  if (verdict.kind === 'refused' && verdict.code === 'role_not_allowed') {
+    const failed = checklist?.to === option.to.key ? checklist.gates.find((gate) => !gate.passed) : undefined
+    if (!failed) return null
+    const names = [...(failed.outside ?? [])]
+    if (failed.outside_more) names.push(`and ${String(failed.outside_more)} more`)
+    return { ...base, state: 'blocked', text: failed.reason, gate: failed.gate, names, disabled: true }
   }
   if (verdict.kind === 'blocked') {
     const names = [...(verdict.outside ?? [])]

@@ -91,6 +91,17 @@ async function deliverPullRequest(
   await deliver(request, 'pull_request', payload)
 }
 
+/** Waits until the jobs behind the 202s have recorded what `seen` looks for in the issue's pull requests. */
+async function recorded(
+  request: APIRequestContext,
+  id: string,
+  seen: (pulls: { draft: boolean; check_runs?: { name: string; conclusion?: string | null }[] }[]) => boolean,
+) {
+  await expect
+    .poll(async () => seen(await ok(await request.get(`/api/issues/${id}/pull-requests`, { headers: bearer(personToken()) }))))
+    .toBe(true)
+}
+
 /** A completed check run named `e2e` on the head commit of the issue's pull request. */
 async function deliverCheck(
   request: APIRequestContext,
@@ -314,6 +325,7 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   const head = { number: 300 + Number(id.split('-')[1]), sha: randomUUID().replaceAll('-', '').padEnd(40, '0') }
   await deliverPullRequest(request, id, 'opened', head)
   await deliverPullRequest(request, id, 'ready_for_review', head)
+  await recorded(request, id, (pulls) => pulls.some((pull) => !pull.draft))
   const agent = await ok<{ token: string }>(await request.post('/api/actors', { headers: person, data: { kind: 'codex' } }))
   await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'agent_review' } }))
   // Ended after the move, so the end queues no run in In Progress.
@@ -324,6 +336,18 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
     }),
   )
   await deliverCheck(request, id, head, 'failure')
+  await recorded(request, id, (pulls) =>
+    pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e' && run.conclusion === 'failure')),
+  )
+
+  const watching = await browser.newContext({ baseURL: process.env.E2E_BASE_URL, extraHTTPHeaders: person })
+  const personPage = await watching.newPage()
+  await personPage.goto(`/issues/${id}`)
+  const watched = personPage.locator('[data-transition="human_review"]')
+  await expect(watched).toHaveAttribute('data-verdict', 'blocked')
+  await expect(watched.locator('[data-blocked-gate]')).toHaveText('ci_green')
+  await expect(watched.locator('[data-blocked-names]')).toHaveText('`e2e` (failure)')
+  await watching.close()
 
   const context = await browser.newContext({
     baseURL: process.env.E2E_BASE_URL,
@@ -341,6 +365,9 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   await expect(page.locator('#checks [data-check="e2e"]')).toHaveAttribute('data-check-state', 'failing')
 
   await deliverCheck(request, id, head, 'success')
+  await recorded(request, id, (pulls) =>
+    pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e' && run.conclusion === 'success')),
+  )
   const upload = await request.post(`/api/issues/${id}/proof`, {
     headers: bearer(agent.token),
     multipart: { title: 'Screenshot', file: { name: 'shot.png', mimeType: 'image/png', buffer: PNG } },

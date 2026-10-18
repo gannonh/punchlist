@@ -156,6 +156,23 @@ describe('moveView', () => {
     ])
   })
 
+  test("another role's move shows its failing gate to a person, and is hidden when nothing fails", () => {
+    const notMine = option({ kind: 'refused', code: 'role_not_allowed', message: 'only an agent' })
+    expect(moveView(notMine, false, checklist)).toEqual({
+      to: 'human_review',
+      toName: 'Human Review',
+      peopleOnly: true,
+      by: 'by agent',
+      state: 'blocked',
+      text: '1 of 1 checks failed on 0000000',
+      gate: 'ci_green',
+      names: ['`check` (failure)'],
+      disabled: true,
+    })
+    const passing = { ...checklist, gates: checklist.gates.map((gate) => ({ ...gate, passed: true })) }
+    expect(moveView(notMine, false, passing)).toBe(null)
+  })
+
   test('an allowed move says how many gates pass', () => {
     expect(moveView(option({ kind: 'allowed' }), false, checklist)?.text).toBe('All 4 gates pass.')
     expect(moveView(option({ kind: 'allowed' }), false, null)?.text).toBe('No gates on this move.')
