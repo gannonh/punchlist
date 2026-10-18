@@ -71,7 +71,7 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
   ],
 }
 
-function useNow(): Date {
+export function useNow(): Date {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const timer = setInterval(() => {
@@ -188,7 +188,7 @@ export function IssuesScreen({
           step(-1)
         },
         Enter: () => {
-          if (current) setSheet(current)
+          if (current) void navigate({ to: '/issues/$id', params: { id: current } })
         },
         s: () => {
           if (current) openMenu(current)
@@ -219,7 +219,7 @@ export function IssuesScreen({
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout])
+  }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout, navigate])
 
   const filtered = filter.text !== '' || filter.who !== ''
   const menuRow = rowById(menu?.id ?? null)

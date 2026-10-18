@@ -134,6 +134,54 @@
   }
 }
 
+/* The issue page: the prototype's Sidebar layout. The rail stacks above the main column, under the header, on phones. */
+@layer components {
+  .issue-page { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; align-items: start; }
+  .issue-page > .head { grid-column: 1 / -1; }
+  .issue-page > .main, .issue-page > .rail { display: grid; gap: 12px; min-width: 0; }
+  .issue-page > .rail { position: sticky; top: 62px; max-height: calc(100vh - 110px); overflow-y: auto; }
+  @media (max-width: 899px) {
+    .issue-page { grid-template-columns: minmax(0, 1fr); }
+    .issue-page > .head { order: -2; }
+    .issue-page > .rail { position: static; order: -1; max-height: none; overflow: visible; }
+    .issue-page .rail-only-wide { display: none; }
+  }
+  .panel { @apply min-w-0 rounded-lg border bg-card px-3.5 py-3; scroll-margin-top: 62px; }
+  .panel-title { @apply mb-2.5 flex items-center gap-2 text-meta font-semibold tracking-[.04em] text-ink-3 uppercase; }
+  .subhead { @apply mt-0.5 mb-1.5 text-caption font-semibold tracking-[.04em] text-ink-3 uppercase; }
+  .empty { @apply rounded-md border border-dashed p-3.5 text-center text-meta text-ink-3; }
+  .notice { @apply flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-meta; }
+
+  .transition {
+    @apply grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-1 rounded-md border bg-card px-2.5 py-2 text-left;
+  }
+  .transition:hover { border-color: #d6d3d1; }
+  .transition[aria-disabled="true"] { @apply cursor-not-allowed bg-stone-50; }
+  .transition .verdict { @apply col-span-full flex items-start gap-1.5 text-meta; }
+  .transition.allowed .verdict { @apply text-ok; }
+  .transition.blocked .verdict { @apply text-bad; }
+  .transition.locked .verdict { @apply text-warn; }
+
+  .run-log {
+    @apply m-0 max-h-48 overflow-auto rounded-md bg-stone-900 px-2.5 py-2 font-mono text-caption whitespace-pre text-stone-200;
+    line-height: 1.55;
+  }
+  .run-log.live { border: 1px solid #0f766e; }
+  .run-pulse { animation: pl-pulse 1.4s ease-out infinite; }
+
+  .timeline { @apply relative m-0 list-none p-0; }
+  .timeline::before { content: ""; position: absolute; left: 9px; top: 10px; bottom: 10px; border-left: 1px solid var(--border); }
+
+  .feed-filter { @apply inline-flex rounded-md border bg-card p-px; }
+  .feed-filter button { @apply inline-flex cursor-pointer items-center gap-1 rounded-sm px-2 py-0.5 text-caption font-medium text-muted-foreground; }
+  .feed-filter button[aria-pressed="true"] { @apply bg-foreground text-card; }
+
+  .composer { @apply mt-2.5 grid gap-1.5 border-t pt-3; }
+  .composer textarea {
+    @apply min-h-14 w-full resize-y rounded-md border bg-card px-2.5 py-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring disabled:cursor-not-allowed disabled:bg-secondary disabled:text-ink-3;
+  }
+}
+
 @keyframes pl-pulse {
   0% { box-shadow: 0 0 0 0 rgba(15, 118, 110, 0.45); }
   100% { box-shadow: 0 0 0 7px rgba(15, 118, 110, 0); }

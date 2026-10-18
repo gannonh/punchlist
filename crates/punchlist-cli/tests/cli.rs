@@ -284,6 +284,7 @@ async fn register(pl: &Pl, name: &str) -> Client {
         .register_runner(&RegisterRunner {
             name: name.into(),
             agents: vec!["claude-code".into()],
+            models: Default::default(),
         })
         .await
         .unwrap();

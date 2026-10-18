@@ -234,7 +234,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * The transitions that can be requested from the issue's status, each with the verdict the
+         *     caller's request would get: the same rules and gates `POST /api/issues/{id}/transitions`
+         *     checks, over the evidence recorded now. Nothing is read from GitHub and nothing is
+         *     written, so a request, which reads GitHub first, can still answer differently.
+         */
+        get: operations["issue_transitions"];
         put?: never;
         /**
          * Move an issue to another status. The workflow's lock, role and gate rules are checked,
@@ -608,9 +614,17 @@ export interface components {
         AttemptInfo: {
             /** Format: int32 */
             attempt: number;
+            /** Format: int64 */
+            duration_ms?: number | null;
             failure_reason?: string | null;
             /** Format: date-time */
             finished_at?: string | null;
+            /** Format: int64 */
+            input_tokens?: number | null;
+            /** @description The model the runner passed the agent; `None` for the agent's default. */
+            model?: string | null;
+            /** Format: int64 */
+            output_tokens?: number | null;
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
@@ -1143,6 +1157,11 @@ export interface components {
         PullRequest: {
             author_login: string;
             branch: string;
+            /**
+             * @description The newest check run of each name on the head commit, as `ci_green` reads them. Only
+             *     an issue's pull requests carry them; their names are text from outside the team.
+             */
+            check_runs?: components["schemas"]["CheckRunEvidence"][];
             checks: components["schemas"]["ChecksState"];
             /** Format: int32 */
             checks_passed: number;
@@ -1233,6 +1252,13 @@ export interface components {
         RegisterRunner: {
             /** @description Agent keys the runner can start, such as `claude-code`. */
             agents: string[];
+            /**
+             * @description The model the runner passes each agent, by agent key, such as `claude-code` →
+             *     `haiku`. An agent missing here runs its own default model.
+             */
+            models?: {
+                [key: string]: string;
+            };
             /** @description A name people read, such as `sartre`. */
             name: string;
         };
@@ -1334,6 +1360,8 @@ export interface components {
             issue_id: string;
             /** @description The last 20 log lines, oldest first. */
             log_tail: components["schemas"]["LogLine"][];
+            /** @description The model the latest attempt's runner passed the agent; `None` for the agent's default. */
+            model?: string | null;
             outcome: components["schemas"]["RunOutcome"];
             /** Format: int64 */
             output_tokens?: number | null;
@@ -1422,6 +1450,24 @@ export interface components {
             event: components["schemas"]["Event"];
             row: components["schemas"]["IssueRow"];
         };
+        /**
+         * @description `GET /api/issues/{id}/transitions`: the moves that can be requested from the issue's
+         *     status, each with the verdict the caller's request would get on the evidence recorded now.
+         */
+        TransitionList: {
+            /** @description The issue's status; `locked_to` are the roles it locks out. */
+            status: components["schemas"]["StatusInfo"];
+            /** @description Each transition from `status` that is not made only by an event, in the workflow's order. */
+            transitions: components["schemas"]["TransitionOption"][];
+            /** @description The status locks the caller's role out: it can move, comment on and edit nothing here. */
+            viewer_locked: boolean;
+        };
+        TransitionOption: {
+            /** @description The roles that make it. */
+            by: components["schemas"]["Role"][];
+            to: components["schemas"]["StatusInfo"];
+            verdict: components["schemas"]["Verdict"];
+        };
         /** @description `PATCH /api/issues/{id}`. An absent field is left as it is. */
         UpdateIssue: {
             /**
@@ -1450,6 +1496,22 @@ export interface components {
              */
             project?: string | null;
             title?: string;
+        };
+        /**
+         * @description What `POST /api/issues/{id}/transitions` would answer the caller, without the read of
+         *     GitHub a gated request makes first, so a request can still answer differently.
+         */
+        Verdict: {
+            /** @enum {string} */
+            kind: "allowed";
+        } | (components["schemas"]["GateResult"] & {
+            /** @enum {string} */
+            kind: "blocked";
+        }) | {
+            code: string;
+            /** @enum {string} */
+            kind: "refused";
+            message: string;
         };
         /** @description `GET /api/workflow`: the workspace's active workflow. */
         WorkflowInfo: {
@@ -2154,6 +2216,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Run"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    issue_transitions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Issue id, such as PL-1 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransitionList"];
                 };
             };
             401: {

@@ -177,6 +177,13 @@ async fn register_runner(
         .fetch_one(&mut *tx)
         .await?
     };
+    sqlx::query!(
+        "UPDATE runner SET models = $2 WHERE id = $1",
+        row.id,
+        serde_json::to_value(&request.models).map_err(|error| sqlx::Error::Encode(error.into()))?,
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok((
         StatusCode::CREATED,

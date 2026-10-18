@@ -791,6 +791,7 @@ mod tests {
             open_threads: 0,
             issue_id: None,
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            check_runs: Vec::new(),
         };
         let mut now = now(vec![]);
         now.pull_requests = vec![pr.clone()];

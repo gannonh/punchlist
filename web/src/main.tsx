@@ -11,6 +11,7 @@ import {
 } from '@tanstack/react-router'
 import { Toaster } from '@/components/ui/sonner'
 import { sessionQuery } from '@/lib/queries'
+import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type Layout } from '@/screens/issues'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
@@ -53,7 +54,23 @@ const issues = createRoute({
   },
 })
 
-const router = createRouter({ routeTree: root.addChildren([signIn, issues]), context: { queryClient } })
+// The issue page. A browser whose requests carry a standalone agent's bearer token shows it as that agent.
+const issue = createRoute({
+  getParentRoute: () => root,
+  path: '/issues/$id',
+  beforeLoad: async ({ context }) => {
+    const session = await context.queryClient.query(sessionQuery)
+    if (!session) throw redirect({ to: '/sign-in' })
+    return { session }
+  },
+  component: function Issue() {
+    const { session } = issue.useRouteContext()
+    const { id } = issue.useParams()
+    return <IssueScreen key={id} id={id} viewer={session.actor} workspaceId={session.workspace_id} />
+  },
+})
+
+const router = createRouter({ routeTree: root.addChildren([signIn, issues, issue]), context: { queryClient } })
 
 declare module '@tanstack/react-router' {
   interface Register {

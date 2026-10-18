@@ -1151,6 +1151,7 @@ mod tests {
             open_threads: 0,
             issue_id: Some("PL-7".into()),
             updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            check_runs: Vec::new(),
         }
     }
 
@@ -1475,6 +1476,10 @@ mod tests {
         let attempt = |n, name, state, reason: Option<&str>| punchlist_api::AttemptInfo {
             attempt: n,
             runner: runner(name),
+            model: None,
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
             state,
             failure_reason: reason.map(String::from),
             started_at: at("2026-10-16T10:00:00Z"),
@@ -1490,6 +1495,7 @@ mod tests {
             started_at: at("2026-10-16T10:00:00Z"),
             finished_at: None,
             attempt: 2,
+            model: None,
             runner: runner("sartre"),
             failure_reason: None,
             duration_ms: None,

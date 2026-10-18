@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use axum::Json;
 use axum::extract::State;
 use punchlist_api::{ErrorBody, StatusInfo, WorkflowInfo, WorkflowRefusal};
-use punchlist_core::{Workflow, default_workflow, workflow_schema};
+use punchlist_core::{Status, Workflow, default_workflow, workflow_schema};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -339,6 +339,23 @@ pub(crate) async fn load(
     Ok(())
 }
 
+/// A status as the app reads it: its name, the roles it locks out, its dispatch, and whether
+/// any transition leaves it.
+pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
+    StatusInfo {
+        key: status.as_str().to_string(),
+        name: status.display_name(),
+        locked_to: (workflow.locks().iter())
+            .find(|(locked, _)| locked == status)
+            .map(|(_, roles)| roles.clone())
+            .unwrap_or_default(),
+        dispatch: workflow
+            .dispatch_for(status.as_str())
+            .map(|d| d.agent.clone()),
+        closed: !(workflow.transitions().iter()).any(|transition| transition.from.contains(status)),
+    }
+}
+
 /// The workspace's active workflow: its version, the commit it came from, its statuses and
 /// the last push that was refused.
 #[utoipa::path(
@@ -364,19 +381,7 @@ async fn show_workflow(
         invalid,
         commit_sha,
         statuses: (workflow.statuses().iter())
-            .map(|status| StatusInfo {
-                key: status.as_str().to_string(),
-                name: status.display_name(),
-                locked_to: (workflow.locks().iter())
-                    .find(|(locked, _)| locked == status)
-                    .map(|(_, roles)| roles.clone())
-                    .unwrap_or_default(),
-                dispatch: workflow
-                    .dispatch_for(status.as_str())
-                    .map(|d| d.agent.clone()),
-                closed: !(workflow.transitions().iter())
-                    .any(|transition| transition.from.contains(status)),
-            })
+            .map(|status| status_info(&workflow, status))
             .collect(),
         refused: refused
             .workflow_refused_commit
