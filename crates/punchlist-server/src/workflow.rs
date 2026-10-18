@@ -292,16 +292,25 @@ pub(crate) async fn load(
     // ponytail: one event per issue per workflow change. Upgrade path: events only for the
     // issues whose row changed.
     if previous != Some(version_id) {
-        let github = crate::github::github_actor(&mut *tx, workspace_id, None).await?;
         let issues = sqlx::query_scalar!(
             "SELECT id FROM issue WHERE workspace_id = $1 ORDER BY id",
             workspace_id,
         )
         .fetch_all(&mut *tx)
         .await?;
-        for issue_id in &issues {
-            crate::events::record_row_event(&mut *tx, workspace_id, issue_id, github, "workflow")
+        // No issue, no actor made for nothing.
+        if !issues.is_empty() {
+            let github = crate::github::github_actor(&mut *tx, workspace_id, None).await?;
+            for issue_id in &issues {
+                crate::events::record_row_event(
+                    &mut *tx,
+                    workspace_id,
+                    issue_id,
+                    github,
+                    "workflow",
+                )
                 .await?;
+            }
         }
     }
     tracing::info!("loaded workflow {} from {place}", workflow.version());
