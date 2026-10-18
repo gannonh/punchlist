@@ -1,12 +1,13 @@
 # API document and auth
 
-The server publishes its OpenAPI document at `GET /api/openapi.json` (no token needed) and requires a token on every other route except `POST /api/session` and the signature-checked `POST /api/github/webhook`: a bearer token, or for a person without an `Authorization` header the `punchlist_session` cookie ([web-app.md](web-app.md)). `pl` reads its server URL and token from `~/.config/punchlist/config.toml` or the file in `PUNCHLIST_CONFIG`.
+The server publishes its OpenAPI document at `GET /api/openapi.json` (no token needed) and requires a token on every other route except `POST /api/session`, `DELETE /api/session` (it only clears the cookie, 204) and the signature-checked `POST /api/github/webhook`: a bearer token, or for a person without an `Authorization` header the `punchlist_session` cookie ([web-app.md](web-app.md)). `pl` reads its server URL and token from `~/.config/punchlist/config.toml` or the file in `PUNCHLIST_CONFIG`.
 
 ## Sub-features
 
 - `openapi` lists every API path, from `/api/actors` to `/api/workspaces/{id}/events`; `/api/openapi.json` itself is not among them.
 - `auth-required` answers `401` with `{"code":"unauthorized"}` for a missing or unknown token.
 - `pl-config-missing` exits `1` with `error: cannot read <path>; it needs `server_url` and `token` ...`.
+- `session`: `GET /api/session` answers the caller's actor and workspace for a person's token or cookie and for a standalone agent's bearer token; a run's agent gets 403 ([actors-and-proof.md](actors-and-proof.md)). `POST /api/session` takes only a person's token (any other answers 401). A cookie whose actor is not a person answers 401.
 - `not-found` answers `404` with `issue PL-9 not found`.
 - `other-workspace`: any token on another workspace's issue answers `403` (`issue PL-1 is in another workspace`), and the server logs `workspace mismatch`. [issue-placement.md](issue-placement.md) makes the second workspace.
 

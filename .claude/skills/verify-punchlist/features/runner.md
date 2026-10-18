@@ -4,7 +4,8 @@
 
 ## Sub-features
 
-- `register` makes a runner actor (role `runner`) and a `runner` row; `pl runner list` shows it with its last heartbeat.
+- `register` makes a runner actor (role `runner`) and a `runner` row; `pl runner list` shows it with its last heartbeat, or `No runners.`. `runner.models` holds the `models` it sent, by agent key (`--model` as `claude-code`, `--codex-model` as `codex`).
+- `model`: a claim copies its agent's model from `runner.models` onto `attempt.model` (NULL when the runner sent none: the agent's own default). The API's runs and attempts carry it and the issue page shows it; `pl` does not print it.
 - `heartbeat` updates `runner.last_heartbeat` and renews only the leases of the attempts the body lists in `held`; a claim the runner never received expires. The answer's `stale` lists the held attempts it did not renew (finished, or failed by `lease-expiry`); the runner stops their agents and its log says `run <id>: lease lost; stopping the agent`.
 - `claim` moves `start → in_progress` as the runner, writes a `run` row and an `attempt` row with `attempt = 1`.
 - `claim-taken` is what a second runner gets when it raced for the same issue: its log says `claim taken: PL-<n> was claimed by runner <name>`, and no second `attempt` row exists.
@@ -30,10 +31,11 @@ Preconditions:
 
 - Baseline run `$RUN`. `up` bootstraps the workspace with repository `gannonh/punchlist-sandbox`, so runners clone and push only there.
 - `gh auth status` shows a logged-in account that can push to the sandbox, and `git ls-remote https://github.com/gannonh/punchlist-sandbox.git HEAD` answers.
-- An agent run makes a live model call. Start a runner that will claim an issue only inside a named live check. `$C runner` passes `--model haiku`, the alias for the newest Haiku (Haiku 5.5 on the Anthropic API), and `--codex-model gpt-6-luna` for Codex runs. A runner claims Codex dispatches only when started with `--agents claude-code,codex`, and then needs `codex` on `PATH`, logged in (`codex login status`).
+- An agent run makes a live model call. Start a runner that will claim an issue only inside a named live check. `$C runner` passes `--model haiku`, the alias for the newest Haiku (Haiku 5.5 on the Anthropic API), and `--codex-model gpt-6-luna` for Codex runs when this checkout's `pl` has that flag. A runner claims Codex dispatches only when started with `--agents claude-code,codex`, and then needs `codex` on `PATH`, logged in (`codex login status`).
 
 - **Start a runner.** `$C runner "$RUN" r1`. It waits until the log at `$EVIDENCE/runner-r1.log` says the runner registered.
-- **List.** `$C pl "$RUN" runner list`. One line naming `r1`, `claude-code` and a heartbeat a few seconds old. `$C sql "$RUN" "SELECT id, name, last_heartbeat FROM runner"` has one row.
+- **List.** `$C pl "$RUN" runner list`. One line naming `r1`, `claude-code` and a heartbeat a few seconds old. `$C sql "$RUN" "SELECT name, models FROM runner"` has one row, `r1 | {"codex": "gpt-6-luna", "claude-code": "haiku"}`. With no issue in Start this makes no model call; `$C runner-stop` prints `stopped runner r1`.
+- **Model, without a model call.** Register through the API with `models` and claim, as [issue-refusals.md](issue-refusals.md)'s Gated recipe does: `-d '{"name":"r","agents":["claude-code"],"models":{"claude-code":"haiku"}}'`. `SELECT attempt, state, model FROM attempt` is `1 | running | haiku`. Nobody heartbeats that runner, so the attempt fails `lease expired: runner r stopped sending heartbeats` after 30 s and the run stays running: a real runner started afterwards in the same run claims attempt 2 and calls the model.
 - **Claim.** `$C pl "$RUN" issue create --title "Add a hello file" --body "Create hello.txt containing hello."`, `$C pl "$RUN" issue move PL-1 todo`, `$C pl "$RUN" issue move PL-1 start`, wait 10 s, `$C pl "$RUN" issue show PL-1`. `Status: In Progress`, a timeline line `r1 (runner)  Start → In Progress`, and a run with agent `Claude Code`, runner `r1`, outcome `running`. `$C sql "$RUN" "SELECT issue_id, runner_id, attempt, state FROM attempt"` has one row.
 - **Worktree.** `git -C /tmp/punchlist-verify/$RUN/worktrees/r1/worktrees/gannonh/punchlist-sandbox/PL-1 branch --show-current` prints `feature/pl-1`.
 - **Log.** `$C pl "$RUN" run log <run-id>` while the agent works, and again after. The line count grows. After the run, a line contains `gh pr create`.

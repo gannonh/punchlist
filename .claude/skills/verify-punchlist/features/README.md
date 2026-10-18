@@ -10,10 +10,10 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | List issues | [issue-list.md](issue-list.md) | `pl issue list`, `GET /api/issues` |
 | Runners, claims, dispatch on entry and runs | [runner.md](runner.md) | `pl runner start`, `pl runner list`, `pl issue show` (runs), `pl run log`, `/api/runners`, `/api/runs/*` |
 | GitHub webhook, pull requests and checks | [github.md](github.md) | `$C webhook`, `POST /api/github/webhook`, `pl issue show` (pull requests, comments), `pl pr unlinked`, `/api/issues/{id}/pull-requests`, `/api/pull-requests/unlinked` |
-| Workflow file, gated transitions, the gate checklist and the agent's MCP tools | [workflow-and-gates.md](workflow-and-gates.md) | `pl workflow show`, `pl issue transition`, `pl issue comment`, `pl issue show` (gates), `pl mcp`, `/api/workflow`, `/api/workflow/schema.json`, `GET /api/issues/{id}/gates`, `POST /api/issues/{id}/comments` |
+| Workflow file, gated transitions, the gate checklist and the agent's MCP tools | [workflow-and-gates.md](workflow-and-gates.md) | `pl workflow show`, `pl issue transition`, `pl issue comment`, `pl issue show` (gates), `pl mcp`, `/api/workflow`, `/api/workflow/schema.json`, `GET /api/issues/{id}/gates`, `GET /api/issues/{id}/transitions`, `POST /api/issues/{id}/comments` |
 | Agent actors and proof | [actors-and-proof.md](actors-and-proof.md) | `pl actor create/list`, `pl proof attach/list`, `pl issue show` (Proof), `/api/actors`, `/api/issues/{id}/proof`, `GET /api/proof/{id}` |
 | Projects, milestones and an issue's parent | [issue-placement.md](issue-placement.md) | `pl project create/list`, `pl milestone create`, `pl issue edit`, `pl issue show`, `/api/projects`, `PATCH /api/issues/{id}` |
-| Web app: issue list, board, edits and transitions | [web-app.md](web-app.md) | the server's URL (`web/dist`), `$C sign-in-url`, `/api/session`, `GET /api/workspaces/{id}/events`, `PATCH /api/issues/{id}`, `pnpm e2e` |
+| Web app: issue list, board, edits, transitions and the issue page | [web-app.md](web-app.md) | the server's URL (`web/dist`), `/issues/<id>`, `$C sign-in-url`, `/api/session`, `GET /api/workspaces/{id}/events`, `PATCH /api/issues/{id}`, `GET /api/issues/{id}/transitions`, `pnpm e2e` |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 
 ## Baseline preconditions

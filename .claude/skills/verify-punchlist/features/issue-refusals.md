@@ -7,7 +7,7 @@ The server refuses a move the workflow does not allow and says which rule refuse
 - `refuse-role` names the roles that may make the move: `only a runner makes start → in_progress, not a person` (code `role_not_allowed`).
 - `refuse-missing` refuses a move with no transition: `no transition backlog → done exists in the workflow` (code `no_transition`).
 - `refuse-event-only` refuses a move that only a GitHub event makes: `merging → done happens only on the `pr_merged` event, not on request` (code `event_only`).
-- `refuse-gated` refuses a gated move, for an allowed role, when a gate fails over the recorded evidence (code `gate_failed`): `gate pr_open failed: no open pull request is linked to PL-1`, followed by every gate's result. [workflow-and-gates.md](workflow-and-gates.md) covers the gates themselves.
+- `refuse-gated` refuses a gated move, for an allowed role, when a gate fails over the recorded evidence (code `gate_failed`). `pl` and the API's `message` say `in_progress → agent_review needs gate pr_open: no open pull request is linked to PL-1` (`pl` then lists every gate's result); the agent's `request_transition` says `Refused (gate_failed): gate pr_open failed: no open pull request is linked to PL-1`. [workflow-and-gates.md](workflow-and-gates.md) covers the gates themselves.
 - `refuse-locked` refuses an agent or runner acting on an issue in a status the workflow locks to them: `human_review is locked: an agent cannot act on an issue in it` (code `locked`).
 - `refuse-unknown` refuses a status not in the workflow: ``status `shipped` is not in the workflow`` (code `unknown_status`).
 - `refuse-no-write` leaves the status, `transition` and `event` tables unchanged.
