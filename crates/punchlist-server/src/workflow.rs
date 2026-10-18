@@ -273,6 +273,12 @@ pub(crate) async fn load(
     )
     .fetch_one(&mut *tx)
     .await?;
+    let previous = sqlx::query_scalar!(
+        "SELECT workflow_version_id FROM workspace WHERE id = $1",
+        workspace_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query!(
         "UPDATE workspace SET workflow_version_id = $2, workflow_refused_commit = NULL,
              workflow_refused_at = NULL, workflow_refused_reason = NULL WHERE id = $1",
@@ -281,6 +287,33 @@ pub(crate) async fn load(
     )
     .execute(&mut *tx)
     .await?;
+    // A different version can change every row's gates and status names, so the open app
+    // is told each row changed.
+    // ponytail: one event per issue per workflow change, written under the workspace lock, so
+    // a load costs O(issues) statements and event rows. Upgrade path: one workspace-level stream
+    // message on which the app refetches the list and the workflow once.
+    if previous != Some(version_id) {
+        let issues = sqlx::query_scalar!(
+            "SELECT id FROM issue WHERE workspace_id = $1 ORDER BY id",
+            workspace_id,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        // `github_actor` creates the actor, so a workspace without issues gets none.
+        if !issues.is_empty() {
+            let github = crate::github::github_actor(&mut *tx, workspace_id, None).await?;
+            for issue_id in &issues {
+                crate::events::record_row_event(
+                    &mut *tx,
+                    workspace_id,
+                    issue_id,
+                    github,
+                    "workflow",
+                )
+                .await?;
+            }
+        }
+    }
     tracing::info!("loaded workflow {} from {place}", workflow.version());
     Ok(())
 }

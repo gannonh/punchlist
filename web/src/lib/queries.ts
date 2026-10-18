@@ -20,6 +20,7 @@ import {
   type StatusInfo,
   type StreamItem,
   type Transitions,
+  workflowStale,
 } from '@/model/issues'
 
 export const sessionQuery = queryOptions({
@@ -72,6 +73,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
   useEffect(() => {
     if (!ready) return
     let retry: ReturnType<typeof setTimeout> | undefined
+    let reread: ReturnType<typeof setTimeout> | undefined
     const after = client.getQueryData(issuesQuery.queryKey)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
@@ -80,13 +82,15 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       failures.current = 0
       setIssues(client, (cache) => applyStream(cache, item))
-      const statuses = client.getQueryData(workflowQuery.queryKey)?.statuses
-      if (statuses && !statuses.some((status) => status.key === item.row.issue.status)) {
-        void client.invalidateQueries({ queryKey: workflowQuery.queryKey })
+      // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
+      // starts after every load they came from committed.
+      if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
+        clearTimeout(reread)
+        reread = setTimeout(() => void client.invalidateQueries({ queryKey: workflowQuery.queryKey }), 100)
       }
     })
     // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
-    // ends. Read the session and a fresh list, then open it again; a signed-out session shows the sign-in page.
+    // ends. Read the session, a fresh list and the workflow, then open it again; a signed-out session shows the sign-in page.
     // The wait doubles from 2 s to at most 60 s while the stream keeps closing, and resets once an event arrives.
     source.addEventListener('error', () => {
       if (source.readyState !== EventSource.CLOSED) return
@@ -96,6 +100,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
         void Promise.allSettled([
           client.refetchQueries({ queryKey: sessionQuery.queryKey }),
           client.refetchQueries({ queryKey: issuesQuery.queryKey }),
+          client.refetchQueries({ queryKey: workflowQuery.queryKey }),
         ]).then(() => {
           setOpened((count) => count + 1)
         })
@@ -103,6 +108,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     })
     return () => {
       clearTimeout(retry)
+      clearTimeout(reread)
       source.close()
     }
   }, [client, workspaceId, ready, opened])

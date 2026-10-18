@@ -910,7 +910,8 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
             | EventDetail::Edited { .. }
             | EventDetail::Run
             | EventDetail::PullRequest
-            | EventDetail::Proof => None,
+            | EventDetail::Proof
+            | EventDetail::Workflow => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -1007,7 +1008,10 @@ fn render_show(
                 }
             }
             // Only the event stream carries these; a timeline has none.
-            EventDetail::Run | EventDetail::PullRequest | EventDetail::Proof => {}
+            EventDetail::Run
+            | EventDetail::PullRequest
+            | EventDetail::Proof
+            | EventDetail::Workflow => {}
         }
     }
     text

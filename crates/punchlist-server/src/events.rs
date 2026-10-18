@@ -49,8 +49,8 @@ pub(crate) async fn next_event_seq(
     .await
 }
 
-/// Writes an event that says only that the issue's row changed: `run`, `pull_request` or
-/// `proof`. The caller took the workspace's lock first, as the lock order has it.
+/// Writes an event that says only that the issue's row changed: `run`, `pull_request`, `proof`
+/// or `workflow`. The caller took the workspace's lock first, as the lock order has it.
 pub(crate) async fn record_row_event(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -156,6 +156,7 @@ impl TryFrom<EventRow> for Event {
             ("run", None) => EventDetail::Run,
             ("pull_request", None) => EventDetail::PullRequest,
             ("proof", None) => EventDetail::Proof,
+            ("workflow", None) => EventDetail::Workflow,
             ("edited", None) => EventDetail::Edited {
                 fields: row
                     .edited_fields
@@ -212,7 +213,8 @@ impl TryFrom<EventRow> for Event {
 
 /// The workspace's events after `after`, in sequence order, at most `limit` of them: every
 /// event, as the stream reads them, or with `issue_id` that issue's timeline, which leaves out
-/// the `run`, `pull_request` and `proof` events that only tell the stream its row changed.
+/// the `run`, `pull_request`, `proof` and `workflow` events that only tell the stream its row
+/// changed.
 pub(crate) async fn events(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -238,7 +240,7 @@ pub(crate) async fn events(
          LEFT JOIN refusal r ON r.id = e.refusal_id
          WHERE e.workspace_id = $1 AND e.seq > $3
            AND ($2::text IS NULL
-                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof')))
+                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof', 'workflow')))
          ORDER BY e.seq
          LIMIT $4"#,
         workspace_id,

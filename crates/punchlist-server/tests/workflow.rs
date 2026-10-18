@@ -4319,3 +4319,98 @@ async fn a_read_that_changes_only_a_check_runs_other_bases_writes_one_event(pool
     refresh().await;
     assert_eq!(events().await, first + 1);
 }
+
+/// How many `workflow` events each actor wrote.
+async fn workflow_events(pool: &PgPool) -> Vec<(String, i64)> {
+    sqlx::query!(
+        r#"SELECT a.name, count(*) AS "n!" FROM event e JOIN actor a ON a.id = e.actor_id
+           WHERE e.kind = 'workflow' GROUP BY a.name ORDER BY a.name"#
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.name, r.n))
+    .collect()
+}
+
+#[sqlx::test]
+async fn loading_a_different_workflow_writes_one_event_per_issue_and_nothing_else_does(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    for title in ["X", "Y"] {
+        let (status, _) = call(
+            &s.app,
+            &token,
+            "POST",
+            "/api/issues",
+            Some(json!({"title": title})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files
+            .insert("workflow.toml".into(), PRD_WORKFLOW.into());
+        for (path, text) in [
+            ("prompts/system.md", "System.\n"),
+            ("prompts/in_progress.md", "Build it.\n"),
+            ("prompts/agent_review.md", "Review it.\n"),
+        ] {
+            repo.files.insert(path.into(), text.into());
+        }
+    }
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 2)]);
+
+    // The same version again, from a newer commit, writes none.
+    s.github.lock().unwrap().sha = "b".repeat(40);
+    deliver(&s, "push", "push-2", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 2)]);
+
+    // A refused file writes none.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "c".repeat(40);
+        repo.files.insert(
+            "workflow.toml".into(),
+            PRD_WORKFLOW.replace("\"pr_ready\"", "\"pr_redy\""),
+        );
+    }
+    deliver(&s, "push", "push-3", PUSH).await;
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 2)]);
+
+    // A different version writes two more, and the timeline shows none of them.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "d".repeat(40);
+        repo.files.insert(
+            "workflow.toml".into(),
+            PRD_WORKFLOW.replace("max_concurrent = 5", "max_concurrent = 4"),
+        );
+    }
+    deliver(&s, "push", "push-4", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 2);
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 4)]);
+    let (_, timeline) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
+    let kinds: Vec<&str> = (timeline.as_array().unwrap().iter())
+        .map(|event| event["detail"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["created"]);
+
+    // Going back to the first version, whose row already exists, writes two more.
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "e".repeat(40);
+        repo.files
+            .insert("workflow.toml".into(), PRD_WORKFLOW.into());
+    }
+    deliver(&s, "push", "push-5", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 2);
+    assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 6)]);
+}

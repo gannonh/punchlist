@@ -10,6 +10,7 @@ import {
   replaceRow,
   revertEdit,
   rowView,
+  workflowStale,
   type IssueRow,
   type StatusInfo,
 } from './issues'
@@ -183,6 +184,28 @@ describe('the cache', () => {
       ['PL-2', 'Idle', 'no pull request'],
     ])
     expect(ready.lastSeq).toBe(6)
+  })
+
+  test('a workflow message replaces the row with its new gate summary', () => {
+    const gates = { to: 'human_review', to_name: 'Human Review', passed: 1, total: 2, first_failed: 'proof_attached' }
+    const cache = fromList({ issues: [row('PL-1', {}, { gates: { ...gates, total: 1 } })], last_event_seq: 4 })
+    const loaded = applyStream(cache, {
+      event: { ...event(5, 'PL-1'), detail: { kind: 'workflow' } },
+      row: row('PL-1', {}, { gates }),
+    })
+    expect(loaded.rows.map((r) => rowView(r, now).gates.text)).toEqual(['1 of 2 gates pass'])
+    expect(loaded.lastSeq).toBe(5)
+  })
+
+  test('a workflow message or an unknown status makes the cached workflow stale', () => {
+    const item = (kind: 'workflow' | 'run', status: string) => ({
+      event: { ...event(5, 'PL-1'), detail: { kind } },
+      row: row('PL-1', { status }),
+    })
+    expect(workflowStale(item('workflow', 'in_progress'), statuses)).toBe(true)
+    expect(workflowStale(item('run', 'in_progress'), statuses)).toBe(false)
+    expect(workflowStale(item('run', 'shipping'), statuses)).toBe(true)
+    expect(workflowStale(item('run', 'shipping'), undefined)).toBe(false)
   })
 
   test("a write's answer older than the row the stream gave is dropped", () => {

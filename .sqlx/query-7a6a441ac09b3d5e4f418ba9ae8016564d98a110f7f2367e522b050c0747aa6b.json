@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.name, count(*) AS \"n!\" FROM event e JOIN actor a ON a.id = e.actor_id\n           WHERE e.kind = 'workflow' GROUP BY a.name ORDER BY a.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "n!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "7a6a441ac09b3d5e4f418ba9ae8016564d98a110f7f2367e522b050c0747aa6b"
+}
