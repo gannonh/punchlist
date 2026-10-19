@@ -180,6 +180,8 @@ pub struct Workflow {
     dispatch: Vec<Dispatch>,
     /// The checks `ci_green` requires, from `[gate.ci_green]`. Empty when the file has none.
     required_checks: Vec<RequiredCheck>,
+    /// `[import.linear.states]`: a Linear state's name and the status it imports into.
+    linear_states: Vec<(String, Status)>,
     prompts: BTreeMap<String, String>,
 }
 
@@ -609,6 +611,13 @@ impl Workflow {
             required_checks.push(RequiredCheck { name, app });
         }
 
+        let mut linear_states = Vec::new();
+        for (name, status) in raw.import.linear.states {
+            let key = format!("import.linear.states.{name}");
+            let status = known(status.get_ref(), status.span(), key)?;
+            linear_states.push((name, status));
+        }
+
         let workflow = Workflow {
             version: content_hash(text, &BTreeMap::new()),
             source: text.to_string(),
@@ -617,6 +626,7 @@ impl Workflow {
             locks,
             dispatch,
             required_checks,
+            linear_states,
             prompts: BTreeMap::new(),
         };
         let unclaimable = workflow
@@ -733,6 +743,31 @@ impl Workflow {
     /// The dispatch rule for a status, if a runner starts an agent there.
     pub fn dispatch_for(&self, status: &str) -> Option<&Dispatch> {
         self.dispatch.iter().find(|d| d.status.0 == status)
+    }
+
+    /// The status a Linear issue in the state `name`, of Linear's state type `kind`, imports
+    /// into: the `[import.linear.states]` entry for the name; else the status whose key or
+    /// name is the state's name, in any case; else the status for the state's type, when the
+    /// workflow has it. `None` for a triage state and anything else.
+    pub fn linear_status(&self, name: &str, kind: &str) -> Option<&Status> {
+        if let Some((_, status)) = self.linear_states.iter().find(|(n, _)| n == name) {
+            return Some(status);
+        }
+        let same = |s: &&Status| {
+            s.0.eq_ignore_ascii_case(name) || s.display_name().eq_ignore_ascii_case(name)
+        };
+        if let Some(status) = self.statuses.iter().find(same) {
+            return Some(status);
+        }
+        let by_type = match kind {
+            "backlog" => "backlog",
+            "unstarted" => "todo",
+            "started" => IN_PROGRESS,
+            "completed" => "done",
+            "canceled" | "duplicate" => "canceled",
+            _ => return None,
+        };
+        self.status(by_type)
     }
 
     /// The status a new issue starts in: the first one listed.
@@ -885,6 +920,29 @@ struct RawWorkflow {
     /// Settings for the gates that take any.
     #[serde(default)]
     gate: RawGates,
+    /// Settings for `pl import`.
+    #[serde(default)]
+    import: RawImport,
+}
+
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawImport {
+    #[serde(default)]
+    linear: RawLinearImport,
+}
+
+/// How `pl import linear` maps Linear's workflow states.
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawLinearImport {
+    /// A Linear state's name and the status its issues import into, such as
+    /// `"QA" = "agent_review"`. A state not listed goes to the status of the same name, else
+    /// by its type: backlog, unstarted to todo, started to in_progress, completed to done,
+    /// canceled to canceled. A triage state needs an entry.
+    #[serde(default)]
+    #[schemars(with = "BTreeMap<String, String>")]
+    states: BTreeMap<String, Spanned<String>>,
 }
 
 #[derive(Default, Deserialize, JsonSchema)]
@@ -1686,6 +1744,51 @@ mod tests {
         .unwrap();
         assert_eq!(workflow.statuses().len(), 9);
         assert_eq!(workflow.prompts().len(), 3);
+    }
+
+    #[test]
+    fn linear_states_map_by_table_then_name_then_type() {
+        let workflow = default_workflow();
+        let mapped = |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
+        assert_eq!(mapped("In Progress", "started"), Some("in_progress"));
+        assert_eq!(mapped("Agent Review", "started"), Some("agent_review"));
+        assert_eq!(mapped("Human Review", "started"), Some("human_review"));
+        assert_eq!(mapped("Start", "unstarted"), Some("start"));
+        assert_eq!(mapped("Duplicate", "canceled"), Some("canceled"));
+        assert_eq!(mapped("Duplicate", "duplicate"), Some("canceled"));
+        assert_eq!(mapped("QA", "started"), Some("in_progress"));
+        assert_eq!(mapped("Rework", "started"), Some("in_progress"));
+        assert_eq!(mapped("Up Next", "unstarted"), Some("todo"));
+        assert_eq!(mapped("Shipped", "completed"), Some("done"));
+        assert_eq!(mapped("Icebox", "backlog"), Some("backlog"));
+        assert_eq!(mapped("Triage", "triage"), None);
+
+        let table = runnable(
+            "[import.linear.states]\n\"QA\" = \"b\"\n\"In Progress\" = \"a\"\n",
+        );
+        let workflow = Workflow::from_toml(&table).unwrap();
+        let mapped = |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
+        assert_eq!(mapped("QA", "started"), Some("b"));
+        assert_eq!(mapped("In Progress", "started"), Some("a"));
+        // No `todo` or `done` in this workflow, so their types map nowhere.
+        assert_eq!(mapped("Todo", "unstarted"), None);
+        assert_eq!(mapped("Done", "completed"), None);
+        assert_eq!(mapped("Review", "started"), Some("in_progress"));
+    }
+
+    #[test]
+    fn a_linear_state_mapped_to_an_unknown_status_is_refused() {
+        let text = runnable("[import.linear.states]\n\"QA\" = \"qa\"\n");
+        assert_eq!(
+            error(&text),
+            (
+                Some(3),
+                "import.linear.states.QA".into(),
+                Problem::UnknownStatus("qa".into())
+            )
+        );
+        let text = runnable("[import.linear]\nstate = {}\n");
+        assert!(matches!(error(&text).2, Problem::Toml(m) if m.contains("unknown field `state`")));
     }
 
     #[test]

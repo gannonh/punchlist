@@ -66,3 +66,11 @@ prompt = "prompts/agent_review.md"
 # check GitHub Actions produces, and a table names another GitHub App by its slug.
 # [gate.ci_green]
 # required = ["test", { name = "deploy", app = "vercel" }]
+
+# `pl import linear` puts each Linear issue in the status named like its Linear state, else in
+# the status for the state's type (backlog, unstarted → todo, started → in_progress,
+# completed → done, canceled → canceled). A state that maps to no status, such as Triage, stops
+# the import; map it, or override any other, here:
+# [import.linear.states]
+# "Triage" = "backlog"
+# "QA" = "agent_review"
