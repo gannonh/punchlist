@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM issue) AS \"issues!\",\n                  (SELECT count(*) FROM job) AS \"jobs!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issues!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "jobs!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "02cc91a70999dcd5086df32b0df0a8afd4820f015eb00e33fd10fb6dbbd01432"
+}

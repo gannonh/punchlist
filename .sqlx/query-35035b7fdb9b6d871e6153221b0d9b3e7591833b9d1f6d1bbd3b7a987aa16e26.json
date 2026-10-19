@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT count(*) FROM issue) AS \"issues!\",\n                  (SELECT count(*) FROM comment) AS \"comments!\",\n                  (SELECT count(*) FROM event) AS \"events!\",\n                  (SELECT count(*) FROM actor) AS \"actors!\",\n                  (SELECT count(*) FROM project) AS \"projects!\",\n                  (SELECT count(*) FROM milestone) AS \"milestones!\",\n                  (SELECT count(*) FROM transition) AS \"transitions!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issues!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "comments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "events!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "actors!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "projects!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "milestones!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "transitions!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "35035b7fdb9b6d871e6153221b0d9b3e7591833b9d1f6d1bbd3b7a987aa16e26"
+}

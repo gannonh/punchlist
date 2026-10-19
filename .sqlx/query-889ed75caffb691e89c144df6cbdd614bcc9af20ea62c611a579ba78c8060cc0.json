@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.linear_id AS \"linear_id!\" FROM comment c JOIN issue i ON i.id = c.issue_id\n           WHERE i.workspace_id = $1 AND c.linear_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "linear_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "comment",
+            "name": "linear_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "889ed75caffb691e89c144df6cbdd614bcc9af20ea62c611a579ba78c8060cc0"
+}

@@ -556,6 +556,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{id}/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the workspace holds from Linear, counted from the rows with a Linear id, and its
+         *     latest import. Person token.
+         */
+        get: operations["import_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{id}/imports/linear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import a Linear project, as `pl import linear` read it. Every issue's state must map to a
+         *     status of the active workflow, or nothing is queued. Person token.
+         */
+        post: operations["start_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{id}/imports/{run}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One import of the workspace. Person token. */
+        get: operations["import_run"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -980,6 +1037,51 @@ export interface components {
             /** Format: uuid */
             run_id: string;
         };
+        ImportCounts: {
+            /** Format: int64 */
+            comments: number;
+            /** Format: int64 */
+            issues: number;
+            /** Format: int64 */
+            milestones: number;
+            /** Format: int64 */
+            people: number;
+            /** Format: int64 */
+            projects: number;
+        };
+        /** @description What one import wrote. */
+        ImportReport: {
+            created: components["schemas"]["ImportCounts"];
+            /** @description Issues gone from Linear's project, parents outside it, empty comments skipped. */
+            notes: string[];
+            updated: components["schemas"]["ImportCounts"];
+        };
+        /** @description One import, as the server's job runs it. */
+        ImportRun: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description Why the last attempt failed; a `queued` import with one is retried. */
+            error?: string | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            /**
+             * Format: int64
+             * @description The job's id.
+             */
+            id: number;
+            report?: components["schemas"]["ImportReport"] | null;
+            state: components["schemas"]["ImportState"];
+        };
+        /** @enum {string} */
+        ImportState: "queued" | "running" | "done" | "failed";
+        /**
+         * @description `GET /api/workspaces/{id}/imports`: the workspace's rows imported from Linear, and the
+         *     latest import.
+         */
+        ImportStatus: {
+            last_run?: components["schemas"]["ImportRun"] | null;
+            totals: components["schemas"]["ImportCounts"];
+        };
         Issue: {
             assignee?: components["schemas"]["Actor"] | null;
             /** @description Markdown. */
@@ -990,6 +1092,7 @@ export interface components {
             id: string;
             /** @description In the order they were set. */
             labels?: string[];
+            linear?: components["schemas"]["LinearLink"] | null;
             milestone?: components["schemas"]["MilestoneRef"] | null;
             /** @description The parent issue's id, such as `PL-1`; `None` when the issue has none. */
             parent?: string | null;
@@ -1055,6 +1158,71 @@ export interface components {
             repository: components["schemas"]["Repository"];
             /** Format: uuid */
             run_id: string;
+        };
+        LinearComment: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            user?: components["schemas"]["LinearUser"] | null;
+        };
+        /**
+         * @description `POST /api/workspaces/{id}/imports/linear`: one Linear project as `pl import linear` read
+         *     it. Every id is Linear's, and a rerun finds what it imported before by them.
+         */
+        LinearImport: {
+            issues: components["schemas"]["LinearIssue"][];
+            project: components["schemas"]["LinearProject"];
+            /** @description The team's key, such as `KAT`. */
+            team: string;
+        };
+        LinearIssue: {
+            comments?: components["schemas"]["LinearComment"][];
+            /** Format: date-time */
+            created_at: string;
+            creator?: components["schemas"]["LinearUser"] | null;
+            /** @description Markdown. */
+            description?: string | null;
+            id: string;
+            /** @description Such as `KAT-12`. */
+            identifier: string;
+            labels?: string[];
+            milestone_id?: string | null;
+            parent_id?: string | null;
+            state: components["schemas"]["LinearState"];
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+            url: string;
+        };
+        LinearLink: {
+            /** @description Such as `KAT-12`. */
+            identifier: string;
+            url: string;
+        };
+        LinearMilestone: {
+            /** @description Imported as the milestone's PASS when text. */
+            description?: string | null;
+            id: string;
+            name: string;
+        };
+        LinearProject: {
+            id: string;
+            milestones: components["schemas"]["LinearMilestone"][];
+            name: string;
+            url: string;
+        };
+        LinearState: {
+            name: string;
+            /**
+             * @description Linear's state type: `triage`, `backlog`, `unstarted`, `started`, `completed`,
+             *     `canceled` or `duplicate`.
+             */
+            type: string;
+        };
+        LinearUser: {
+            id: string;
+            name: string;
         };
         LogLine: {
             /** Format: int32 */
@@ -3134,6 +3302,166 @@ export interface operations {
                 };
             };
             /** @description Not the token's workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    import_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportStatus"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    start_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LinearImport"];
+            };
+        };
+        responses: {
+            /** @description Queued. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRun"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description A Linear state maps to no status; the message names each. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    import_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+                /** @description The import's id */
+                run: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportRun"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace, or no such import in it. */
             404: {
                 headers: {
                     [name: string]: unknown;

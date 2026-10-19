@@ -1,0 +1,34 @@
+{
+  "data": {
+    "teams": {
+      "nodes": [
+        {
+          "key": "KAT",
+          "projects": {
+            "nodes": [
+              {
+                "id": "a203d5bc-c8c0-4ce1-8366-cc64538b6bfa",
+                "name": "Punchlist",
+                "url": "https://linear.app/kata-sh/project/punchlist-7cf20c10006d",
+                "projectMilestones": {
+                  "nodes": [
+                    {
+                      "id": "165e3be3-8130-4546-ae71-5884b503fddf",
+                      "name": "Gate 0: Spec, stack and prototype",
+                      "description": "PASS when the PRD and ADRs 0001 to 0004 are on main; ADRs record the stack questions Gate 1 depends on ([KAT-3729](https://linear.app/kata-sh/issue/KAT-3729/decide-the-stack-questions-that-gate-1s-first-slices-depend-on)); Gannon has picked one of three prototype variants each for the issue list ([KAT-3725](https://linear.app/kata-sh/issue/KAT-3725/prototype-the-issue-list)) and the issue page ([KAT-3726](https://linear.app/kata-sh/issue/KAT-3726/prototype-the-issue-page)); and Gate 1 is sliced into Linear issues in delivery order, with the evidence recorded on [KAT-3728](https://linear.app/kata-sh/issue/KAT-3728/gate-0-check-cut-gate-1-into-slices-and-record-the-evidence)."
+                    },
+                    {
+                      "id": "c6e977ba-a96a-4d2e-9f0d-c7e47c60b790",
+                      "name": "Gate 1: Groundwork ships from Punchlist",
+                      "description": "PASS when Groundwork's and Punchlist's own issues have run from Punchlist for 14 consecutive days with no fallback to Linear; at least 80% of Groundwork's merged pull requests started from a runner dispatch; no agent action landed on an issue in a status locked to people; and no run was lost or duplicated across runner restarts. Every slice issue in this milestone is Done, and a gate check records the evidence."
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

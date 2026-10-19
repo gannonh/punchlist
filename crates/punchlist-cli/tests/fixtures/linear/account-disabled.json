@@ -1,0 +1,17 @@
+{
+  "errors": [
+    {
+      "message": "Account disabled",
+      "extensions": {
+        "type": "forbidden",
+        "code": "FORBIDDEN",
+        "statusCode": 403,
+        "userError": true,
+        "userPresentableMessage": "Your Linear account has been disabled. Please contact your workspace admin.",
+        "http": {
+          "status": 400
+        }
+      }
+    }
+  ]
+}

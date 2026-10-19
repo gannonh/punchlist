@@ -62,12 +62,21 @@ impl Pl {
     }
 
     async fn run(&self, args: &[&str]) -> Output {
+        self.run_with(args, &[]).await
+    }
+
+    async fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let config = self.config.clone();
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let env: Vec<(String, String)> = (env.iter())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let output = tokio::task::spawn_blocking(move || {
             Command::cargo_bin("pl")
                 .unwrap()
                 .env("PUNCHLIST_CONFIG", config)
+                .env_remove("LINEAR_API_KEY")
+                .envs(env)
                 .args(args)
                 .output()
                 .unwrap()
@@ -952,6 +961,163 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
         show.stdout.contains(
             "Claude Code (agent, claude-code)  commented:\n    Started.\n\n    (agent)\n"
         ),
+        "{}",
+        show.stdout
+    );
+}
+
+/// A stand-in for Linear's GraphQL endpoint that answers with the recorded fixtures, for a
+/// personal key sent as it is.
+async fn fake_linear() -> String {
+    use axum::Json;
+    use axum::http::{HeaderMap, StatusCode};
+    use serde_json::Value;
+    async fn answer(headers: HeaderMap, Json(request): Json<Value>) -> (StatusCode, String) {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("lin_api_test") {
+            return (StatusCode::BAD_REQUEST, fixture("account-disabled"));
+        }
+        let query = request["query"].as_str().unwrap_or_default();
+        let name = if query.starts_with("query Project") {
+            "project"
+        } else if query.starts_with("query Comments") {
+            "comments"
+        } else if request["variables"]["after"].is_null() {
+            "issues-1"
+        } else {
+            "issues-2"
+        };
+        (StatusCode::OK, fixture(name))
+    }
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/linear/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route("/graphql", axum::routing::post(answer));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/graphql")
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn import_linear_twice_then_status(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    tokio::spawn(punchlist_server::work_jobs(AppState::new(pool.clone())));
+    let linear = fake_linear().await;
+    let workspace = Client::new(&pl.url, &pl.token)
+        .unwrap()
+        .session()
+        .await
+        .unwrap()
+        .workspace_id
+        .to_string();
+    let args = [
+        "import",
+        "linear",
+        "--team",
+        "KAT",
+        "--project",
+        "Punchlist",
+        "--workspace",
+        &workspace,
+    ];
+
+    let no_key = pl.run(&args).await;
+    assert_eq!(no_key.code, 1);
+    assert_eq!(
+        no_key.stderr,
+        "error: LINEAR_API_KEY is not set; pl reads Linear with your personal API key from the environment and never stores it, such as `with-env pl import linear …`\n"
+    );
+    let refused = pl
+        .run_with(
+            &args,
+            &[
+                ("LINEAR_API_KEY", "lin_api_wrong"),
+                ("LINEAR_API_URL", &linear),
+            ],
+        )
+        .await;
+    assert_eq!(
+        (refused.code, refused.stderr.as_str()),
+        (1, "error: Linear refused the query: Account disabled\n")
+    );
+
+    let env = [
+        ("LINEAR_API_KEY", "lin_api_test"),
+        ("LINEAR_API_URL", linear.as_str()),
+    ];
+    let mut filters = time_filters();
+    filters.push((r"\d+(\.\d+)?s\b|\d+m \d+s", "[elapsed]"));
+    let first = pl.run_with(&args, &env).await;
+    assert_eq!((first.code, first.stderr.as_str()), (0, ""));
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!(first.stdout, @r"
+        Read KAT/Punchlist from Linear: 3 issues, 2 comments, 2 milestones in [elapsed].
+        Import 1 done.
+                     Created  Updated
+        Issues             3        0
+        Comments           2        0
+        Projects           1        0
+        Milestones         2        0
+        People             1        0
+        Elapsed [elapsed].
+        ");
+    });
+    let again = pl.run_with(&args, &env).await;
+    assert_eq!(again.code, 0);
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!(again.stdout, @r"
+        Read KAT/Punchlist from Linear: 3 issues, 2 comments, 2 milestones in [elapsed].
+        Import 2 done.
+                     Created  Updated
+        Issues             0        0
+        Comments           0        0
+        Projects           0        0
+        Milestones         0        0
+        People             0        0
+        Elapsed [elapsed].
+        ");
+    });
+    let list = pl.run(&["issue", "list"]).await;
+    assert_eq!(list.stdout.lines().count(), 3, "{}", list.stdout);
+
+    let status = pl.run(&["import", "status"]).await;
+    assert_eq!(status.code, 0);
+    insta::with_settings!({filters => filters}, {
+        insta::assert_snapshot!(status.stdout, @r"
+        Imported from Linear
+          Issues      3
+          Comments    2
+          Projects    1
+          Milestones  2
+          People      1
+        Last import 2  done  [time]
+                     Created  Updated
+        Issues             0        0
+        Comments           0        0
+        Projects           0        0
+        Milestones         0        0
+        People             0        0
+        ");
+    });
+
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    let head: Vec<&str> = show.stdout.lines().take(5).collect();
+    assert_eq!(
+        head,
+        [
+            "PL-1  Slice 10: the web app shows the issue page from the approved prototype",
+            "Status: Done",
+            "Project: Punchlist",
+            "Milestone: Gate 1: Groundwork ships from Punchlist",
+            "Linear: KAT-3743  https://linear.app/kata-sh/issue/KAT-3743/slice-10-the-web-app-shows-the-issue-page-from-the-approved-prototype",
+        ]
+    );
+    assert!(
+        show.stdout.contains("Imported agent (agent, imported)"),
         "{}",
         show.stdout
     );

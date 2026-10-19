@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, linear_id, '' AS \"pass_when!\" FROM project\n           WHERE workspace_id = $1 AND (linear_id = $2 OR name = $3)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "project",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "linear_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "project",
+            "name": "linear_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "pass_when!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "65e8c882c8bf84198a0a709ae9c9cd697a1ccb1bee3c194e79d8478a9e1e724c"
+}

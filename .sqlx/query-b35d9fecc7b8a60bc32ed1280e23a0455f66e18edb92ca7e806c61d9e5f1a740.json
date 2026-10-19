@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE issue SET title = $2, body = $3, labels = $4, parent_id = $5, project_id = $6,\n                    milestone_id = $7, status = $8, linear_identifier = $9, linear_url = $10,\n                    linear_updated_at = $11,\n                    updated_at = CASE WHEN $12 THEN now() ELSE updated_at END\n             WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "TextArray",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b35d9fecc7b8a60bc32ed1280e23a0455f66e18edb92ca7e806c61d9e5f1a740"
+}
