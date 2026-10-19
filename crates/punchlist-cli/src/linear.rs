@@ -14,9 +14,11 @@ use serde_json::json;
 
 const API_URL: &str = "https://api.linear.app/graphql";
 
-/// The team by its key, and its project by name, with the project's milestones.
+/// The team by its key, and its project by name, with the project's milestones. Every
+/// connection takes `first`: Linear counts one without it as 50 toward its complexity limit of
+/// 10,000, and `teams` unbounded made this query 13,185.
 pub const PROJECT_QUERY: &str = "query Project($team: String!, $project: String!) {
-  teams(filter: {key: {eq: $team}}) {
+  teams(filter: {key: {eq: $team}}, first: 1) {
     nodes {
       key
       projects(filter: {name: {eq: $project}}, first: 2) {
