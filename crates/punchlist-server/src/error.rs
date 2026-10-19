@@ -37,6 +37,8 @@ pub enum ApiError {
     ProofNotFound(Uuid),
     #[error("project {0} not found")]
     ProjectNotFound(Uuid),
+    #[error("import {0} not found in this workspace")]
+    ImportNotFound(i64),
     #[error("workspace {0} not found")]
     WorkspaceNotFound(Uuid),
     #[error("{0}")]
@@ -78,6 +80,7 @@ impl ApiError {
             | ApiError::RunnerNotFound(_)
             | ApiError::ProofNotFound(_)
             | ApiError::ProjectNotFound(_)
+            | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) => StatusCode::CONFLICT,
@@ -99,6 +102,7 @@ impl ApiError {
             | ApiError::RunnerNotFound(_)
             | ApiError::ProofNotFound(_)
             | ApiError::ProjectNotFound(_)
+            | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
             ApiError::ClaimTaken(_) => "claim_taken",

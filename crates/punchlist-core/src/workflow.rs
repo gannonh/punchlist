@@ -1749,7 +1749,8 @@ mod tests {
     #[test]
     fn linear_states_map_by_table_then_name_then_type() {
         let workflow = default_workflow();
-        let mapped = |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
+        let mapped =
+            |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
         assert_eq!(mapped("In Progress", "started"), Some("in_progress"));
         assert_eq!(mapped("Agent Review", "started"), Some("agent_review"));
         assert_eq!(mapped("Human Review", "started"), Some("human_review"));
@@ -1763,11 +1764,10 @@ mod tests {
         assert_eq!(mapped("Icebox", "backlog"), Some("backlog"));
         assert_eq!(mapped("Triage", "triage"), None);
 
-        let table = runnable(
-            "[import.linear.states]\n\"QA\" = \"b\"\n\"In Progress\" = \"a\"\n",
-        );
+        let table = runnable("[import.linear.states]\n\"QA\" = \"b\"\n\"In Progress\" = \"a\"\n");
         let workflow = Workflow::from_toml(&table).unwrap();
-        let mapped = |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
+        let mapped =
+            |name: &str, kind: &str| workflow.linear_status(name, kind).map(Status::as_str);
         assert_eq!(mapped("QA", "started"), Some("b"));
         assert_eq!(mapped("In Progress", "started"), Some("a"));
         // No `todo` or `done` in this workflow, so their types map nowhere.

@@ -3,8 +3,8 @@
 
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ChecksState, GateSummary, Issue, IssueRow, MilestoneRef, ProjectRef, PullRequestState,
-    PullRequestStatus, PullRequestSummary, RunSummary, plain_pull_request_url,
+    ChecksState, GateSummary, Issue, IssueRow, LinearLink, MilestoneRef, ProjectRef,
+    PullRequestState, PullRequestStatus, PullRequestSummary, RunSummary, plain_pull_request_url,
 };
 use punchlist_core::display_name;
 use uuid::Uuid;
@@ -92,6 +92,8 @@ struct Loaded {
     pr_draft: Option<bool>,
     pr_checks: Option<String>,
     pr_url: Option<String>,
+    linear_identifier: Option<String>,
+    linear_url: Option<String>,
 }
 
 /// Each issue with its run and its newest pull request. The run is the running one; else
@@ -114,7 +116,8 @@ async fn load(
                   last.agent AS "last_agent?", last.outcome AS "last_outcome?",
                   last.finished_at AS "last_finished_at?", last.reason AS "last_reason?",
                   pr.number AS "pr_number?", pr.state AS "pr_state?", pr.draft AS "pr_draft?",
-                  pr.checks AS "pr_checks?", pr.url AS "pr_url?"
+                  pr.checks AS "pr_checks?", pr.url AS "pr_url?",
+                  i.linear_identifier, i.linear_url
            FROM issue i
            LEFT JOIN project p ON p.id = i.project_id
            LEFT JOIN milestone m ON m.id = i.milestone_id
@@ -200,6 +203,8 @@ fn parse(row: Loaded) -> sqlx::Result<(Issue, RunSummary, Option<PullRequestSumm
         created_at: row.created_at,
         updated_at: row.updated_at,
         waiting_on_person: None,
+        linear: (row.linear_identifier.zip(row.linear_url))
+            .map(|(identifier, url)| LinearLink { identifier, url }),
     };
     Ok((issue, run, pull_request))
 }

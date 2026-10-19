@@ -17,6 +17,12 @@ const MAX_READS: u32 = 3;
 /// How long the worker sleeps when no job wakes it.
 const POLL: Duration = Duration::from_secs(1);
 
+/// A job failure a retry cannot fix, such as an import whose states no longer map: the job is
+/// marked `failed` at once, with this message.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct Permanent(pub String);
+
 /// Runs jobs for the life of the server: until none is ready, then until a job is enqueued
 /// or a second passes (a retry's `run_after` or an expired lease needs no wake-up).
 pub async fn work_jobs(state: AppState) {
@@ -64,6 +70,7 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
     // attempt still holds the job, so a worker whose lease expired rolls back.
     let result = async {
         let mut tx;
+        let mut result = None;
         match job.kind.as_str() {
             "github_event" => {
                 // GitHub is read before the transaction begins, so no lock or connection is
@@ -101,14 +108,19 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
                 tx = state.pool.begin().await?;
                 crate::workflow::load(state, &mut tx, job.payload).await?;
             }
+            "linear_import" => {
+                tx = state.pool.begin().await?;
+                result = Some(crate::linear_import::run(&mut tx, job.payload).await?);
+            }
             other => anyhow::bail!("unknown job kind `{other}`"),
         }
         let done = sqlx::query!(
             "UPDATE job SET state = 'done', lease_expires_at = NULL, last_error = NULL,
-                    finished_at = now()
+                    finished_at = now(), result = $3
              WHERE id = $1 AND state = 'running' AND attempts = $2",
             job.id,
             attempt,
+            result,
         )
         .execute(&mut *tx)
         .await?;
@@ -120,6 +132,11 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
 
     if let Err(error) = result {
         tracing::warn!(job = job.id, attempt, %error, "job failed");
+        let last = if error.is::<Permanent>() {
+            attempt
+        } else {
+            MAX_ATTEMPTS
+        };
         sqlx::query!(
             "UPDATE job SET
                 state = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'queued' END,
@@ -130,7 +147,7 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
              WHERE id = $1 AND state = 'running' AND attempts = $2",
             job.id,
             attempt,
-            MAX_ATTEMPTS,
+            last,
             format!("{error:#}"),
         )
         .execute(&state.pool)

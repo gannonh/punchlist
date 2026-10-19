@@ -309,7 +309,10 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/session",
             "/api/workflow",
             "/api/workflow/schema.json",
-            "/api/workspaces/{id}/events"
+            "/api/workspaces/{id}/events",
+            "/api/workspaces/{id}/imports",
+            "/api/workspaces/{id}/imports/linear",
+            "/api/workspaces/{id}/imports/{run}"
         ]
     );
 }

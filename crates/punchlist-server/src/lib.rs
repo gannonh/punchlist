@@ -9,6 +9,7 @@ mod github;
 mod github_api;
 mod issues;
 mod jobs;
+mod linear_import;
 mod projects;
 mod proof;
 mod pull_requests;
@@ -131,6 +132,7 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
         .merge(events::routes())
         .merge(github::routes())
         .merge(issues::routes())
+        .merge(linear_import::routes())
         .merge(projects::routes())
         .merge(proof::routes(proof_max_bytes))
         .merge(pull_requests::routes())

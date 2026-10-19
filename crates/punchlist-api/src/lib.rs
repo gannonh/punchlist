@@ -55,6 +55,16 @@ pub struct Issue {
     /// every other response that carries an issue leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on_person: Option<String>,
+    /// The Linear issue it was imported from; `None` for an issue made in Punchlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear: Option<LinearLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearLink {
+    /// Such as `KAT-12`.
+    pub identifier: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -418,6 +428,154 @@ pub struct Milestone {
 pub struct ProjectList {
     /// Oldest first.
     pub projects: Vec<Project>,
+}
+
+/// `POST /api/workspaces/{id}/imports/linear`: one Linear project as `pl import linear` read
+/// it. Every id is Linear's, and a rerun finds what it imported before by them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearImport {
+    /// The team's key, such as `KAT`.
+    pub team: String,
+    pub project: LinearProject,
+    pub issues: Vec<LinearIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearProject {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub milestones: Vec<LinearMilestone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearMilestone {
+    pub id: String,
+    pub name: String,
+    /// Imported as the milestone's PASS when text.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearIssue {
+    pub id: String,
+    /// Such as `KAT-12`.
+    pub identifier: String,
+    pub url: String,
+    pub title: String,
+    /// Markdown.
+    #[serde(default)]
+    pub description: Option<String>,
+    pub state: LinearState,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub milestone_id: Option<String>,
+    #[serde(default)]
+    pub creator: Option<LinearUser>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub comments: Vec<LinearComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearState {
+    pub name: String,
+    /// Linear's state type: `triage`, `backlog`, `unstarted`, `started`, `completed`,
+    /// `canceled` or `duplicate`.
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearUser {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinearComment {
+    pub id: String,
+    pub body: String,
+    /// `None` for a comment an integration wrote.
+    #[serde(default)]
+    pub user: Option<LinearUser>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportState {
+    Queued,
+    Running,
+    Done,
+    Failed,
+}
+
+impl ImportState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImportState::Queued => "queued",
+            ImportState::Running => "running",
+            ImportState::Done => "done",
+            ImportState::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ImportState> {
+        [
+            ImportState::Queued,
+            ImportState::Running,
+            ImportState::Done,
+            ImportState::Failed,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == s)
+    }
+}
+
+/// One import, as the server's job runs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportRun {
+    /// The job's id.
+    pub id: i64,
+    pub state: ImportState,
+    /// Why the last attempt failed; a `queued` import with one is retried.
+    pub error: Option<String>,
+    /// Set once it is `done`.
+    pub report: Option<ImportReport>,
+    pub created_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// What one import wrote.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportReport {
+    pub created: ImportCounts,
+    pub updated: ImportCounts,
+    /// Issues gone from Linear's project, parents outside it, empty comments skipped.
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportCounts {
+    pub issues: i64,
+    pub comments: i64,
+    pub projects: i64,
+    pub milestones: i64,
+    pub people: i64,
+}
+
+/// `GET /api/workspaces/{id}/imports`: the workspace's rows imported from Linear, and the
+/// latest import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportStatus {
+    pub totals: ImportCounts,
+    pub last_run: Option<ImportRun>,
 }
 
 /// `POST /api/runners`, with a person's token. Registers a runner and creates its actor, or

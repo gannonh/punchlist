@@ -369,6 +369,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: None,
+            linear: None,
         }
     }
 
