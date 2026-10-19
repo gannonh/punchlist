@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""A stand-in for Linear's GraphQL endpoint, for `pl import linear` checks without Linear.
+
+    fake-linear PORT                  serve crates/punchlist-cli/tests/fixtures/linear/
+    fake-linear PORT --issues 300     serve one project with 300 generated issues, 3 comments each
+
+Point pl at it: LINEAR_API_KEY=lin_api_test LINEAR_API_URL=http://127.0.0.1:PORT/graphql.
+Any other key gets Linear's "Account disabled" answer. Pages hold 50 issues, as Linear's do.
+"""
+
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parents[4] / "crates/punchlist-cli/tests/fixtures/linear"
+STATES = [("Backlog", "backlog"), ("Todo", "unstarted"), ("In Progress", "started"),
+          ("Agent Review", "started"), ("Done", "completed"), ("Duplicate", "duplicate")]
+
+
+def fixture(name):
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+def generated_issue(n):
+    user = {"id": f"user-{n % 4}", "name": f"Person {n % 4}"}
+    comments = [{"id": f"comment-{n}-{c}", "body": f"Comment {c} on issue {n}." +
+                 ("\n\n(agent)" if c == 2 else ""), "createdAt": f"2026-09-{1 + n % 28:02d}T1{c}:00:00Z",
+                 "user": user} for c in range(3)]
+    name, kind = STATES[n % len(STATES)]
+    return {"id": f"issue-{n}", "identifier": f"GEN-{n}", "url": f"https://linear.app/x/issue/GEN-{n}",
+            "title": f"Generated issue {n}", "description": f"Body of issue {n}.",
+            "createdAt": f"2026-08-01T00:{n // 60 % 60:02d}:{n % 60:02d}Z", "updatedAt": "2026-09-30T00:00:00Z",
+            "state": {"name": name, "type": kind}, "labels": {"nodes": [{"name": "generated"}]},
+            "parent": {"id": f"issue-{n - 1}"} if n % 10 else None,
+            "projectMilestone": {"id": "milestone-gen"} if n % 2 else None, "creator": user,
+            "comments": {"nodes": comments, "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+
+
+def answer(request, generated):
+    query, variables = request["query"], request.get("variables") or {}
+    if query.startswith("query Project"):
+        if not generated:
+            return fixture("project")
+        project = {"id": "project-gen", "name": variables["project"], "url": "https://linear.app/x/project/gen",
+                   "projectMilestones": {"nodes": [{"id": "milestone-gen", "name": "Gate 0",
+                                                    "description": "PASS when every generated issue imports."}]}}
+        return {"data": {"teams": {"nodes": [{"key": variables["team"], "projects": {"nodes": [project]}}]}}}
+    if query.startswith("query Comments"):
+        return fixture("comments")
+    if not generated:
+        return fixture("issues-2" if variables.get("after") else "issues-1")
+    start = int(variables.get("after") or 0)
+    end = min(start + 50, generated)
+    return {"data": {"issues": {"nodes": [generated_issue(n) for n in range(start + 1, end + 1)],
+                                "pageInfo": {"hasNextPage": end < generated, "endCursor": str(end)}}}}
+
+
+def main():
+    port = int(sys.argv[1])
+    generated = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[2] == "--issues" else 0
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            if self.headers.get("authorization") != "lin_api_test":
+                status, body = 400, fixture("account-disabled")
+            else:
+                status, body = 200, answer(request, generated)
+            data = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
