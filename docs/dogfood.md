@@ -34,7 +34,7 @@ tailscale funnel --bg --https=10000 --set-path=/api/github/webhook \
 
 The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 
-The workspace has one runner, in its own herdr pane on sartre. Start it again after a reboot:
+The workspace has one runner, in the pane `runner` of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runner again after a reboot:
 
 ```sh
 PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
