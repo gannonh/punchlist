@@ -97,11 +97,33 @@ There is no fallback to Linear: a day spent in Linear ends the streak. Get the s
 
 ## Backups
 
-Every night, from cron on sartre (`crontab -e`):
+Every night at 03:00, from a systemd user timer on sartre (Omarchy has no cron; linger is on, so it runs while logged out, and `Persistent=true` runs a missed night at the next boot). `~/.config/systemd/user/punchlist-backup.service`:
 
-```sh
-0 3 * * * cd ~/srv/punchlist-host && d=~/backups/punchlist/$(date +\%F) && mkdir -p $d && docker compose exec -T db pg_dump -U punchlist -Fc punchlist > $d/db.dump && docker compose exec -T server tar -C /var/lib/punchlist -cf - proof > $d/proof.tar
+```ini
+[Unit]
+Description=Back up the Punchlist dogfood instance (docs/dogfood.md)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/srv/punchlist-host
+ExecStart=/usr/bin/bash -c 'd=%h/backups/punchlist/$(date +%%F) && mkdir -p $d && docker compose exec -T db pg_dump -U punchlist -Fc punchlist > $d/db.dump && docker compose exec -T server tar -C /var/lib/punchlist -cf - proof > $d/proof.tar'
 ```
+
+`~/.config/systemd/user/punchlist-backup.timer`:
+
+```ini
+[Unit]
+Description=Nightly backup of the Punchlist dogfood instance
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Turn it on with `systemctl --user daemon-reload && systemctl --user enable --now punchlist-backup.timer`. Back up now with `systemctl --user start punchlist-backup.service`; `systemctl --user list-timers` shows the next run.
 
 Restore one:
 
