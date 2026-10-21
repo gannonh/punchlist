@@ -7,7 +7,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | | |
 | --- | --- |
 | Checkout | `~/srv/punchlist-host` on sartre, a clone of `gannonh/punchlist` on `main`. Its directory name makes the Compose project `punchlist-host`, apart from development checkouts |
-| App | `http://100.96.231.20:7880` (sartre's Tailscale address) |
+| App | `https://sartre.tail984796.ts.net:7880`, tailnet only: `tailscale serve` in front of the server on `127.0.0.1:7880` (sartre's firewall drops other ports from the tailnet) |
 | Postgres | `127.0.0.1:5440` on sartre, volume `punchlist-host_db` |
 | Proof files | volume `punchlist-host_proof` |
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
@@ -21,15 +21,18 @@ Start or update it:
 cd ~/srv/punchlist-host && git pull --ff-only
 scripts/dogfood.sh up -d --build --wait
 SQLX_OFFLINE=true cargo install --locked --path crates/punchlist-cli   # pl, for the runner and the CLI
-curl -s -o /dev/null -w '%{http_code}\n' http://100.96.231.20:7880/api/openapi.json   # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7880/api/openapi.json   # 200
 ```
 
-`scripts/dogfood.sh` is `docker compose` with the instance's address and ports, and the App's id, private key and webhook secret from the Punchlist 1Password Environment, where they are `DOGFOOD_GITHUB_APP_ID`, `DOGFOOD_GITHUB_APP_PRIVATE_KEY` and `DOGFOOD_GITHUB_WEBHOOK_SECRET`; the plain `GITHUB_*` names there are the sandbox App's, for verify-punchlist. Start, stop and restart the stack through the script, since a plain `docker compose up` would recreate it on the default ports without the App. `ps`, `logs` and `exec` work either way. The webhook Funnel:
+`scripts/dogfood.sh` is `docker compose` with the instance's address and ports, and the App's id, private key and webhook secret from the Punchlist 1Password Environment, where they are `DOGFOOD_GITHUB_APP_ID`, `DOGFOOD_GITHUB_APP_PRIVATE_KEY` and `DOGFOOD_GITHUB_WEBHOOK_SECRET`; the plain `GITHUB_*` names there are the sandbox App's, for verify-punchlist. Start, stop and restart the stack through the script, since a plain `docker compose up` would recreate it on the default ports without the App. `ps`, `logs` and `exec` work either way. The app for the tailnet, and the webhook Funnel for GitHub:
 
 ```sh
+tailscale serve --bg --https=7880 http://127.0.0.1:7880
 tailscale funnel --bg --https=10000 --set-path=/api/github/webhook \
-  http://100.96.231.20:7880/api/github/webhook
+  http://127.0.0.1:7880/api/github/webhook
 ```
+
+The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 
 The workspace has one runner, in its own herdr pane on sartre. Start it again after a reboot:
 
