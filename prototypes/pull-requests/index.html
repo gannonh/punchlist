@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Punchlist · Pull requests prototype</title>
+  <link rel="stylesheet" href="../issue-list/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Punchlist <span class="tag">prototype · pull requests</span></div>
+    <div class="switcher" role="group" aria-label="Layout">
+      <button type="button" data-variant="page" aria-pressed="true"><kbd>1</kbd> Page</button>
+      <button type="button" data-variant="tab" aria-pressed="false"><kbd>2</kbd> List tab</button>
+      <button type="button" data-variant="queue" aria-pressed="false"><kbd>3</kbd> Merge queue</button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+
+  <footer class="shortcuts">
+    <span class="title">Keys</span>
+    <span><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> layout</span>
+    <span><kbd>Tab</kbd> next row or link</span>
+    <span><kbd>Enter</kbd> on a row opens its issue; on a link opens GitHub</span>
+  </footer>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
