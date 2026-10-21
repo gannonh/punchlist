@@ -74,11 +74,12 @@ FROM transition t JOIN actor a ON a.id = t.actor_id
 WHERE a.role IN ('agent', 'runner') AND t.from_status = 'human_review';
 ```
 
-Lost attempts, each with the attempt that replaced it, and attempts on one issue that overlapped (the target for overlaps is 0):
+Lost attempts, each with the attempt of the same run that replaced it (none when the run ended), and attempts on one issue that overlapped (the target for overlaps is 0):
 
 ```sql
-SELECT issue_id, run_id, attempt, failure_reason FROM attempt
-WHERE failure_reason ~ 'lost|lease expired|runner restarted|runner stopped' ORDER BY started_at;
+SELECT a.issue_id, a.run_id, a.attempt, a.failure_reason, b.attempt AS replaced_by
+FROM attempt a LEFT JOIN attempt b ON b.run_id = a.run_id AND b.attempt = a.attempt + 1
+WHERE a.failure_reason ~ 'lost|lease expired|runner restarted|runner stopped' ORDER BY a.started_at;
 
 SELECT a.issue_id, a.id, b.id FROM attempt a JOIN attempt b
   ON a.issue_id = b.issue_id AND a.id < b.id
@@ -109,7 +110,23 @@ cd ~/srv/punchlist-host && d=~/backups/punchlist/<date>
 docker compose stop server
 docker compose up -d --wait db
 docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
-docker compose run --rm -T --no-deps --entrypoint tar server -C /var/lib/punchlist -xf - < $d/proof.tar
+docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < $d/proof.tar
 ```
 
-Then start the stack as above. Once a week, check that a backup restores: restore it into a scratch project (`COMPOSE_PROJECT_NAME=punchlist-restore PUNCHLIST_PORT=7881 PUNCHLIST_DB_PORT=5441`, the same commands) and compare `SELECT count(*) FROM issue` with the instance. `docker compose -p punchlist-restore down -v` removes it.
+Then start the stack as above.
+
+Once a week, check that last night's backup restores, into a scratch project beside the instance:
+
+```sh
+cd ~/srv/punchlist-host && d=~/backups/punchlist/$(date +%F)
+export COMPOSE_PROJECT_NAME=punchlist-restore PUNCHLIST_HOST=127.0.0.1 PUNCHLIST_PORT=7881 PUNCHLIST_DB_PORT=5441
+docker compose up -d --wait db
+docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
+docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < $d/proof.tar
+docker compose up -d --wait
+q="SELECT (SELECT count(*) FROM issue), (SELECT count(*) FROM event), (SELECT count(*) FROM proof)"
+docker compose exec -T db psql -U punchlist -tAc "$q"                                                       # the restore
+docker compose -p punchlist-host exec -T db psql -U punchlist -tAc "$q"                                     # the instance; equal unless it changed since 03:00
+docker compose exec -T server sh -c 'ls /var/lib/punchlist/proof | grep -vc part'                           # proof files: the restore's proof count
+docker compose down -v && unset COMPOSE_PROJECT_NAME PUNCHLIST_HOST PUNCHLIST_PORT PUNCHLIST_DB_PORT
+```

@@ -24,13 +24,13 @@ The app is at `http://127.0.0.1:7878`. Create a workspace and a person, and save
     --repository owner/name --server-url http://127.0.0.1:7878 > ~/.config/punchlist/config.toml)
 ```
 
-The image carries `pl` for Linux: `docker compose cp server:/usr/local/bin/pl ~/.local/bin/pl`. Runners run `pl runner start` on the machines that have the agents; they are not part of the stack.
+The image carries `pl` for Linux: `mkdir -p ~/.local/bin && docker compose cp server:/usr/local/bin/pl ~/.local/bin/pl`. Runners run `pl runner start` on the machines that have the agents; they are not part of the stack.
 
 Compose reads these variables from the environment it runs in:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PUNCHLIST_HOST` | `127.0.0.1` | The address the app listens on, such as a Tailscale address |
+| `PUNCHLIST_HOST` | `127.0.0.1` | The host address the app's port is published on, such as a Tailscale address |
 | `PUNCHLIST_PORT` | `7878` | The app's port |
 | `PUNCHLIST_DB_PORT` | `5433` | Postgres on `127.0.0.1`, for backups and `psql` |
 | `GITHUB_APP_ID` | none | The GitHub App's id; with the key, the server reads `.punchlist/` and pull requests |
@@ -58,7 +58,7 @@ Restore them, into the same stack or a new one:
 docker compose stop server
 docker compose up -d --wait db
 docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < punchlist.dump
-docker compose run --rm -T --no-deps --entrypoint tar server -C /var/lib/punchlist -xf - < punchlist-proof.tar
+docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < punchlist-proof.tar
 docker compose up -d
 ```
 

@@ -15,11 +15,11 @@ export PUNCHLIST_CONFIG="$DIR/config.toml"
 SQLX_OFFLINE=true cargo build -q -p punchlist-cli
 pl() { target/debug/pl "$@"; }
 expect() {
-  local label=$1 want=$2 out
+  local label=$1 want=$2 out status=0
   shift 2
-  out=$("$@" 2>&1) || true
-  if ! grep -qF -- "$want" <<<"$out"; then
-    printf 'FAIL %s: no "%s" in\n%s\n' "$label" "$want" "$out"
+  out=$("$@" 2>&1) || status=$?
+  if [ "$status" -ne 0 ] || ! grep -qF -- "$want" <<<"$out"; then
+    printf 'FAIL %s: exit %s, want "%s" in\n%s\n' "$label" "$status" "$want" "$out"
     docker compose logs server | tail -40
     exit 1
   fi
@@ -61,7 +61,7 @@ docker compose exec -T server tar -C /var/lib/punchlist -cf - proof >"$DIR/proof
 docker compose down -v
 docker compose up -d --wait db
 docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists <"$DIR/db.dump"
-docker compose run --rm -T --no-deps --entrypoint tar server -C /var/lib/punchlist -xf - <"$DIR/proof.tar"
+docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' <"$DIR/proof.tar"
 docker compose up -d --wait
 wait_up
 check "after restore"
