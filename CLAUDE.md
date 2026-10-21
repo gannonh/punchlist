@@ -4,7 +4,7 @@ Punchlist is an open-source issue tracker where coding agents do the work and th
 
 - Product spec: `docs/product/prd.md`.
 - Decisions: `docs/adr/`. Read the relevant ADR before changing what it decided.
-- Work: the Linear project **Punchlist** in the Kata-sh team, starting with milestone **Gate 0: Spec, stack and prototype**.
+- Work: Punchlist runs from its own Punchlist instance (`docs/dogfood.md`): workspace `Punchlist`, issues `PL-<n>`, read and moved with `pl` (`PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml` on sartre) or the app at `http://100.96.231.20:7880`. Where the global rules say Linear, read this instance. The Linear project **Punchlist** in the Kata-sh team is read-only since the KAT-3792 cutover; its issues were imported, each showing its `KAT-<n>` id.
 
 ## Stack
 

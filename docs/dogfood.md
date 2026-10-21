@@ -1,6 +1,6 @@
 # Dogfood checklist
 
-Gate 1 passes when Groundwork's and Punchlist's own issues run from Punchlist for 14 consecutive days, with no fallback to Linear. This page says how the instance on sartre is set up, what a day looks like, what to record, and what to do when the server is down.
+Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive days, with no fallback to Linear. Groundwork joins once one sign-in can serve several workspaces. This page says how the instance on sartre is set up, what a day looks like, what to record, and what to do when the server is down.
 
 ## The instance
 
@@ -11,29 +11,29 @@ Gate 1 passes when Groundwork's and Punchlist's own issues run from Punchlist fo
 | Postgres | `127.0.0.1:5440` on sartre, volume `punchlist-host_db` |
 | Proof files | volume `punchlist-host_proof` |
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
-| Workspaces | `groundwork` (prefix `GW`, `gannonh/groundwork`) and `punchlist` (prefix `PL`, `gannonh/punchlist`) |
-| `pl` configs | `~/.config/punchlist/groundwork.toml` and `~/.config/punchlist/punchlist.toml` |
+| GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only |
+| Workspace | `Punchlist` (prefix `PL`, `gannonh/punchlist`) |
+| `pl` config | `~/.config/punchlist/punchlist.toml` |
 
 Start or update it:
 
 ```sh
 cd ~/srv/punchlist-host && git pull --ff-only
-PUNCHLIST_HOST=100.96.231.20 PUNCHLIST_PORT=7880 PUNCHLIST_DB_PORT=5440 \
-  with-env docker compose up -d --build
+scripts/dogfood.sh up -d --build --wait
+SQLX_OFFLINE=true cargo install --locked --path crates/punchlist-cli   # pl, for the runner and the CLI
 curl -s -o /dev/null -w '%{http_code}\n' http://100.96.231.20:7880/api/openapi.json   # 200
 ```
 
-`with-env` supplies the GitHub App's id, private key and webhook secret. The webhook Funnel:
+`scripts/dogfood.sh` is `docker compose` with the instance's address and ports, and the App's id, private key and webhook secret from the Punchlist 1Password Environment, where they are `DOGFOOD_GITHUB_APP_ID`, `DOGFOOD_GITHUB_APP_PRIVATE_KEY` and `DOGFOOD_GITHUB_WEBHOOK_SECRET`; the plain `GITHUB_*` names there are the sandbox App's, for verify-punchlist. Start, stop and restart the stack through the script, since a plain `docker compose up` would recreate it on the default ports without the App. `ps`, `logs` and `exec` work either way. The webhook Funnel:
 
 ```sh
 tailscale funnel --bg --https=10000 --set-path=/api/github/webhook \
   http://100.96.231.20:7880/api/github/webhook
 ```
 
-Each workspace has one runner, in its own herdr pane on sartre. Start it again after a reboot:
+The workspace has one runner, in its own herdr pane on sartre. Start it again after a reboot:
 
 ```sh
-PUNCHLIST_CONFIG=~/.config/punchlist/groundwork.toml pl runner start --name sartre-groundwork --agents claude-code,codex
 PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
 ```
 
@@ -41,7 +41,7 @@ A runner keeps its name, so starting it again re-adopts the same runner and resu
 
 ## A day
 
-1. Open the app. Read the board for both workspaces: what moved overnight, what waits on you in Human Review, and anything that shows `waiting on a person`.
+1. Open the app. Read the board: what moved overnight, what waits on you in Human Review, and anything that shows `waiting on a person`.
 2. Review each Human Review pull request on GitHub. Move it to Merging, or back with a comment. Merge from Merging only.
 3. Pick the next issues and move them to Start. The runner claims them. Do not type a prompt into an agent for an issue; if an issue needs one, the issue body or the workflow's prompt is wrong, so fix that.
 4. New work starts as an issue in Punchlist (`pl issue create` or the app), never in Linear.
@@ -57,7 +57,7 @@ Issues run, per workspace:
 SELECT w.name, count(DISTINCT r.issue_id) FROM run r JOIN workspace w ON w.id = r.workspace_id GROUP BY w.name;
 ```
 
-Merged pull requests, and how many came from a runner's branch (the target is 80% or more for Groundwork):
+Merged pull requests, and how many came from a runner's branch (the target is 80% or more):
 
 ```sql
 SELECT w.name, count(*) AS merged,
@@ -91,7 +91,7 @@ SELECT a.issue_id, a.id, b.id FROM attempt a JOIN attempt b
 There is no fallback to Linear: a day spent in Linear ends the streak. Get the server back instead.
 
 1. Look: `cd ~/srv/punchlist-host && docker compose ps && docker compose logs --tail 100 server`.
-2. Restart: `PUNCHLIST_HOST=100.96.231.20 PUNCHLIST_PORT=7880 PUNCHLIST_DB_PORT=5440 with-env docker compose up -d`. Migrations run at start; a failed migration is in the log.
+2. Restart: `cd ~/srv/punchlist-host && scripts/dogfood.sh up -d --wait`. Migrations run at start; a failed migration is in the log.
 3. If the data is lost or damaged, restore the last backup (below), then start the stack as in step 2. Pushes to `.punchlist/` that the server missed load at start. Pull requests that changed while it was down are read again before their next gated move.
 4. Record the outage, and what it cost, in the gate check issue.
 
@@ -107,8 +107,8 @@ Restore one:
 
 ```sh
 cd ~/srv/punchlist-host && d=~/backups/punchlist/<date>
-docker compose stop server
-docker compose up -d --wait db
+scripts/dogfood.sh stop server
+scripts/dogfood.sh up -d --wait db
 docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
 docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < $d/proof.tar
 ```
