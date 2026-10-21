@@ -6,7 +6,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 
 | | |
 | --- | --- |
-| Checkout | `~/srv/punchlist-host` on sartre, a clone of `gannonh/punchlist` on `main`. Its directory name makes the Compose project `punchlist-host`, apart from development checkouts |
+| Checkout | `~/dev/punchlist` on sartre, on `main`. `scripts/dogfood.sh` names the Compose project `punchlist-host`, so `pnpm dev` and `pnpm check` in the same checkout (project `punchlist`) never reach the instance |
 | App | `https://sartre.tail984796.ts.net:7880`, tailnet only: `tailscale serve` in front of the server on `127.0.0.1:7880` (sartre's firewall drops other ports from the tailnet) |
 | Postgres | `127.0.0.1:5440` on sartre, volume `punchlist-host_db` |
 | Proof files | volume `punchlist-host_proof` |
@@ -18,13 +18,13 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 Start or update it:
 
 ```sh
-cd ~/srv/punchlist-host && git pull --ff-only
+cd ~/dev/punchlist && git pull --ff-only
 scripts/dogfood.sh up -d --build --wait
 SQLX_OFFLINE=true cargo install --locked --path crates/punchlist-cli   # pl, for the runner and the CLI
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7880/api/openapi.json   # 200
 ```
 
-`scripts/dogfood.sh` is `docker compose` with the instance's address and ports, and the App's id, private key and webhook secret from the Punchlist 1Password Environment, where they are `DOGFOOD_GITHUB_APP_ID`, `DOGFOOD_GITHUB_APP_PRIVATE_KEY` and `DOGFOOD_GITHUB_WEBHOOK_SECRET`; the plain `GITHUB_*` names there are the sandbox App's, for verify-punchlist. Start, stop and restart the stack through the script, since a plain `docker compose up` would recreate it on the default ports without the App. `ps`, `logs` and `exec` work either way. The app for the tailnet, and the webhook Funnel for GitHub:
+`scripts/dogfood.sh` is `docker compose` with the instance's address and ports, and the App's id, private key and webhook secret from the Punchlist 1Password Environment, where they are `DOGFOOD_GITHUB_APP_ID`, `DOGFOOD_GITHUB_APP_PRIVATE_KEY` and `DOGFOOD_GITHUB_WEBHOOK_SECRET`; the plain `GITHUB_*` names there are the sandbox App's, for verify-punchlist. Start, stop and restart the stack through the script, since a plain `docker compose up` would recreate it on the default ports without the App. Plain `docker compose` in the checkout is the development project, so give it `-p punchlist-host` to reach the instance. The app for the tailnet, and the webhook Funnel for GitHub:
 
 ```sh
 tailscale serve --bg --https=7880 http://127.0.0.1:7880
@@ -93,8 +93,8 @@ SELECT a.issue_id, a.id, b.id FROM attempt a JOIN attempt b
 
 There is no fallback to Linear: a day spent in Linear ends the streak. Get the server back instead.
 
-1. Look: `cd ~/srv/punchlist-host && docker compose ps && docker compose logs --tail 100 server`.
-2. Restart: `cd ~/srv/punchlist-host && scripts/dogfood.sh up -d --wait`. Migrations run at start; a failed migration is in the log.
+1. Look: `cd ~/dev/punchlist && docker compose -p punchlist-host ps && docker compose -p punchlist-host logs --tail 100 server`.
+2. Restart: `cd ~/dev/punchlist && scripts/dogfood.sh up -d --wait`. Migrations run at start; a failed migration is in the log.
 3. If the data is lost or damaged, restore the last backup (below), then start the stack as in step 2. Pushes to `.punchlist/` that the server missed load at start. Pull requests that changed while it was down are read again before their next gated move.
 4. Record the outage, and what it cost, in the gate check issue.
 
@@ -108,8 +108,8 @@ Description=Back up the Punchlist dogfood instance (docs/dogfood.md)
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/srv/punchlist-host
-ExecStart=/usr/bin/bash -c 'd=%h/backups/punchlist/$(date +%%F) && mkdir -p $d && docker compose exec -T db pg_dump -U punchlist -Fc punchlist > $d/db.dump && docker compose exec -T server tar -C /var/lib/punchlist -cf - proof > $d/proof.tar'
+WorkingDirectory=%h/dev/punchlist
+ExecStart=/usr/bin/bash -c 'd=%h/backups/punchlist/$(date +%%F) && mkdir -p $d && docker compose -p punchlist-host exec -T db pg_dump -U punchlist -Fc punchlist > $d/db.dump && docker compose -p punchlist-host exec -T server tar -C /var/lib/punchlist -cf - proof > $d/proof.tar'
 ```
 
 `~/.config/systemd/user/punchlist-backup.timer`:
@@ -131,11 +131,11 @@ Turn it on with `systemctl --user daemon-reload && systemctl --user enable --now
 Restore one:
 
 ```sh
-cd ~/srv/punchlist-host && d=~/backups/punchlist/<date>
+cd ~/dev/punchlist && d=~/backups/punchlist/<date>
 scripts/dogfood.sh stop server
 scripts/dogfood.sh up -d --wait db
-docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
-docker compose run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < $d/proof.tar
+docker compose -p punchlist-host exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
+docker compose -p punchlist-host run --rm -T --no-deps --entrypoint sh server -c 'rm -rf /var/lib/punchlist/proof/* && tar -C /var/lib/punchlist -xf -' < $d/proof.tar
 ```
 
 Then start the stack as above.
@@ -143,7 +143,7 @@ Then start the stack as above.
 Once a week, check that last night's backup restores, into a scratch project beside the instance:
 
 ```sh
-cd ~/srv/punchlist-host && d=~/backups/punchlist/$(date +%F)
+cd ~/dev/punchlist && d=~/backups/punchlist/$(date +%F)
 export COMPOSE_PROJECT_NAME=punchlist-restore PUNCHLIST_HOST=127.0.0.1 PUNCHLIST_PORT=7881 PUNCHLIST_DB_PORT=5441
 docker compose up -d --wait db
 docker compose exec -T db pg_restore -U punchlist -d punchlist --clean --if-exists < $d/db.dump
