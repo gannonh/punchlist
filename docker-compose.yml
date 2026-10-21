@@ -1,7 +1,10 @@
-# Postgres for development. Port 5433 keeps it clear of other projects' Postgres on 5432.
+# Postgres alone for development (`pnpm dev` starts only `db`); with `server`, the self-host stack:
+# `docker compose up -d`. README.md lists the variables. Port 5433 keeps Postgres clear of other
+# projects' Postgres on 5432.
 services:
   db:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: punchlist
       POSTGRES_PASSWORD: punchlist
@@ -16,5 +19,27 @@ services:
       timeout: 5s
       retries: 30
 
+  server:
+    build: .
+    image: punchlist-server
+    restart: unless-stopped
+    # The server shuts down gracefully on SIGINT, not on Docker's default SIGTERM.
+    stop_signal: SIGINT
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://punchlist:punchlist@db:5432/punchlist
+      GITHUB_WEBHOOK_SECRET:
+      GITHUB_APP_ID:
+      GITHUB_APP_PRIVATE_KEY:
+      PUNCHLIST_PROOF_MAX_BYTES:
+      RUST_LOG:
+    ports:
+      - "${PUNCHLIST_HOST:-127.0.0.1}:${PUNCHLIST_PORT:-7878}:7878"
+    volumes:
+      - proof:/var/lib/punchlist/proof
+
 volumes:
   db:
+  proof:
