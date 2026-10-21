@@ -2,7 +2,7 @@
 //! with real KAT content (`fixtures/linear/`).
 
 use punchlist_api::{LinearComment, LinearState, LinearUser};
-use punchlist_cli::{parse_comments, parse_issues, parse_project};
+use punchlist_cli::{parse_comments, parse_issues, parse_labels, parse_project};
 
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!(
@@ -82,6 +82,13 @@ fn issues_pages_and_a_comment_page_parse() {
             "a31e9dc6-3696-4b18-a1b3-708bb1a3d31e".to_string()
         )]
     );
+    assert_eq!(
+        first.more_labels,
+        [(
+            "b9e82236-1717-4739-ae8a-253cd409d1d3".to_string(),
+            "8f0c5e0a-label-cursor".to_string()
+        )]
+    );
     let shown: Vec<String> = (first.issues.iter())
         .map(|i| {
             format!(
@@ -123,6 +130,11 @@ fn issues_pages_and_a_comment_page_parse() {
             name: "Duplicate".into(),
             kind: "duplicate".into()
         }
+    );
+
+    assert_eq!(
+        parse_labels(&fixture("labels")).unwrap(),
+        (vec!["web".to_string()], None)
     );
 
     let (comments, next) = parse_comments(&fixture("comments")).unwrap();

@@ -28,14 +28,15 @@ pub const PROJECT_QUERY: &str = "query Project($team: String!, $project: String!
   }
 }";
 
-/// One page of the project's issues. Pages and comment pages are kept small for Linear's
-/// query complexity limit: 50 issues, each with 50 comments and 20 labels.
-pub const ISSUES_QUERY: &str = "query Issues($team: String!, $project: ID!, $after: String) {
-  issues(filter: {team: {key: {eq: $team}}, project: {id: {eq: $project}}}, first: 50, after: $after) {
+/// One page of the project's issues, from every team that shares it. Pages and comment pages
+/// are kept small for Linear's query complexity limit: 50 issues, each with 50 comments and 20
+/// labels.
+pub const ISSUES_QUERY: &str = "query Issues($project: ID!, $after: String) {
+  issues(filter: {project: {id: {eq: $project}}}, first: 50, after: $after) {
     nodes {
       id identifier url title description createdAt updatedAt
       state { name type }
-      labels(first: 20) { nodes { name } }
+      labels(first: 20) { nodes { name } pageInfo { hasNextPage endCursor } }
       parent { id }
       projectMilestone { id }
       creator { id name }
@@ -53,6 +54,16 @@ pub const COMMENTS_QUERY: &str = "query Comments($issue: String!, $after: String
   issue(id: $issue) {
     comments(first: 100, after: $after) {
       nodes { id body createdAt user { id name } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}";
+
+/// The next page of one issue's labels.
+pub const LABELS_QUERY: &str = "query Labels($issue: String!, $after: String) {
+  issue(id: $issue) {
+    labels(first: 100, after: $after) {
+      nodes { name }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -142,7 +153,7 @@ struct Issue {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     state: LinearState,
-    labels: Nodes<Label>,
+    labels: Page<Label>,
     parent: Option<Id>,
     project_milestone: Option<Id>,
     creator: Option<LinearUser>,
@@ -182,6 +193,16 @@ struct IssueComments {
 #[derive(Deserialize)]
 struct CommentsOf {
     comments: Page<Comment>,
+}
+
+#[derive(Deserialize)]
+struct IssueLabels {
+    issue: Option<LabelsOf>,
+}
+
+#[derive(Deserialize)]
+struct LabelsOf {
+    labels: Page<Label>,
 }
 
 /// A response's data, or Linear's errors.
@@ -232,6 +253,8 @@ pub struct IssuesPage {
     pub issues: Vec<LinearIssue>,
     /// Each issue with more comments than the page holds, and the cursor after the last.
     pub more_comments: Vec<(String, String)>,
+    /// Each issue with more labels than the page holds, and the cursor after the last.
+    pub more_labels: Vec<(String, String)>,
     /// The cursor of the next page of issues, when there is one.
     pub next: Option<String>,
 }
@@ -239,10 +262,14 @@ pub struct IssuesPage {
 pub fn parse_issues(json: &str) -> anyhow::Result<IssuesPage> {
     let page: Issues = data(json)?;
     let mut more_comments = Vec::new();
+    let mut more_labels = Vec::new();
     let issues = (page.issues.nodes.into_iter())
         .map(|issue| {
             if let Some(cursor) = issue.comments.page_info.next() {
                 more_comments.push((issue.id.clone(), cursor));
+            }
+            if let Some(cursor) = issue.labels.page_info.next() {
+                more_labels.push((issue.id.clone(), cursor));
             }
             LinearIssue {
                 id: issue.id,
@@ -264,6 +291,7 @@ pub fn parse_issues(json: &str) -> anyhow::Result<IssuesPage> {
     Ok(IssuesPage {
         issues,
         more_comments,
+        more_labels,
         next: page.issues.page_info.next(),
     })
 }
@@ -279,6 +307,29 @@ pub fn parse_comments(json: &str) -> anyhow::Result<(Vec<LinearComment>, Option<
         page.nodes.into_iter().map(Into::into).collect(),
         page.page_info.next(),
     ))
+}
+
+/// `LABELS_QUERY`'s answer: the label names, and the cursor of the next page when there is one.
+pub fn parse_labels(json: &str) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    let found: IssueLabels = data(json)?;
+    let page = found
+        .issue
+        .context("Linear no longer has the issue")?
+        .labels;
+    Ok((
+        page.nodes.into_iter().map(|l| l.name).collect(),
+        page.page_info.next(),
+    ))
+}
+
+/// The cursor after `next`, refused when it is the cursor that was just asked with: Linear
+/// would answer the same page again, forever.
+fn advance(asked: Option<&str>, next: Option<String>) -> anyhow::Result<Option<String>> {
+    anyhow::ensure!(
+        next.is_none() || next.as_deref() != asked,
+        "Linear answered the same page again; stopping instead of reading it forever"
+    );
+    Ok(next)
 }
 
 pub struct Linear {
@@ -326,23 +377,35 @@ impl Linear {
         let mut issues = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let vars = json!({"team": team, "project": found.id, "after": after});
+            let vars = json!({"project": found.id, "after": after});
             let mut page = parse_issues(&self.query(ISSUES_QUERY, vars).await?)?;
+            let issue = |issues: &[LinearIssue], id: &str| -> usize {
+                (issues.iter().position(|i| i.id == id))
+                    .expect("a page's cursor is for one of its issues")
+            };
             for (id, cursor) in page.more_comments {
-                let issue = (page.issues.iter_mut())
-                    .find(|i| i.id == id)
-                    .expect("a page's comment cursor is for one of its issues");
+                let at = issue(&page.issues, &id);
                 let mut after = Some(cursor);
                 while let Some(cursor) = after {
                     let vars = json!({"issue": id, "after": cursor});
                     let (comments, next) =
                         parse_comments(&self.query(COMMENTS_QUERY, vars).await?)?;
-                    issue.comments.extend(comments);
-                    after = next;
+                    page.issues[at].comments.extend(comments);
+                    after = advance(Some(&cursor), next)?;
+                }
+            }
+            for (id, cursor) in page.more_labels {
+                let at = issue(&page.issues, &id);
+                let mut after = Some(cursor);
+                while let Some(cursor) = after {
+                    let vars = json!({"issue": id, "after": cursor});
+                    let (labels, next) = parse_labels(&self.query(LABELS_QUERY, vars).await?)?;
+                    page.issues[at].labels.extend(labels);
+                    after = advance(Some(&cursor), next)?;
                 }
             }
             issues.extend(page.issues);
-            match page.next {
+            match advance(after.as_deref(), page.next)? {
                 Some(cursor) => after = Some(cursor),
                 None => break,
             }
@@ -352,5 +415,26 @@ impl Linear {
             project: found,
             issues,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance;
+
+    #[test]
+    fn a_page_that_does_not_advance_stops_the_read() {
+        assert_eq!(advance(None, Some("a".into())).unwrap(), Some("a".into()));
+        assert_eq!(
+            advance(Some("a"), Some("b".into())).unwrap(),
+            Some("b".into())
+        );
+        assert_eq!(advance(Some("a"), None).unwrap(), None);
+        assert_eq!(
+            advance(Some("a"), Some("a".into()))
+                .unwrap_err()
+                .to_string(),
+            "Linear answered the same page again; stopping instead of reading it forever"
+        );
     }
 }

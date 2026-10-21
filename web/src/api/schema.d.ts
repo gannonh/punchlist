@@ -3411,7 +3411,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description A Linear state maps to no status; the message names each. */
+            /** @description A Linear state maps to no status, the message naming each, or an issue or comment appears twice. */
             422: {
                 headers: {
                     [name: string]: unknown;

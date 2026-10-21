@@ -2,7 +2,7 @@
 
 mod linear;
 
-pub use linear::{IssuesPage, parse_comments, parse_issues, parse_project};
+pub use linear::{IssuesPage, parse_comments, parse_issues, parse_labels, parse_project};
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

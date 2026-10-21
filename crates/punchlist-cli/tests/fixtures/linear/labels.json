@@ -1,0 +1,17 @@
+{
+  "data": {
+    "issue": {
+      "labels": {
+        "nodes": [
+          {
+            "name": "web"
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "9b1d2f3e-label-cursor"
+        }
+      }
+    }
+  }
+}

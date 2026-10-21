@@ -303,6 +303,16 @@ async fn a_rerun_updates_what_linear_changed_and_reports_what_it_dropped(pool: P
     let state = AppState::new(pool.clone());
     let app = router(state.clone());
     import(&state, &app, &who, snapshot()).await;
+    // PL-3 waits on a dispatch for In Progress, which the move below ends.
+    sqlx::query(
+        "WITH t AS (INSERT INTO transition (issue_id, from_status, to_status, actor_id, workflow_version)
+                    SELECT 'PL-3', 'todo', 'in_progress', id, 'v0' FROM actor WHERE name = 'Gannon'
+                    RETURNING id)
+         INSERT INTO dispatch (issue_id, transition_id, agent) SELECT 'PL-3', id, 'claude-code' FROM t",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let mut changed = snapshot();
     let issues = changed["issues"].as_array_mut().unwrap();
@@ -363,10 +373,12 @@ async fn a_rerun_updates_what_linear_changed_and_reports_what_it_dropped(pool: P
             "PL-3 transition None by Gannon"
         ]
     );
-    let transition = sqlx::query!("SELECT issue_id, from_status, to_status FROM transition")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let transition = sqlx::query!(
+        "SELECT issue_id, from_status, to_status FROM transition WHERE workflow_version <> 'v0'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         (
             transition.issue_id.as_str(),
@@ -403,6 +415,34 @@ async fn an_unmapped_state_imports_nothing_and_names_the_state(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!((row.issues, row.jobs), (0, 0));
+}
+
+#[sqlx::test]
+async fn a_repeated_issue_or_comment_is_refused_before_anything_is_queued(pool: PgPool) {
+    let who = workspace(&pool, "PL").await;
+    let app = router(AppState::new(pool.clone()));
+    let uri = format!("/api/workspaces/{}/imports/linear", who.workspace_id);
+    let mut twice = snapshot();
+    let first = twice["issues"][0].clone();
+    twice["issues"].as_array_mut().unwrap().push(first);
+    let (status, body) = call(&app, &who.token, "POST", &uri, Some(twice)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["message"], "Linear issue KAT-1 appears twice");
+
+    let mut twice = snapshot();
+    let comment = twice["issues"][0]["comments"][0].clone();
+    twice["issues"][0]["comments"]
+        .as_array_mut()
+        .unwrap()
+        .push(comment);
+    let (status, body) = call(&app, &who.token, "POST", &uri, Some(twice)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["message"], "Linear comment c-1 on KAT-1 appears twice");
+    let jobs = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM job"#)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0);
 }
 
 #[sqlx::test]

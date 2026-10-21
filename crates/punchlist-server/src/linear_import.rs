@@ -22,7 +22,9 @@ use uuid::Uuid;
 use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
 use crate::events::next_event_seq;
-use crate::issues::{insert_transition, is_signed_by_agent, record_event, record_transition_event};
+use crate::issues::{
+    end_dispatches, insert_transition, is_signed_by_agent, record_event, record_transition_event,
+};
 use crate::jobs::Permanent;
 use crate::workflow::{active_workflow, lock_workspace};
 use crate::{ApiError, AppState};
@@ -86,6 +88,29 @@ fn map_states<'a>(
     }
 }
 
+/// An issue id, or a comment id on one issue, that the snapshot repeats. The job keys each
+/// row by Linear id, so a repeat would fail its insert on every retry.
+fn repeated_id(issues: &[LinearIssue]) -> Option<String> {
+    let mut seen = HashSet::new();
+    for issue in issues {
+        if !seen.insert(issue.id.as_str()) {
+            return Some(format!("Linear issue {} appears twice", issue.identifier));
+        }
+        let mut comments = HashSet::new();
+        if let Some(c) = issue
+            .comments
+            .iter()
+            .find(|c| !comments.insert(c.id.as_str()))
+        {
+            return Some(format!(
+                "Linear comment {} on {} appears twice",
+                c.id, issue.identifier
+            ));
+        }
+    }
+    None
+}
+
 /// Import a Linear project, as `pl import linear` read it. Every issue's state must map to a
 /// status of the active workflow, or nothing is queued. Person token.
 #[utoipa::path(
@@ -98,7 +123,7 @@ fn map_states<'a>(
         (status = 401, body = ErrorBody),
         (status = 403, body = ErrorBody, description = "Not a person's token."),
         (status = 404, body = ErrorBody, description = "Not the token's workspace."),
-        (status = 422, body = ErrorBody, description = "A Linear state maps to no status; the message names each."),
+        (status = 422, body = ErrorBody, description = "A Linear state maps to no status, the message naming each, or an issue or comment appears twice."),
     )
 )]
 async fn start_import(
@@ -111,6 +136,9 @@ async fn start_import(
     let mut tx = state.pool.begin().await?;
     let (workflow, _) = active_workflow(&mut tx, id).await?;
     map_states(&workflow, &snapshot.issues).map_err(ApiError::Invalid)?;
+    if let Some(repeat) = repeated_id(&snapshot.issues) {
+        return Err(ApiError::Invalid(repeat));
+    }
     let payload = serde_json::to_value(ImportJob {
         workspace_id: id,
         actor_id: actor.id,
@@ -694,6 +722,8 @@ pub(crate) async fn run(
             record_event(tx, &importer, &current.id, Some(&fields), None).await?;
         }
         if to != current.status {
+            // As any move does, without queuing a dispatch for the new status.
+            end_dispatches(tx, &current.id).await?;
             let transition = insert_transition(
                 tx,
                 &importer,

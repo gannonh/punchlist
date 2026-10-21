@@ -2015,7 +2015,7 @@
             }
           },
           "422": {
-            "description": "A Linear state maps to no status; the message names each.",
+            "description": "A Linear state maps to no status, the message naming each, or an issue or comment appears twice.",
             "content": {
               "application/json": {
                 "schema": {

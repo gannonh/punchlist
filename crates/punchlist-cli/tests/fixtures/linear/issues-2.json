@@ -15,7 +15,11 @@
             "type": "duplicate"
           },
           "labels": {
-            "nodes": []
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           },
           "parent": null,
           "projectMilestone": null,

@@ -19,7 +19,11 @@
               {
                 "name": "feature"
               }
-            ]
+            ],
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "8f0c5e0a-label-cursor"
+            }
           },
           "parent": null,
           "projectMilestone": {
@@ -64,7 +68,11 @@
               {
                 "name": "feature"
               }
-            ]
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           },
           "parent": null,
           "projectMilestone": {

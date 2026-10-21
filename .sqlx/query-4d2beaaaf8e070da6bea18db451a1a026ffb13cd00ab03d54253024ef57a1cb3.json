@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT issue_id, from_status, to_status FROM transition",
+  "query": "SELECT issue_id, from_status, to_status FROM transition WHERE workflow_version <> 'v0'",
   "describe": {
     "columns": [
       {
@@ -46,5 +46,5 @@
       false
     ]
   },
-  "hash": "5cedba5ba3ec1857258bc23f9c19b0b2e65db4839dfa673ae88e3f6f4c629e5a"
+  "hash": "4d2beaaaf8e070da6bea18db451a1a026ffb13cd00ab03d54253024ef57a1cb3"
 }

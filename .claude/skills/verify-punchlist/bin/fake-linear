@@ -31,7 +31,8 @@ def generated_issue(n):
     return {"id": f"issue-{n}", "identifier": f"GEN-{n}", "url": f"https://linear.app/x/issue/GEN-{n}",
             "title": f"Generated issue {n}", "description": f"Body of issue {n}.",
             "createdAt": f"2026-08-01T00:{n // 60 % 60:02d}:{n % 60:02d}Z", "updatedAt": "2026-09-30T00:00:00Z",
-            "state": {"name": name, "type": kind}, "labels": {"nodes": [{"name": "generated"}]},
+            "state": {"name": name, "type": kind}, "labels": {"nodes": [{"name": "generated"}],
+                                                       "pageInfo": {"hasNextPage": False, "endCursor": None}},
             "parent": {"id": f"issue-{n - 1}"} if n % 10 else None,
             "projectMilestone": {"id": "milestone-gen"} if n % 2 else None, "creator": user,
             "comments": {"nodes": comments, "pageInfo": {"hasNextPage": False, "endCursor": None}}}
@@ -48,6 +49,8 @@ def answer(request, generated):
         return {"data": {"teams": {"nodes": [{"key": variables["team"], "projects": {"nodes": [project]}}]}}}
     if query.startswith("query Comments"):
         return fixture("comments")
+    if query.startswith("query Labels"):
+        return fixture("labels")
     if not generated:
         return fixture("issues-2" if variables.get("after") else "issues-1")
     start = int(variables.get("after") or 0)

@@ -981,6 +981,8 @@ async fn fake_linear() -> String {
             "project"
         } else if query.starts_with("query Comments") {
             "comments"
+        } else if query.starts_with("query Labels") {
+            "labels"
         } else if request["variables"]["after"].is_null() {
             "issues-1"
         } else {
