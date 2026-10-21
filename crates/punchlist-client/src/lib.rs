@@ -4,10 +4,10 @@
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist,
-    Heartbeat, HeartbeatReply, Issue, IssueList, IssueWritten, Lease, Milestone, MoveIssue, Moved,
-    PROOF_TYPES, Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow,
-    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, UpdateIssue,
-    WorkflowInfo, proof_type_by_extension,
+    Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList, IssueWritten, Lease,
+    LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project, ProjectList, Proof, ProofKind,
+    PullRequest, PullRequestsNow, RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog,
+    RunnerList, Session, UpdateIssue, WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -79,6 +79,32 @@ impl Client {
     ) -> Result<IssueWritten, ClientError> {
         self.send(Method::PATCH, &["issues", id], Some(request))
             .await
+    }
+
+    /// Who the token belongs to, and its workspace.
+    pub async fn session(&self) -> Result<Session, ClientError> {
+        self.send::<(), _>(Method::GET, &["session"], None).await
+    }
+
+    /// Queues an import of a Linear project into the workspace.
+    pub async fn import_linear(
+        &self,
+        workspace_id: &str,
+        snapshot: &LinearImport,
+    ) -> Result<ImportRun, ClientError> {
+        let path = ["workspaces", workspace_id, "imports", "linear"];
+        self.send(Method::POST, &path, Some(snapshot)).await
+    }
+
+    pub async fn import_run(&self, workspace_id: &str, run: i64) -> Result<ImportRun, ClientError> {
+        let run = run.to_string();
+        let path = ["workspaces", workspace_id, "imports", &run];
+        self.send::<(), _>(Method::GET, &path, None).await
+    }
+
+    pub async fn import_status(&self, workspace_id: &str) -> Result<ImportStatus, ClientError> {
+        let path = ["workspaces", workspace_id, "imports"];
+        self.send::<(), _>(Method::GET, &path, None).await
     }
 
     pub async fn list_projects(&self) -> Result<ProjectList, ClientError> {

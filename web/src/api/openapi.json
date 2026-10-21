@@ -1889,6 +1889,211 @@
           }
         }
       }
+    },
+    "/api/workspaces/{id}/imports": {
+      "get": {
+        "summary": "What the workspace holds from Linear, counted from the rows with a Linear id, and its\nlatest import. Person token.",
+        "operationId": "import_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/imports/linear": {
+      "post": {
+        "summary": "Import a Linear project, as `pl import linear` read it. Every issue's state must map to a\nstatus of the active workflow, or nothing is queued. Person token.",
+        "operationId": "start_import",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinearImport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRun"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A Linear state maps to no status, the message naming each, or an issue or comment appears twice.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/imports/{run}": {
+      "get": {
+        "summary": "One import of the workspace. Person token.",
+        "operationId": "import_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "run",
+            "in": "path",
+            "description": "The import's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportRun"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace, or no such import in it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2903,6 +3108,141 @@
           }
         }
       },
+      "ImportCounts": {
+        "type": "object",
+        "required": [
+          "issues",
+          "comments",
+          "projects",
+          "milestones",
+          "people"
+        ],
+        "properties": {
+          "comments": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "issues": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "milestones": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "projects": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ImportReport": {
+        "type": "object",
+        "description": "What one import wrote.",
+        "required": [
+          "created",
+          "updated",
+          "notes"
+        ],
+        "properties": {
+          "created": {
+            "$ref": "#/components/schemas/ImportCounts"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Issues gone from Linear's project, parents outside it, empty comments skipped."
+          },
+          "updated": {
+            "$ref": "#/components/schemas/ImportCounts"
+          }
+        }
+      },
+      "ImportRun": {
+        "type": "object",
+        "description": "One import, as the server's job runs it.",
+        "required": [
+          "id",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt failed; a `queued` import with one is retried."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The job's id."
+          },
+          "report": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ImportReport",
+                "description": "Set once it is `done`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/ImportState"
+          }
+        }
+      },
+      "ImportState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "done",
+          "failed"
+        ]
+      },
+      "ImportStatus": {
+        "type": "object",
+        "description": "`GET /api/workspaces/{id}/imports`: the workspace's rows imported from Linear, and the\nlatest import.",
+        "required": [
+          "totals"
+        ],
+        "properties": {
+          "last_run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ImportRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "totals": {
+            "$ref": "#/components/schemas/ImportCounts"
+          }
+        }
+      },
       "Issue": {
         "type": "object",
         "required": [
@@ -2944,6 +3284,17 @@
               "type": "string"
             },
             "description": "In the order they were set."
+          },
+          "linear": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearLink",
+                "description": "The Linear issue it was imported from; `None` for an issue made in Punchlist."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "milestone": {
             "oneOf": [
@@ -3111,6 +3462,235 @@
           "run_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "LinearComment": {
+        "type": "object",
+        "required": [
+          "id",
+          "body",
+          "created_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string"
+          },
+          "user": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearUser",
+                "description": "`None` for a comment an integration wrote."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "LinearImport": {
+        "type": "object",
+        "description": "`POST /api/workspaces/{id}/imports/linear`: one Linear project as `pl import linear` read\nit. Every id is Linear's, and a rerun finds what it imported before by them.",
+        "required": [
+          "team",
+          "project",
+          "issues"
+        ],
+        "properties": {
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinearIssue"
+            }
+          },
+          "project": {
+            "$ref": "#/components/schemas/LinearProject"
+          },
+          "team": {
+            "type": "string",
+            "description": "The team's key, such as `KAT`."
+          }
+        }
+      },
+      "LinearIssue": {
+        "type": "object",
+        "required": [
+          "id",
+          "identifier",
+          "url",
+          "title",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinearComment"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "creator": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinearUser"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Markdown."
+          },
+          "id": {
+            "type": "string"
+          },
+          "identifier": {
+            "type": "string",
+            "description": "Such as `KAT-12`."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "milestone_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/LinearState"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "LinearLink": {
+        "type": "object",
+        "required": [
+          "identifier",
+          "url"
+        ],
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "description": "Such as `KAT-12`."
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "LinearMilestone": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Imported as the milestone's PASS when text."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "LinearProject": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "url",
+          "milestones"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "milestones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinearMilestone"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "LinearState": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "Linear's state type: `triage`, `backlog`, `unstarted`, `started`, `completed`,\n`canceled` or `duplicate`."
+          }
+        }
+      },
+      "LinearUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, edited_fields, created_at)\n         VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text",
+        "Uuid",
+        "TextArray",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c5043f3a18ad5a8b6060af33f5ee4a5e2eb6a68d0e5180b83f58961caeaae354"
+}

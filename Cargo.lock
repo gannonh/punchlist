@@ -1554,6 +1554,7 @@ dependencies = [
  "punchlist-mcp",
  "punchlist-runner",
  "punchlist-server",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",

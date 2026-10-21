@@ -13,6 +13,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | Workflow file, gated transitions, the gate checklist and the agent's MCP tools | [workflow-and-gates.md](workflow-and-gates.md) | `pl workflow show`, `pl issue transition`, `pl issue comment`, `pl issue show` (gates), `pl mcp`, `/api/workflow`, `/api/workflow/schema.json`, `GET /api/issues/{id}/gates`, `GET /api/issues/{id}/transitions`, `POST /api/issues/{id}/comments` |
 | Agent actors and proof | [actors-and-proof.md](actors-and-proof.md) | `pl actor create/list`, `pl proof attach/list`, `pl issue show` (Proof), `/api/actors`, `/api/issues/{id}/proof`, `GET /api/proof/{id}` |
 | Projects, milestones and an issue's parent | [issue-placement.md](issue-placement.md) | `pl project create/list`, `pl milestone create`, `pl issue edit`, `pl issue show`, `/api/projects`, `PATCH /api/issues/{id}` |
+| Linear import | [linear-import.md](linear-import.md) | `pl import linear`, `pl import status`, `bin/fake-linear`, `/api/workspaces/{id}/imports`, `/api/workspaces/{id}/imports/linear`, `/api/workspaces/{id}/imports/{run}` |
 | Web app: issue list, board, edits, transitions and the issue page | [web-app.md](web-app.md) | the server's URL (`web/dist`), `/issues/<id>`, `$C sign-in-url`, `/api/session`, `GET /api/workspaces/{id}/events`, `PATCH /api/issues/{id}`, `GET /api/issues/{id}/transitions`, `pnpm e2e` |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 

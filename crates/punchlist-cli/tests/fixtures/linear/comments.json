@@ -1,0 +1,23 @@
+{
+  "data": {
+    "issue": {
+      "comments": {
+        "nodes": [
+          {
+            "id": "d4a131d6-3141-4db4-bdfc-aef466c82ad4",
+            "body": "PR #48 is ready to merge: it is marked ready, merges cleanly, CI is green on c41f9d6, and no review threads are open.\n\nCodeRabbit's re-review found nothing to act on. Moved to Human Review.\n\n(agent)",
+            "createdAt": "2026-10-18T21:08:35.128Z",
+            "user": {
+              "id": "240f1aae-bb2d-4208-8e7a-229638b979c7",
+              "name": "Gannon Hall"
+            }
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "d4a131d6-3141-4db4-bdfc-aef466c82ad4"
+        }
+      }
+    }
+  }
+}

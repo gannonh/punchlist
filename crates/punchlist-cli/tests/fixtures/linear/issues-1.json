@@ -1,0 +1,100 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "b9e82236-1717-4739-ae8a-253cd409d1d3",
+          "identifier": "KAT-3743",
+          "url": "https://linear.app/kata-sh/issue/KAT-3743/slice-10-the-web-app-shows-the-issue-page-from-the-approved-prototype",
+          "title": "Slice 10: the web app shows the issue page from the approved prototype",
+          "description": "The issue page, `/issues/<id>`, is the approved Sidebar prototype.",
+          "createdAt": "2026-10-08T18:35:04.284Z",
+          "updatedAt": "2026-10-18T21:36:45.464Z",
+          "state": {
+            "name": "Done",
+            "type": "completed"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "feature"
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "8f0c5e0a-label-cursor"
+            }
+          },
+          "parent": null,
+          "projectMilestone": {
+            "id": "c6e977ba-a96a-4d2e-9f0d-c7e47c60b790"
+          },
+          "creator": {
+            "id": "240f1aae-bb2d-4208-8e7a-229638b979c7",
+            "name": "Gannon Hall"
+          },
+          "comments": {
+            "nodes": [
+              {
+                "id": "a31e9dc6-3696-4b18-a1b3-708bb1a3d31e",
+                "body": "Spec edits before Build, from reading the code:\n\n1. **Transitions come from a server route, not wasm.** A verdict on a gated move needs the recorded check runs, threads and proof, which only the server holds.\n2. **Agent viewer by bearer token, not cookie sign-in.** `auth.rs` refuses cookie auth for anything but a person on purpose.\n\n(agent)",
+                "createdAt": "2026-10-18T18:35:19.457Z",
+                "user": {
+                  "id": "240f1aae-bb2d-4208-8e7a-229638b979c7",
+                  "name": "Gannon Hall"
+                }
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "a31e9dc6-3696-4b18-a1b3-708bb1a3d31e"
+            }
+          }
+        },
+        {
+          "id": "fec846ce-e3c7-4e33-90dd-b193b6ffd996",
+          "identifier": "KAT-3744",
+          "url": "https://linear.app/kata-sh/issue/KAT-3744/slice-11-import-a-linear-project-into-a-workspace",
+          "title": "Slice 11: import a Linear project into a workspace",
+          "description": "`pl import linear --team <key> --project <name> --workspace <id>`.",
+          "createdAt": "2026-10-08T18:35:21.630Z",
+          "updatedAt": "2026-10-19T17:30:44.709Z",
+          "state": {
+            "name": "In Progress",
+            "type": "started"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "feature"
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          },
+          "parent": null,
+          "projectMilestone": {
+            "id": "c6e977ba-a96a-4d2e-9f0d-c7e47c60b790"
+          },
+          "creator": {
+            "id": "240f1aae-bb2d-4208-8e7a-229638b979c7",
+            "name": "Gannon Hall"
+          },
+          "comments": {
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": true,
+        "endCursor": "fec846ce-e3c7-4e33-90dd-b193b6ffd996"
+      }
+    }
+  }
+}

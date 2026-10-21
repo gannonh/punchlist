@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, pass_when FROM milestone ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "pass_when",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "pass_when"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1b4c0bed41cd2bb2edf8ce0d4ea7b3b3a7d3628ceb64bed2e377efdc77e79f0b"
+}

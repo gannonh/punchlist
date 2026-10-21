@@ -1,0 +1,45 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "5f86d06b-1f34-4be7-b906-bbcd5626225f",
+          "identifier": "KAT-3782",
+          "url": "https://linear.app/kata-sh/issue/KAT-3782/verify-punchlist-map-catches-up-with-the-issue-page-agent-sessions",
+          "title": "verify-punchlist: map catches up with the issue page, agent sessions, check runs and runner models",
+          "description": null,
+          "createdAt": "2026-10-18T21:42:56.707Z",
+          "updatedAt": "2026-10-19T13:30:57.448Z",
+          "state": {
+            "name": "Duplicate",
+            "type": "duplicate"
+          },
+          "labels": {
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          },
+          "parent": null,
+          "projectMilestone": null,
+          "creator": {
+            "id": "240f1aae-bb2d-4208-8e7a-229638b979c7",
+            "name": "Gannon Hall"
+          },
+          "comments": {
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": "5f86d06b-1f34-4be7-b906-bbcd5626225f"
+      }
+    }
+  }
+}

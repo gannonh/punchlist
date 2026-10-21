@@ -1,0 +1,51 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             (SELECT count(*) FROM issue WHERE workspace_id = $1 AND linear_id IS NOT NULL)\n                 AS \"issues!\",\n             (SELECT count(*) FROM comment c JOIN issue i ON i.id = c.issue_id\n              WHERE i.workspace_id = $1 AND c.linear_id IS NOT NULL) AS \"comments!\",\n             (SELECT count(*) FROM project WHERE workspace_id = $1 AND linear_id IS NOT NULL)\n                 AS \"projects!\",\n             (SELECT count(*) FROM milestone m JOIN project p ON p.id = m.project_id\n              WHERE p.workspace_id = $1 AND m.linear_id IS NOT NULL) AS \"milestones!\",\n             (SELECT count(*) FROM actor WHERE workspace_id = $1 AND linear_id IS NOT NULL)\n                 AS \"people!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issues!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "comments!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "projects!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "milestones!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "people!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "91fe1e110c1461e50673db8870e5405c7b2722595b669344a013a3f5770e212a"
+}

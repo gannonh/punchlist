@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use chrono::{DateTime, Utc};
 use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
     IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
@@ -81,7 +82,7 @@ async fn create_issue(
     )
     .execute(&mut *tx)
     .await?;
-    let seq = record_event(&mut tx, &actor, &id, None).await?;
+    let seq = record_event(&mut tx, &actor, &id, None, None).await?;
     let written = written(&mut tx, &actor, &id, seq).await?;
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(written)))
@@ -103,18 +104,20 @@ async fn written(
 }
 
 /// Writes an issue's `created` event, or with `fields` its `edited` event, and returns its
-/// sequence number.
-async fn record_event(
+/// sequence number. `at` is when it happened, when that was not now: an import's issue was
+/// created in Linear.
+pub(crate) async fn record_event(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
     id: &str,
     fields: Option<&[&str]>,
+    at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<i64> {
     let seq = next_event_seq(tx, actor.workspace_id).await?;
     let fields: Option<Vec<String>> = fields.map(|f| f.iter().map(|f| f.to_string()).collect());
     sqlx::query!(
-        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, edited_fields)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, edited_fields, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, coalesce($7, now()))",
         actor.workspace_id,
         seq,
         id,
@@ -125,6 +128,7 @@ async fn record_event(
         },
         actor.id,
         fields.as_deref(),
+        at,
     )
     .execute(&mut *tx)
     .await?;
@@ -557,12 +561,9 @@ pub(crate) async fn record_transition(
         .map(|(moved, _, _)| moved)
 }
 
-/// Dispatch on entry. The issue has left the status a dispatch still waiting was for, so
-/// that one goes; `to` gets its own, for this transition, when it has a dispatch rule and
-/// the workflow does not lock agents or runners out of it. True when one was queued. A run
-/// waiting for its next attempt (`settle_run`) was for the status the issue left, so it
-/// fails, its last attempt's reason saying why; else the issue would wait behind a running
-/// run that no runner holds.
+/// Dispatch on entry. `end_dispatches` first, then `to` gets its own, for this transition,
+/// when it has a dispatch rule and the workflow does not lock agents or runners out of it.
+/// True when one was queued.
 async fn queue_dispatch(
     tx: &mut sqlx::PgConnection,
     workflow: &Workflow,
@@ -570,21 +571,7 @@ async fn queue_dispatch(
     to: &str,
     transition_id: Uuid,
 ) -> sqlx::Result<bool> {
-    sqlx::query!(
-        "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
-        id
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query!(
-        "UPDATE run SET outcome = 'failed', finished_at = now()
-         WHERE issue_id = $1 AND outcome = 'running'
-           AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = run.id
-                           AND a.state = 'running')",
-        id
-    )
-    .execute(&mut *tx)
-    .await?;
+    end_dispatches(tx, id).await?;
     let unlocked = |role| workflow.check_unlocked(to, role).is_ok();
     let Some(dispatch) = workflow
         .dispatch_for(to)
@@ -601,6 +588,75 @@ async fn queue_dispatch(
     .execute(&mut *tx)
     .await?;
     Ok(true)
+}
+
+/// The issue has left its status, so a dispatch still waiting for it goes. A run waiting for
+/// its next attempt (`settle_run`) was for that status too, so it fails, its last attempt's
+/// reason saying why; else the issue would wait behind a running run that no runner holds.
+pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<()> {
+    sqlx::query!(
+        "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE run SET outcome = 'failed', finished_at = now()
+         WHERE issue_id = $1 AND outcome = 'running'
+           AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = run.id
+                           AND a.state = 'running')",
+        id
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// Inserts a transition row, with no gate results, and returns its id.
+pub(crate) async fn insert_transition(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: &str,
+    to: &str,
+    delivery_id: Option<&str>,
+    workflow_version: &str,
+) -> sqlx::Result<Uuid> {
+    sqlx::query_scalar!(
+        "INSERT INTO transition
+             (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        id,
+        from,
+        to,
+        actor.id,
+        workflow_version,
+        delivery_id,
+    )
+    .fetch_one(&mut *tx)
+    .await
+}
+
+/// Writes a transition's event; returns its sequence number and time.
+pub(crate) async fn record_transition_event(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    transition_id: Uuid,
+) -> sqlx::Result<(i64, DateTime<Utc>)> {
+    let seq = next_event_seq(tx, actor.workspace_id).await?;
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, transition_id)
+         VALUES ($1, $2, $3, 'transition', $4, $5) RETURNING created_at",
+        actor.workspace_id,
+        seq,
+        id,
+        actor.id,
+        transition_id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok((seq, created_at))
 }
 
 /// `record_transition`, also returning the new transition's id and whether a dispatch was
@@ -627,19 +683,8 @@ pub(crate) async fn write_transition(
     let issue = issue(tx, actor.workspace_id, id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.to_string()))?;
-    let transition_id = sqlx::query_scalar!(
-        "INSERT INTO transition
-             (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-        id,
-        from,
-        to,
-        actor.id,
-        workflow_version,
-        delivery_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let transition_id =
+        insert_transition(tx, actor, id, &from, to, delivery_id, workflow_version).await?;
     for (position, result) in gates.iter().enumerate() {
         sqlx::query!(
             "INSERT INTO transition_gate (transition_id, position, gate, result, reason)
@@ -654,18 +699,7 @@ pub(crate) async fn write_transition(
         .await?;
     }
     let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
-    let seq = next_event_seq(tx, actor.workspace_id).await?;
-    let created_at = sqlx::query_scalar!(
-        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, transition_id)
-         VALUES ($1, $2, $3, 'transition', $4, $5) RETURNING created_at",
-        actor.workspace_id,
-        seq,
-        id,
-        actor.id,
-        transition_id,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let (seq, created_at) = record_transition_event(tx, actor, id, transition_id).await?;
     let mut detail = EventDetail::transition(from, to.to_string(), workflow_version.to_string());
     if let EventDetail::Transition {
         delivery_id: detail_delivery,
@@ -911,10 +945,15 @@ pub(crate) async fn record_refusal(
     Ok(())
 }
 
+/// True when the comment's last non-blank line is `(agent)`: an agent wrote it.
+pub(crate) fn is_signed_by_agent(body: &str) -> bool {
+    body.trim_end().lines().last().map(str::trim) == Some("(agent)")
+}
+
 /// An agent's comment ends with `(agent)` on its own line. Punchlist adds it when missing.
 fn signed_by_agent(body: &str) -> String {
     let body = body.trim_end();
-    if body.lines().last().map(str::trim) == Some("(agent)") {
+    if is_signed_by_agent(body) {
         body.to_string()
     } else {
         format!("{body}\n\n(agent)")
@@ -1222,7 +1261,7 @@ async fn update_issue(
         )
         .execute(&mut *tx)
         .await?;
-        record_event(&mut tx, &actor, &id, Some(&fields)).await?
+        record_event(&mut tx, &actor, &id, Some(&fields), None).await?
     };
     let written = written(&mut tx, &actor, &id, seq).await?;
     tx.commit().await?;

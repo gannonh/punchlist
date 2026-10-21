@@ -1,5 +1,9 @@
 //! `pl`, the Punchlist command line.
 
+mod linear;
+
+pub use linear::{IssuesPage, parse_comments, parse_issues, parse_labels, parse_project};
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,8 +13,8 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
-    Event, EventDetail, GateChecklist, Issue, Project, Proof, ProofKind, PullRequest, Run,
-    RunOutcome, Runner, UpdateIssue, WorkflowInfo, gate_lines,
+    Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
+    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, UpdateIssue, WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -55,9 +59,36 @@ pub enum Command {
     /// Read the workspace's workflow.
     #[command(subcommand)]
     Workflow(WorkflowCommand),
+    /// Import issues from Linear.
+    #[command(subcommand)]
+    Import(ImportCommand),
     /// Serve Punchlist's MCP tools on stdio for one issue. The runner starts this for each
     /// agent run.
     Mcp(McpArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ImportCommand {
+    /// Import one Linear project: its issues with their statuses, labels, milestones, parents
+    /// and comments. Reads Linear with the personal API key in LINEAR_API_KEY, which is never
+    /// sent to the server. Rerun it to bring later changes in; nothing is imported twice.
+    Linear {
+        /// The team's key, such as KAT.
+        #[arg(long)]
+        team: String,
+        /// The project's name in that team.
+        #[arg(long)]
+        project: String,
+        /// The workspace to import into: its id, which must be your token's.
+        #[arg(long)]
+        workspace: String,
+    },
+    /// Print what the workspace has from Linear, and the last import with its notes or error.
+    Status {
+        /// Default: your token's workspace.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -409,6 +440,20 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             )?;
             Ok(())
         }
+        Command::Import(ImportCommand::Linear {
+            team,
+            project,
+            workspace,
+        }) => import_linear(&client, &team, &project, &workspace, out).await,
+        Command::Import(ImportCommand::Status { workspace }) => {
+            let workspace = match workspace {
+                Some(workspace) => workspace,
+                None => client.session().await?.workspace_id.to_string(),
+            };
+            let status = client.import_status(&workspace).await?;
+            write!(out, "{}", render_import_status(&status))?;
+            Ok(())
+        }
         Command::Workflow(WorkflowCommand::Show) => {
             write!(out, "{}", render_workflow(&client.workflow().await?))?;
             Ok(())
@@ -430,6 +475,122 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// How long `pl import linear` waits for the server's job.
+const IMPORT_WAIT: Duration = Duration::from_secs(15 * 60);
+
+async fn import_linear(
+    client: &Client,
+    team: &str,
+    project: &str,
+    workspace: &str,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let snapshot = linear::Linear::from_env()?.read(team, project).await?;
+    let comments: usize = snapshot.issues.iter().map(|i| i.comments.len()).sum();
+    writeln!(
+        out,
+        "Read {}/{} from Linear: {} issues, {} comments, {} milestones in {}.",
+        team,
+        snapshot.project.name,
+        snapshot.issues.len(),
+        comments,
+        snapshot.project.milestones.len(),
+        format_duration(Some(started.elapsed().as_millis() as i64)),
+    )?;
+    let mut run = client.import_linear(workspace, &snapshot).await?;
+    let mut warned = None;
+    while matches!(run.state, ImportState::Queued | ImportState::Running) {
+        anyhow::ensure!(
+            started.elapsed() < IMPORT_WAIT,
+            "import {} is still {} after {}; `pl import status` shows how it ends",
+            run.id,
+            run.state.as_str(),
+            format_duration(Some(IMPORT_WAIT.as_millis() as i64)),
+        );
+        if run.error.is_some() && run.error != warned {
+            eprintln!(
+                "import {} failed an attempt and will retry: {}",
+                run.id,
+                run.error.as_deref().unwrap_or_default()
+            );
+            warned = run.error.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        run = client.import_run(workspace, run.id).await?;
+    }
+    let elapsed = format_duration(Some(started.elapsed().as_millis() as i64));
+    match (run.state, &run.report) {
+        (ImportState::Done, Some(report)) => {
+            writeln!(out, "Import {} done.", run.id)?;
+            write!(out, "{}", render_import_report(report))?;
+            writeln!(out, "Elapsed {elapsed}.")?;
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "import {} failed after {elapsed}: {}",
+            run.id,
+            run.error.as_deref().unwrap_or("no reason recorded")
+        ),
+    }
+}
+
+/// What one import created and updated per record type, then its notes.
+fn render_import_report(report: &ImportReport) -> String {
+    let (c, u) = (&report.created, &report.updated);
+    let rows = [
+        ("Issues", c.issues, u.issues),
+        ("Comments", c.comments, u.comments),
+        ("Projects", c.projects, u.projects),
+        ("Milestones", c.milestones, u.milestones),
+        ("People", c.people, u.people),
+    ];
+    let mut text = format!("{:<12}{:>8}{:>9}\n", "", "Created", "Updated");
+    for (name, created, updated) in rows {
+        text.push_str(&format!("{name:<12}{created:>8}{updated:>9}\n"));
+    }
+    if !report.notes.is_empty() {
+        text.push_str("Notes\n");
+        for note in &report.notes {
+            text.push_str(&format!("  {note}\n"));
+        }
+    }
+    text
+}
+
+/// `pl import status`: the totals, then the last import.
+fn render_import_status(status: &ImportStatus) -> String {
+    let t = &status.totals;
+    let mut text = String::from("Imported from Linear\n");
+    for (name, count) in [
+        ("Issues", t.issues),
+        ("Comments", t.comments),
+        ("Projects", t.projects),
+        ("Milestones", t.milestones),
+        ("People", t.people),
+    ] {
+        text.push_str(&format!("  {name:<12}{count}\n"));
+    }
+    let Some(run) = &status.last_run else {
+        text.push_str("No imports yet.\n");
+        return text;
+    };
+    let at = run.finished_at.unwrap_or(run.created_at);
+    text.push_str(&format!(
+        "Last import {}  {}  {}\n",
+        run.id,
+        run.state.as_str(),
+        at.format("%Y-%m-%d %H:%M:%S UTC")
+    ));
+    if let Some(error) = &run.error {
+        text.push_str(&format!("Error: {error}\n"));
+    }
+    if let Some(report) = &run.report {
+        text.push_str(&render_import_report(report));
+    }
+    text
 }
 
 fn init_logging() {
@@ -941,6 +1102,9 @@ fn render_show(
     if let Some(milestone) = &issue.milestone {
         text.push_str(&format!("Milestone: {}\n", milestone.name));
     }
+    if let Some(linear) = &issue.linear {
+        text.push_str(&format!("Linear: {}  {}\n", linear.identifier, linear.url));
+    }
     if let Some(why) = &issue.waiting_on_person {
         text.push_str(&format!("waiting on a person: {why}\n"));
     }
@@ -1227,6 +1391,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
+            linear: None,
         };
         let mut moved = EventDetail::transition(
             "in_progress".into(),
@@ -1340,6 +1505,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: None,
+            linear: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);
         let who: Vec<&str> = text

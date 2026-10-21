@@ -43,7 +43,7 @@ impl TryFrom<ActorRow> for ActorInfo {
     }
 }
 
-fn person_only(actor: &Actor) -> Result<(), ApiError> {
+pub(crate) fn person_only(actor: &Actor) -> Result<(), ApiError> {
     if actor.role != Role::Person {
         return Err(ApiError::Forbidden("this needs a person's token".into()));
     }

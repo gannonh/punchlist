@@ -1015,6 +1015,7 @@ mod tests {
                 project: None,
                 milestone: None,
                 waiting_on_person: None,
+                linear: None,
             },
             repository: crate::worktree::tests::repository(),
             branch: format!("feature/{}", issue.to_lowercase()),

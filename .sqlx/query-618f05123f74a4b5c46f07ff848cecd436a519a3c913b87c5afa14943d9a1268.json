@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO issue (id, workspace_id, number, title, body, status, created_by,\n                                        created_at, labels, project_id, milestone_id, linear_id,\n                                        linear_identifier, linear_url, linear_updated_at)\n                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "TextArray",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "618f05123f74a4b5c46f07ff848cecd436a519a3c913b87c5afa14943d9a1268"
+}

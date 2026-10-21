@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE job SET payload = jsonb_set(payload, '{snapshot,issues,0,state}',\n                                            '{\"name\": \"Triage\", \"type\": \"triage\"}')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ff1ac7d3694af2d75dfc3fda5fcb67e2cda93d6529d7dcbb4914bccd717161a2"
+}

@@ -1,0 +1,14 @@
+{
+  "data": {
+    "teams": {
+      "nodes": [
+        {
+          "key": "KAT",
+          "projects": {
+            "nodes": []
+          }
+        }
+      ]
+    }
+  }
+}

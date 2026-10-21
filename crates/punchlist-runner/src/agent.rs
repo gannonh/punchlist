@@ -560,6 +560,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             project: None,
             milestone: None,
             waiting_on_person: None,
+            linear: None,
         }
     }
 

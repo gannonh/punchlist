@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, comment_id, created_at)\n             VALUES ($1, $2, $3, 'comment', $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "17f9f93a7f39cf64379be43f359d2a32d9e7b624e8a23ca6ba4cd09bfe01d8e5"
+}
