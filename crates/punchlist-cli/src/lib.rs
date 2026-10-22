@@ -161,7 +161,21 @@ pub enum MilestoneCommand {
 /// What `pl issue edit` sets or clears: at least one of these.
 #[derive(Debug, clap::Args)]
 #[group(required = true, multiple = true)]
-pub struct Placement {
+pub struct IssueEdit {
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Markdown.
+    #[arg(long, conflicts_with = "body_file")]
+    pub body: Option<String>,
+    /// A file holding the body, or `-` for stdin.
+    #[arg(long)]
+    pub body_file: Option<PathBuf>,
+    /// A label; repeat it for more. Replaces the issue's labels.
+    #[arg(long, conflicts_with = "no_labels")]
+    pub label: Vec<String>,
+    /// Clear the labels.
+    #[arg(long)]
+    pub no_labels: bool,
     /// The parent issue's id, such as PL-1.
     #[arg(long, conflicts_with = "no_parent")]
     pub parent: Option<String>,
@@ -273,11 +287,12 @@ pub enum IssueCommand {
     /// names the rule or gate.
     #[command(visible_alias = "transition")]
     Move { id: String, status: String },
-    /// Set or clear an issue's parent, project and milestone.
+    /// Change an issue's title, body and labels, or set or clear its parent, project and
+    /// milestone.
     Edit {
         id: String,
         #[command(flatten)]
-        placement: Placement,
+        edit: IssueEdit,
     },
     /// Comment on an issue.
     Comment {
@@ -953,14 +968,18 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             client.comment(&id, &body).await?;
             writeln!(out, "Commented on {id}.")?;
         }
-        IssueCommand::Edit { id, placement } => {
-            let request = placement_edit(client, &id, placement).await?;
+        IssueCommand::Edit { id, edit } => {
+            let request = issue_edit(client, &id, edit).await?;
             let issue = client.update_issue(&id, &request).await?.row.issue;
             let none = || "none".to_string();
             writeln!(
                 out,
-                "{}  parent {} · project {} · milestone {}",
+                "{}  {}\n  labels {} · parent {} · project {} · milestone {}",
                 issue.id,
+                issue.title,
+                Some(issue.labels.join(", "))
+                    .filter(|l| !l.is_empty())
+                    .unwrap_or_else(none),
                 issue.parent.unwrap_or_else(none),
                 issue.project.map_or_else(none, |p| p.name),
                 issue.milestone.map_or_else(none, |m| m.name),
@@ -977,27 +996,32 @@ fn find_project<'a>(projects: &'a [Project], name: &str) -> anyhow::Result<&'a P
         .ok_or_else(|| anyhow::anyhow!("no project named {name} in this workspace"))
 }
 
-/// The `PATCH` for `pl issue edit`, with project and milestone names turned into their ids.
+/// The `PATCH` for `pl issue edit`, with the body read from `--body-file` and project and milestone names turned into their ids.
 /// A milestone's name is looked up in `--project`, else in the issue's project.
-async fn placement_edit(
-    client: &Client,
-    id: &str,
-    placement: Placement,
-) -> anyhow::Result<UpdateIssue> {
+async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Result<UpdateIssue> {
+    let body = match &edit.body_file {
+        Some(path) if path.as_os_str() == "-" => Some(std::io::read_to_string(std::io::stdin())?),
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?,
+        ),
+        None => edit.body,
+    };
+    let labels = (!edit.label.is_empty() || edit.no_labels).then_some(edit.label);
     let mut request = UpdateIssue {
-        parent: placement
-            .parent
-            .map(Some)
-            .or(placement.no_parent.then_some(None)),
-        project: placement.no_project.then_some(None),
-        milestone: placement.no_milestone.then_some(None),
+        title: edit.title,
+        body,
+        labels,
+        parent: edit.parent.map(Some).or(edit.no_parent.then_some(None)),
+        project: edit.no_project.then_some(None),
+        milestone: edit.no_milestone.then_some(None),
         ..UpdateIssue::default()
     };
-    if placement.project.is_none() && placement.milestone.is_none() {
+    if edit.project.is_none() && edit.milestone.is_none() {
         return Ok(request);
     }
     let projects = client.list_projects().await?.projects;
-    let project = match &placement.project {
+    let project = match &edit.project {
         Some(name) => {
             let project = find_project(&projects, name)?;
             request.project = Some(Some(project.id));
@@ -1011,7 +1035,7 @@ async fn placement_edit(
             find_project(&projects, &current.name)?
         }
     };
-    if let Some(name) = &placement.milestone {
+    if let Some(name) = &edit.milestone {
         let milestone = (project.milestones.iter())
             .find(|milestone| milestone.name == *name)
             .ok_or_else(|| {
@@ -1093,6 +1117,9 @@ fn render_show(
         "{}  {}\nStatus: {}\n",
         issue.id, issue.title, issue.status_name
     );
+    if !issue.labels.is_empty() {
+        text.push_str(&format!("Labels: {}\n", issue.labels.join(", ")));
+    }
     if let Some(parent) = &issue.parent {
         text.push_str(&format!("Parent: {parent}\n"));
     }
