@@ -128,7 +128,7 @@ WantedBy=timers.target
 
 Turn it on with `systemctl --user daemon-reload && systemctl --user enable --now punchlist-backup.timer`. Back up now with `systemctl --user start punchlist-backup.service`; `systemctl --user list-timers` shows the next run.
 
-Restore one:
+Restore one. First stop the runner (`Ctrl-C` in its pane), so it cannot write run or lease state newer than the backup into the restored database; it stops its agents as it exits. Start it again as above once the stack is back.
 
 ```sh
 cd ~/dev/punchlist && d=~/backups/punchlist/<date>

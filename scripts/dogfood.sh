@@ -6,4 +6,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME=punchlist-host PUNCHLIST_HOST=127.0.0.1 PUNCHLIST_PORT=7880 PUNCHLIST_DB_PORT=5440
-exec with-env bash -c 'GITHUB_APP_ID=$DOGFOOD_GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY=$DOGFOOD_GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET=$DOGFOOD_GITHUB_WEBHOOK_SECRET exec docker compose "$@"' dogfood "$@"
+# `up` refuses to start without the App, which would run but read nothing from GitHub. `:?` names
+# the variable, never its value.
+exec with-env bash -c 'if [ "$1" = up ]; then : "${DOGFOOD_GITHUB_APP_ID:?}" "${DOGFOOD_GITHUB_APP_PRIVATE_KEY:?}" "${DOGFOOD_GITHUB_WEBHOOK_SECRET:?}"; fi
+GITHUB_APP_ID=$DOGFOOD_GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY=$DOGFOOD_GITHUB_APP_PRIVATE_KEY GITHUB_WEBHOOK_SECRET=$DOGFOOD_GITHUB_WEBHOOK_SECRET exec docker compose "$@"' dogfood "$@"
