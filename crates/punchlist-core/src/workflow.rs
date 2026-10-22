@@ -1735,6 +1735,10 @@ mod tests {
                 "prompts/agent_review.md",
                 include_str!("../../../.punchlist/prompts/agent_review.md"),
             ),
+            (
+                "prompts/merging.md",
+                include_str!("../../../.punchlist/prompts/merging.md"),
+            ),
         ]
         .map(|(path, text)| (path.to_string(), text.to_string()));
         let workflow = Workflow::from_files(
@@ -1743,7 +1747,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(workflow.statuses().len(), 9);
-        assert_eq!(workflow.prompts().len(), 3);
+        assert_eq!(workflow.prompts().len(), 4);
+        let merging = workflow.dispatch_for("merging").unwrap();
+        assert_eq!(
+            (merging.agent.as_str(), merging.prompt.as_deref()),
+            ("claude-code", Some("prompts/merging.md"))
+        );
     }
 
     #[test]

@@ -281,7 +281,7 @@ A developer running five agents spends the day starting runs by hand, checking w
 6. **Build.** The agent opens a draft pull request. Logs stream to the issue page.
 7. **Gate.** The agent requests Agent Review, then Human Review. Punchlist checks each request; the agent fixes CI and review threads until the gates pass.
 8. **Review.** A person reviews the pull request, gates and proof on the issue page and moves it to Merging.
-9. **Merge.** The pull request merges, and the issue moves to Done.
+9. **Merge.** Once the issue is in Merging, an agent brings the pull request up to date with the default branch, resolving any conflict, and merges it once its checks pass. The merge moves the issue to Done.
 
 ### Functional requirements
 
@@ -392,7 +392,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 - [x] Sync approach for an instant UI: a sync engine, or server state with optimistic updates? Server state with optimistic edits and a live event stream, decided Oct 7, 2026 (ADR 0006).
 - [x] Does the workflow file live in the code repository or in the workspace, for teams with several repositories? In the repository, on its default branch, decided Oct 7, 2026 (ADR 0010).
 - [x] One repository per workspace in v1, or several? One, decided Oct 7, 2026 (ADR 0010).
-- [ ] Merge from Punchlist, or leave merging on GitHub?
+- [x] Merge from Punchlist, or leave merging on GitHub? A person approves by moving the issue to Merging, and an agent dispatched there merges the pull request on GitHub, decided Oct 22, 2026.
 - [ ] Trademark and domain check for the name; punchlist.com is a design-feedback product.
 
 ## Sources
