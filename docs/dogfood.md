@@ -34,7 +34,7 @@ tailscale funnel --bg --https=10000 --set-path=/api/github/webhook \
 
 The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 
-The workspace has one runner, in the pane `runner` of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runner again after a reboot:
+The workspace has one runner, in the tab `runner` of the herdr workspace `punchlist-dogfood` on sartre, started in `~/dev/punchlist`. The instance itself runs in Docker, in no tab. Start the runner again after a reboot:
 
 ```sh
 PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
@@ -44,13 +44,13 @@ A runner keeps its name, so starting it again re-adopts the same runner and resu
 
 ## A day
 
-Two people work the instance: Gannon, and one long-lived Claude Code session, the orchestrator, in the herdr workspace `punchlist-dogfood` on sartre (pane `orchestrator`), started in `~/dev/punchlist`. The orchestrator plans and grooms issues and reads the runs; it never implements an issue itself, so every implementing pull request comes from a runner dispatch. Its own pull requests (docs, prompts) are made in a worktree, never on the instance's checkout, and count against the 80% target.
+Two people work the instance: Gannon, and one long-lived Claude Code session, the orchestrator, in the herdr workspace `punchlist-dogfood` on sartre (tab `orchestrator`), started in `~/dev/punchlist`. The orchestrator plans and grooms issues and reads the runs; it never implements an issue itself, so every implementing pull request comes from a runner dispatch. Its own pull requests (docs, prompts) are made in a worktree, never on the instance's checkout, and count against the 80% target.
 
 1. Open the app. Read the board: what moved overnight, what waits on you in Human Review, and anything that shows `waiting on a person`.
 2. Review each Human Review pull request on GitHub. Move it to Merging, or back with a comment. Merge from Merging only.
 3. Before an issue leaves Backlog, the orchestrator grooms it: its blockers are Done, its file pointers match `main`, and it folds in what earlier runs taught. Moving it to Todo is your approval.
 4. Move the next issues to Start. The runner claims them. Do not type a prompt into an agent for an issue; if an issue needs one, the issue body or the workflow's prompt is wrong, so fix that.
-5. The orchestrator watches the workspace's event stream (`GET /api/workspaces/{id}/events`) and reports claims, moves, failed runs and refusals in its pane, so nobody has to announce a Start.
+5. The orchestrator watches the workspace's event stream (`GET /api/workspaces/{id}/events`) and reports claims, moves, failed runs and refusals in its tab, so nobody has to announce a Start.
 6. After each merge, the orchestrator reviews the issue's runs (attempts, lost or re-dispatched runs, duration and tokens, refused transitions, review threads and CI fixes, anything a person had to do) and files each product gap as a `PL` issue, or opens a pull request for a prompt gap in `.punchlist/prompts/`.
 7. New work starts as an issue in Punchlist (`pl issue create` or the app), never in Linear.
 8. At the end of the day, add a line to the gate check issue: the date, issues moved to Done, and anything that went wrong. A day that needed Linear, or an agent typed into by hand, ends the streak; record it and start the count again.
@@ -133,7 +133,7 @@ WantedBy=timers.target
 
 Turn it on with `systemctl --user daemon-reload && systemctl --user enable --now punchlist-backup.timer`. Back up now with `systemctl --user start punchlist-backup.service`; `systemctl --user list-timers` shows the next run.
 
-Restore one. First stop the runner (`Ctrl-C` in its pane), so it cannot write run or lease state newer than the backup into the restored database; it stops its agents as it exits. Start it again as above once the stack is back.
+Restore one. First stop the runner (`Ctrl-C` in its tab), so it cannot write run or lease state newer than the backup into the restored database; it stops its agents as it exits. Start it again as above once the stack is back.
 
 ```sh
 cd ~/dev/punchlist && d=~/backups/punchlist/<date>
