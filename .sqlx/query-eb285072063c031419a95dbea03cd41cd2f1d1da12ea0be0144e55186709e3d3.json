@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n            SELECT 1 FROM event e\n            JOIN refusal r ON r.id = e.refusal_id\n            JOIN actor a ON a.id = r.actor_id\n            WHERE e.issue_id = $1 AND r.from_status = $2 AND r.to_status = $3\n              AND a.role = 'github'\n              AND e.seq > COALESCE((SELECT max(seq) FROM event\n                                    WHERE issue_id = $1 AND kind = 'transition'), 0)\n         )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "eb285072063c031419a95dbea03cd41cd2f1d1da12ea0be0144e55186709e3d3"
+}

@@ -21,7 +21,8 @@ use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::events::{events, next_event_seq};
 use crate::github::{
-    PullRequestRead, lock_pull_requests, newest_check_runs, refresh_pull_requests, written_since,
+    PullRequestRead, catch_up_merge, lock_pull_requests, newest_check_runs, refresh_pull_requests,
+    written_since,
 };
 use crate::rows::{issue, issue_rows};
 use crate::runs::RUNS_PER_ENTRY;
@@ -307,6 +308,7 @@ async fn request_move(
         &gates,
     )
     .await?;
+    catch_up_merge(&mut tx, actor.workspace_id, &workflow, id, &request.to).await?;
     tx.commit().await?;
     if request.to == START {
         moved.warning = invalid;
@@ -612,7 +614,9 @@ pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sql
     Ok(())
 }
 
-/// Inserts a transition row, with no gate results, and returns its id.
+/// Inserts a transition row, with no gate results, and returns its id. Stamped with the write
+/// clock, not the transaction's start: a merge caught up on entering Merging is a second
+/// transition in the same transaction, and orders after the first.
 pub(crate) async fn insert_transition(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
@@ -624,8 +628,9 @@ pub(crate) async fn insert_transition(
 ) -> sqlx::Result<Uuid> {
     sqlx::query_scalar!(
         "INSERT INTO transition
-             (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+             (issue_id, from_status, to_status, actor_id, workflow_version, delivery_id,
+              created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp()) RETURNING id",
         id,
         from,
         to,

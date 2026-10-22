@@ -1841,21 +1841,7 @@ async fn a_start_loads_a_push_the_server_missed_and_changes_nothing_otherwise(po
 /// `from` and delivers `closed`, the pull request event that closes its pull request.
 /// Returns PL-1's status.
 async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed: &str) -> String {
-    let on = format!("on = \"{event}\"");
-    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
-    // The template still has the line this replaces, so the gate is in the file.
-    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
-    {
-        let mut repo = s.github.lock().unwrap();
-        repo.sha = "a".repeat(40);
-        repo.files.insert("workflow.toml".into(), gated);
-        for prompt in ["system", "in_progress", "agent_review"] {
-            repo.files
-                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
-        }
-    }
-    deliver(s, "push", "push-1", PUSH).await;
-    assert_eq!(workflow_versions(&s.state.pool).await, 1);
+    load_with_gate(s, event, gate).await;
     let (status, _) = call(
         &s.app,
         &s.person.token,
@@ -1879,6 +1865,25 @@ async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed:
         .fetch_one(&s.state.pool)
         .await
         .unwrap()
+}
+
+/// Loads the PRD workflow with `gate` on its `on = "<event>"` transition.
+async fn load_with_gate(s: &Setup, event: &str, gate: &str) {
+    let on = format!("on = \"{event}\"");
+    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
+    // The template still has the line this replaces, so the gate is in the file.
+    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert("workflow.toml".into(), gated);
+        for prompt in ["system", "in_progress", "agent_review"] {
+            repo.files
+                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
+        }
+    }
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&s.state.pool).await, 1);
 }
 
 /// How many transitions, comments and GitHub actors there are. A person made none of them
@@ -1995,6 +2000,7 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     assert_eq!(detail["gate"], "ci_green");
     assert_eq!(detail["reason"], MERGED_REASON);
     assert_eq!(detail["delivery_id"], "closed-1");
+    refused_merge_stays_final_at_start(&s).await;
 
     // The PRD's way out of Merging: a person sends the issue back to Todo.
     let (status, body) = call(
@@ -2015,6 +2021,157 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
             ("transition".to_string(), 1)
         ]
     );
+}
+
+#[sqlx::test]
+async fn a_failing_gate_on_a_caught_up_merge_leaves_the_issue_in_merging(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_with_gate(&s, "pr_merged", "proof_attached").await;
+    let token = s.person.token.clone();
+    let (status, _) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver(&s, "pull_request", "merged-1", MERGED).await;
+
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "merging"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let now: String = sqlx::query_scalar("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(now, "merging");
+    let moves: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT t.from_status, t.to_status, a.role
+         FROM transition t JOIN actor a ON a.id = t.actor_id ORDER BY t.created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        moves,
+        [("human_review".into(), "merging".into(), "person".into())]
+    );
+    let (status, events) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
+    assert_eq!(status, StatusCode::OK, "{events}");
+    let refusal = &events.as_array().unwrap()[2];
+    assert_eq!(refusal["actor"]["name"], "GitHub");
+    assert_eq!(refusal["detail"]["kind"], "refusal");
+    assert_eq!(refusal["detail"]["from"], "merging");
+    assert_eq!(refusal["detail"]["to"], "done");
+    assert_eq!(refusal["detail"]["gate"], "proof_attached");
+    assert_eq!(
+        refusal["detail"]["reason"],
+        "no proof is attached to PL-1 for attempt 0"
+    );
+    refused_merge_stays_final_at_start(&s).await;
+
+    // Satisfying the failed gate does not let a restart retry this event.
+    attach_proof(&s, &token).await;
+    refused_merge_stays_final_at_start(&s).await;
+
+    // A fresh status entry can evaluate the merge again; the old refusal does not block it.
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "merging"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(issue_status(&pool).await, "done");
+}
+
+#[sqlx::test]
+async fn an_unreadable_workspace_does_not_abort_startup_catch_up(pool: PgPool) {
+    let broken = bootstrap(
+        &pool,
+        &Bootstrap {
+            workspace_name: "Broken".into(),
+            issue_prefix: "BAD".into(),
+            repository_owner: "gannonh".into(),
+            repository_name: "broken".into(),
+            person_name: "Gannon".into(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            VALUES ($1, 'broken', 'broken', 'not valid TOML', '{}') RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v) WHERE id = $1",
+    )
+    .bind(broken.workspace_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let s = setup(&pool).await;
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver(&s, "pull_request", "merged-1", MERGED).await;
+    sqlx::query("UPDATE issue SET status = 'merging' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    punchlist_server::catch_up_merges_at_start(&pool)
+        .await
+        .unwrap();
+    assert_eq!(issue_status(&pool).await, "done");
+    assert_eq!(
+        event_transitions(&pool).await,
+        [moved("merging", "done", "GitHub", None)]
+    );
+}
+
+/// Restarting neither duplicates a refusal nor retries its transition.
+async fn refused_merge_stays_final_at_start(s: &Setup) {
+    let pool = &s.state.pool;
+    let before = events_by_kind(pool).await;
+    punchlist_server::catch_up_merges_at_start(pool)
+        .await
+        .unwrap();
+    assert_eq!(events_by_kind(pool).await, before);
+
+    punchlist_server::catch_up_merges_at_start(pool)
+        .await
+        .unwrap();
+    assert_eq!(issue_status(pool).await, "merging");
+    assert_eq!(events_by_kind(pool).await, before);
 }
 
 #[sqlx::test]
