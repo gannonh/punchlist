@@ -419,6 +419,7 @@ impl Session {
 pub(crate) async fn run_codex(
     codex_command: &Path,
     home: &Path,
+    env: &[(&'static str, Option<OsString>)],
     thread_params: Value,
     worktree: &Path,
     prompt: &str,
@@ -426,7 +427,9 @@ pub(crate) async fn run_codex(
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
-    let spawned = Command::new(codex_command)
+    let mut command = Command::new(codex_command);
+    crate::agent::with_env(&mut command, env);
+    let spawned = command
         .arg("app-server")
         // The account's apps (connectors) and plugins bring MCP servers of their own, even
         // into an empty home; hooks run the person's or the repository's commands.
@@ -545,6 +548,7 @@ done"#
         let exit = run_codex(
             &command,
             &home,
+            &[],
             thread_params(Some("gpt-6-luna"), "low", mcp, temp.path()),
             temp.path(),
             "Review the pull request.",
@@ -853,7 +857,18 @@ done"#;
         let (stop_tx, stop_rx) = watch::channel(false);
         let dir = temp.path().to_path_buf();
         let run = tokio::spawn(async move {
-            run_codex(&command, &dir, json!({}), &dir, "p", "test", tx, stop_rx).await
+            run_codex(
+                &command,
+                &dir,
+                &[],
+                json!({}),
+                &dir,
+                "p",
+                "test",
+                tx,
+                stop_rx,
+            )
+            .await
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         stop_tx.send(true).unwrap();

@@ -4,10 +4,11 @@
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist,
-    Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList, IssueWritten, Lease,
-    LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project, ProjectList, Proof, ProofKind,
-    PullRequest, PullRequestsNow, RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog,
-    RunnerList, Session, UpdateIssue, WorkflowInfo, proof_type_by_extension,
+    GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList,
+    IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project,
+    ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
+    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, Session, UpdateIssue,
+    WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -284,6 +285,22 @@ impl Client {
         let request = ResumeRun { attempt };
         self.send(Method::POST, &["runs", run_id, "resume"], Some(&request))
             .await
+    }
+
+    /// A fresh GitHub token for the runner's running attempt. Runner token; a lapsed lease is
+    /// `ClientError::Refused` with code `stale_attempt`.
+    pub async fn refresh_github_token(
+        &self,
+        run_id: &str,
+        attempt: i32,
+    ) -> Result<GithubToken, ClientError> {
+        let request = RefreshGithubToken { attempt };
+        self.send(
+            Method::POST,
+            &["runs", run_id, "github-token"],
+            Some(&request),
+        )
+        .await
     }
 
     /// Claims one issue, in Start or waiting in a status with a dispatch rule, waiting up to

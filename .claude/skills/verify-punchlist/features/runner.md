@@ -30,7 +30,7 @@
 Preconditions:
 
 - Baseline run `$RUN`. `up` bootstraps the workspace with repository `gannonh/punchlist-sandbox`, so runners clone and push only there.
-- `gh auth status` shows a logged-in account that can push to the sandbox, and `git ls-remote https://github.com/gannonh/punchlist-sandbox.git HEAD` answers.
+- With `up`'s GitHub App credentials (the sandbox App, Contents and Pull requests: Read and write), runs act as the App and the runner needs no `gh` login. Without them a run uses the runner's own: then `gh auth status` shows a logged-in account that can push to the sandbox, and `git ls-remote https://github.com/gannonh/punchlist-sandbox.git HEAD` answers.
 - An agent run makes a live model call. Start a runner that will claim an issue only inside a named live check. `$C runner` passes `--model haiku`, the alias for the newest Haiku (Haiku 5.5 on the Anthropic API), and `--codex-model gpt-6-luna` for Codex runs when this checkout's `pl` has that flag. A runner claims Codex dispatches only when started with `--agents claude-code,codex`, and then needs `codex` on `PATH`, logged in (`codex login status`).
 
 - **Start a runner.** `$C runner "$RUN" r1`. It waits until the log at `$EVIDENCE/runner-r1.log` says the runner registered.

@@ -43,6 +43,7 @@ pub struct RunnerConfig {
 mod agent;
 mod codex;
 pub mod error;
+mod github;
 mod orchestrator;
 pub mod path_safety;
 pub mod workspace;

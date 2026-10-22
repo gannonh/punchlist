@@ -438,6 +438,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{id}/github-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A fresh GitHub token for the runner's running attempt, before the one it has expires.
+         *     Runner token; 409 `stale_attempt` unless the attempt is the runner's running attempt and
+         *     its lease has not lapsed; 503 when the server has no App credentials or GitHub refused.
+         */
+        post: operations["github_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{id}/log": {
         parameters: {
             query?: never;
@@ -752,6 +773,12 @@ export interface components {
              *     lifecycle on.
              */
             branch: string;
+            github?: components["schemas"]["GithubToken"] | null;
+            /**
+             * @description Why the server could not mint the run's token, such as GitHub's answer. The runner
+             *     fails the attempt with it.
+             */
+            github_error?: string | null;
             /** @description The issue, in the status whose dispatch rule the run is for. */
             issue: components["schemas"]["Issue"];
             /** Format: date-time */
@@ -1012,6 +1039,22 @@ export interface components {
             to_name: string;
             /** Format: int32 */
             total: number;
+        };
+        /**
+         * @description An installation token of the workspace's GitHub App, for its repository alone, and the
+         *     App's bot account, which a run's commits are authored by.
+         */
+        GithubToken: {
+            /** @description `<bot user id>+<app slug>[bot]@users.noreply.github.com`. */
+            bot_email: string;
+            /** @description `<app slug>[bot]`. */
+            bot_name: string;
+            /**
+             * Format: date-time
+             * @description The runner asks for a fresh one before then (`POST /api/runs/{id}/github-token`).
+             */
+            expires_at: string;
+            token: string;
         };
         /** @description `POST /api/runners/{id}/heartbeat`. */
         Heartbeat: {
@@ -1412,6 +1455,11 @@ export interface components {
             refreshed: boolean;
             /** @description The unresolved review threads of the open ones. */
             review_threads: components["schemas"]["ReviewThread"][];
+        };
+        /** @description `POST /api/runs/{id}/github-token`: the runner's running attempt, whose token to renew. */
+        RefreshGithubToken: {
+            /** Format: int32 */
+            attempt: number;
         };
         /**
          * @description `POST /api/runners`, with a person's token. Registers a runner and creates its actor, or
@@ -2969,6 +3017,74 @@ export interface operations {
                 };
             };
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    github_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Run id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshGithubToken"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GithubToken"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The attempt is not the runner's running attempt. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No token could be minted. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

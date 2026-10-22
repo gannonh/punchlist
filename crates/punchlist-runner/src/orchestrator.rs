@@ -21,6 +21,7 @@ use crate::agent::{
     AgentExit, AgentResult, build_prompt, claude_args, kill_runner, run_claude, write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
+use crate::github::{GithubAccess, refresh_at};
 use crate::worktree::Worktrees;
 
 /// The agent keys this runner has an adapter for.
@@ -549,11 +550,50 @@ async fn run_attempt(
             output_tokens: None,
         })
     };
+    // The run acts on GitHub as the workspace's App when the server minted it a token; a
+    // server without App credentials sends none, and the run uses the runner's own.
+    let github = match (&claim.github_error, &claim.github) {
+        (Some(error), _) => Err(format!("GitHub refused the run's token: {error}")),
+        (None, Some(token)) => GithubAccess::create(&ctx.config.worktree_root, &run_id, token)
+            .map(|access| Some(Arc::new(access)))
+            .map_err(|e| format!("cannot write the run's GitHub token: {e}")),
+        (None, None) => Ok(None),
+    };
+    let refresher = match (&github, &claim.github) {
+        (Ok(Some(access)), Some(token)) => Some(tokio::spawn(refresh_github_token(
+            ctx.client.clone(),
+            run_id.clone(),
+            attempt,
+            access.clone(),
+            token.expires_at,
+            lines_tx.clone(),
+        ))),
+        _ => None,
+    };
+    let env = match &github {
+        Ok(Some(access)) => access.env(),
+        _ => Vec::new(),
+    };
     // Stopping the runner drops the preparation, which kills the git command it is running.
     let exit = match (resume_in, prompt) {
+        _ if github.is_err() => {
+            let reason = github.as_ref().err().cloned().unwrap_or_default();
+            let _ = lines_tx.send(reason.clone()).await;
+            failed(reason)
+        }
         (Some(path), _) => {
             let resume = RESUME_PROMPT;
-            run_agent(ctx, &claim, &path, resume, true, lines_tx.clone(), stop_rx).await
+            run_agent(
+                ctx,
+                &claim,
+                &env,
+                &path,
+                resume,
+                true,
+                lines_tx.clone(),
+                stop_rx,
+            )
+            .await
         }
         (None, Err(reason)) => {
             let _ = lines_tx.send(reason.clone()).await;
@@ -563,7 +603,7 @@ async fn run_attempt(
             let prepared = {
                 let mut stop = stop_rx.clone();
                 tokio::select! {
-                    prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.merged_branches, &claim.issue.id) => Some(prepared),
+                    prepared = ctx.worktrees.prepare(&claim.repository, &claim.branch, &claim.merged_branches, &claim.issue.id, env.clone()) => Some(prepared),
                     _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
                 }
             };
@@ -581,6 +621,7 @@ async fn run_attempt(
                     run_agent(
                         ctx,
                         &claim,
+                        &env,
                         &path,
                         &prompt,
                         false,
@@ -597,6 +638,12 @@ async fn run_attempt(
             }
         }
     };
+    if let Some(refresher) = refresher {
+        // Its log sender has to go before the flusher can end.
+        refresher.abort();
+        let _ = refresher.await;
+    }
+    drop(github);
     drop(lines_tx);
     forward.abort();
     let stale = flusher.await.unwrap_or(false);
@@ -642,11 +689,62 @@ async fn run_attempt(
     .await;
 }
 
-/// Runs the agent the claim names in the worktree, with Punchlist's MCP server attached.
-/// `resume` carries on the attempt's Claude Code session; only Claude Code is resumed.
+/// How long a failed token refresh waits before it asks again.
+const GITHUB_TOKEN_RETRY: Duration = Duration::from_secs(30);
+
+/// Keeps the run's GitHub token fresh: asks the server for the next one before the current
+/// one expires (`refresh_at`) and writes it where the agent's `gh` and git read it, until
+/// the attempt ends and this is aborted, or the attempt is no longer the runner's.
+async fn refresh_github_token(
+    client: Client,
+    run_id: String,
+    attempt: i32,
+    access: Arc<GithubAccess>,
+    mut expires_at: chrono::DateTime<chrono::Utc>,
+    lines: mpsc::Sender<String>,
+) {
+    let mut received_at = chrono::Utc::now();
+    loop {
+        let wait = refresh_at(received_at, expires_at) - chrono::Utc::now();
+        tokio::time::sleep(wait.to_std().unwrap_or_default()).await;
+        let refreshed = match client.refresh_github_token(&run_id, attempt).await {
+            Ok(token) => access
+                .write(&token.token)
+                .map(|()| token)
+                .map_err(|e| e.to_string()),
+            Err(e) if is_code(&e, "stale_attempt") => return,
+            Err(e) => Err(e.to_string()),
+        };
+        match refreshed {
+            Ok(token) => {
+                let line = format!(
+                    "refreshed the run's GitHub token; it expires at {}",
+                    token.expires_at.to_rfc3339()
+                );
+                tracing::info!("run {run_id}: {line}");
+                let _ = lines.send(line).await;
+                received_at = chrono::Utc::now();
+                expires_at = token.expires_at;
+            }
+            Err(e) => {
+                let delay = GITHUB_TOKEN_RETRY.as_secs();
+                tracing::warn!(
+                    "run {run_id}: cannot refresh the GitHub token: {e}; retrying in {delay}s"
+                );
+                tokio::time::sleep(GITHUB_TOKEN_RETRY).await;
+            }
+        }
+    }
+}
+
+/// Runs the agent the claim names in the worktree, with Punchlist's MCP server attached and
+/// `env` over the runner's environment. `resume` carries on the attempt's Claude Code
+/// session; only Claude Code is resumed.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     ctx: &Context,
     claim: &Claim,
+    env: &[(&'static str, Option<std::ffi::OsString>)],
     worktree: &Path,
     prompt: &str,
     resume: bool,
@@ -680,6 +778,7 @@ async fn run_agent(
             run_codex(
                 command,
                 home.path(),
+                env,
                 params,
                 worktree,
                 prompt,
@@ -706,6 +805,7 @@ async fn run_agent(
             let exit = run_claude(
                 &config.claude_command,
                 &args,
+                env,
                 worktree,
                 prompt,
                 marker,
@@ -1025,6 +1125,13 @@ mod tests {
             agent_token: "agent-token".into(),
             session_id,
             next_line,
+            github: Some(punchlist_api::GithubToken {
+                token: "ghs_run".into(),
+                expires_at: now + chrono::Duration::hours(1),
+                bot_name: "app[bot]".into(),
+                bot_email: "1+app[bot]@users.noreply.github.com".into(),
+            }),
+            github_error: None,
         }
     }
 
@@ -1190,19 +1297,22 @@ mod tests {
         let worktrees = Worktrees::with_remote_base(root.clone(), remote);
         let repository = crate::worktree::tests::repository();
         (worktrees
-            .prepare(&repository, "feature/pl-1", &[], "PL-1")
+            .prepare(&repository, "feature/pl-1", &[], "PL-1", vec![])
             .await)
             .unwrap();
         let argv = temp.path().join("argv");
+        let github = temp.path().join("github");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = crate::agent::tests::fake_agent(
             &bin,
             &format!(
                 r#"echo "$@" >> {}
+test "$1" = --probe || echo "${{GH_TOKEN-unset}} $(cat "$PUNCHLIST_GITHUB_TOKEN_FILE") $GIT_AUTHOR_NAME" >> {}
 cat > /dev/null
 echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
-                argv.display()
+                argv.display(),
+                github.display()
             ),
         );
         let seen: Seen = Arc::default();
@@ -1268,6 +1378,11 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
             );
         }
 
+        // Both agents, resumed and fresh, had the claim's GitHub token and no other.
+        assert_eq!(
+            std::fs::read_to_string(&github).unwrap(),
+            "unset ghs_run app[bot]\nunset ghs_run app[bot]\n"
+        );
         let argv = std::fs::read_to_string(&argv).unwrap();
         let mut sessions: Vec<&str> = argv
             .lines()

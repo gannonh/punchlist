@@ -2,6 +2,7 @@
 //! issue, on the issue's branch. New code; it uses the copied `path_safety` and `workspace`.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -66,14 +67,16 @@ impl Worktrees {
 
     /// Makes the issue's worktree and returns its path. Reuses it when it already exists
     /// on `branch`, fast-forwarded to the branch on the remote, and replaces it when it is on one of `merged_branches`, the issue's
-    /// earlier branches whose pull requests merged. Dropping the future kills the git
-    /// command it is running.
+    /// earlier branches whose pull requests merged. Git runs with `env` over the runner's
+    /// environment (`None` removes a variable), such as the run's GitHub credential.
+    /// Dropping the future kills the git command it is running.
     pub async fn prepare(
         &self,
         repository: &Repository,
         branch: &str,
         merged_branches: &[String],
         issue_id: &str,
+        env: Vec<(&'static str, Option<OsString>)>,
     ) -> Result<PathBuf, String> {
         let key = format!("{}/{}", repository.owner, repository.name);
         let lock = self
@@ -96,6 +99,7 @@ impl Worktrees {
             let git = Git {
                 cancel,
                 timeout: GIT_TIMEOUT,
+                env,
             };
             prepare_blocking(
                 &git,
@@ -133,6 +137,7 @@ impl Worktrees {
             let git = Git {
                 cancel: Cancel::default(),
                 timeout: Duration::from_secs(30),
+                env: Vec::new(),
             };
             let head = git
                 .run(
@@ -172,6 +177,7 @@ fn safe_segment(value: &str, what: &str) -> Result<String, String> {
 struct Git {
     cancel: Cancel,
     timeout: Duration,
+    env: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl Git {
@@ -179,6 +185,12 @@ impl Git {
         let mut command = Command::new("git");
         if let Some(dir) = dir {
             command.arg("-C").arg(dir);
+        }
+        for (name, value) in &self.env {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
         }
         let mut child = command
             .args(args)
@@ -401,6 +413,7 @@ pub(crate) mod tests {
         Git {
             cancel: Cancel::default(),
             timeout: GIT_TIMEOUT,
+            env: Vec::new(),
         }
         .run(dir, args, context)
     }
@@ -417,6 +430,7 @@ pub(crate) mod tests {
         let git = Git {
             cancel: Cancel::default(),
             timeout: Duration::from_secs(1),
+            env: Vec::new(),
         };
         let started = Instant::now();
         assert_eq!(
@@ -432,6 +446,7 @@ pub(crate) mod tests {
         let git = Git {
             cancel: cancel.clone(),
             timeout: GIT_TIMEOUT,
+            env: Vec::new(),
         };
         let guard = CancelOnDrop(cancel);
         let dropper = std::thread::spawn(move || {
@@ -497,7 +512,7 @@ pub(crate) mod tests {
         let branch = "feature/pl-1-first-issue";
 
         let path = worktrees
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert!(path.ends_with("worktrees/acme/widgets/PL-1"));
@@ -507,7 +522,7 @@ pub(crate) mod tests {
 
         std::fs::write(path.join("marker.txt"), "kept").unwrap();
         let again = worktrees
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(again, path);
@@ -517,7 +532,7 @@ pub(crate) mod tests {
         );
 
         let err = worktrees
-            .prepare(&repository(), "feature/other", &[], "PL-1")
+            .prepare(&repository(), "feature/other", &[], "PL-1", vec![])
             .await
             .unwrap_err();
         assert!(err.contains("is on `feature/pl-1-first-issue`, not `feature/other`"));
@@ -534,18 +549,18 @@ pub(crate) mod tests {
         );
         let branch = "feature/pl-1";
         let path = worktrees
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         let other = worktrees
-            .prepare(&repository(), "feature/pl-2", &[], "PL-2")
+            .prepare(&repository(), "feature/pl-2", &[], "PL-2", vec![])
             .await
             .unwrap();
         std::fs::write(other.join("marker.txt"), "kept").unwrap();
         std::fs::remove_dir_all(&path).unwrap();
 
         let again = worktrees
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(again, path);
@@ -583,7 +598,7 @@ pub(crate) mod tests {
         };
 
         let path = first
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         let branch_sha = commit(&path, "one.txt");
@@ -592,14 +607,14 @@ pub(crate) mod tests {
         // The pull request is still open: a retry continues from the branch's commit, in the
         // worktree and from the remote.
         let retry = first
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(retry, path);
         assert_eq!(run(&retry, &["rev-parse", "HEAD"]), branch_sha);
         let other = Worktrees::with_remote_base(temp.path().join("other"), remote_base.clone());
         let unmerged = other
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(run(&unmerged, &["rev-parse", "HEAD"]), branch_sha);
@@ -609,7 +624,7 @@ pub(crate) mod tests {
         let pushed_sha = commit(&unmerged, "review.txt");
         run(&unmerged, &["push", "origin", branch]);
         let reused = first
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(reused, path);
@@ -619,7 +634,7 @@ pub(crate) mod tests {
         run(&path, &["reset", "--hard", &branch_sha]);
         commit(&path, "diverged.txt");
         let err = first
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap_err();
         assert!(
@@ -632,6 +647,7 @@ pub(crate) mod tests {
         let git = Git {
             cancel: Cancel::default(),
             timeout: GIT_TIMEOUT,
+            env: Vec::new(),
         };
         assert_eq!(remote_has_branch(&git, &path, branch), Ok(true));
         assert_eq!(remote_has_branch(&git, &path, "feature/absent"), Ok(false));
@@ -651,7 +667,7 @@ pub(crate) mod tests {
         // Uncommitted work in the worktree on the merged branch is never deleted.
         std::fs::write(path.join("draft.txt"), "kept").unwrap();
         let err = first
-            .prepare(&repository(), next, &merged, "PL-1")
+            .prepare(&repository(), next, &merged, "PL-1", vec![])
             .await
             .unwrap_err();
         assert!(
@@ -667,7 +683,7 @@ pub(crate) mod tests {
         std::fs::remove_file(path.join("draft.txt")).unwrap();
 
         let again = first
-            .prepare(&repository(), next, &merged, "PL-1")
+            .prepare(&repository(), next, &merged, "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(again, path);
@@ -680,7 +696,7 @@ pub(crate) mod tests {
 
         let second = Worktrees::with_remote_base(temp.path().join("second"), remote_base);
         let fresh = second
-            .prepare(&repository(), next, &merged, "PL-1")
+            .prepare(&repository(), next, &merged, "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(run(&fresh, &["rev-parse", "--abbrev-ref", "HEAD"]), next);
@@ -689,7 +705,7 @@ pub(crate) mod tests {
         // A retry of the second lifecycle lands on its branch and keeps its commits.
         let next_sha = commit(&again, "two.txt");
         let retry = first
-            .prepare(&repository(), next, &merged, "PL-1")
+            .prepare(&repository(), next, &merged, "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(run(&retry, &["rev-parse", "--abbrev-ref", "HEAD"]), next);
@@ -711,7 +727,7 @@ pub(crate) mod tests {
             None
         );
         let path = worktrees
-            .prepare(&repository(), branch, &[], "PL-1")
+            .prepare(&repository(), branch, &[], "PL-1", vec![])
             .await
             .unwrap();
         assert_eq!(
@@ -737,7 +753,7 @@ pub(crate) mod tests {
         let mut repo = repository();
         repo.owner = "../evil".into();
         let err = worktrees
-            .prepare(&repo, "feature/x", &[], "PL-1")
+            .prepare(&repo, "feature/x", &[], "PL-1", vec![])
             .await
             .unwrap_err();
         assert_eq!(err, "unsafe repository owner `../evil`");

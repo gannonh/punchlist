@@ -11,7 +11,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | Postgres | `127.0.0.1:5440` on sartre, volume `punchlist-host_db` |
 | Proof files | volume `punchlist-host_proof` |
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
-| GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only |
+| GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only. Runs act on GitHub as it: their pushes, pull requests, comments, thread replies and merges show as `punchlist-sartre[bot]`. It needs Contents and Pull requests: Read and write, Checks: Read |
 | Workspace | `Punchlist` (prefix `PL`, `gannonh/punchlist`) |
 | `pl` config | `~/.config/punchlist/punchlist.toml` |
 
@@ -39,6 +39,8 @@ The workspace has one runner, in the pane `runner` of the herdr workspace `punch
 ```sh
 PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
 ```
+
+The runner needs no `gh` login: each run gets an installation token of the App from the server, for `gannonh/punchlist` alone, and its agent sees no other GitHub credential. A run whose claim says the App cannot write the repository fails with that reason; accept the App's new permissions on the installation (GitHub, Settings, Applications, `punchlist-sartre`, Review request).
 
 The runner works on one issue at a time unless told otherwise, whatever the workflow's `[dispatch] max_concurrent`, which caps the whole workspace. The `pl` config sets it to three:
 

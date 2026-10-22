@@ -9,8 +9,8 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, Issue, LogLine, Repository,
-    ResumeRun, Run, RunLog, RunOutcome, RunnerRef,
+    AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, GithubToken, Issue, LogLine,
+    RefreshGithubToken, Repository, ResumeRun, Run, RunLog, RunOutcome, RunnerRef,
 };
 use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
@@ -48,6 +48,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(append_log))
         .routes(routes!(finish_run))
         .routes(routes!(resume_run))
+        .routes(routes!(github_token))
         .routes(routes!(run_log))
         .routes(routes!(issue_runs))
 }
@@ -270,6 +271,8 @@ async fn try_claim(
         agent_token,
         session_id: leased.session_id,
         next_line: 1,
+        github: None,
+        github_error: None,
     }))
 }
 
@@ -448,7 +451,7 @@ async fn claim(
     // Subscribe before the first attempt so a move in between is not missed.
     let mut starts = state.starts.subscribe();
     if let Some(claim) = try_claim(&state, &actor, &runner, &Target::Any).await? {
-        return Ok(Json(claim).into_response());
+        return Ok(Json(with_github_token(&state, claim).await).into_response());
     }
     let deadline = Instant::now() + wait;
     loop {
@@ -463,7 +466,7 @@ async fn claim(
             Ok(Err(RecvError::Lagged(_))) => Target::Any,
         };
         if let Some(claim) = try_claim(&state, &actor, &runner, &target).await? {
-            return Ok(Json(claim).into_response());
+            return Ok(Json(with_github_token(&state, claim).await).into_response());
         }
     }
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -780,7 +783,7 @@ async fn resume_run(
     let merged_branches = merged_branches(&mut tx, &held.issue_id).await?;
     let repository = repository(&mut tx, actor.workspace_id).await?;
     tx.commit().await?;
-    Ok(Json(Claim {
+    let claim = Claim {
         run_id: id,
         attempt: request.attempt,
         agent: run.agent,
@@ -793,7 +796,68 @@ async fn resume_run(
         agent_token,
         session_id: held.session_id,
         next_line,
-    }))
+        github: None,
+        github_error: None,
+    };
+    Ok(Json(with_github_token(&state, claim).await))
+}
+
+/// `claim` with the token its run acts on GitHub with, or why there is none. Minted after
+/// the claim committed, so no GitHub request holds the workspace's lock; the runner fails an
+/// attempt whose token could not be minted.
+async fn with_github_token(state: &AppState, mut claim: Claim) -> Claim {
+    let Some(github) = &state.github else {
+        return claim;
+    };
+    let Repository { owner, name, .. } = &claim.repository;
+    match github.run_token(owner, name).await {
+        Ok(token) => claim.github = Some(token),
+        Err(error) => {
+            tracing::warn!(
+                "run {}: cannot mint its GitHub token: {error:#}",
+                claim.run_id
+            );
+            claim.github_error = Some(format!("{error:#}"));
+        }
+    }
+    claim
+}
+
+/// A fresh GitHub token for the runner's running attempt, before the one it has expires.
+/// Runner token; 409 `stale_attempt` unless the attempt is the runner's running attempt and
+/// its lease has not lapsed; 503 when the server has no App credentials or GitHub refused.
+#[utoipa::path(
+    post,
+    path = "/api/runs/{id}/github-token",
+    params(("id" = Uuid, Path, description = "Run id")),
+    request_body = RefreshGithubToken,
+    responses(
+        (status = 200, body = GithubToken),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "The attempt is not the runner's running attempt."),
+        (status = 503, body = ErrorBody, description = "No token could be minted."),
+    )
+)]
+async fn github_token(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RefreshGithubToken>,
+) -> Result<Json<GithubToken>, ApiError> {
+    let runner = runner_of(&state, &actor).await?;
+    ensure_run(&state.pool, &actor, id).await?;
+    hold_attempt(&state.pool, id, request.attempt, &runner).await?;
+    let github = (state.github.as_ref()).ok_or_else(|| {
+        ApiError::GithubTokenUnavailable("the server has no GitHub App credentials".into())
+    })?;
+    let mut conn = state.pool.acquire().await?;
+    let Repository { owner, name, .. } = repository(&mut conn, actor.workspace_id).await?;
+    drop(conn);
+    let token = (github.run_token(&owner, &name).await)
+        .map_err(|error| ApiError::GithubTokenUnavailable(format!("{error:#}")))?;
+    Ok(Json(token))
 }
 
 /// After an attempt of the run ended with `outcome`: ends the run with it and dispatches the

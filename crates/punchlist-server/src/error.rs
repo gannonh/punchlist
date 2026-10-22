@@ -25,6 +25,10 @@ pub enum ApiError {
         "what GitHub has for {0} changed while its gates were being checked, so nothing was decided and it did not move; request again"
     )]
     EvidenceChanged(String),
+    /// A run's GitHub token could not be minted: the server has no App credentials, or
+    /// GitHub refused.
+    #[error("cannot mint the run's GitHub token: {0}")]
+    GithubTokenUnavailable(String),
     #[error("issue {0} not found")]
     IssueNotFound(String),
     #[error("{0}")]
@@ -74,7 +78,8 @@ impl ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::GithubNotConfigured
             | ApiError::GithubUnreadable(_)
-            | ApiError::EvidenceChanged(_) => StatusCode::SERVICE_UNAVAILABLE,
+            | ApiError::EvidenceChanged(_)
+            | ApiError::GithubTokenUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::IssueNotFound(_)
             | ApiError::RunNotFound(_)
             | ApiError::RunnerNotFound(_)
@@ -97,6 +102,7 @@ impl ApiError {
             ApiError::GithubNotConfigured => "github_not_configured",
             ApiError::GithubUnreadable(_) => "github_unreadable",
             ApiError::EvidenceChanged(_) => "evidence_changed",
+            ApiError::GithubTokenUnavailable(_) => "github_token_unavailable",
             ApiError::IssueNotFound(_)
             | ApiError::RunNotFound(_)
             | ApiError::RunnerNotFound(_)

@@ -1500,6 +1500,92 @@
         }
       }
     },
+    "/api/runs/{id}/github-token": {
+      "post": {
+        "summary": "A fresh GitHub token for the runner's running attempt, before the one it has expires.\nRunner token; 409 `stale_attempt` unless the attempt is the runner's running attempt and\nits lease has not lapsed; 503 when the server has no App credentials or GitHub refused.",
+        "operationId": "github_token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshGithubToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GithubToken"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The attempt is not the runner's running attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No token could be minted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/runs/{id}/log": {
       "get": {
         "summary": "Every log line of a run, oldest first.",
@@ -2415,6 +2501,24 @@
             "type": "string",
             "description": "The branch to work on, `feature/<id>`, or `feature/<id>-<n>` from the issue's second\nlifecycle on."
           },
+          "github": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GithubToken",
+                "description": "The token the run acts on GitHub with, as the workspace's GitHub App. `None` when the\nserver has no App credentials, or could not mint one (`github_error`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "github_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the server could not mint the run's token, such as GitHub's answer. The runner\nfails the attempt with it."
+          },
           "issue": {
             "$ref": "#/components/schemas/Issue",
             "description": "The issue, in the status whose dispatch rule the run is for."
@@ -3054,6 +3158,34 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "GithubToken": {
+        "type": "object",
+        "description": "An installation token of the workspace's GitHub App, for its repository alone, and the\nApp's bot account, which a run's commits are authored by.",
+        "required": [
+          "token",
+          "expires_at",
+          "bot_name",
+          "bot_email"
+        ],
+        "properties": {
+          "bot_email": {
+            "type": "string",
+            "description": "`<bot user id>+<app slug>[bot]@users.noreply.github.com`."
+          },
+          "bot_name": {
+            "type": "string",
+            "description": "`<app slug>[bot]`."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The runner asks for a fresh one before then (`POST /api/runs/{id}/github-token`)."
+          },
+          "token": {
+            "type": "string"
           }
         }
       },
@@ -4135,6 +4267,19 @@
               "$ref": "#/components/schemas/ReviewThread"
             },
             "description": "The unresolved review threads of the open ones."
+          }
+        }
+      },
+      "RefreshGithubToken": {
+        "type": "object",
+        "description": "`POST /api/runs/{id}/github-token`: the runner's running attempt, whose token to renew.",
+        "required": [
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
