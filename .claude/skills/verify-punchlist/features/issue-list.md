@@ -6,6 +6,7 @@
 
 - `list-empty` prints `No issues.`.
 - `list-rows` prints one aligned row per issue, ordered by number.
+- `list-web` (web app only): the app's list and board filter the same rows by text, assignee, project and milestone; [web-app.md](web-app.md) `web-filter` covers them. `pl issue list` has no filters.
 - `list-seq` (API only) returns `last_event_seq`, the workspace's latest event number of any kind (`created`, `edited`, `transition`, `comment`, `refusal`, `run`, `proof`, `pull_request`, `workflow`), read in the same snapshot as the list.
 
 ## How to get to it (user POV)

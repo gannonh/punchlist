@@ -308,6 +308,68 @@ test('set a parent, project and milestone in the sheet, and roll back a parent c
   expect(stored.parent).toBeNull()
 })
 
+test('the milestone filter lives in the URL, follows edits, and combines with the project filter', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const name = `Filtered ${randomUUID().slice(0, 8)}`
+  const project = await ok<{ id: string }>(await request.post('/api/projects', { headers: person, data: { name } }))
+  const milestone = async (title: string) =>
+    (
+      await ok<{ id: string }>(
+        await request.post(`/api/projects/${project.id}/milestones`, { headers: person, data: { name: title } }),
+      )
+    ).id
+  const first = await milestone('M1')
+  const second = await milestone('M2')
+  const placed = async (title: string, milestone: string | null) => {
+    const { row } = await ok<{ row: { issue: { id: string } } }>(
+      await request.post('/api/issues', { headers: person, data: { title, body: '' } }),
+    )
+    await ok(
+      await request.patch(`/api/issues/${row.issue.id}`, {
+        headers: person,
+        data: { project: project.id, milestone },
+      }),
+    )
+    return row.issue.id
+  }
+  const a = await placed('In M1', first)
+  const b = await placed('Also in M1', first)
+  const c = await placed('In M2', second)
+  const d = await placed('In the project alone', null)
+  const shown = () => page.locator('[data-issue]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-issue')))
+  await signIn(page)
+
+  await page.getByLabel('Milestone filter').selectOption({ label: `${name} · M1` })
+  await expect.poll(shown).toEqual([a, b])
+  await expect(page).toHaveURL(`/?milestone=${first}`)
+
+  await page.reload()
+  await expect.poll(shown).toEqual([a, b])
+  await expect(page.getByLabel('Milestone filter').locator('option:checked')).toHaveText(`${name} · M1`)
+
+  await ok(await request.patch(`/api/issues/${c}`, { headers: person, data: { milestone: first } }))
+  await expect.poll(shown).toEqual([a, b, c])
+  await ok(await request.patch(`/api/issues/${a}`, { headers: person, data: { milestone: null } }))
+  await expect.poll(shown).toEqual([b, c])
+
+  await page.getByLabel('Project filter').selectOption({ label: name })
+  await page.getByLabel('Milestone filter').selectOption({ label: 'No milestone' })
+  await expect.poll(shown).toEqual([a, d])
+  await expect(page).toHaveURL(`/?project=${project.id}&milestone=none`)
+  await page.getByLabel('Filter issues').fill('alone')
+  await expect.poll(shown).toEqual([d])
+
+  await page.getByRole('button', { name: 'Board' }).click()
+  await expect.poll(shown).toEqual([d])
+  await expect(page).toHaveURL(`/?layout=board&project=${project.id}&milestone=none`)
+  await page.getByLabel('Filter issues').fill('nothing has this title')
+  await page.getByRole('button', { name: 'Clear filters' }).click()
+  await expect(page).toHaveURL('/?layout=board')
+})
+
 // The issue page. These come last: their runs and dispatches must not be what an earlier test's runner claims.
 
 /** A 1×1 PNG. */

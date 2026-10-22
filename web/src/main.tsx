@@ -12,7 +12,7 @@ import {
 import { Toaster } from '@/components/ui/sonner'
 import { sessionQuery } from '@/lib/queries'
 import { IssueScreen } from '@/screens/issue'
-import { IssuesScreen, type Layout } from '@/screens/issues'
+import { IssuesScreen, type ListSearch } from '@/screens/issues'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
 
@@ -29,11 +29,16 @@ const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
 
 const signIn = createRoute({ getParentRoute: () => root, path: '/sign-in', component: SignInScreen })
 
+const id = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
+
 const issues = createRoute({
   getParentRoute: () => root,
   path: '/',
-  validateSearch: (search: Record<string, unknown>): { layout?: Layout } =>
-    search.layout === 'board' ? { layout: 'board' } : {},
+  validateSearch: (search: Record<string, unknown>): ListSearch => ({
+    layout: search.layout === 'board' ? 'board' : undefined,
+    project: id(search.project),
+    milestone: id(search.milestone),
+  }),
   beforeLoad: async ({ context }) => {
     const session = await context.queryClient.query(sessionQuery)
     if (!session) throw redirect({ to: '/sign-in' })
@@ -41,14 +46,16 @@ const issues = createRoute({
   },
   component: function Issues() {
     const { session } = issues.useRouteContext()
-    const { layout = 'list' } = issues.useSearch()
+    const search = issues.useSearch()
     const navigate = issues.useNavigate()
     return (
       <IssuesScreen
         workspaceId={session.workspace_id}
         me={session.actor.name}
-        layout={layout}
-        onLayout={(next) => void navigate({ search: next === 'board' ? { layout: 'board' } : {}, replace: true })}
+        search={search}
+        onSearch={({ layout, project, milestone }) =>
+          void navigate({ search: { layout, project, milestone }, replace: true })
+        }
       />
     )
   },
