@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT number, url FROM pull_request p\n         WHERE issue_id = $1 AND state = 'merged'\n           AND NOT EXISTS (SELECT 1 FROM pull_request o\n                           WHERE o.issue_id = $1 AND (o.state = 'open' OR o.number > p.number))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "number",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "url"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "56e6c73a60b81e08661c7531443e93bec6624d6710e8cfa0314599ed68020c29"
+}

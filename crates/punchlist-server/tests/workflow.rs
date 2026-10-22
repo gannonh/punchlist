@@ -1841,21 +1841,7 @@ async fn a_start_loads_a_push_the_server_missed_and_changes_nothing_otherwise(po
 /// `from` and delivers `closed`, the pull request event that closes its pull request.
 /// Returns PL-1's status.
 async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed: &str) -> String {
-    let on = format!("on = \"{event}\"");
-    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
-    // The template still has the line this replaces, so the gate is in the file.
-    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
-    {
-        let mut repo = s.github.lock().unwrap();
-        repo.sha = "a".repeat(40);
-        repo.files.insert("workflow.toml".into(), gated);
-        for prompt in ["system", "in_progress", "agent_review"] {
-            repo.files
-                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
-        }
-    }
-    deliver(s, "push", "push-1", PUSH).await;
-    assert_eq!(workflow_versions(&s.state.pool).await, 1);
+    load_with_gate(s, event, gate).await;
     let (status, _) = call(
         &s.app,
         &s.person.token,
@@ -1879,6 +1865,25 @@ async fn close_with_gate(s: &Setup, event: &str, gate: &str, from: &str, closed:
         .fetch_one(&s.state.pool)
         .await
         .unwrap()
+}
+
+/// Loads the PRD workflow with `gate` on its `on = "<event>"` transition.
+async fn load_with_gate(s: &Setup, event: &str, gate: &str) {
+    let on = format!("on = \"{event}\"");
+    let gated = PRD_WORKFLOW.replace(&on, &format!("{on}\ngates = [\"{gate}\"]"));
+    // The template still has the line this replaces, so the gate is in the file.
+    assert_eq!(gated.matches(&format!("gates = [\"{gate}\"]")).count(), 1);
+    {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = "a".repeat(40);
+        repo.files.insert("workflow.toml".into(), gated);
+        for prompt in ["system", "in_progress", "agent_review"] {
+            repo.files
+                .insert(format!("prompts/{prompt}.md"), "Prompt.\n".into());
+        }
+    }
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&s.state.pool).await, 1);
 }
 
 /// How many transitions, comments and GitHub actors there are. A person made none of them
@@ -2015,6 +2020,62 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
             ("transition".to_string(), 1)
         ]
     );
+}
+
+#[sqlx::test]
+async fn a_failing_gate_on_a_caught_up_merge_leaves_the_issue_in_merging(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_with_gate(&s, "pr_merged", "ci_green").await;
+    let token = s.person.token.clone();
+    let (status, _) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver(&s, "pull_request", "merged-1", MERGED).await;
+
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "merging"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let now: String = sqlx::query_scalar("SELECT status FROM issue WHERE id = 'PL-1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(now, "merging");
+    let moves: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT t.from_status, t.to_status, a.role
+         FROM transition t JOIN actor a ON a.id = t.actor_id ORDER BY t.created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        moves,
+        [("human_review".into(), "merging".into(), "person".into())]
+    );
+    let (status, events) = call(&s.app, &token, "GET", "/api/issues/PL-1/events", None).await;
+    assert_eq!(status, StatusCode::OK, "{events}");
+    let refusal = &events.as_array().unwrap()[2];
+    assert_eq!(refusal["actor"]["name"], "GitHub");
+    assert_eq!(refusal["detail"]["kind"], "refusal");
+    assert_eq!(refusal["detail"]["from"], "merging");
+    assert_eq!(refusal["detail"]["to"], "done");
+    assert_eq!(refusal["detail"]["gate"], "ci_green");
+    assert_eq!(refusal["detail"]["reason"], MERGED_REASON);
 }
 
 #[sqlx::test]

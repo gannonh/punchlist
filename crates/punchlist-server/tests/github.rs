@@ -896,3 +896,144 @@ async fn closing_unmerged_ends_the_running_run_so_the_issue_can_be_claimed_again
         )
     );
 }
+
+/// The person asks to move `issue` to `to`; returns the status the answer shows.
+async fn move_to(s: &Setup, issue: &str, to: &str) -> String {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/api/issues/{issue}/transitions"))
+        .header("authorization", format!("Bearer {}", s.person.token))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "to": to }).to_string()))
+        .unwrap();
+    let response = s.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["issue"]["status"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn status(pool: &PgPool, issue: &str) -> String {
+    sqlx::query_scalar("SELECT status FROM issue WHERE id = $1")
+        .bind(issue)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Each transition of `issue`, oldest first: from, to, the actor's role and name.
+async fn transitions(pool: &PgPool, issue: &str) -> Vec<(String, String, String, String)> {
+    sqlx::query_as(
+        "SELECT t.from_status, t.to_status, a.role, a.name
+         FROM transition t JOIN actor a ON a.id = t.actor_id
+         WHERE t.issue_id = $1 ORDER BY t.created_at",
+    )
+    .bind(issue)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn row(from: &str, to: &str, role: &str, name: &str) -> (String, String, String, String) {
+    (from.into(), to.into(), role.into(), name.into())
+}
+
+#[sqlx::test]
+async fn an_issue_entering_merging_after_its_merge_moves_to_done(pool: PgPool) {
+    let s = setup(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    force_status(&pool, &issue, "human_review").await;
+    deliver(&s, "pull_request", "d1", MERGED).await;
+    assert_eq!(status(&pool, &issue).await, "human_review");
+
+    // The answer is the person's move; the catch-up follows it in the same transaction.
+    assert_eq!(move_to(&s, &issue, "merging").await, "merging");
+    assert_eq!(status(&pool, &issue).await, "done");
+    assert_eq!(
+        transitions(&pool, &issue).await,
+        [
+            row("human_review", "merging", "person", "Gannon"),
+            row("merging", "done", "github", "GitHub"),
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn an_issue_entering_merging_with_its_pull_request_open_waits_for_the_merge(pool: PgPool) {
+    let s = setup(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    force_status(&pool, &issue, "human_review").await;
+    deliver(&s, "pull_request", "d1", READY).await;
+
+    assert_eq!(move_to(&s, &issue, "merging").await, "merging");
+    assert_eq!(status(&pool, &issue).await, "merging");
+
+    deliver(&s, "pull_request", "d2", MERGED).await;
+    assert_eq!(status(&pool, &issue).await, "done");
+    assert_eq!(
+        transitions(&pool, &issue).await,
+        [
+            row("human_review", "merging", "person", "Gannon"),
+            row("merging", "done", "github", "octocat"),
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn an_older_merged_pull_request_does_not_move_an_issue_whose_newer_one_is_open(pool: PgPool) {
+    let s = setup(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    force_status(&pool, &issue, "human_review").await;
+    deliver(&s, "pull_request", "d1", MERGED).await;
+    let newer = edited(READY, |v| {
+        v["number"] = json!(13);
+        v["pull_request"]["number"] = json!(13);
+        v["pull_request"]["id"] = json!(1934102999_i64);
+        v["pull_request"]["head"]["ref"] = json!("feature/pl-1-fix-the-thing-2");
+        v["pull_request"]["html_url"] = json!("https://github.com/gannonh/punchlist/pull/13");
+    });
+    deliver(&s, "pull_request", "d2", &newer).await;
+    let states: Vec<(i64, String)> =
+        sqlx::query_as("SELECT number, state FROM pull_request ORDER BY number")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(states, [(12, "merged".into()), (13, "open".into())]);
+
+    assert_eq!(move_to(&s, &issue, "merging").await, "merging");
+    assert_eq!(status(&pool, &issue).await, "merging");
+    assert_eq!(
+        transitions(&pool, &issue).await,
+        [row("human_review", "merging", "person", "Gannon")]
+    );
+}
+
+#[sqlx::test]
+async fn an_issue_in_merging_with_its_pull_request_merged_moves_to_done_at_start(pool: PgPool) {
+    let s = setup(&pool).await;
+    let waiting = create_issue(&s, "Fix the thing").await;
+    let open = create_issue(&s, "Another thing").await;
+    force_status(&pool, &waiting, "human_review").await;
+    deliver(&s, "pull_request", "d1", MERGED).await;
+    // Moved before the catch-up was deployed: no catch-up ran on its way in.
+    force_status(&pool, &waiting, "merging").await;
+    force_status(&pool, &open, "merging").await;
+
+    punchlist_server::catch_up_merges_at_start(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status(&pool, &waiting).await, "done");
+    assert_eq!(status(&pool, &open).await, "merging");
+    assert_eq!(
+        transitions(&pool, &waiting).await,
+        [row("merging", "done", "github", "GitHub")]
+    );
+
+    // A second start writes nothing.
+    punchlist_server::catch_up_merges_at_start(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "transition").await, 1);
+}

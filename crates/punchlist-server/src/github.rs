@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use punchlist_api::{ErrorBody, ReviewComment};
-use punchlist_core::{CheckRunEvidence, GITHUB_ACTIONS, Refusal, Role, linked_issue_id};
+use punchlist_core::{CheckRunEvidence, GITHUB_ACTIONS, Refusal, Role, Workflow, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use utoipa_axum::router::OpenApiRouter;
@@ -1034,7 +1034,12 @@ async fn record_pull_request(
     }
     let closed = state != "open" && was.is_none_or(|was| was.state == "open");
     if let (true, Some(issue_id)) = (closed, linked) {
-        close_issue_on_pull_request(tx, workspace_id, pr, closed_by, delivery_id, &issue_id)
+        let closed = Closed {
+            number: pr.number,
+            url: &pr.html_url,
+            merged: pr.is_merged(),
+        };
+        close_issue_on_pull_request(tx, workspace_id, closed, closed_by, delivery_id, &issue_id)
             .await?;
     }
     Ok(id)
@@ -1527,16 +1532,87 @@ pub(crate) async fn github_actor(
     .await
 }
 
+/// The pull request a close moves an issue on.
+struct Closed<'a> {
+    number: i64,
+    url: &'a str,
+    merged: bool,
+}
+
+/// An issue that enters a status waiting on `pr_merged` after its pull request merged moves
+/// on as the merge's webhook would have moved it: that close was applied once, while the
+/// issue was elsewhere (`record_pull_request`), and does not come again. Only the pull
+/// request the gates read counts: the issue's highest-numbered one, merged, with none of
+/// its pull requests open. `pr_closed_unmerged` is not caught up: the next claim reuses a
+/// closed pull request's branch. The caller holds the workspace's lock, so a merge being
+/// recorded now either is seen here or finds the issue in the new status.
+pub(crate) async fn catch_up_merge(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+    issue_id: &str,
+    status: &str,
+) -> Result<(), ApiError> {
+    if workflow.transition_on(status, "pr_merged").is_none() {
+        return Ok(());
+    }
+    let merged = sqlx::query!(
+        "SELECT number, url FROM pull_request p
+         WHERE issue_id = $1 AND state = 'merged'
+           AND NOT EXISTS (SELECT 1 FROM pull_request o
+                           WHERE o.issue_id = $1 AND (o.state = 'open' OR o.number > p.number))",
+        issue_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(pr) = merged else {
+        return Ok(());
+    };
+    let closed = Closed {
+        number: pr.number,
+        url: &pr.url,
+        merged: true,
+    };
+    close_issue_on_pull_request(tx, workspace_id, closed, None, None, issue_id).await
+}
+
+/// `catch_up_merge` for every issue, once per `serve`: an issue that entered such a status
+/// before the catch-up existed, or whose merge was recorded while no server ran it, moves on
+/// without re-entering the status. An issue it moved is no longer in that status, so a second
+/// start writes nothing.
+pub async fn catch_up_merges_at_start(pool: &sqlx::PgPool) -> Result<(), ApiError> {
+    let workspaces = sqlx::query_scalar!("SELECT id FROM workspace ORDER BY created_at")
+        .fetch_all(pool)
+        .await?;
+    for workspace_id in workspaces {
+        let mut tx = pool.begin().await?;
+        lock_workspace(&mut tx, workspace_id).await?;
+        let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
+        let issues = sqlx::query!(
+            "SELECT id, status FROM issue WHERE workspace_id = $1 ORDER BY number",
+            workspace_id
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for issue in issues {
+            catch_up_merge(&mut tx, workspace_id, &workflow, &issue.id, &issue.status).await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
 /// A closed pull request moves its linked issue if the workflow has a transition on that
 /// event from the issue's status and that transition's gates pass. With no such transition
 /// the pull request's new state is all that is recorded. With a failed gate the issue stays
 /// where it is and the refusal goes on its timeline: no status, transition or comment.
-/// Runs once per close: see `record_pull_request`. `closed_by` is the GitHub login that
-/// closed it, when known.
+/// Runs once per close (see `record_pull_request`), and for a merge recorded before the issue
+/// entered the status that waits on it (`catch_up_merge`). `closed_by` is the GitHub login
+/// that closed it, when known.
 async fn close_issue_on_pull_request(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
-    pr: &PullRequestData,
+    pr: Closed<'_>,
     closed_by: Option<&str>,
     delivery_id: Option<&str>,
     issue_id: &str,
@@ -1547,7 +1623,7 @@ async fn close_issue_on_pull_request(
     )
     .fetch_one(&mut *tx)
     .await?;
-    let name = if pr.is_merged() {
+    let name = if pr.merged {
         "pr_merged"
     } else {
         "pr_closed_unmerged"
@@ -1620,7 +1696,7 @@ async fn close_issue_on_pull_request(
     // The agent working this issue has nothing left to do: its pull request is gone, and the
     // issue is no longer in the status that started the run. Ending the run frees the issue
     // to be claimed again.
-    let how = if pr.is_merged() {
+    let how = if pr.merged {
         "merged"
     } else {
         "closed without merging"
@@ -1646,10 +1722,7 @@ async fn close_issue_on_pull_request(
     .await?;
     if transition.require.iter().any(|r| r == "comment") {
         let by = closed_by.map_or_else(String::new, |login| format!(" by @{login}"));
-        let body = format!(
-            "Pull request #{} was {how}{by}.\n\n{}",
-            pr.number, pr.html_url
-        );
+        let body = format!("Pull request #{} was {how}{by}.\n\n{}", pr.number, pr.url);
         record_comment(tx, &actor, issue_id, &body, Some(transition_id)).await?;
     }
     Ok(())
