@@ -12,7 +12,7 @@ struct Pl {
     config: PathBuf,
     url: String,
     token: String,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 struct Output {
@@ -57,7 +57,7 @@ impl Pl {
             config,
             url: format!("http://{addr}"),
             token: person.token,
-            _dir: dir,
+            dir,
         }
     }
 
@@ -756,7 +756,7 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
         (placed.code, placed.stdout.as_str()),
         (
             0,
-            "PL-2  parent PL-1 · project Punchlist · milestone Gate 0\n"
+            "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 0\n"
         )
     );
     let show = pl.run(&["issue", "show", "PL-2"]).await;
@@ -788,12 +788,12 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
     let gate1 = edit(&["PL-2", "--milestone", "Gate 1"]).await;
     assert_eq!(
         gate1.stdout,
-        "PL-2  parent PL-1 · project Punchlist · milestone Gate 1\n"
+        "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 1\n"
     );
     let moved = edit(&["PL-2", "--project", "Groundwork"]).await;
     assert_eq!(
         moved.stdout,
-        "PL-2  parent PL-1 · project Groundwork · milestone none\n"
+        "PL-2  Slice\n  labels none · parent PL-1 · project Groundwork · milestone none\n"
     );
 
     edit(&["PL-3", "--parent", "PL-2"]).await;
@@ -829,7 +829,10 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
     let cleared = edit(&["PL-2", "--no-parent", "--no-project"]).await;
     assert_eq!(
         (cleared.code, cleared.stdout.as_str()),
-        (0, "PL-2  parent none · project none · milestone none\n")
+        (
+            0,
+            "PL-2  Slice\n  labels none · parent none · project none · milestone none\n"
+        )
     );
     let show = pl.run(&["issue", "show", "PL-2"]).await;
     assert!(
@@ -837,6 +840,115 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
         "{}",
         show.stdout
     );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn edit_sets_title_body_and_labels(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Old", "--body", "Old body"])
+        .await;
+    let body = |pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT body FROM issue WHERE id = 'PL-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    let titled = pl.run(&["issue", "edit", "PL-1", "--title", "New"]).await;
+    assert_eq!(
+        (titled.code, titled.stdout.as_str()),
+        (
+            0,
+            "PL-1  New\n  labels none · parent none · project none · milestone none\n"
+        )
+    );
+
+    let spec = pl.dir.path().join("spec.md");
+    let text = "# Spec\n\n- [ ] tabs\tand trailing space \n\n\n";
+    std::fs::write(&spec, text).unwrap();
+    let filed = (pl.run(&[
+        "issue",
+        "edit",
+        "PL-1",
+        "--body-file",
+        spec.to_str().unwrap(),
+    ]))
+    .await;
+    assert_eq!(filed.code, 0, "{}", filed.stderr);
+    assert_eq!(body(&pool).await, text);
+
+    let config = pl.config.clone();
+    let piped = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("pl")
+            .unwrap()
+            .env("PUNCHLIST_CONFIG", config)
+            .args(["issue", "edit", "PL-1", "--body-file", "-"])
+            .write_stdin("From stdin\n")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(piped.status.success(), "{piped:?}");
+    assert_eq!(body(&pool).await, "From stdin\n");
+
+    let labeled = (pl.run(&["issue", "edit", "PL-1", "--label", "a", "--label", "b"])).await;
+    assert_eq!(
+        labeled.stdout,
+        "PL-1  New\n  labels a, b · parent none · project none · milestone none\n"
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        (show.stdout).starts_with("PL-1  New\nStatus: Backlog\nLabels: a, b\n\nFrom stdin\n"),
+        "{}",
+        show.stdout
+    );
+    let cleared = pl.run(&["issue", "edit", "PL-1", "--no-labels"]).await;
+    assert_eq!(cleared.code, 0, "{}", cleared.stderr);
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        (show.stdout).starts_with("PL-1  New\nStatus: Backlog\n\nFrom stdin\n"),
+        "{}",
+        show.stdout
+    );
+
+    // An agent's edit in a status locked to agents is refused, as any edit is.
+    let agent = Client::new(&pl.url, &pl.token)
+        .unwrap()
+        .create_agent(&punchlist_api::CreateAgent {
+            kind: "codex".into(),
+            model: None,
+            owner: None,
+        })
+        .await
+        .unwrap();
+    let agent_config = pl.dir.path().join("agent.toml");
+    std::fs::write(
+        &agent_config,
+        format!("server_url = \"{}\"\ntoken = \"{}\"\n", pl.url, agent.token),
+    )
+    .unwrap();
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let locked = pl
+        .run_with(
+            &["issue", "edit", "PL-1", "--body", "Mine"],
+            &[("PUNCHLIST_CONFIG", agent_config.to_str().unwrap())],
+        )
+        .await;
+    assert_eq!(
+        (locked.code, locked.stderr.as_str()),
+        (
+            1,
+            "error: refused: human_review is locked: an agent cannot act on an issue in it\n"
+        )
+    );
+    assert_eq!(body(&pool).await, "From stdin\n");
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
@@ -1107,12 +1219,13 @@ async fn import_linear_twice_then_status(pool: PgPool) {
     });
 
     let show = pl.run(&["issue", "show", "PL-1"]).await;
-    let head: Vec<&str> = show.stdout.lines().take(5).collect();
+    let head: Vec<&str> = show.stdout.lines().take(6).collect();
     assert_eq!(
         head,
         [
             "PL-1  Slice 10: the web app shows the issue page from the approved prototype",
             "Status: Done",
+            "Labels: feature, web",
             "Project: Punchlist",
             "Milestone: Gate 1: Groundwork ships from Punchlist",
             "Linear: KAT-3743  https://linear.app/kata-sh/issue/KAT-3743/slice-10-the-web-app-shows-the-issue-page-from-the-approved-prototype",
