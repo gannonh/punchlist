@@ -38,6 +38,14 @@ impl GithubAccess {
         run_id: &str,
         token: &GithubToken,
     ) -> std::io::Result<GithubAccess> {
+        // The bot's name goes into YAML: GitHub's bot logins are letters, digits, `-` and
+        // `[bot]`.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"-[]".contains(&b);
+        if token.bot_name.is_empty() || !token.bot_name.bytes().all(plain) {
+            return Err(std::io::Error::other(
+                "the GitHub bot's name is not a plain login",
+            ));
+        }
         let dir = std::path::absolute(root.join("github").join(run_id))?;
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -66,7 +74,14 @@ impl GithubAccess {
             ));
         }
         replace(&self.dir.join("token"), token)?;
-        let hosts = format!("github.com:\n    oauth_token: {token}\n    git_protocol: https\n");
+        // gh's multi-account layout, `version: "1"`. In the older one gh migrates the file
+        // first, asking `GET /user` for the login, which an installation token may not read.
+        replace(&self.dir.join("gh").join("config.yml"), "version: \"1\"\n")?;
+        let user = &self.bot_name;
+        let hosts = format!(
+            "github.com:\n    users:\n        \"{user}\":\n            oauth_token: {token}\n    \
+             git_protocol: https\n    user: \"{user}\"\n    oauth_token: {token}\n"
+        );
         replace(&self.dir.join("gh").join("hosts.yml"), &hosts)
     }
 
@@ -188,7 +203,13 @@ mod tests {
         );
         assert_eq!(
             run(&access, &repo, "cat \"$GH_CONFIG_DIR/hosts.yml\""),
-            "github.com:\n    oauth_token: ghs_first\n    git_protocol: https\n"
+            "github.com:\n    users:\n        \"punchlist-sartre[bot]\":\n            \
+             oauth_token: ghs_first\n    git_protocol: https\n    \
+             user: \"punchlist-sartre[bot]\"\n    oauth_token: ghs_first\n"
+        );
+        assert_eq!(
+            run(&access, &repo, "cat \"$GH_CONFIG_DIR/config.yml\""),
+            "version: \"1\"\n"
         );
         run(&access, &repo, "git commit -q --allow-empty -m one");
         assert_eq!(
@@ -207,6 +228,9 @@ mod tests {
         assert!(run(&access, &repo, "cat \"$GH_CONFIG_DIR/hosts.yml\"").contains("ghs_second"));
 
         assert!(access.write("ghs_x\n    user: someone").is_err());
+        let mut forged = token("ghs_first");
+        forged.bot_name = "bot\"\n    oauth_token: x".into();
+        assert!(GithubAccess::create(temp.path(), "run-2", &forged).is_err());
         let dir = access.dir.clone();
         drop(access);
         assert!(!dir.exists());
