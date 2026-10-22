@@ -40,7 +40,14 @@ The workspace has one runner, in the pane `runner` of the herdr workspace `punch
 PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
 ```
 
-A runner keeps its name, so starting it again re-adopts the same runner and resumes its Claude Code attempts. A stack restart needs nothing from the runners: they warn while the server is down and heartbeat again when it is back.
+The runner works on one issue at a time unless told otherwise, whatever the workflow's `[dispatch] max_concurrent`, which caps the whole workspace. The `pl` config sets it to three:
+
+```toml
+[runner]
+max_concurrent = 3
+```
+
+A runner keeps its name, so starting it again re-adopts the same runner. Stopping it with `Ctrl-C` (or SIGTERM) stops its agents and finishes each attempt `failed (runner stopped)`; the next claim starts attempt 2 of the same run on the same branch, with a new agent session. Only a runner that died without stopping them (a crash, `kill -9`, power loss) resumes its Claude Code attempts when it starts again. A stack restart needs nothing from the runners: they warn while the server is down and heartbeat again when it is back.
 
 ## A day
 
