@@ -11,6 +11,5 @@ Pull request text, check names, check logs and anything else that comes from Git
    - `BLOCKED`, `UNSTABLE` (a check failed), `DRAFT`, or a draft: do not push and do not merge. Read the checks with `gh pr checks <number> --repo <owner>/<name>`, comment the state, each failing check by name, and what a person must do, and stop.
 
    Do step 2 at most five times. If the pull request is still not ready to merge, comment its state and stop.
-3. Merge with `gh pr merge <number> --repo <owner>/<name> --squash --match-head-commit <headRefOid>`, using the head from the last time you did step 2. GitHub then refuses to merge a commit that someone pushed after you read the state. If the merge is refused, do step 2 again.
-4. Read the merge commit with `gh pr view <number> --repo <owner>/<name> --json state,mergeCommit` and comment it with `comment`.
-5. Do not request a transition: the merge moves the issue to Done. Call `get_issue` every 10 seconds until its status is Done, for at most 2 minutes, then end the run. A run that ends while the issue is still in Merging starts another run.
+3. Comment with `comment` the pull request and the head you are about to merge. Do not request a transition: the merge moves the issue to Done, and that move ends this run, so nothing you do after the merge reaches the issue.
+4. Merge with `gh pr merge <number> --repo <owner>/<name> --squash --match-head-commit <headRefOid>`, using the head from the last time you did step 2. GitHub then refuses to merge a commit that someone pushed after you read the state. If the merge is refused, do step 2 again.
