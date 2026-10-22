@@ -63,12 +63,9 @@ impl GithubAccess {
     /// Replaces the token where `gh` and git read it. Each file is replaced whole, so a
     /// reader sees the old token or the new one.
     pub(crate) fn write(&self, token: &str) -> std::io::Result<()> {
-        // It goes into YAML below; GitHub's tokens are letters, digits and `_`.
-        if token.is_empty()
-            || !token
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        {
+        // It goes into YAML below; GitHub's tokens are letters, digits, `_`, `-` and `.`.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"_-.".contains(&b);
+        if token.is_empty() || !token.bytes().all(plain) {
             return Err(std::io::Error::other(
                 "the GitHub token is not a plain token",
             ));
@@ -223,9 +220,13 @@ mod tests {
         );
 
         // A refresh reaches a git already configured with the old token.
-        access.write("ghs_second").unwrap();
-        assert!(run(&access, &repo, credential).ends_with("password=ghs_second\n"));
-        assert!(run(&access, &repo, "cat \"$GH_CONFIG_DIR/hosts.yml\"").contains("ghs_second"));
+        // GitHub's newer tokens are longer, with `-` and `.`.
+        access.write("ghs_second.a-b").unwrap();
+        assert!(run(&access, &repo, credential).ends_with("password=ghs_second.a-b\n"));
+        assert!(
+            run(&access, &repo, "cat \"$GH_CONFIG_DIR/hosts.yml\"")
+                .contains("oauth_token: ghs_second.a-b\n")
+        );
 
         assert!(access.write("ghs_x\n    user: someone").is_err());
         let mut forged = token("ghs_first");
