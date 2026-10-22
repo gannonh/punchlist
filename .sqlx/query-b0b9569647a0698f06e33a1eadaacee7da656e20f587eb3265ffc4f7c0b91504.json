@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, linear_id AS \"linear_id!\", linear_identifier, linear_updated_at, title, body,\n                  labels, status, parent_id, project_id, milestone_id\n           FROM issue WHERE workspace_id = $1 AND linear_id IS NOT NULL ORDER BY number",
+  "query": "SELECT id, linear_id AS \"linear_id!\", linear_identifier, linear_updated_at, title, body,\n                  labels, status, parent_id, project_id, milestone_id,\n                  EXISTS (SELECT 1 FROM event e WHERE e.issue_id = issue.id\n                          AND e.kind = 'transition' AND e.seq > coalesce(linear_status_seq, 0))\n                    AS \"moved!\"\n           FROM issue WHERE workspace_id = $1 AND linear_id IS NOT NULL ORDER BY number",
   "describe": {
     "columns": [
       {
@@ -123,6 +123,12 @@
             "name": "milestone_id"
           }
         }
+      },
+      {
+        "ordinal": 11,
+        "name": "moved!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -141,8 +147,9 @@
       false,
       true,
       true,
-      true
+      true,
+      null
     ]
   },
-  "hash": "b861e5139dfc79f0c485b05adeea0f24fde4c7fe38bd040bd317ab5ed2443a9a"
+  "hash": "b0b9569647a0698f06e33a1eadaacee7da656e20f587eb3265ffc4f7c0b91504"
 }

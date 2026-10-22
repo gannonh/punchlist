@@ -395,6 +395,96 @@ async fn a_rerun_updates_what_linear_changed_and_reports_what_it_dropped(pool: P
 }
 
 #[sqlx::test]
+async fn a_rerun_keeps_the_status_of_an_issue_moved_in_punchlist(pool: PgPool) {
+    let who = workspace(&pool, "PL").await;
+    let state = AppState::new(pool.clone());
+    let app = router(state.clone());
+    let mut first = snapshot();
+    first["issues"][0]["state"] = json!({"name": "Backlog", "type": "backlog"});
+    import(&state, &app, &who, first.clone()).await;
+    // PL-2 (KAT-1) moves in Punchlist, by the same person who ran the import.
+    for to in ["todo", "start"] {
+        let (status, moved) = call(
+            &app,
+            &who.token,
+            "POST",
+            "/api/issues/PL-2/transitions",
+            Some(json!({"to": to})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+    }
+
+    // Linear edits KAT-1, still in Backlog, and moves KAT-3 (PL-1), which did not move here.
+    let mut changed = first;
+    let spec = &mut changed["issues"][0];
+    spec["title"] = json!("Spec, renamed");
+    spec["description"] = json!("The new spec.");
+    spec["labels"] = json!(["Bug"]);
+    spec["updated_at"] = json!("2026-09-08T10:00:00Z");
+    let orphan = &mut changed["issues"][2];
+    orphan["state"] = json!({"name": "Done", "type": "completed"});
+    orphan["updated_at"] = json!("2026-09-08T10:00:00Z");
+    let report = import(&state, &app, &who, changed.clone()).await;
+    assert_eq!(
+        report["notes"],
+        json!([
+            "KAT-3 (PL-1) has a parent outside Linear's project, so it has none here",
+            "KAT-1 (PL-2) moved in Punchlist since its import, so it stays in Start; Linear has it in Backlog",
+            "KAT-2 (PL-3): skipped an empty comment from 2026-09-06 09:00 UTC"
+        ])
+    );
+    assert_eq!(report["updated"]["issues"], 2);
+
+    // A later edit in Linear keeps it too: the import that kept the status did not set it.
+    changed["issues"][0]["title"] = json!("Spec, renamed again");
+    changed["issues"][0]["updated_at"] = json!("2026-09-09T10:00:00Z");
+    let report = import(&state, &app, &who, changed).await;
+    assert_eq!(
+        report["notes"][0],
+        "KAT-1 (PL-2) moved in Punchlist since its import, so it stays in Start; Linear has it in Backlog"
+    );
+
+    let issues = sqlx::query!("SELECT id, title, body, labels, status FROM issue ORDER BY number")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let issues: Vec<String> = (issues.iter())
+        .map(|i| {
+            format!(
+                "{} {:?} {:?} {:?} {}",
+                i.id, i.title, i.body, i.labels, i.status
+            )
+        })
+        .collect();
+    assert_eq!(
+        issues,
+        [
+            "PL-1 \"Orphan\" \"\" [] done",
+            "PL-2 \"Spec, renamed again\" \"The new spec.\" [\"Bug\"] start",
+            "PL-3 \"Child\" \"\" [] in_progress",
+        ]
+    );
+    let transitions = sqlx::query!(
+        "SELECT t.issue_id, t.from_status, t.to_status FROM transition t ORDER BY t.created_at, t.issue_id"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let transitions: Vec<String> = (transitions.iter())
+        .map(|t| format!("{} {} → {}", t.issue_id, t.from_status, t.to_status))
+        .collect();
+    assert_eq!(
+        transitions,
+        [
+            "PL-2 backlog → todo",
+            "PL-2 todo → start",
+            "PL-1 agent_review → done"
+        ]
+    );
+}
+
+#[sqlx::test]
 async fn an_unmapped_state_imports_nothing_and_names_the_state(pool: PgPool) {
     let who = workspace(&pool, "PL").await;
     let app = router(AppState::new(pool.clone()));

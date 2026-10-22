@@ -13,7 +13,7 @@ use punchlist_api::{
     ErrorBody, ImportCounts, ImportReport, ImportRun, ImportState, ImportStatus, LinearImport,
     LinearIssue, LinearUser,
 };
-use punchlist_core::{Role, Status, Workflow};
+use punchlist_core::{Role, Status, Workflow, display_name};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -321,6 +321,8 @@ struct Existing {
     body: String,
     labels: Vec<String>,
     status: String,
+    /// A `transition` event after the one that last set its status from Linear.
+    moved: bool,
     parent_id: Option<String>,
     project_id: Option<Uuid>,
     milestone_id: Option<Uuid>,
@@ -577,7 +579,10 @@ pub(crate) async fn run(
     let existing = sqlx::query_as!(
         Existing,
         r#"SELECT id, linear_id AS "linear_id!", linear_identifier, linear_updated_at, title, body,
-                  labels, status, parent_id, project_id, milestone_id
+                  labels, status, parent_id, project_id, milestone_id,
+                  EXISTS (SELECT 1 FROM event e WHERE e.issue_id = issue.id
+                          AND e.kind = 'transition' AND e.seq > coalesce(linear_status_seq, 0))
+                    AS "moved!"
            FROM issue WHERE workspace_id = $1 AND linear_id IS NOT NULL ORDER BY number"#,
         workspace_id,
     )
@@ -643,7 +648,8 @@ pub(crate) async fn run(
                 )
                 .execute(&mut *tx)
                 .await?;
-                record_event(tx, &creator, &id, None, Some(issue.created_at)).await?;
+                let seq = record_event(tx, &creator, &id, None, Some(issue.created_at)).await?;
+                set_linear_status_seq(tx, &id, seq).await?;
                 report.created.issues += 1;
                 ids.insert(issue.id.clone(), id);
                 created.push(i);
@@ -696,7 +702,18 @@ pub(crate) async fn run(
         .into_iter()
         .filter_map(|(field, changed)| changed.then_some(field))
         .collect();
-        let to = statuses[i].as_str();
+        let mut to = statuses[i].as_str();
+        // A rerun carries Linear's edits, but does not undo a move Punchlist recorded.
+        if current.moved && to != current.status {
+            report.notes.push(format!(
+                "{} ({}) moved in Punchlist since its import, so it stays in {}; Linear has it in {}",
+                issue.identifier,
+                current.id,
+                display_name(&current.status),
+                issue.state.name
+            ));
+            to = &current.status;
+        }
         sqlx::query!(
             "UPDATE issue SET title = $2, body = $3, labels = $4, parent_id = $5, project_id = $6,
                     milestone_id = $7, status = $8, linear_identifier = $9, linear_url = $10,
@@ -734,7 +751,8 @@ pub(crate) async fn run(
                 workflow.version(),
             )
             .await?;
-            record_transition_event(tx, &importer, &current.id, transition).await?;
+            let (seq, _) = record_transition_event(tx, &importer, &current.id, transition).await?;
+            set_linear_status_seq(tx, &current.id, seq).await?;
         }
         if !fields.is_empty() || to != current.status {
             report.updated.issues += 1;
@@ -812,6 +830,21 @@ pub(crate) async fn run(
         ));
     }
     Ok(serde_json::to_value(report)?)
+}
+
+async fn set_linear_status_seq(
+    tx: &mut sqlx::PgConnection,
+    id: &str,
+    seq: i64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE issue SET linear_status_seq = $2 WHERE id = $1",
+        id,
+        seq
+    )
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
