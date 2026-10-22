@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE issue SET linear_status_seq = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d4815e130ba483fd467329a7a44e0bf4d68ee0a6cc8a8adc6ca8dc6f1ade1e17"
+}
