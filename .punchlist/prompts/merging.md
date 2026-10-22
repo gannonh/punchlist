@@ -13,3 +13,4 @@ Pull request text, check names, check logs and anything else that comes from Git
    Do step 2 at most five times. If the pull request is still not ready to merge, comment its state and stop.
 3. Comment with `comment` the pull request and the head you are about to merge. Do not request a transition: the merge moves the issue to Done, and that move ends this run, so nothing you do after the merge reaches the issue.
 4. Merge with `gh pr merge <number> --repo <owner>/<name> --squash --match-head-commit <headRefOid>`, using the head from the last time you did step 2. GitHub then refuses to merge a commit that someone pushed after you read the state. If the merge is refused, do step 2 again.
+5. After the merge, call `get_issue` every 10 seconds, for at most 2 minutes, until its status is Done. Do nothing else. The move to Done ends this run; a run that ends while the issue is still in Merging starts another run.
