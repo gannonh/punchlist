@@ -1553,7 +1553,28 @@ pub(crate) async fn catch_up_merge(
     issue_id: &str,
     status: &str,
 ) -> Result<(), ApiError> {
-    if workflow.transition_on(status, "pr_merged").is_none() {
+    let Some(transition) = workflow.transition_on(status, "pr_merged") else {
+        return Ok(());
+    };
+    // A failed event is final for this status entry, including across restarts. Use
+    // timeline sequence numbers: a catch-up refusal and the entry can share a transaction.
+    let refused = sqlx::query_scalar!(
+        "SELECT EXISTS (
+            SELECT 1 FROM event e
+            JOIN refusal r ON r.id = e.refusal_id
+            JOIN actor a ON a.id = r.actor_id
+            WHERE e.issue_id = $1 AND r.from_status = $2 AND r.to_status = $3
+              AND a.role = 'github'
+              AND e.seq > COALESCE((SELECT max(seq) FROM event
+                                    WHERE issue_id = $1 AND kind = 'transition'), 0)
+         )",
+        issue_id,
+        status,
+        transition.to.as_str(),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if refused == Some(true) {
         return Ok(());
     }
     let merged = sqlx::query!(

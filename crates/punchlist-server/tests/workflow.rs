@@ -2000,6 +2000,7 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
     assert_eq!(detail["gate"], "ci_green");
     assert_eq!(detail["reason"], MERGED_REASON);
     assert_eq!(detail["delivery_id"], "closed-1");
+    refused_merge_stays_final_at_start(&s).await;
 
     // The PRD's way out of Merging: a person sends the issue back to Todo.
     let (status, body) = call(
@@ -2025,7 +2026,7 @@ async fn a_failing_gate_on_pr_merged_leaves_the_issue_in_merging(pool: PgPool) {
 #[sqlx::test]
 async fn a_failing_gate_on_a_caught_up_merge_leaves_the_issue_in_merging(pool: PgPool) {
     let s = setup(&pool).await;
-    load_with_gate(&s, "pr_merged", "ci_green").await;
+    load_with_gate(&s, "pr_merged", "proof_attached").await;
     let token = s.person.token.clone();
     let (status, _) = call(
         &s.app,
@@ -2074,8 +2075,48 @@ async fn a_failing_gate_on_a_caught_up_merge_leaves_the_issue_in_merging(pool: P
     assert_eq!(refusal["detail"]["kind"], "refusal");
     assert_eq!(refusal["detail"]["from"], "merging");
     assert_eq!(refusal["detail"]["to"], "done");
-    assert_eq!(refusal["detail"]["gate"], "ci_green");
-    assert_eq!(refusal["detail"]["reason"], MERGED_REASON);
+    assert_eq!(refusal["detail"]["gate"], "proof_attached");
+    assert_eq!(
+        refusal["detail"]["reason"],
+        "no proof is attached to PL-1 for attempt 0"
+    );
+    refused_merge_stays_final_at_start(&s).await;
+
+    // Satisfying the failed gate does not let a restart retry this event.
+    attach_proof(&s, &token).await;
+    refused_merge_stays_final_at_start(&s).await;
+
+    // A fresh status entry can evaluate the merge again; the old refusal does not block it.
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = call(
+        &s.app,
+        &token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "merging"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(issue_status(&pool).await, "done");
+}
+
+/// Restarting neither duplicates a refusal nor retries its transition.
+async fn refused_merge_stays_final_at_start(s: &Setup) {
+    let pool = &s.state.pool;
+    let before = events_by_kind(pool).await;
+    punchlist_server::catch_up_merges_at_start(pool)
+        .await
+        .unwrap();
+    assert_eq!(events_by_kind(pool).await, before);
+
+    punchlist_server::catch_up_merges_at_start(pool)
+        .await
+        .unwrap();
+    assert_eq!(issue_status(pool).await, "merging");
+    assert_eq!(events_by_kind(pool).await, before);
 }
 
 #[sqlx::test]
