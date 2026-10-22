@@ -99,7 +99,10 @@ impl GithubAccess {
             ("GIT_CONFIG_GLOBAL", set("/dev/null")),
             ("GIT_CONFIG_NOSYSTEM", set("1")),
             ("GIT_CONFIG_COUNT", set("1")),
-            ("GIT_CONFIG_KEY_0", set("credential.helper")),
+            (
+                "GIT_CONFIG_KEY_0",
+                set("credential.https://github.com.helper"),
+            ),
             ("GIT_CONFIG_VALUE_0", set(CREDENTIAL_HELPER)),
             ("GIT_TERMINAL_PROMPT", set("0")),
             ("GIT_AUTHOR_NAME", set(&self.bot_name)),
@@ -190,6 +193,25 @@ mod tests {
             run(&access, &repo, credential),
             "protocol=https\nhost=github.com\nusername=x-access-token\npassword=ghs_first\n"
         );
+        // Unrelated remotes must never receive the installation token.
+        for (protocol, host) in [
+            ("https", "attacker.example"),
+            ("https", "github.com.attacker.example"),
+            ("http", "github.com"),
+        ] {
+            assert_eq!(
+                run(
+                    &access,
+                    &repo,
+                    &format!(
+                        "if printf 'protocol={protocol}\\nhost={host}\\n\\n' | \
+                         git -c core.askPass=false credential fill 2>/dev/null; \
+                         then exit 1; fi"
+                    )
+                ),
+                ""
+            );
+        }
         assert_eq!(
             run(
                 &access,
