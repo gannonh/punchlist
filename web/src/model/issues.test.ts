@@ -11,6 +11,7 @@ import {
   revertEdit,
   rowView,
   workflowStale,
+  type Filter,
   type IssueRow,
   type StatusInfo,
 } from './issues'
@@ -138,14 +139,38 @@ describe('filters and groups', () => {
   })
 
   test('text and assignee filters', () => {
-    const ids = (who: Parameters<typeof filterRows>[1]) => filterRows(rows, who).map((r) => r.issue.id)
-    expect(ids({ text: 'login', who: '' })).toEqual(['PL-1'])
-    expect(ids({ text: 'WEB', who: '' })).toEqual(['PL-3'])
-    expect(ids({ text: '', who: 'agents' })).toEqual(['PL-2'])
-    expect(ids({ text: '', who: 'agent:codex' })).toEqual(['PL-2'])
-    expect(ids({ text: '', who: 'agent:claude-code' })).toEqual([])
-    expect(ids({ text: '', who: 'people' })).toEqual(['PL-3'])
-    expect(ids({ text: '', who: 'none' })).toEqual(['PL-1'])
+    const ids = (filter: Partial<Filter>) =>
+      filterRows(rows, { text: '', who: '', project: '', milestone: '', ...filter }).map((r) => r.issue.id)
+    expect(ids({ text: 'login' })).toEqual(['PL-1'])
+    expect(ids({ text: 'WEB' })).toEqual(['PL-3'])
+    expect(ids({ who: 'agents' })).toEqual(['PL-2'])
+    expect(ids({ who: 'agent:codex' })).toEqual(['PL-2'])
+    expect(ids({ who: 'agent:claude-code' })).toEqual([])
+    expect(ids({ who: 'people' })).toEqual(['PL-3'])
+    expect(ids({ who: 'none' })).toEqual(['PL-1'])
+  })
+
+  test('project and milestone filters, combined with the others', () => {
+    const p1 = { id: 'p1', name: 'Alpha' }
+    const placed = [
+      row('PL-1', { title: 'alpha one', project: p1, milestone: { id: 'm1', name: 'A1' } }),
+      row('PL-2', { project: p1, milestone: { id: 'm1', name: 'A1' } }),
+      row('PL-3', { project: p1 }),
+      row('PL-4', { project: { id: 'p2', name: 'Beta' }, milestone: { id: 'm2', name: 'B1' } }),
+      row('PL-5'),
+    ]
+    const ids = (filter: Partial<Filter>) =>
+      filterRows(placed, { text: '', who: '', project: '', milestone: '', ...filter }).map((r) => r.issue.id)
+    expect(ids({})).toEqual(['PL-1', 'PL-2', 'PL-3', 'PL-4', 'PL-5'])
+    expect(ids({ project: 'p1' })).toEqual(['PL-1', 'PL-2', 'PL-3'])
+    expect(ids({ project: 'none' })).toEqual(['PL-5'])
+    expect(ids({ milestone: 'none' })).toEqual(['PL-3', 'PL-5'])
+    expect(ids({ project: 'p1', milestone: 'none' })).toEqual(['PL-3'])
+    expect(ids({ milestone: 'm1' })).toEqual(['PL-1', 'PL-2'])
+    expect(ids({ milestone: 'm1', text: 'alpha' })).toEqual(['PL-1'])
+    expect(ids({ milestone: 'm1', text: 'beta' })).toEqual([])
+    expect(ids({ project: 'p1', who: 'agents' })).toEqual([])
+    expect(ids({ milestone: '00000000-0000-0000-0000-000000000000' })).toEqual([])
   })
 })
 

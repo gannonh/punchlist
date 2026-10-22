@@ -21,12 +21,20 @@ import {
   useEditIssue,
   useEventStream,
   useIssues,
+  useProjects,
   useSignOut,
   useTransitions,
   useWorkflow,
 } from '@/lib/queries'
 
 export type Layout = 'list' | 'board'
+
+/** What the list's URL holds: the layout and the project and milestone filters, each `'none'` or an id. */
+export interface ListSearch {
+  layout?: 'board'
+  project?: string
+  milestone?: string
+}
 
 const NARROW = '(max-width: 767px)'
 const subscribeNarrow = (notify: () => void) => {
@@ -87,24 +95,36 @@ export function useNow(): Date {
 export function IssuesScreen({
   workspaceId,
   me,
-  layout,
-  onLayout,
+  search: url,
+  onSearch,
 }: {
   workspaceId: string
   me: string
-  layout: Layout
-  onLayout: (layout: Layout) => void
+  search: ListSearch
+  onSearch: (search: ListSearch) => void
 }) {
   const issues = useIssues()
   const workflow = useWorkflow()
   const actors = useActors()
+  const projects = useProjects()
   const edit = useEditIssue()
   const signOut = useSignOut()
   const navigate = useNavigate()
   const { transitions, request, dismiss } = useTransitions()
   useEventStream(workspaceId, issues.isSuccess)
 
-  const [filter, setFilter] = useState<Filter>({ text: '', who: '' })
+  const [local, setLocal] = useState<Pick<Filter, 'text' | 'who'>>({ text: '', who: '' })
+  const layout: Layout = url.layout ?? 'list'
+  const filter = useMemo<Filter>(
+    () => ({ ...local, project: url.project ?? '', milestone: url.milestone ?? '' }),
+    [local, url.project, url.milestone],
+  )
+  const onLayout = useCallback(
+    (next: Layout) => {
+      onSearch({ ...url, layout: next === 'board' ? 'board' : undefined })
+    },
+    [onSearch, url],
+  )
   const [selected, setSelected] = useState<string | null>(null)
   const [column, setColumn] = useState<string | null>(null)
   const [sheet, setSheet] = useState<string | null>(null)
@@ -221,7 +241,17 @@ export function IssuesScreen({
     }
   }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout, navigate])
 
-  const filtered = filter.text !== '' || filter.who !== ''
+  const filtered = Object.values(filter).some((value) => value !== '')
+  const projectList = projects.data ?? []
+  const allMilestones = projectList.flatMap((project) =>
+    project.milestones.map((m) => ({ id: m.id, project: project.id, label: `${project.name} · ${m.name}` })),
+  )
+  const milestones = allMilestones.filter((m) => !filter.project || m.project === filter.project)
+  const ref = (value: string) => value !== '' && value !== 'none'
+  // An id in the URL that the select does not list: it shows that id rather than falling back to `Any`.
+  const unknown = projects.data ? null : 'Loading…'
+  const strayProject = ref(filter.project) && !projectList.some((p) => p.id === filter.project)
+  const strayMilestone = ref(filter.milestone) && !milestones.some((m) => m.id === filter.milestone)
   const menuRow = rowById(menu?.id ?? null)
   const sheetRow = rowById(sheet)
   const viewProps = { groups, selected: current, transitions, now, onPick: pick, onDismiss: dismiss }
@@ -252,10 +282,10 @@ export function IssuesScreen({
             type="search"
             placeholder="Filter issues  /"
             aria-label="Filter issues"
-            value={filter.text}
+            value={local.text}
             className="h-7.5 flex-[1_1_120px] rounded-md border bg-card px-2 py-1.25 focus:outline-2 focus:outline-offset-1 focus:outline-ring sm:w-45 sm:flex-none"
             onChange={(event) => {
-              setFilter((f) => ({ ...f, text: event.target.value }))
+              setLocal((f) => ({ ...f, text: event.target.value }))
             }}
           />
           <select
@@ -263,7 +293,7 @@ export function IssuesScreen({
             value={filter.who}
             className="h-7.5 rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
             onChange={(event) => {
-              setFilter((f) => ({ ...f, who: event.target.value as Who }))
+              setLocal((f) => ({ ...f, who: event.target.value as Who }))
             }}
           >
             <option value="">Everyone</option>
@@ -275,6 +305,49 @@ export function IssuesScreen({
               </option>
             ))}
             <option value="none">Unassigned</option>
+          </select>
+          <select
+            aria-label="Project filter"
+            value={filter.project}
+            className="h-7.5 max-w-45 rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
+            onChange={(event) => {
+              const project = event.target.value
+              const keep =
+                project === '' ||
+                !ref(filter.milestone) ||
+                allMilestones.some((m) => m.id === filter.milestone && m.project === project)
+              onSearch({ ...url, project: project || undefined, milestone: keep ? url.milestone : undefined })
+            }}
+          >
+            <option value="">Any project</option>
+            <option value="none">No project</option>
+            {projectList.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+            {strayProject && <option value={filter.project}>{unknown ?? 'Unknown project'}</option>}
+          </select>
+          <select
+            aria-label="Milestone filter"
+            value={filter.milestone}
+            className="h-7.5 max-w-55 rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
+            onChange={(event) => {
+              onSearch({ ...url, milestone: event.target.value || undefined })
+            }}
+          >
+            <option value="">Any milestone</option>
+            <option value="none">No milestone</option>
+            {milestones.map((milestone) => (
+              <option key={milestone.id} value={milestone.id}>
+                {milestone.label}
+              </option>
+            ))}
+            {strayMilestone && (
+              <option value={filter.milestone}>
+                {unknown ?? allMilestones.find((m) => m.id === filter.milestone)?.label ?? 'Unknown milestone'}
+              </option>
+            )}
           </select>
           {closed.length > 0 && (
             <label className="flex items-center gap-1.5 text-meta text-ink-3">
@@ -349,7 +422,8 @@ export function IssuesScreen({
               <Button
                 variant="outline"
                 onClick={() => {
-                  setFilter({ text: '', who: '' })
+                  setLocal({ text: '', who: '' })
+                  onSearch({ layout: url.layout })
                 }}
               >
                 Clear filters

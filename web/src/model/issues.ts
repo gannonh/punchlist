@@ -160,6 +160,10 @@ export type Who = '' | 'people' | 'agents' | 'none' | `agent:${string}`
 export interface Filter {
   text: string
   who: Who
+  /** `''` is any, `'none'` an issue with none, else a project id. */
+  project: string
+  /** `''` is any, `'none'` an issue with none, else a milestone id. */
+  milestone: string
 }
 
 function matchesWho(actor: Actor | null | undefined, who: Who): boolean {
@@ -174,6 +178,8 @@ function matchesWho(actor: Actor | null | undefined, who: Who): boolean {
 export function filterRows(rows: readonly IssueRow[], filter: Filter): IssueRow[] {
   const text = filter.text.trim().toLowerCase()
   return rows.filter(({ issue }) => {
+    if (filter.project && (issue.project?.id ?? 'none') !== filter.project) return false
+    if (filter.milestone && (issue.milestone?.id ?? 'none') !== filter.milestone) return false
     if (!matchesWho(issue.assignee, filter.who)) return false
     if (!text) return true
     const assignee = issue.assignee ? `${issue.assignee.name} ${agentName(issue.assignee.kind)}` : ''
