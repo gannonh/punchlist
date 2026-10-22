@@ -1606,20 +1606,32 @@ pub async fn catch_up_merges_at_start(pool: &sqlx::PgPool) -> Result<(), ApiErro
         .fetch_all(pool)
         .await?;
     for workspace_id in workspaces {
-        let mut tx = pool.begin().await?;
-        lock_workspace(&mut tx, workspace_id).await?;
-        let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
-        let issues = sqlx::query!(
-            "SELECT id, status FROM issue WHERE workspace_id = $1 ORDER BY number",
-            workspace_id
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        for issue in issues {
-            catch_up_merge(&mut tx, workspace_id, &workflow, &issue.id, &issue.status).await?;
+        if let Err(error) = catch_up_workspace_merges(pool, workspace_id).await {
+            tracing::error!(%workspace_id, %error, "could not catch up merged pull requests at start");
         }
-        tx.commit().await?;
     }
+    Ok(())
+}
+
+/// Isolate a workspace's catch-up transaction: an unreadable stored workflow must not
+/// prevent other workspaces from catching up, or prevent the server from starting.
+async fn catch_up_workspace_merges(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await?;
+    lock_workspace(&mut tx, workspace_id).await?;
+    let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
+    let issues = sqlx::query!(
+        "SELECT id, status FROM issue WHERE workspace_id = $1 ORDER BY number",
+        workspace_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for issue in issues {
+        catch_up_merge(&mut tx, workspace_id, &workflow, &issue.id, &issue.status).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

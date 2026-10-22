@@ -2103,6 +2103,61 @@ async fn a_failing_gate_on_a_caught_up_merge_leaves_the_issue_in_merging(pool: P
     assert_eq!(issue_status(&pool).await, "done");
 }
 
+#[sqlx::test]
+async fn an_unreadable_workspace_does_not_abort_startup_catch_up(pool: PgPool) {
+    let broken = bootstrap(
+        &pool,
+        &Bootstrap {
+            workspace_name: "Broken".into(),
+            issue_prefix: "BAD".into(),
+            repository_owner: "gannonh".into(),
+            repository_name: "broken".into(),
+            person_name: "Gannon".into(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            VALUES ($1, 'broken', 'broken', 'not valid TOML', '{}') RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v) WHERE id = $1",
+    )
+    .bind(broken.workspace_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let s = setup(&pool).await;
+    let (status, _) = call(
+        &s.app,
+        &s.person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Fix the thing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    deliver(&s, "pull_request", "merged-1", MERGED).await;
+    sqlx::query("UPDATE issue SET status = 'merging' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    punchlist_server::catch_up_merges_at_start(&pool)
+        .await
+        .unwrap();
+    assert_eq!(issue_status(&pool).await, "done");
+    assert_eq!(
+        event_transitions(&pool).await,
+        [moved("merging", "done", "GitHub", None)]
+    );
+}
+
 /// Restarting neither duplicates a refusal nor retries its transition.
 async fn refused_merge_stays_final_at_start(s: &Setup) {
     let pool = &s.state.pool;
