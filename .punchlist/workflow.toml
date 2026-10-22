@@ -37,7 +37,7 @@ to = "merging"
 by = ["person"]
 
 [[transition]]
-from = "merging"
+from = ["human_review", "merging"]   # human_review: merged on GitHub before the move to Merging
 to = "done"
 on = "pr_merged"
 
