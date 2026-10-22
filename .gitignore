@@ -19,3 +19,4 @@ verify-artifacts/
 # Playwright
 test-results/
 playwright-report/
+notes.md

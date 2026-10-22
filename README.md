@@ -66,7 +66,6 @@ docker compose up -d
 
 ## Develop
 
-
 For development you need Rust (through [rustup](https://rustup.rs), which reads `rust-toolchain.toml`), Node 24, pnpm and Docker.
 
 ```sh
@@ -76,9 +75,9 @@ pnpm dev                                    # Postgres on 127.0.0.1:5433, then t
 In another terminal, create a workspace and a person, and save the printed config. It holds the person's token, so only you can read it:
 
 ```sh
-(umask 077 && mkdir -p ~/.config/punchlist &&
-  DATABASE_URL=postgres://punchlist:punchlist@127.0.0.1:5433/punchlist \
-  cargo run -q -p punchlist-server -- bootstrap --person "Your Name" > ~/.config/punchlist/config.toml)
+umask 077 && mkdir -p ~/.config/punchlist &&
+DATABASE_URL=postgres://punchlist:punchlist@127.0.0.1:5433/punchlist \
+cargo run -q -p punchlist-server -- bootstrap --person "Your Name" > ~/.config/punchlist/config.toml
 ```
 
 Then drive it with `pl`:
