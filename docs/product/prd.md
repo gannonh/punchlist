@@ -10,7 +10,7 @@ The issue is the unit of work. A runner on the team's own machine claims issues 
 
 The first release targets solo developers and small teams, 1 to 10 people, who already run several coding agents in parallel. Teams bring their own agents and subscriptions. The core is open source under MIT or Apache-2.0, at the user's choice, and self-hostable.
 
-The first milestone is dogfooding: Groundwork's issues move from Linear to Punchlist, and Groundwork's agents ship from it.
+The first milestone is dogfooding: Punchlist's own issues move from Linear to Punchlist, and Punchlist's agents ship from it. Groundwork follows once one sign-in can serve several workspaces.
 
 ## Vision
 
@@ -245,7 +245,7 @@ The server publishes a JSON Schema for `workflow.toml`, so editors with a TOML l
 
 ## v1 PRD
 
-v1 runs Groundwork's development for two weeks with no fallback to Linear: issues imported from Linear, agents dispatched by a runner on sartre, and the workflow file enforcing Groundwork's lifecycle.
+v1 runs Punchlist's own development for two weeks with no fallback to Linear: issues imported from Linear, agents dispatched by a runner on sartre, and the workflow file enforcing Punchlist's lifecycle.
 
 ### Problem
 
@@ -348,8 +348,8 @@ All targets are hypotheses to revisit after the dogfood phase.
 
 | Metric | Target | Phase |
 | --- | --- | --- |
-| Consecutive days Groundwork runs from Punchlist with no fallback to Linear | 14 | Gate 1: dogfood |
-| Groundwork pull requests that start from a runner dispatch | 80% or more | Gate 1: dogfood |
+| Consecutive days Punchlist runs from Punchlist with no fallback to Linear | 14 | Gate 1: dogfood |
+| Punchlist pull requests that start from a runner dispatch | 80% or more | Gate 1: dogfood |
 | Agent actions on issues in a status locked to people | 0 | All |
 | Runs lost or duplicated across runner restarts | 0 | All |
 | Weekly active workspaces, 90 days after launch | 50 | 4: launch |
