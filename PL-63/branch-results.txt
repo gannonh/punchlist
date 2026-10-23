@@ -1,0 +1,11 @@
+PASS 1. branch: overlay with <img src=/api/proof/{A}>: {"dialogs":1,"src":"/api/proof/41c2674e-7ae9-4c8b-853e-3f6c692f29bf"}
+PASS 2. image width <= viewport, aspect ratio equals the file: {"viewport":1280,"width":1049.5625,"height":655.984375,"natural":[1360,850],"rendered":1.6,"file":1.6}
+PASS 6. → A→V→B, ← B→V: ["41c2674e-7ae9-4c8b-853e-3f6c692f29bf","a57b8884-c633-4e34-88d0-bb2858646463","b7dcb52f-41b0-4d44-92f3-cb455d9174da","a57b8884-c633-4e34-88d0-bb2858646463"]
+PASS 3. video has controls, currentTime > 0 after 1 s: {"controls":true,"currentTime":1.000546,"src":"/api/proof/a57b8884-c633-4e34-88d0-bb2858646463"}
+PASS 8. link href=/api/proof/{id}, target=_blank, opens a new tab: {"href":"/api/proof/a57b8884-c633-4e34-88d0-bb2858646463","target":"_blank","tabUrl":"/api/proof/a57b8884-c633-4e34-88d0-bb2858646463"}
+PASS 4. Esc closes, focus on the opening card, page stays: {"dialogs":0,"focusIsCard":true,"path":"/issues/PL-2"}
+PASS 5. backdrop click closes: {"opened":"b7dcb52f-41b0-4d44-92f3-cb455d9174da","after":0}
+PASS 7. Tab to a card, Enter opens it: {"focused":"41c2674e-7ae9-4c8b-853e-3f6c692f29bf","viewer":"41c2674e-7ae9-4c8b-853e-3f6c692f29bf"}
+PASS 10. overlay panel uses theme variables only: {"raw":[],"background":"rgb(17, 17, 19)","borderColor":"rgb(63, 63, 70)","linkColor":"rgb(129, 140, 248)","backdrop":["bg-black/50"]}
+PASS 9. 390 px: no horizontal scroll, overlay and image fit: {"scrollWidth":390,"clientWidth":390,"dialog":[16,374],"img":[29,361],"viewport":390}
+video: /home/gannonh/.local/share/punchlist/worktrees/worktrees/gannonh/punchlist/PL-63/verify-artifacts/pl63-branch/checks/page@96cbba237b004c106bfc5e355b76e566.webm
