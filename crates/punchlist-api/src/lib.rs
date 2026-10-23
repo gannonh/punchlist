@@ -264,6 +264,15 @@ pub fn plain_pull_request_url(number: i64, url: &str) -> Option<&str> {
     .then_some(url)
 }
 
+/// A review comment's URL as GitHub sent it, when it is
+/// `https://github.com/<owner>/<name>/pull/<number>#discussion_r<digits>`; otherwise `None`.
+pub fn plain_review_thread_url(url: &str) -> Option<&str> {
+    let (pull_request, comment) = url.split_once("#discussion_r")?;
+    let number = pull_request.rsplit('/').next()?.parse().ok()?;
+    plain_pull_request_url(number, pull_request)?;
+    (!comment.is_empty() && comment.bytes().all(|b| b.is_ascii_digit())).then_some(url)
+}
+
 /// `GET /api/issues`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct IssueList {
@@ -1102,6 +1111,10 @@ pub struct ReviewThread {
     pub comments: Vec<ReviewComment>,
     /// How many comments the thread has, which can be more than `comments`.
     pub comments_total: i32,
+    /// The oldest recorded comment on GitHub; `None` unless it is a plain
+    /// `https://github.com/<owner>/<name>/pull/<number>#discussion_r<id>` URL.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1446,6 +1459,22 @@ mod tests {
             plain_pull_request_url(12, "https://github.com/a/b/pull/12/files"),
             None
         );
+    }
+
+    #[test]
+    fn a_review_thread_url_is_plain_only_as_a_github_discussion_of_a_pull_request() {
+        let url = "https://github.com/gannonh/punchlist/pull/12#discussion_r1700001";
+        assert_eq!(plain_review_thread_url(url), Some(url));
+        for url in [
+            "javascript:alert(1)//https://github.com/a/b/pull/12#discussion_r1",
+            "https://github.com.evil.example/a/b/pull/12#discussion_r1",
+            "https://github.com/a/b/pull/12#discussion_rabc",
+            "https://github.com/a/b/pull/12#discussion_r",
+            "https://github.com/a/b/pull/12",
+            "https://github.com/a/b/pull/+12#discussion_r1",
+        ] {
+            assert_eq!(plain_review_thread_url(url), None, "{url}");
+        }
     }
 
     #[test]
