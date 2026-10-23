@@ -273,7 +273,7 @@ async fn try_claim(
     record_row_event(&mut tx, actor.workspace_id, &id, actor.id, "run").await?;
     let repository = repository(&mut tx, actor.workspace_id).await?;
     tx.commit().await?;
-    Ok(Claimed::Claim(Claim {
+    Ok(Claimed::Claim(Box::new(Claim {
         run_id,
         attempt,
         agent,
@@ -288,12 +288,12 @@ async fn try_claim(
         next_line: 1,
         github: None,
         github_error: None,
-    }))
+    })))
 }
 
 /// What `try_claim` did.
 enum Claimed {
-    Claim(Claim),
+    Claim(Box<Claim>),
     Nothing,
     /// The workspace runs `max_concurrent` attempts already.
     AtLimit,
@@ -479,7 +479,7 @@ async fn claim(
     loop {
         let at_limit = match claimed {
             Claimed::Claim(claim) => {
-                return Ok(Json(with_github_token(&state, claim).await).into_response());
+                return Ok(Json(with_github_token(&state, *claim).await).into_response());
             }
             Claimed::Nothing => false,
             Claimed::AtLimit => true,
