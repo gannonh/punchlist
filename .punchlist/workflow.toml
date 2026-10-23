@@ -52,6 +52,11 @@ to = "done"
 on = "pr_merged"
 
 [[transition]]
+from = ["backlog", "todo"]           # an epic: its children are all done or canceled
+to = "done"
+on = "children_done"
+
+[[transition]]
 from = ["in_progress", "agent_review"]
 to = "todo"
 on = "pr_closed_unmerged"
