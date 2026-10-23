@@ -2,6 +2,7 @@
 //! output as log lines and reads the final `result` line for the outcome and token counts.
 //! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -273,10 +274,13 @@ fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult
 /// arrive; stderr lines go there prefixed with `stderr: `. The channel is bounded, so a slow
 /// server slows the agent rather than growing the runner's memory. The agent runs in its own
 /// process group; when `stop` becomes true the whole group is killed and this returns
-/// `Stopped`. Anything left in the group after the agent exits is killed too.
+/// `Stopped`. Anything left in the group after the agent exits is killed too. `env` goes over
+/// the runner's environment; `None` removes a variable.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_claude(
     claude_command: &Path,
     args: &[String],
+    env: &[(&'static str, Option<OsString>)],
     worktree: &Path,
     prompt: &str,
     marker: &str,
@@ -291,7 +295,9 @@ pub async fn run_claude(
             output_tokens: None,
         })
     };
-    let spawned = Command::new(claude_command)
+    let mut command = Command::new(claude_command);
+    with_env(&mut command, env);
+    let spawned = command
         .args(args)
         .current_dir(worktree)
         // The agent reads untrusted issue text; keep the person's config path out of its reach.
@@ -418,6 +424,16 @@ pub(crate) fn kill_runner(runner_id: &str) -> usize {
 
 /// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
 /// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
+/// Sets each `Some` variable of `env` on `command` and removes each `None` one.
+pub(crate) fn with_env(command: &mut Command, env: &[(&'static str, Option<OsString>)]) {
+    for (name, value) in env {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+}
+
 pub(crate) fn kill_group(leader: Option<u32>) {
     if let Some(pid) = leader {
         let _ = std::process::Command::new("kill")
@@ -525,6 +541,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let exit = run_claude(
             &command,
             &claude_args(None, None, uuid::Uuid::nil(), false),
+            &[],
             temp.path(),
             "p",
             "test",
@@ -605,6 +622,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let exit = run_claude(
             &command,
             &claude_args(Some("haiku"), None, uuid::Uuid::nil(), false),
+            &[],
             temp.path(),
             prompt,
             "test",
@@ -778,6 +796,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
         let exit = run_claude(
             &missing,
             &claude_args(None, None, uuid::Uuid::nil(), false),
+            &[],
             temp.path(),
             "p",
             "test",
@@ -802,6 +821,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             run_claude(
                 &command,
                 &claude_args(None, None, uuid::Uuid::nil(), false),
+                &[],
                 temp.path(),
                 "p",
                 "test",
@@ -848,6 +868,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             run_claude(
                 &command,
                 &claude_args(None, None, uuid::Uuid::nil(), false),
+                &[],
                 &dir,
                 "p",
                 "test",

@@ -33,6 +33,18 @@ pub struct GithubClient {
     http: reqwest::Client,
     base_url: String,
     auth: Auth,
+    /// The App's bot account, read once.
+    bot: Arc<tokio::sync::OnceCell<Bot>>,
+    /// Test-only: a run's token is reported to expire this long after it is minted, or
+    /// sooner when GitHub's does, so a runner refreshes it before GitHub's hour is up.
+    token_lifetime: Option<std::time::Duration>,
+}
+
+/// The account an installation token acts as.
+#[derive(Clone)]
+struct Bot {
+    name: String,
+    email: String,
 }
 
 #[derive(Deserialize)]
@@ -43,7 +55,26 @@ struct Installation {
 #[derive(Deserialize)]
 struct AccessToken {
     token: String,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// What the token may do, such as `"contents": "write"`.
+    #[serde(default)]
+    permissions: HashMap<String, String>,
 }
+
+#[derive(Deserialize)]
+struct App {
+    slug: String,
+}
+
+#[derive(Deserialize)]
+struct User {
+    id: u64,
+}
+
+/// What a run's token has to be able to do: push its branch, and open, comment on and merge
+/// its pull request.
+const RUN_PERMISSIONS: [&str; 2] = ["contents", "pull_requests"];
 
 #[derive(Deserialize)]
 struct RepositoryInfo {
@@ -214,7 +245,99 @@ impl GithubClient {
                 .expect("a reqwest client builds"),
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
+            bot: Arc::default(),
+            token_lifetime: None,
         }
+    }
+
+    /// Test-only: report a run's token to expire `lifetime` after it is minted.
+    pub fn with_token_lifetime(mut self, lifetime: std::time::Duration) -> GithubClient {
+        self.token_lifetime = Some(lifetime);
+        self
+    }
+
+    /// A token for a run, limited to the one repository, that acts as the App's bot. An
+    /// error when the App's installation cannot write the repository's contents and pull
+    /// requests, since the run's push and pull request would then be refused.
+    pub(crate) async fn run_token(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> anyhow::Result<punchlist_api::GithubToken> {
+        // A fixed token stands in for the App's JWT against a fake GitHub.
+        let app = match &self.auth {
+            Auth::Token(token) => token.clone(),
+            Auth::App { app_id, key } => app_jwt(app_id, key)?,
+        };
+        let installation: Installation = self
+            .call(
+                &app,
+                reqwest::Method::GET,
+                &format!("/repos/{owner}/{name}/installation"),
+            )
+            .await?
+            .json()
+            .await?;
+        let minted: AccessToken = self
+            .send(
+                &app,
+                reqwest::Method::POST,
+                &format!("/app/installations/{}/access_tokens", installation.id),
+                Some(&serde_json::json!({ "repositories": [name] })),
+            )
+            .await?
+            .json()
+            .await?;
+        let short: Vec<String> = (RUN_PERMISSIONS.iter())
+            .filter(|p| minted.permissions.get(**p).map(String::as_str) != Some("write"))
+            .map(|p| {
+                let has = minted.permissions.get(*p).map_or("none", String::as_str);
+                format!("{p}: {has}")
+            })
+            .collect();
+        if !short.is_empty() {
+            anyhow::bail!(
+                "the GitHub App's installation on {owner}/{name} grants {}; a run needs \
+                 contents and pull_requests: write (GitHub App settings, Permissions, then \
+                 accept them on the installation)",
+                short.join(", ")
+            );
+        }
+        let bot = self
+            .bot
+            .get_or_try_init(|| async {
+                let app: App = (self.call(&app, reqwest::Method::GET, "/app").await?)
+                    .json()
+                    .await?;
+                let name = format!("{}[bot]", app.slug);
+                // `/users` takes an installation token, not the App's JWT.
+                let user: User = self
+                    .call(
+                        &minted.token,
+                        reqwest::Method::GET,
+                        &format!("/users/{}%5Bbot%5D", app.slug),
+                    )
+                    .await?
+                    .json()
+                    .await?;
+                let email = format!("{}+{name}@users.noreply.github.com", user.id);
+                anyhow::Ok(Bot { name, email })
+            })
+            .await?;
+        let now = chrono::Utc::now();
+        // GitHub's tokens last an hour.
+        let mut expires_at = minted
+            .expires_at
+            .unwrap_or(now + chrono::Duration::hours(1));
+        if let Some(lifetime) = self.token_lifetime {
+            expires_at = expires_at.min(now + chrono::Duration::from_std(lifetime)?);
+        }
+        Ok(punchlist_api::GithubToken {
+            token: minted.token,
+            expires_at,
+            bot_name: bot.name.clone(),
+            bot_email: bot.email.clone(),
+        })
     }
 
     /// A token for calls on one repository.

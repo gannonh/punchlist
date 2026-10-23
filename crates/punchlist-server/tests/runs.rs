@@ -1222,3 +1222,180 @@ async fn one_issue_has_at_most_one_running_attempt(pool: PgPool) {
         Some("attempt_one_running_per_issue")
     );
 }
+
+/// A fake GitHub that mints installation tokens for the App installed on
+/// `gannonh/punchlist`, with `permissions`, numbered `ghs_1`, `ghs_2`, ..., and records each
+/// mint's path and body.
+async fn token_github(
+    permissions: Value,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+) {
+    use axum::extract::{Path, State};
+    use axum::routing::{get, post};
+    type Mints = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+    let mints: Mints = Default::default();
+    let app = Router::new()
+        .route(
+            "/repos/gannonh/punchlist/installation",
+            get(|| async { axum::Json(json!({"id": 77})) }),
+        )
+        .route(
+            "/app/installations/{id}/access_tokens",
+            post(
+                move |State(mints): State<Mints>,
+                      Path(id): Path<String>,
+                      axum::Json(body): axum::Json<Value>| {
+                    let permissions = permissions.clone();
+                    async move {
+                        let mut mints = mints.lock().unwrap();
+                        mints.push((id, body));
+                        axum::Json(json!({
+                            "token": format!("ghs_{}", mints.len()),
+                            "expires_at": "2099-01-01T00:00:00Z",
+                            "permissions": permissions,
+                        }))
+                    }
+                },
+            ),
+        )
+        .route(
+            "/app",
+            get(|| async { axum::Json(json!({"slug": "punchlist-sartre"})) }),
+        )
+        .route(
+            "/users/{login}",
+            get(|Path(login): Path<String>| async move {
+                assert_eq!(login, "punchlist-sartre[bot]");
+                axum::Json(json!({"id": 4242}))
+            }),
+        )
+        .with_state(mints.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (url, mints)
+}
+
+#[sqlx::test]
+async fn a_claim_answers_a_token_for_its_repository_and_only_its_running_attempt_refreshes_it(
+    pool: PgPool,
+) {
+    let (url, mints) =
+        token_github(json!({"contents": "write", "pull_requests": "write", "checks": "read"}))
+            .await;
+    let (_, person) = setup(&pool, Duration::from_secs(30)).await;
+    let github = punchlist_server::GithubClient::with_token(&url, "app-jwt");
+    let app = router(AppState::new(pool.clone()).with_github(github));
+    let runner = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let other = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Push as the App", &["todo", "start"]).await;
+
+    let (status, claimed) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(
+        claimed["github"],
+        json!({
+            "token": "ghs_1",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "bot_name": "punchlist-sartre[bot]",
+            "bot_email": "4242+punchlist-sartre[bot]@users.noreply.github.com",
+        })
+    );
+    assert_eq!(claimed["github_error"], Value::Null);
+    // The workspace's installation, limited to its one repository.
+    assert_eq!(
+        mints.lock().unwrap().clone(),
+        [("77".to_string(), json!({"repositories": ["punchlist"]}))]
+    );
+
+    let run = claimed["run_id"].as_str().unwrap();
+    let refresh = format!("/api/runs/{run}/github-token");
+    let (status, body) = call(
+        &app,
+        &runner.token,
+        "POST",
+        &refresh,
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["token"].clone()),
+        (StatusCode::OK, json!("ghs_2"))
+    );
+    // Another runner, an attempt that is not running, the person: none get one.
+    let (status, body) = call(
+        &app,
+        &other.token,
+        "POST",
+        &refresh,
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].clone()),
+        (StatusCode::CONFLICT, json!("stale_attempt"))
+    );
+    let (status, _) = call(
+        &app,
+        &runner.token,
+        "POST",
+        &refresh,
+        Some(json!({"attempt": 2})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = call(
+        &app,
+        &person.token,
+        "POST",
+        &refresh,
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let finish = json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1});
+    let (status, body) = call(
+        &app,
+        &runner.token,
+        "POST",
+        &format!("/api/runs/{run}/finish"),
+        Some(finish),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = call(
+        &app,
+        &runner.token,
+        "POST",
+        &refresh,
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].clone()),
+        (StatusCode::CONFLICT, json!("stale_attempt"))
+    );
+    assert_eq!(mints.lock().unwrap().len(), 2);
+}
+
+#[sqlx::test]
+async fn a_claim_whose_app_cannot_write_says_why_and_has_no_token(pool: PgPool) {
+    let (url, _) = token_github(json!({"contents": "read", "pull_requests": "read"})).await;
+    let (_, person) = setup(&pool, Duration::from_secs(30)).await;
+    let github = punchlist_server::GithubClient::with_token(&url, "app-jwt");
+    let app = router(AppState::new(pool.clone()).with_github(github));
+    let runner = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Push as the App", &["todo", "start"]).await;
+
+    let (status, claimed) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["github"], Value::Null);
+    assert_eq!(
+        claimed["github_error"],
+        "the GitHub App's installation on gannonh/punchlist grants contents: read, \
+         pull_requests: read; a run needs contents and pull_requests: write (GitHub App \
+         settings, Permissions, then accept them on the installation)"
+    );
+}

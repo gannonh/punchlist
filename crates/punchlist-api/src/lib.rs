@@ -709,6 +709,27 @@ pub struct Claim {
     /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
     /// stored line on a resumed one.
     pub next_line: i64,
+    /// The token the run acts on GitHub with, as the workspace's GitHub App. `None` when the
+    /// server has no App credentials, or could not mint one (`github_error`).
+    #[serde(default)]
+    pub github: Option<GithubToken>,
+    /// Why the server could not mint the run's token, such as GitHub's answer. The runner
+    /// fails the attempt with it.
+    #[serde(default)]
+    pub github_error: Option<String>,
+}
+
+/// An installation token of the workspace's GitHub App, for its repository alone, and the
+/// App's bot account, which a run's commits are authored by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GithubToken {
+    pub token: String,
+    /// The runner asks for a fresh one before then (`POST /api/runs/{id}/github-token`).
+    pub expires_at: DateTime<Utc>,
+    /// `<app slug>[bot]`.
+    pub bot_name: String,
+    /// `<bot user id>+<app slug>[bot]@users.noreply.github.com`.
+    pub bot_email: String,
 }
 
 /// `GET /api/runners/{id}/leases`: a running attempt the runner holds whose lease has not
@@ -729,6 +750,12 @@ pub struct Lease {
 /// same agent session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ResumeRun {
+    pub attempt: i32,
+}
+
+/// `POST /api/runs/{id}/github-token`: the runner's running attempt, whose token to renew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RefreshGithubToken {
     pub attempt: i32,
 }
 

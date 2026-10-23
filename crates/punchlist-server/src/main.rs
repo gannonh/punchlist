@@ -43,6 +43,10 @@ enum Command {
             requires = "github_app_id"
         )]
         github_app_private_key: Option<String>,
+        /// A test setting: report each run's GitHub token to expire this many seconds after
+        /// it is minted, instead of GitHub's hour, so runners refresh it sooner.
+        #[arg(long, env = "PUNCHLIST_GITHUB_TOKEN_LIFETIME", hide = true)]
+        github_token_lifetime: Option<u64>,
         /// The directory proof files are kept in. A leading `~/` is the home directory.
         #[arg(
             long,
@@ -108,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             github_webhook_secret,
             github_app_id,
             github_app_private_key,
+            github_token_lifetime,
             proof_dir,
             proof_max_bytes,
             web_dir,
@@ -162,7 +167,12 @@ async fn main() -> anyhow::Result<()> {
             }
             match github_app_id.zip(github_app_private_key) {
                 Some((id, key)) => {
-                    state = state.with_github(GithubClient::app(&id, &key)?);
+                    let mut github = GithubClient::app(&id, &key)?;
+                    if let Some(seconds) = github_token_lifetime {
+                        github =
+                            github.with_token_lifetime(std::time::Duration::from_secs(seconds));
+                    }
+                    state = state.with_github(github);
                     queue_workflow_loads_at_start(&state.pool, uuid::Uuid::new_v4())
                         .await
                         .context("queue the workflow loads")?;
