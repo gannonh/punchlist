@@ -87,7 +87,8 @@ struct Claimable {
 /// attempt was lost (`settle_run`). The three kinds are ordered together, so started issues
 /// do not hold back a dispatch on an older one. An issue in a status the workflow locks to
 /// agents or runners is never claimed, even with a dispatch waiting there from an older
-/// workflow.
+/// workflow. A new run in a status whose dispatch rule is `serial` waits while any run in that
+/// status is running in the workspace, which has one repository.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -105,6 +106,12 @@ async fn select_claimable(
         .iter()
         .filter(|(_, roles)| roles.contains(&Role::Agent) || roles.contains(&Role::Runner))
         .map(|(status, _)| status.as_str())
+        .collect();
+    let serial: Vec<&str> = workflow
+        .statuses()
+        .iter()
+        .map(|status| status.as_str())
+        .filter(|status| workflow.dispatch_for(status).is_some_and(|d| d.serial))
         .collect();
     let only = match target {
         Target::Any => None,
@@ -138,6 +145,12 @@ async fn select_claimable(
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
                                            AND run.outcome = 'running')
                  END
+             AND (r.id IS NOT NULL
+                  OR NOT CASE WHEN i.status = $4 THEN $7 ELSE i.status END = ANY($8)
+                  OR NOT EXISTS (SELECT 1 FROM run s WHERE s.workspace_id = $1
+                                 AND s.outcome = 'running'
+                                 AND s.status = CASE WHEN i.status = $4 THEN $7
+                                                     ELSE i.status END))
            ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
         workspace_id,
         &runner.agents,
@@ -145,6 +158,8 @@ async fn select_claimable(
         START,
         start_agent,
         &locked as &[&str],
+        IN_PROGRESS,
+        &serial as &[&str],
     )
     .fetch_optional(&mut *tx)
     .await
@@ -748,6 +763,20 @@ async fn finish_run(
     let _ = state
         .starts
         .send((actor.workspace_id, run.issue_id.clone()));
+    // So can the next dispatch waiting in the run's status, which a `serial` rule held back.
+    let next = sqlx::query_scalar!(
+        "SELECT i.id FROM dispatch d JOIN issue i ON i.id = d.issue_id
+         WHERE i.workspace_id = $1 AND d.run_id IS NULL
+           AND i.status = (SELECT status FROM run WHERE id = $2)
+         ORDER BY i.number LIMIT 1",
+        actor.workspace_id,
+        id,
+    )
+    .fetch_optional(&state.pool)
+    .await?;
+    if let Some(next) = next {
+        let _ = state.starts.send((actor.workspace_id, next));
+    }
     Ok(Json(run))
 }
 

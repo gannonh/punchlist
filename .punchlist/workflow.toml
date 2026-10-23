@@ -74,6 +74,7 @@ prompt = "prompts/agent_review.md"
 [dispatch.status.merging]
 agent = "claude-code"
 prompt = "prompts/merging.md"
+serial = true                    # each merge lands on the main the previous one left
 
 # `ci_green` passes when every check run on the head commit passed. To also require named
 # checks, so that a branch that deletes its CI workflow does not pass, list them: a name is a
