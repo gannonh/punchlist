@@ -5,6 +5,10 @@ services:
   db:
     image: postgres:17
     restart: unless-stopped
+    # An agent's run sets PUNCHLIST_ATTEMPT, so the runner removes the container when the attempt
+    # ends (verify-punchlist's `up`, `pnpm dev`, `pnpm check`). Empty outside a run.
+    labels:
+      punchlist.attempt: ${PUNCHLIST_ATTEMPT:-}
     environment:
       POSTGRES_USER: punchlist
       POSTGRES_PASSWORD: punchlist

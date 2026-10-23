@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use punchlist_api::{Issue, Repository, RunOutcome};
 use punchlist_core::{fenced, is_plain_name, quoted};
@@ -385,42 +386,117 @@ pub async fn run_claude(
 /// (`kill_runner`).
 pub(crate) const RUNNER_MARKER: &str = "PUNCHLIST_RUNNER";
 
-/// Kills every process of this user whose environment carries `runner_id`, and the process
-/// group each leads: the agents, and their commands, an earlier process of this runner
-/// started. Returns how many it found. Reads `/proc`, so it finds nothing off Linux.
+/// The environment variable every agent process carries beside `RUNNER_MARKER`: the attempt
+/// it works for, `<run id>-<attempt>`. Commands the agent starts outside its process group,
+/// such as `setsid pnpm dev`, keep it, so the end of the attempt finds them (`end_attempt`).
+pub(crate) const ATTEMPT_MARKER: &str = "PUNCHLIST_ATTEMPT";
+
+/// The Docker label of the containers an attempt's commands start, with the attempt as its
+/// value: verify-punchlist's `up` sets it from `ATTEMPT_MARKER`.
+const ATTEMPT_LABEL: &str = "punchlist.attempt";
+
+/// How long the processes an attempt left get between SIGTERM and SIGKILL.
+pub(crate) const ATTEMPT_GRACE: Duration = Duration::from_secs(10);
+
+/// How long one `docker` command of an attempt's cleanup may take.
+const DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The ids of this user's processes, this one aside, whose environment holds `var=value`.
+/// Reads `/proc`, so it finds nothing off Linux. A zombie's environment reads empty, so a
+/// process that has died is not among them.
 // ponytail: Linux only. Upgrade path: a pid file per agent under the state directory, for
 // macOS runners.
-pub(crate) fn kill_runner(runner_id: &str) -> usize {
-    let wanted = format!("{RUNNER_MARKER}={runner_id}").into_bytes();
+fn marked(var: &str, value: &str) -> Vec<u32> {
+    let wanted = format!("{var}={value}").into_bytes();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return 0;
+        return Vec::new();
     };
-    let mut found = 0;
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
-            continue;
-        };
-        if environ
-            .split(|&b| b == 0)
-            .any(|var| var == wanted.as_slice())
-        {
-            found += 1;
-            kill_group(Some(pid));
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let environ = std::fs::read(entry.path().join("environ")).ok()?;
+            let found = environ
+                .split(|&b| b == 0)
+                .any(|var| var == wanted.as_slice());
+            (found && pid != std::process::id()).then_some(pid)
+        })
+        .collect()
+}
+
+/// Sends `signal` (`TERM`, `KILL`) to each of `pids`.
+fn signal(signal: &str, pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .args(pids.iter().map(u32::to_string))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Kills every process of this user whose environment carries `runner_id`, and the process
+/// group each leads: the agents, and their commands, an earlier process of this runner
+/// started. Returns how many it found.
+pub(crate) fn kill_runner(runner_id: &str) -> usize {
+    let found = marked(RUNNER_MARKER, runner_id);
+    for &pid in &found {
+        kill_group(Some(pid));
+    }
+    signal("KILL", &found);
+    found.len()
+}
+
+/// Ends what an attempt left running after its agent exited: every process whose environment
+/// carries `ATTEMPT_MARKER=attempt` gets SIGTERM, and SIGKILL once `grace` has passed, and
+/// every container labeled `punchlist.attempt=<attempt>` is removed. Returns how many
+/// processes and containers it found. Without Docker it removes no container.
+pub(crate) async fn end_attempt(attempt: &str, grace: Duration) -> (usize, usize) {
+    let found = marked(ATTEMPT_MARKER, attempt);
+    signal("TERM", &found);
+    let deadline = tokio::time::Instant::now() + grace;
+    let mut left = found.clone();
+    while !left.is_empty() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        left = marked(ATTEMPT_MARKER, attempt);
+        if tokio::time::Instant::now() >= deadline {
+            // A process a command forks while dying is killed on the next pass.
+            signal("KILL", &left);
         }
     }
-    found
+    (found.len(), remove_containers(attempt).await)
+}
+
+/// Removes the containers labeled with `attempt`, running or not. Returns how many.
+async fn remove_containers(attempt: &str) -> usize {
+    let docker = |args: Vec<String>| async move {
+        let output = Command::new("docker")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        match tokio::time::timeout(DOCKER_TIMEOUT, output).await {
+            Ok(Ok(output)) if output.status.success() => Some(output.stdout),
+            _ => None,
+        }
+    };
+    let filter = format!("label={ATTEMPT_LABEL}={attempt}");
+    let Some(listed) = docker(vec!["ps".into(), "-aq".into(), "--filter".into(), filter]).await
+    else {
+        return 0;
+    };
+    let ids: Vec<String> = String::from_utf8_lossy(&listed)
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    if ids.is_empty() {
+        return 0;
+    }
+    let count = ids.len();
+    let removed = docker([vec!["rm".into(), "-f".into()], ids].concat()).await;
+    if removed.is_some() { count } else { 0 }
 }
 
 /// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
@@ -452,33 +528,36 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    /// Starts `sh -c script` with `var=value`, and returns once its environment shows it:
+    /// `spawn` returns once the child has forked, before `execve` has replaced its
+    /// environment, so `/proc/<pid>/environ` reads empty, then holds the test's own
+    /// environment, and only then the marker.
+    fn spawn_marked(var: &str, value: &str, script: &str) -> std::process::Child {
+        let child = std::process::Command::new("sh")
+            .args(["-c", script])
+            .env(var, value)
+            .spawn()
+            .unwrap();
+        let environ = format!("/proc/{}/environ", child.id());
+        let wanted = format!("{var}={value}").into_bytes();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !std::fs::read(&environ)
+            .unwrap_or_default()
+            .split(|&b| b == 0)
+            .any(|var| var == wanted.as_slice())
+        {
+            assert!(std::time::Instant::now() < deadline, "no marker");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child
+    }
+
     #[test]
     fn kill_runner_kills_only_the_processes_of_its_runner() {
         let marker = uuid::Uuid::new_v4().to_string();
-        // `spawn` returns once the child has forked, before `execve` has replaced its
-        // environment: `/proc/<pid>/environ` reads empty, then holds the test's own
-        // environment, and only then the marker. Wait for the marker.
-        let spawn = |value: &str| {
-            let child = std::process::Command::new("sleep")
-                .arg("30")
-                .env(RUNNER_MARKER, value)
-                .spawn()
-                .unwrap();
-            let environ = format!("/proc/{}/environ", child.id());
-            let wanted = format!("{RUNNER_MARKER}={value}").into_bytes();
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while !std::fs::read(&environ)
-                .unwrap_or_default()
-                .split(|&b| b == 0)
-                .any(|var| var == wanted.as_slice())
-            {
-                assert!(std::time::Instant::now() < deadline, "no marker");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            child
-        };
-        let mut ours = spawn(&marker);
-        let mut other = spawn(&uuid::Uuid::new_v4().to_string());
+        let other_marker = uuid::Uuid::new_v4().to_string();
+        let mut ours = spawn_marked(RUNNER_MARKER, &marker, "exec sleep 30");
+        let mut other = spawn_marked(RUNNER_MARKER, &other_marker, "exec sleep 30");
         assert_eq!(kill_runner(&marker), 1);
         assert_eq!(ours.wait().unwrap().code(), None, "killed by a signal");
         assert_eq!(
@@ -489,6 +568,37 @@ pub(crate) mod tests {
         other.kill().unwrap();
         other.wait().unwrap();
     }
+
+    /// One process ends on SIGTERM, one ignores it and gets SIGKILL after the grace, and
+    /// another attempt's process runs on.
+    #[tokio::test]
+    async fn end_attempt_ends_only_its_attempts_processes() {
+        let attempt = uuid::Uuid::new_v4().to_string();
+        let other_attempt = uuid::Uuid::new_v4().to_string();
+        let mut polite = spawn_marked(ATTEMPT_MARKER, &attempt, "exec sleep 30");
+        let mut stubborn = spawn_marked(ATTEMPT_MARKER, &attempt, "trap '' TERM; exec sleep 30");
+        let mut other = spawn_marked(ATTEMPT_MARKER, &other_attempt, "exec sleep 30");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            end_attempt(&attempt, Duration::from_millis(500)).await,
+            (2, 0)
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "waited the grace"
+        );
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(polite.wait().unwrap().signal(), Some(15));
+        assert_eq!(stubborn.wait().unwrap().signal(), Some(9));
+        assert_eq!(
+            other.try_wait().unwrap(),
+            None,
+            "the other attempt's process still runs"
+        );
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
+
     async fn records(input: &[u8], max: usize) -> Vec<String> {
         let mut reader = BufReader::with_capacity(8, input);
         let mut out = Vec::new();
