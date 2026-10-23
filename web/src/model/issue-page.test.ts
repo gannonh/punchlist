@@ -5,6 +5,7 @@ import {
   feedEntries,
   gateSummary,
   logView,
+  mediaStep,
   modelView,
   moveView,
   plainPullRequestUrl,
@@ -289,6 +290,28 @@ describe('logView', () => {
     expect(logView('stderr: warning: unused import')).toEqual({ kind: 'plain', text: 'stderr: warning: unused import' })
     expect(logView('{"type": "assistant"')).toEqual({ kind: 'plain', text: '{"type": "assistant"' })
     expect(logView('42')).toEqual({ kind: 'plain', text: '42' })
+  })
+})
+
+describe('mediaStep', () => {
+  const proof = [
+    { id: 'a', kind: 'image' },
+    { id: 'r', kind: 'report' },
+    { id: 'v', kind: 'video' },
+    { id: 'b', kind: 'image' },
+  ] as const
+
+  test('steps through images and videos in card order, skipping reports', () => {
+    expect(mediaStep(proof, 'a', 1)).toBe('v')
+    expect(mediaStep(proof, 'v', 1)).toBe('b')
+    expect(mediaStep(proof, 'b', -1)).toBe('v')
+    expect(mediaStep(proof, 'v', -1)).toBe('a')
+  })
+
+  test('stops at either end and for an id that is not media', () => {
+    expect(mediaStep(proof, 'a', -1)).toBe(null)
+    expect(mediaStep(proof, 'b', 1)).toBe(null)
+    expect(mediaStep(proof, 'r', 1)).toBe(null)
   })
 })
 
