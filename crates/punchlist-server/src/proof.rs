@@ -317,8 +317,8 @@ async fn list_proof(
 }
 
 /// A proof file's bytes, with its content type. It is served so that a browser neither
-/// guesses another type nor runs it. An agent's token gets 403: agents reach only
-/// `/api/issues/...`.
+/// guesses another type nor runs it. A run's agent's token gets 403: it reaches only its
+/// run's issue.
 #[utoipa::path(
     get,
     path = "/api/proof/{id}",

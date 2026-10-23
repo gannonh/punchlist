@@ -12,7 +12,7 @@
   "paths": {
     "/api/actors": {
       "get": {
-        "summary": "List the workspace's people, agents and runners, oldest first. Person token.",
+        "summary": "List the workspace's people, agents and runners, oldest first. A person's or a\nstandalone agent's token.",
         "operationId": "list_actors",
         "responses": {
           "200": {
@@ -34,7 +34,7 @@
             }
           },
           "403": {
-            "description": "Not a person's token.",
+            "description": "A runner's or a run's agent's token.",
             "content": {
               "application/json": {
                 "schema": {
@@ -46,7 +46,7 @@
         }
       },
       "post": {
-        "summary": "Mint an agent actor with its own token and no run. Its token reaches the workspace's\nissues, `/api/issues/<id>` and below, and nothing else. Person token.",
+        "summary": "Mint an agent actor with its own token and no run. Its token reaches the workspace's\nissues, creating and listing them and the event stream, projects, the workflow, actors and\nproof files, and nothing else. Person token.",
         "operationId": "create_agent",
         "requestBody": {
           "content": {
@@ -88,7 +88,7 @@
             }
           },
           "422": {
-            "description": "An unknown kind or owner.",
+            "description": "An unknown kind or owner, or a name over 100 characters.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1074,7 +1074,7 @@
     },
     "/api/proof/{id}": {
       "get": {
-        "summary": "A proof file's bytes, with its content type. It is served so that a browser neither\nguesses another type nor runs it. An agent's token gets 403: agents reach only\n`/api/issues/...`.",
+        "summary": "A proof file's bytes, with its content type. It is served so that a browser neither\nguesses another type nor runs it. A run's agent's token gets 403: it reaches only its\nrun's issue.",
         "operationId": "get_proof",
         "parameters": [
           {
@@ -2585,6 +2585,13 @@
               "string",
               "null"
             ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the timeline calls the agent, 1 to 100 characters. The kind's name by default,\nsuch as `Codex`."
           },
           "owner": {
             "type": [

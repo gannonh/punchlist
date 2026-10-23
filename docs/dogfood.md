@@ -13,7 +13,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
 | GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only. Runs act on GitHub as it: their pushes, pull requests, comments, thread replies and merges show as `punchlist-sartre[bot]`. It needs Contents and Pull requests: Read and write, Checks: Read |
 | Workspace | `Punchlist` (prefix `PL`, `gannonh/punchlist`) |
-| `pl` config | `~/.config/punchlist/punchlist.toml` |
+| `pl` config | `~/.config/punchlist/punchlist.toml` (Gannon), `~/.config/punchlist/orchestrator.toml` (the orchestrator) |
 
 Start or update it:
 
@@ -54,6 +54,17 @@ A runner keeps its name, so starting it again re-adopts the same runner. Stoppin
 ## A day
 
 Two people work the instance: Gannon, and one long-lived Claude Code session, the orchestrator, in the herdr workspace `punchlist-dogfood` on sartre (pane `orchestrator`), started in `~/dev/punchlist`. The orchestrator plans and grooms issues and reads the runs; it never implements an issue itself, so every implementing pull request comes from a runner dispatch. Its own pull requests (docs, prompts) are made in a worktree, never on the instance's checkout, and count against the 80% target.
+
+The orchestrator acts in Punchlist as itself, the agent `Orchestrator`, so the timeline shows its issues, edits and comments as `Orchestrator (agent, claude-code)`, not as Gannon. It runs `pl` with `PUNCHLIST_CONFIG=~/.config/punchlist/orchestrator.toml`, which holds that agent's token. Its token creates, lists, edits and comments on issues, and reads the event stream, projects, the workflow, actors and proof files. It cannot make a person's move (`backlog → todo`, `todo → start`, `human_review → merging`), act in a status locked to agents, create projects or milestones, mint actors, or register runners. Mint the agent once, as Gannon:
+
+```sh
+PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl actor create --agent --kind claude-code --name Orchestrator
+# Prints the agent's token once. Write it into the orchestrator's config:
+printf 'server_url = "http://127.0.0.1:7880"\ntoken = "%s"\n' '<token>' > ~/.config/punchlist/orchestrator.toml
+chmod 600 ~/.config/punchlist/orchestrator.toml
+```
+
+Its GitHub actions (merges, pull request comments, `@coderabbitai` requests through `gh`) still show the account `gh` is logged in as.
 
 1. Open the app. Read the board: what moved overnight, what waits on you in Human Review, and anything that shows `waiting on a person`.
 2. Review each Human Review pull request on GitHub. Move it to Merging, or back with a comment. Merge from Merging only.
