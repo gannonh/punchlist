@@ -2,7 +2,7 @@
 
 Punchlist is an open-source issue tracker where coding agents do the work and the tracker enforces how the work gets done. It is for solo developers and small teams that run several coding agents in parallel.
 
-- Product spec: `docs/product/prd.md`.
+- Product spec: `docs/product/prd.md` (vision, principles, the workflow model, non-goals). The requirements are epics in the Punchlist workspace (`R<n>: …`, labeled `epic` and `P0` to `P3`, with their slices as children), and the roadmap is its milestones.
 - Decisions: `docs/adr/`. Read the relevant ADR before changing what it decided.
 - Work: Punchlist runs from its own Punchlist instance (`docs/dogfood.md`): workspace `Punchlist`, issues `PL-<n>`, read and moved with `pl` (`PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml` on sartre) or the app at `https://sartre.tail984796.ts.net:7880`. Where the global rules say Linear, read this instance. The Linear project **Punchlist** in the Kata-sh team is read-only since the KAT-3792 cutover; its issues were imported, each showing its `KAT-<n>` id. A long-lived orchestrator session on sartre plans, grooms, watches and reviews the runs and never implements an issue itself (`docs/dogfood.md`, A day).
 

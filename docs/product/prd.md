@@ -285,36 +285,7 @@ A developer running five agents spends the day starting runs by hand, checking w
 
 ### Functional requirements
 
-A requirement's priority names the phase that ships it: P0 in Gate 1, P1 in Phase 2, P2 in Phase 3 and P3 in Phase 4. The P0 rows are v1.
-
-| ID | Requirement | Priority |
-| --- | --- | --- |
-| R1 | Issues: create and edit with a Markdown body, labels, project, milestone, parent and child, assignee (person or agent) | P0 |
-| R2 | List and board views with keyboard navigation and filters | P0 |
-| R3 | Parse, validate and version `workflow.toml` and its per-status prompts: statuses, transitions, roles, locks, dispatch rules; publish its JSON Schema | P0 |
-| R4 | Gates: `pr_open`, `pr_ready`, `pr_names_issue`, `ci_green`, `mergeable`, `no_open_threads`, `proof_attached` | P0 |
-| R5 | Transition API that checks roles, locks and gates in one transaction and returns the failing gate and reason | P0 |
-| R6 | Append-only event log and timeline per issue | P0 |
-| R7 | Separate identities, roles and API tokens for people and agents | P0 |
-| R8 | Runner: register, heartbeat, claim with a lease, one worktree per issue, start Claude Code and Codex, stream logs, recover after restart | P0 |
-| R9 | Runner support for OpenCode and Pi | P1 |
-| R10 | MCP server and `pl` CLI: read an issue, comment, attach proof, request a transition | P0 |
-| R11 | GitHub App: link a pull request to its issue by branch name or ID; transition on draft opened, merged, and closed unmerged | P0 |
-| R12 | Show the pull request's checks and review threads on the issue page | P1 |
-| R13 | Linear import: issues, statuses mapped to workflow statuses, projects, milestones, labels, comments, parent and child | P0 |
-| R14 | Issue page shows runs with logs, duration and reported cost, plus the pull request, gate status and proof | P0 |
-| R15 | Upload proof (images, video, test reports) through MCP, CLI and the web app | P0 |
-| R16 | Inbox for people: issues waiting in a person-owned status, refused transitions, failed runs | P1 |
-| R17 | Projects and milestones with "PASS when" criteria | P1 |
-| R18 | Concurrency limit per runner and agent; token or cost budget per run | P1 |
-| R19 | Search across issues and comments | P1 |
-| R20 | Docker Compose self-host: web app, worker, Postgres | P0 |
-| R21 | Custom gates that run a command or call a webhook | P2 |
-| R22 | Convert a Symphony `WORKFLOW.md` and its prompts into a Punchlist workflow | P3 |
-| R23 | Runner support for the Cursor agent CLI | P3 |
-| R24 | Run each issue's live checks on `main` and on the branch, and attach the results, screenshots and video as proof | P2 |
-| R25 | `proof_verified` gate: passes only when Punchlist's own verification run passed every live check on the issue | P2 |
-| R26 | Link an issue to the Groundwork opportunity behind it and show that opportunity's quotes on the issue page | P3 |
+The functional requirements live in Punchlist itself, in the workspace `Punchlist` (`docs/dogfood.md`), since 2026-10-23. Each requirement is an epic, an issue titled `R<n>: <requirement>` and labeled `epic` and with its priority (`P0` to `P3`); its slices are the epic's child issues, and it is Done when every child is Done. A requirement's priority names the phase that ships it: P0 in Gate 1, P1 in Phase 2, P2 in Phase 3 and P3 in Phase 4. The P0 epics are v1. Read them with `pl issue list` and `pl issue show`, or in the app filtered by the label `epic`. R1 to R26 were this section's table until then; R27 (operations on several issues at once) and R28 (one sign-in across several workspaces) were the first added in Punchlist.
 
 ### Non-functional requirements
 
@@ -358,14 +329,7 @@ All targets are hypotheses to revisit after the dogfood phase.
 
 Punchlist is the second product, and Groundwork's Gate 1 comes first. Months assume work starts in mid-October 2026.
 
-| Phase | Timing | Scope | Exit criteria |
-| --- | --- | --- | --- |
-| Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend and frontend; three prototype variants each for the issue list and the issue page; ADRs for the stack questions Gate 1 depends on | A variant picked for each prototype, the stack ADRs accepted, and Gate 1 sliced in Linear |
-| Gate 1. Dogfood | Nov to Dec 2026 | P0: R1 to R8, R10, R11, R13 to R15, R20 | Groundwork's and Punchlist's own issues run from Punchlist for 14 days |
-| Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19 | Every P1 requirement is Done, and Gannon runs both projects from Punchlist with no workaround outside it |
-| Phase 3. Verified pull requests | Mar to Apr 2027 | P2: R21, R24, R25. Punchlist runs each issue's live checks itself, and `proof_verified` replaces `proof_attached` | Every dogfood pull request carries a Punchlist-run verification |
-| Phase 4. Launch | Q2 2027 | P3: R22, R23, R26; public docs and a 1.0 release | Launch metrics tracking toward 90-day targets |
-| Phase 5. Team scale | H2 2027 | No requirements yet. Candidates: cycles, roadmaps, email and push notifications, SSO, Jira import | Decide after Phase 4 |
+The phases are the Punchlist project's milestones, each with its PASS when text and its epics and slices: Gate 0 (spec, stack and prototype, Oct 2026), Gate 1 (dogfood, the P0 requirements, Nov to Dec 2026), Phase 2 (the P1 requirements, Jan to Feb 2027), Phase 3 (verified pull requests, the P2 requirements, Mar to Apr 2027), Phase 4 (launch, the P3 requirements, public docs and 1.0, Q2 2027) and Phase 5 (team scale, no requirements yet, H2 2027). `pl project list` prints them. This section's table moved there on 2026-10-23.
 
 ## Risks and open questions
 
@@ -393,7 +357,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 - [x] Does the workflow file live in the code repository or in the workspace, for teams with several repositories? In the repository, on its default branch, decided Oct 7, 2026 (ADR 0010).
 - [x] One repository per workspace in v1, or several? One, decided Oct 7, 2026 (ADR 0010).
 - [x] Merge from Punchlist, or leave merging on GitHub? A person approves by moving the issue to Merging, and an agent dispatched there merges the pull request on GitHub, decided Oct 22, 2026.
-- [ ] Trademark and domain check for the name; punchlist.com is a design-feedback product.
+- Open questions that remain are Punchlist issues labeled `needs-gannon`; the trademark and domain check for the name moved there on 2026-10-23.
 
 ## Sources
 
