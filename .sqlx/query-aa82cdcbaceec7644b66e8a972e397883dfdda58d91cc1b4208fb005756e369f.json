@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,\n                  a.attempt AS \"attempt!\", a.model, a.runner_id AS \"runner_id!\",\n                  n.name AS \"runner_name!\", a.failure_reason, a.duration_ms,\n                  a.input_tokens, a.output_tokens\n           FROM run r\n           JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id\n                         ORDER BY attempt DESC LIMIT 1) a ON true\n           JOIN runner n ON n.id = a.runner_id\n           WHERE r.workspace_id = $1\n             AND ($2::text IS NULL OR r.issue_id = $2)\n             AND ($3::uuid IS NULL OR r.id = $3)\n           ORDER BY r.started_at DESC, r.id",
+  "query": "SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,\n                  a.attempt AS \"attempt!\", a.model, a.reported_model, a.runner_id AS \"runner_id!\",\n                  n.name AS \"runner_name!\", a.failure_reason, a.duration_ms,\n                  a.input_tokens, a.output_tokens\n           FROM run r\n           JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id\n                         ORDER BY attempt DESC LIMIT 1) a ON true\n           JOIN runner n ON n.id = a.runner_id\n           WHERE r.workspace_id = $1\n             AND ($2::text IS NULL OR r.issue_id = $2)\n             AND ($3::uuid IS NULL OR r.id = $3)\n           ORDER BY r.started_at DESC, r.id",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "reported_model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempt",
+            "name": "reported_model"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "runner_id!",
         "type_info": "Uuid",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "runner_name!",
         "type_info": "Text",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "failure_reason",
         "type_info": "Text",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "duration_ms",
         "type_info": "Int8",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "input_tokens",
         "type_info": "Int8",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "output_tokens",
         "type_info": "Int8",
         "origin": {
@@ -186,6 +197,7 @@
       true,
       false,
       true,
+      true,
       false,
       false,
       true,
@@ -194,5 +206,5 @@
       true
     ]
   },
-  "hash": "ebddf57c2e57397eb5e5d83c6dfff7360448f1ddc9ad153b4b37979ebac9c0a0"
+  "hash": "aa82cdcbaceec7644b66e8a972e397883dfdda58d91cc1b4208fb005756e369f"
 }

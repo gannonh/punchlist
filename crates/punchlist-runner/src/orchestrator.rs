@@ -1186,6 +1186,7 @@ mod tests {
                         finished_at: Some(now),
                         attempt: 1,
                         model: None,
+                        reported_model: None,
                         runner: punchlist_api::RunnerRef {
                             id: RUNNER,
                             name: "sartre".into(),

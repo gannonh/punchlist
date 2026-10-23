@@ -882,6 +882,9 @@ pub struct Run {
     /// The model the latest attempt's runner passed the agent; `None` for the agent's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// The model the latest attempt's agent said it runs on; `None` until it says.
+    #[serde(default)]
+    pub reported_model: Option<String>,
     pub runner: RunnerRef,
     pub failure_reason: Option<String>,
     pub duration_ms: Option<i64>,
@@ -902,6 +905,10 @@ pub struct AttemptInfo {
     /// The model the runner passed the agent; `None` for the agent's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// The model the agent said it runs on, such as `claude-haiku-5-5` for `haiku`; `None`
+    /// until it says.
+    #[serde(default)]
+    pub reported_model: Option<String>,
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default)]

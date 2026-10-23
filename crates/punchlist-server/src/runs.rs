@@ -545,9 +545,12 @@ async fn append_log(
         return Ok(StatusCode::NO_CONTENT);
     }
     let mut tx = state.pool.begin().await?;
+    // A first reported model writes an event. Take its workspace lock before the
+    // attempt lock, in the same order as finish and lease expiry.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     // Locking the attempt row serializes appends with finish and with lease expiry.
-    let held = sqlx::query_scalar!(
-        "SELECT attempt FROM attempt
+    let Some(held) = sqlx::query!(
+        "SELECT issue_id, reported_model FROM attempt
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
              AND lease_expires_at > now()
          FOR UPDATE",
@@ -556,10 +559,10 @@ async fn append_log(
         runner.id,
     )
     .fetch_optional(&mut *tx)
-    .await?;
-    if held.is_none() {
+    .await?
+    else {
         return Err(stale(id, request.attempt));
-    }
+    };
     // Lines numbered at or below the stored maximum arrived in an earlier, retried batch.
     let stored = sqlx::query_scalar!(
         r#"SELECT coalesce(max(line_no), 0) AS "max!" FROM run_log WHERE run_id = $1 AND attempt = $2"#,
@@ -596,8 +599,43 @@ async fn append_log(
     )
     .execute(&mut *tx)
     .await?;
+    // The first model the agent names is the session's; a subagent's comes later.
+    if held.reported_model.is_none()
+        && let Some(model) = fresh.iter().find_map(|line| reported_model(line))
+    {
+        sqlx::query!(
+            "UPDATE attempt SET reported_model = $3 WHERE run_id = $1 AND attempt = $2",
+            id,
+            request.attempt,
+            model,
+        )
+        .execute(&mut *tx)
+        .await?;
+        record_row_event(&mut tx, actor.workspace_id, &held.issue_id, actor.id, "run").await?;
+    }
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The model an agent's output line says it runs on: Claude Code's `system`/`init` line or an
+/// assistant message of the session (not a subagent's), or Codex's `thread/started`. Only a
+/// plain name of at most 100 characters counts, since people read it outside any fence.
+fn reported_model(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let model = match (value["type"].as_str(), value["method"].as_str()) {
+        (Some("system"), _) if value["subtype"] == "init" => &value["model"],
+        (Some("assistant"), _) if value["parent_tool_use_id"].is_null() => {
+            &value["message"]["model"]
+        }
+        (_, Some("thread/started")) => &value["params"]["thread"]["model"],
+        _ => return None,
+    }
+    .as_str()?;
+    let plain = (1..=100).contains(&model.len())
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-_:/@[]".contains(&b));
+    plain.then(|| model.to_string())
 }
 
 fn stale(run_id: Uuid, attempt: i32) -> ApiError {
@@ -1150,6 +1188,7 @@ struct RunRow {
     finished_at: Option<DateTime<Utc>>,
     attempt: i32,
     model: Option<String>,
+    reported_model: Option<String>,
     runner_id: Uuid,
     runner_name: String,
     failure_reason: Option<String>,
@@ -1187,7 +1226,7 @@ async fn load_runs(
     let rows = sqlx::query_as!(
         RunRow,
         r#"SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,
-                  a.attempt AS "attempt!", a.model, a.runner_id AS "runner_id!",
+                  a.attempt AS "attempt!", a.model, a.reported_model, a.runner_id AS "runner_id!",
                   n.name AS "runner_name!", a.failure_reason, a.duration_ms,
                   a.input_tokens, a.output_tokens
            FROM run r
@@ -1208,7 +1247,7 @@ async fn load_runs(
     let mut attempts: HashMap<Uuid, Vec<AttemptInfo>> = HashMap::new();
     for row in sqlx::query!(
         "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state, a.model,
-                a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,
+                a.reported_model, a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,
                 a.output_tokens
          FROM attempt a JOIN runner n ON n.id = a.runner_id
          WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
@@ -1220,6 +1259,7 @@ async fn load_runs(
         attempts.entry(row.run_id).or_default().push(AttemptInfo {
             attempt: row.attempt,
             model: row.model,
+            reported_model: row.reported_model,
             runner: RunnerRef {
                 id: row.runner_id,
                 name: row.runner_name,
@@ -1257,6 +1297,7 @@ async fn load_runs(
             finished_at: row.finished_at,
             attempt: row.attempt,
             model: row.model,
+            reported_model: row.reported_model,
             runner: RunnerRef {
                 id: row.runner_id,
                 name: row.runner_name,
@@ -1334,4 +1375,44 @@ async fn run_log(
         run_id: id,
         lines: lines.into_iter().map(LogLine::from).collect(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reported_model;
+
+    #[test]
+    fn reported_model_reads_each_agents_line_and_nothing_else() {
+        let cases = [
+            (
+                r#"{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5"}"#,
+                Some("claude-opus-5-5"),
+            ),
+            (
+                r#"{"type":"assistant","message":{"model":"claude-haiku-5-5","content":[]},"parent_tool_use_id":null}"#,
+                Some("claude-haiku-5-5"),
+            ),
+            (
+                r#"{"type":"assistant","message":{"model":"claude-sonnet-5-5"},"parent_tool_use_id":"toolu_1"}"#,
+                None,
+            ),
+            (
+                r#"{"method":"thread/started","params":{"thread":{"id":"t","modelProvider":"openai","model":"gpt-6-luna"}}}"#,
+                Some("gpt-6-luna"),
+            ),
+            (r#"{"type":"system","subtype":"hook_started"}"#, None),
+            (
+                r#"{"type":"system","subtype":"init","model":"a b\u001b[31m"}"#,
+                None,
+            ),
+            (
+                r#"{"id":2,"result":{"thread":{"model":"gpt-6-luna"}}}"#,
+                None,
+            ),
+            ("disabled the 3 skills Codex found", None),
+        ];
+        for (line, model) in cases {
+            assert_eq!(reported_model(line).as_deref(), model, "{line}");
+        }
+    }
 }
