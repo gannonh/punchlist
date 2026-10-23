@@ -16,6 +16,7 @@ The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, ch
 - `github-move` moves the issue as actor role `github` and records the delivery id on the `transition`; the timeline line ends `[delivery <id>]`.
 - `comment` records a `comment` row and an `event` of kind `comment`; the timeline shows `<actor> (github)  commented:` and the body indented.
 - `unlinked` lists a pull request that names no issue under `pl pr unlinked` and not on any issue.
+- `open-list`: `GET /api/pull-requests` (people only; an agent's token is 403) answers the repository's open and draft pull requests, newest number first, each with `number`, `title`, `branch`, `url` (`null` unless a plain `https://github.com/<owner>/<repo>/pull/<number>`), `draft`, `merge_state`, `checks_passed`, `checks_total`, `open_threads`, `updated_at`, `issue` (`{id, title, status, status_name}`, or `null` when it names none) and `waits_on_merge` (open, not a draft, and its issue's status has an `on = "pr_merged"` transition under the active workflow). It reads no GitHub. The web app's Pull requests page reads it ([web-app.md](web-app.md)).
 - `redelivery` answers the same delivery id again without a second `job` row or a second effect; a delivery whose job `failed` is queued again in the same row.
 - `row-event` marks the linked issue in `pull_request_change` whenever a pull request, its check runs or its review threads are recorded (by a delivery, a gated request's read or `get_issue`'s), and the issue it named before when it comes to name another. The server's sweep turns the marks into one `event` of kind `pull_request` per issue every 250 ms, as the actor `GitHub`, so the open web app updates the row. The timeline does not show it.
 
@@ -23,7 +24,7 @@ The server takes GitHub App webhook deliveries at `POST /api/github/webhook`, ch
 
 - Open, update, review or close a pull request on the workspace's repository on GitHub, then `pl issue show <id>`.
 - `pl pr unlinked`
-- `GET /api/issues/{id}/pull-requests`; `GET /api/pull-requests/unlinked`.
+- `GET /api/issues/{id}/pull-requests`; `GET /api/pull-requests/unlinked`; `GET /api/pull-requests`.
 - Maintainers of the checks: `$C webhook "$RUN" <event> <payload-file> [delivery-id]` plays the part of GitHub.
 
 ## Driving it with control-punchlist
@@ -43,6 +44,7 @@ Preconditions:
 - **Threads.** Deliver a `pull_request_review_thread` event with action `unresolved`, then `$C sql "$RUN" "SELECT node_id, resolved FROM review_thread"` has one unresolved row and `pl issue show PL-1` prints `1 open thread`. Deliver `resolved` for the same `thread.node_id` and it prints `0 open threads`. GitHub sends this event only on resolve and unresolve, so a thread nobody has resolved yet is not counted in a run without App credentials, which is what these fixture deliveries assume: with them the server asks the sandbox for pull request 7's threads instead, and the job fails if there is no such pull request.
 - **Move and comment.** Deliver the events the workflow's `on` rules use, such as `closed` with `merged: true`. Then `$C sql "$RUN" "SELECT t.from_status, t.to_status, t.delivery_id, a.role FROM transition t JOIN actor a ON a.id = t.actor_id ORDER BY t.created_at DESC LIMIT 1"` shows role `github` and the delivery id, `pl issue show PL-1` ends the timeline line with `[delivery <id>]`, and `SELECT body FROM comment` shows any comment the rule required.
 - **Unlinked.** Deliver a `pull_request` `opened` event for number 8 on branch `stray` with a title naming no issue. `$C pl "$RUN" pr unlinked` prints `#8  open  stray  <title>`, and `pl issue show PL-1` still lists only `#7`. With none, it prints `No unlinked pull requests.`
+- **Open list.** With PL-1 in Merging (`$C sql "$RUN" "UPDATE issue SET status = 'merging' WHERE id = 'PL-1'"`) and pull requests delivered for it and for `stray`, `$C curl "$RUN" "$SERVER_URL/api/pull-requests" | jq -c '[.[] | {number, draft, issue: .issue.id, waits_on_merge}]'` lists the open and draft ones only, newest first, and PL-1's open one has `waits_on_merge: true`. With an agent's bearer token (`pl actor create --agent --kind codex`) the same request is 403.
 - **Redelivery.** Run the first `$C webhook` command again with the same delivery id `delivery-1`. Then `$C sql "$RUN" "SELECT count(*) FROM job WHERE idempotency_key = 'delivery-1'"` shows `1`, and the `pull_request`, `transition` and `comment` row counts are what they were before.
 
 ## Real GitHub deliveries
