@@ -371,7 +371,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           [time]  r1 (runner)  Start → In Progress
 
         Runs
-          [run]  Claude Code  runner r1  started [time]  duration —  running
+          [run]  Claude Code  model waiting for the agent  runner r1  started [time]  duration —  running
             cloning
             editing
             [200 x]
@@ -418,7 +418,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           [time]  r1 (runner)  Start → In Progress
 
         Runs
-          [run]  Claude Code  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out
+          [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out
             cloning
             editing
             [200 x]
@@ -578,6 +578,66 @@ async fn unlinked_pull_requests_list_newest_first(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn the_client_reads_the_open_pull_requests(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Fix"]).await;
+    insert_pull_request(&pool, 3, "Stray", "stray", true, ("none", 0, 0), 0, None).await;
+    insert_pull_request(
+        &pool,
+        5,
+        "PL-1: fix",
+        "feature/pl-1-fix",
+        false,
+        ("passing", 2, 2),
+        1,
+        Some("PL-1"),
+    )
+    .await;
+
+    let open = Client::new(&pl.url, &pl.token)
+        .unwrap()
+        .pull_requests()
+        .await
+        .unwrap();
+    let seen: Vec<_> = open
+        .iter()
+        .map(|pr| {
+            (
+                pr.number,
+                pr.draft,
+                pr.url.as_deref(),
+                pr.issue
+                    .as_ref()
+                    .map(|i| (i.id.as_str(), i.status_name.as_str())),
+                (pr.checks_passed, pr.checks_total, pr.open_threads),
+                pr.waits_on_merge,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                5,
+                false,
+                Some("https://github.com/gannonh/punchlist/pull/5"),
+                Some(("PL-1", "Backlog")),
+                (2, 2, 1),
+                false
+            ),
+            (
+                3,
+                true,
+                Some("https://github.com/gannonh/punchlist/pull/3"),
+                None,
+                (0, 0, 0),
+                false
+            ),
+        ]
+    );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
 async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
     let pl = Pl::start(&pool).await;
     pl.run(&["issue", "create", "--title", "Fix"]).await;
@@ -635,7 +695,7 @@ fn runner_start_help_lists_the_flags() {
     let help = String::from_utf8(output.stdout).unwrap();
     for flag in [
         "--name",
-        "--worktree-root",
+        "--state-dir",
         "--model",
         "--claude-command",
         "--agents",
@@ -646,6 +706,8 @@ fn runner_start_help_lists_the_flags() {
     ] {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
     }
+    assert!(help.contains("~/.local/share/punchlist/runner"), "{help}");
+    assert!(!help.contains("--worktree-root"), "{help}");
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]

@@ -5,8 +5,8 @@ use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
     CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist,
     GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList,
-    IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project,
-    ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
+    IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
+    Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
     UpdateIssue, WaitForPerson, WorkflowInfo, proof_type_by_extension,
 };
@@ -226,6 +226,13 @@ impl Client {
     ) -> Result<PullRequestsNow, ClientError> {
         let path = ["issues", id, "pull-requests", "refresh"];
         self.send::<(), _>(Method::POST, &path, None).await
+    }
+
+    /// The open and draft pull requests of the workspace's repository, newest number first.
+    /// A person's token.
+    pub async fn pull_requests(&self) -> Result<Vec<OpenPullRequest>, ClientError> {
+        self.send::<(), _>(Method::GET, &["pull-requests"], None)
+            .await
     }
 
     /// The pull requests that name no issue, newest number first.

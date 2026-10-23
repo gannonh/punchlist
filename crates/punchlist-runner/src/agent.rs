@@ -388,7 +388,7 @@ pub(crate) const RUNNER_MARKER: &str = "PUNCHLIST_RUNNER";
 /// Kills every process of this user whose environment carries `runner_id`, and the process
 /// group each leads: the agents, and their commands, an earlier process of this runner
 /// started. Returns how many it found. Reads `/proc`, so it finds nothing off Linux.
-// ponytail: Linux only. Upgrade path: a pid file per agent under the worktree root, for
+// ponytail: Linux only. Upgrade path: a pid file per agent under the state directory, for
 // macOS runners.
 pub(crate) fn kill_runner(runner_id: &str) -> usize {
     let wanted = format!("{RUNNER_MARKER}={runner_id}").into_bytes();

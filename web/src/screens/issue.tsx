@@ -7,6 +7,7 @@ import { ArrowLeft, Bot, GitMerge, GitPullRequest, Lock, Paperclip, Server, Hard
 import { cn } from 'cn'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Assignee, Labels, LockBadge, PullRequest, StatusDot } from '@/components/atoms'
 import {
   issuePageQueries,
@@ -28,6 +29,8 @@ import {
   gateSummary,
   gateText,
   logView,
+  mediaStep,
+  modelView,
   moveView,
   plainPullRequestUrl,
   PROOF_TYPES,
@@ -168,7 +171,8 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return
+      // An open dialog handles its own keys, `Esc` included, wherever focus is.
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
       if (inField(event.target)) {
         if (event.key === 'Escape') (event.target as HTMLElement).blur()
         return
@@ -530,6 +534,8 @@ const PROOF_ACCEPT = Object.keys(PROOF_TYPES)
 function ProofPanel({ id, proof, person, locked }: { id: string; proof: Proof[]; person: boolean; locked: boolean }) {
   const attach = useAttachProof(id)
   const input = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState<string | null>(null)
+  const shown = proof.find((item) => item.id === open)
   return (
     <Panel
       id="proof"
@@ -573,23 +579,47 @@ function ProofPanel({ id, proof, person, locked }: { id: string; proof: Proof[];
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-2.5">
           {proof.map((item) => (
-            <ProofCard key={item.id} proof={item} person={person} />
+            <ProofCard key={item.id} proof={item} person={person} onOpen={setOpen} />
           ))}
         </div>
+      )}
+      {shown && (
+        <ProofViewer
+          proof={shown}
+          onClose={() => {
+            setOpen(null)
+          }}
+          onStep={(delta) => {
+            setOpen((at) => (at && mediaStep(proof, at, delta)) ?? at)
+          }}
+        />
       )}
     </Panel>
   )
 }
 
-function ProofCard({ proof, person }: { proof: Proof; person: boolean }) {
+const proofMeta = (proof: Proof) => `${proof.kind} · ${fileSize(proof.size)} · ${proof.actor.name}`
+
+function ProofCard({ proof, person, onOpen }: { proof: Proof; person: boolean; onOpen: (id: string) => void }) {
   const src = `/api/proof/${proof.id}`
-  const meta = `${proof.kind} · ${fileSize(proof.size)} · ${proof.actor.name}`
   // An agent's token cannot read the files themselves.
   const thumb =
-    proof.kind === 'image' && person ? (
-      <img src={src} alt={proof.title} loading="lazy" className="aspect-[16/10] w-full bg-secondary object-cover" />
-    ) : proof.kind === 'video' && person ? (
-      <video src={src} controls preload="metadata" className="aspect-[16/10] w-full bg-zinc-900" aria-label={proof.title} />
+    proof.kind !== 'report' && person ? (
+      <button
+        type="button"
+        className="block cursor-zoom-in focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none focus-visible:ring-inset"
+        aria-label={`Open ${proof.title}`}
+        data-proof-open
+        onClick={() => {
+          onOpen(proof.id)
+        }}
+      >
+        {proof.kind === 'image' ? (
+          <img src={src} alt="" loading="lazy" className="aspect-[16/10] w-full bg-secondary object-cover" />
+        ) : (
+          <video src={src} preload="metadata" muted className="pointer-events-none aspect-[16/10] w-full bg-zinc-900" />
+        )}
+      </button>
     ) : proof.kind === 'report' ? null : (
       <div className="aspect-[16/10] w-full bg-gradient-to-br from-primary-line to-primary" aria-hidden="true" />
     )
@@ -604,9 +634,69 @@ function ProofCard({ proof, person }: { proof: Proof; person: boolean }) {
         ) : (
           <span className="text-meta font-medium wrap-anywhere">{proof.title}</span>
         )}
-        <span className="text-caption text-ink-3">{meta}</span>
+        <span className="text-caption text-ink-3">{proofMeta(proof)}</span>
       </div>
     </article>
+  )
+}
+
+/** An image or video proof full size, scaled down to fit the viewport; `←` and `→` step through the others. */
+function ProofViewer({
+  proof,
+  onClose,
+  onStep,
+}: {
+  proof: Proof
+  onClose: () => void
+  onStep: (delta: 1 | -1) => void
+}) {
+  const src = `/api/proof/${proof.id}`
+  const media = 'max-h-[calc(100dvh-9rem)] max-w-full object-contain'
+  // The card that opened it; Radix would return focus to a `DialogTrigger`, and the cards are not one.
+  const [opener] = useState(() => document.activeElement)
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+    >
+      <DialogContent
+        className="w-max max-w-[calc(100vw-2rem)] gap-2 bg-card p-3 sm:max-w-[calc(100vw-2rem)]"
+        data-proof-viewer={proof.id}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          if (opener instanceof HTMLElement) opener.focus()
+        }}
+        // The page's own keys (`Esc` back to the list, `g`, `t`, `c`) stay out of the overlay.
+        onKeyDown={(event) => {
+          event.stopPropagation()
+          const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : null
+          if (delta === null) return
+          event.preventDefault()
+          onStep(delta)
+        }}
+      >
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 pr-8">
+          <DialogTitle className="text-meta font-medium wrap-anywhere">{proof.title}</DialogTitle>
+          <DialogDescription className="text-caption text-ink-3">{proofMeta(proof)}</DialogDescription>
+          <a
+            href={src}
+            target="_blank"
+            rel="noreferrer"
+            className="ml-auto text-caption font-medium text-primary hover:underline"
+            data-proof-original
+          >
+            Open original
+          </a>
+        </div>
+        {proof.kind === 'image' ? (
+          <img key={proof.id} src={src} alt={proof.title} className={media} />
+        ) : (
+          <video key={proof.id} src={src} controls autoPlay className={media} aria-label={proof.title} />
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1041,6 +1131,7 @@ function AttemptCard({
   useLayoutEffect(() => {
     if (follow.current && box.current) box.current.scrollTop = box.current.scrollHeight
   }, [lines.length])
+  const model = modelView(attempt)
   const took = running ? now.getTime() - Date.parse(attempt.started_at) : attempt.duration_ms
   return (
     <article
@@ -1066,6 +1157,17 @@ function AttemptCard({
           {attempt.state}
         </span>
       </div>
+      <div className="flex flex-wrap items-baseline gap-x-2 text-body" data-model>
+        <b className="text-meta font-medium text-ink-3">model</b>
+        {model.name === null ? (
+          <span className="text-muted-foreground">{model.note}</span>
+        ) : (
+          <>
+            <span className="font-mono font-medium text-foreground wrap-anywhere">{model.name}</span>
+            <span className="text-meta text-muted-foreground">({model.note})</span>
+          </>
+        )}
+      </div>
       <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-meta text-muted-foreground" data-facts>
         <span>
           <b className="font-medium text-ink-3">started</b> {age(attempt.started_at, now)} ago
@@ -1075,10 +1177,6 @@ function AttemptCard({
         </span>
         <span>
           <b className="font-medium text-ink-3">tokens</b> {tokens(attempt.input_tokens, attempt.output_tokens)}
-        </span>
-        <span>
-          <b className="font-medium text-ink-3">model</b>{' '}
-          <span className="font-mono">{attempt.model ?? 'default'}</span>
         </span>
       </div>
       {attempt.failure_reason && <div className="text-meta text-bad wrap-anywhere">{attempt.failure_reason}</div>}

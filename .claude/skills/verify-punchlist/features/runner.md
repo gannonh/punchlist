@@ -11,7 +11,7 @@
 - `claim` moves `start → in_progress` as the runner, writes a `run` row and an `attempt` row with `attempt = 1`.
 - `concurrency`: with `[dispatch] max_concurrent = N` in the active workflow, a claim made while the workspace has N `attempt` rows in `state = 'running'` answers 204, writes nothing, and leaves the issue in Start, whichever runner asks. A run waiting for its next attempt holds no slot; a lapsed lease holds one until the sweep fails it; `POST /api/runs/{id}/resume` is not a claim and answers 200 at the limit. A waiting claim at the limit retries any issue on each wake, so a `finish` lets it through within milliseconds; a raised limit is read at the runner's next poll. With no key there is no server limit, only each runner's `--max-concurrent`.
 - `claim-taken` is what a second runner gets when it raced for the same issue: its log says `claim taken: PL-<n> was claimed by runner <name>`, and no second `attempt` row exists.
-- `worktree` is a checkout under the runner's `--worktree-root` on the issue's branch.
+- `worktree` is a checkout under the runner's `--state-dir` (`worktrees/<owner>/<name>/<issue>`) on the issue's branch.
 - `log` streams the agent's stdout (stream-json lines) and stderr (`stderr: ` prefix) to `run_log`. Each line carries its per-attempt `line_no`, so a resent batch is stored once.
 - `finish` records `succeeded` or `failed`, `duration_ms`, `input_tokens` and `output_tokens`.
 - `lease-expiry` fails an attempt whose runner stopped heartbeating with `lease expired: runner <name> stopped sending heartbeats`.
@@ -23,7 +23,7 @@
 ## How to get to it (user POV)
 
 - `pl run list <id>` lists each run's attempts with runner, outcome and reason.
-- `pl runner start [--name N] [--worktree-root DIR] [--agents claude-code,codex] [--model M] [--codex-model M] [--codex-effort E] [--codex-command PATH] [--max-concurrent K]`, `pl runner list`.
+- `pl runner start [--name N] [--state-dir DIR] [--agents claude-code,codex] [--model M] [--codex-model M] [--codex-effort E] [--codex-command PATH] [--max-concurrent K]`, `pl runner list`.
 - `pl issue move <id> start`, then `pl issue show <id>` and `pl run log <run-id>`.
 - `POST /api/runners`, `POST /api/runners/{id}/heartbeat`, `POST /api/runs/claim`, `POST /api/runs/{id}/log`, `POST /api/runs/{id}/finish`, `GET /api/issues/{id}/runs`, `GET /api/runs/{id}/log`.
 
@@ -39,7 +39,7 @@ Preconditions:
 - **List.** `$C pl "$RUN" runner list`. One line naming `r1`, `claude-code` and a heartbeat a few seconds old. `$C sql "$RUN" "SELECT name, models FROM runner"` has one row, `r1 | {"codex": "gpt-6-luna", "claude-code": "haiku"}`. With no issue in Start this makes no model call; `$C runner-stop` prints `stopped runner r1`.
 - **Model, without a model call.** Register through the API with `models` and claim, as [issue-refusals.md](issue-refusals.md)'s Gated recipe does: `-d '{"name":"r","agents":["claude-code"],"models":{"claude-code":"haiku"}}'`. `SELECT attempt, state, model FROM attempt` is `1 | running | haiku`. Nobody heartbeats that runner, so the attempt fails `lease expired: runner r stopped sending heartbeats` after 30 s and the run stays running: a real runner started afterwards in the same run claims attempt 2 and calls the model.
 - **Claim.** `$C pl "$RUN" issue create --title "Add a hello file" --body "Create hello.txt containing hello."`, `$C pl "$RUN" issue move PL-1 todo`, `$C pl "$RUN" issue move PL-1 start`, wait 10 s, `$C pl "$RUN" issue show PL-1`. `Status: In Progress`, a timeline line `r1 (runner)  Start → In Progress`, and a run with agent `Claude Code`, runner `r1`, outcome `running`. `$C sql "$RUN" "SELECT issue_id, runner_id, attempt, state FROM attempt"` has one row.
-- **Worktree.** `git -C /tmp/punchlist-verify/$RUN/worktrees/r1/worktrees/gannonh/punchlist-sandbox/PL-1 branch --show-current` prints `feature/pl-1`.
+- **Worktree.** `git -C /tmp/punchlist-verify/$RUN/runner/r1/worktrees/gannonh/punchlist-sandbox/PL-1 branch --show-current` prints `feature/pl-1`.
 - **Log.** `$C pl "$RUN" run log <run-id>` while the agent works, and again after. The line count grows. After the run, a line contains `gh pr create`.
 - **Finish.** `$C sql "$RUN" "SELECT state, duration_ms, input_tokens, output_tokens FROM attempt"` shows `succeeded` and non-null numbers. `gh pr list --repo gannonh/punchlist-sandbox --draft --search "PL-1 in:title"` lists the agent's pull request.
 - **Concurrency, without a model call.** Push `[dispatch] max_concurrent = 2` to the sandbox's `.punchlist/workflow.toml` on `main` (as [workflow-and-gates.md](workflow-and-gates.md) does) and wait for the `workflow_load` job. Move three issues to Start, register a runner through the API as **Model, without a model call** does, and claim three times right after each other (a lease is 30 s). The first two answer 200 and the third 204; `$C sql "$RUN" "SELECT count(*) FROM attempt WHERE state = 'running'"` is `2` and `SELECT status FROM issue WHERE id = 'PL-3'` is `start`. Hold a claim open (`{"wait_seconds":20}`) and `POST /api/runs/{id}/finish` one attempt after its agent moved the issue on (else `dispatch-again` gives the slot back to that issue, which numbers first): the held claim answers 200 for PL-3 within 2 s. Put the file back afterwards.
@@ -50,7 +50,7 @@ Preconditions:
 
 ## Gotchas
 
-- Each run's runners clone the sandbox under `/tmp/punchlist-verify/<RUN_ID>/worktrees/<name>/`, which `down` deletes. Branches and pull requests the agent pushed stay in the sandbox: close the pull request and delete the branch after the check (`gh pr close <n> --repo gannonh/punchlist-sandbox --delete-branch`).
+- Each run's runners clone the sandbox under `/tmp/punchlist-verify/<RUN_ID>/runner/<name>/`, which `down` deletes. Branches and pull requests the agent pushed stay in the sandbox: close the pull request and delete the branch after the check (`gh pr close <n> --repo gannonh/punchlist-sandbox --delete-branch`).
 - Sandbox branches are named after the issue id, and every run numbers issues from `PL-1`. Before a run, check `git ls-remote --heads https://github.com/gannonh/punchlist-sandbox.git 'feature/pl-*'` and delete leftovers, or the agent's push collides.
 - Contention is deterministic only when both runners are already long-polling when the issue enters Start: start both, wait for both to register, then move the issue.
 - A claim for an issue that ran before gets the same branch name while no pull request on it has merged: the runner reuses the issue's worktree, or without one starts from the branch on the remote. A worktree directory deleted without git (`rm -rf`) is pruned from the clone and added again on the next claim, so the run does not fail on git's stale registration.

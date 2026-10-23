@@ -933,6 +933,9 @@ pub struct Run {
     /// The model the latest attempt's runner passed the agent; `None` for the agent's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// The model the latest attempt's agent said it runs on; `None` until it says.
+    #[serde(default)]
+    pub reported_model: Option<String>,
     pub runner: RunnerRef,
     pub failure_reason: Option<String>,
     pub duration_ms: Option<i64>,
@@ -953,6 +956,10 @@ pub struct AttemptInfo {
     /// The model the runner passed the agent; `None` for the agent's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// The model the agent said it runs on, such as `claude-haiku-5-5` for `haiku`; `None`
+    /// until it says.
+    #[serde(default)]
+    pub reported_model: Option<String>,
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default)]
@@ -1048,6 +1055,37 @@ pub struct PullRequestsNow {
     /// False when GitHub could not be read, or the server has no GitHub App: the rest is
     /// then what was last recorded.
     pub refreshed: bool,
+}
+
+/// `GET /api/pull-requests`: an open or draft pull request of the workspace's repository, as
+/// the Pull requests page shows it. Its title and branch are text from outside the team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OpenPullRequest {
+    pub number: i64,
+    pub title: String,
+    pub branch: String,
+    /// `None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL.
+    pub url: Option<String>,
+    pub draft: bool,
+    /// GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`.
+    pub merge_state: String,
+    pub checks_passed: i32,
+    pub checks_total: i32,
+    pub open_threads: i32,
+    pub updated_at: DateTime<Utc>,
+    /// The issue it names; `None` when it names none.
+    pub issue: Option<PullRequestIssue>,
+    /// Open, not a draft, and its issue is in a status the workflow moves on `pr_merged`.
+    pub waits_on_merge: bool,
+}
+
+/// The issue a pull request names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PullRequestIssue {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub status_name: String,
 }
 
 /// An unresolved review thread. Its path, authors and bodies are text from outside the team.

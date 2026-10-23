@@ -331,6 +331,12 @@ Punchlist is the second product, and Groundwork's Gate 1 comes first. Months ass
 
 The phases are the Punchlist project's milestones, each with its PASS when text and its epics and slices: Gate 0 (spec, stack and prototype, Oct 2026), Gate 1 (dogfood, the P0 requirements, Nov to Dec 2026), Phase 2 (the P1 requirements, Jan to Feb 2027), Phase 3 (verified pull requests, the P2 requirements, Mar to Apr 2027), Phase 4 (launch, the P3 requirements, public docs and 1.0, Q2 2027) and Phase 5 (team scale, no requirements yet, H2 2027). `pl project list` prints them. This section's table moved there on 2026-10-23.
 
+ADR 0011 records the Phase 2 scope and exit criteria here as well:
+
+| Phase | Timing | Scope | Exit criteria |
+| --- | --- | --- | --- |
+| Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19; one sign-in across several workspaces (ADR 0011); the Pull requests page | Every P1 requirement is Done, and Gannon runs Punchlist and Groundwork from Punchlist with no workaround outside it |
+
 ## Risks and open questions
 
 The largest risk is Linear. It owns the issue data, already merges agent pull requests from Coding Sessions, and is the tracker Symphony targets. Among open-source projects, Multica and Plane have the largest followings and are the likeliest to add gates.
@@ -357,6 +363,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 - [x] Does the workflow file live in the code repository or in the workspace, for teams with several repositories? In the repository, on its default branch, decided Oct 7, 2026 (ADR 0010).
 - [x] One repository per workspace in v1, or several? One, decided Oct 7, 2026 (ADR 0010).
 - [x] Merge from Punchlist, or leave merging on GitHub? A person approves by moving the issue to Merging, and an agent dispatched there merges the pull request on GitHub, decided Oct 22, 2026.
+- [x] How does one person reach several workspaces? An account above workspaces, decided Oct 23, 2026 (ADR 0011).
 - Open questions that remain are Punchlist issues labeled `needs-gannon`; the trademark and domain check for the name moved there on 2026-10-23.
 
 ## Sources

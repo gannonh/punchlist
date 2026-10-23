@@ -213,6 +213,26 @@ export function tokens(input: number | null | undefined, output: number | null |
   return `${count(input)} in · ${count(output)} out`
 }
 
+/**
+ * The model an attempt ran on, as `pl run list` says it: the model the agent reported, beside
+ * what the runner pinned, if anything. `name` is null when there is no model to name, and
+ * `note` then stands alone.
+ */
+export function modelView(
+  attempt: Pick<AttemptInfo, 'model' | 'reported_model' | 'state'>,
+): { name: string | null; note: string } {
+  const pinned = attempt.model ?? null
+  const reported = attempt.reported_model ?? null
+  if (reported !== null) {
+    if (pinned === null) return { name: reported, note: 'agent default' }
+    return { name: reported, note: pinned === reported ? 'pinned' : `pinned ${pinned}` }
+  }
+  if (attempt.state === 'running') {
+    return { name: null, note: pinned === null ? 'waiting for the agent' : `waiting for the agent, pinned ${pinned}` }
+  }
+  return pinned === null ? { name: null, note: 'agent default' } : { name: pinned, note: 'pinned' }
+}
+
 /** A pull request's URL when it is a plain `https://github.com/<owner>/<repo>/pull/<number>`, as the rows' is. */
 export function plainPullRequestUrl(number: number, url: string): string | null {
   const parts = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
@@ -241,6 +261,13 @@ export const PROOF_TYPES: Readonly<Record<string, string>> = {
 export function proofType(name: string): string | null {
   const dot = name.lastIndexOf('.')
   return dot < 0 ? null : (PROOF_TYPES[name.slice(dot + 1).toLowerCase()] ?? null)
+}
+
+/** The image or video proof `delta` steps from `id` in card order, skipping reports; `null` past either end. */
+export function mediaStep(proof: readonly Pick<Proof, 'id' | 'kind'>[], id: string, delta: 1 | -1): string | null {
+  const media = proof.filter((item) => item.kind !== 'report')
+  const at = media.findIndex((item) => item.id === id)
+  return at < 0 ? null : (media[at + delta]?.id ?? null)
 }
 
 /** `512 B`, `12 KB` or `3.4 MB`. */

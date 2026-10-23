@@ -235,17 +235,21 @@ cmd_runner() {
   [[ "$name" =~ ^[a-z0-9-]+$ ]] || die "runner name must match [a-z0-9-]+"
   local pidfile="$RUN_DIR/runner-$name.pgid" log="$EVIDENCE/runner-$name.log"
   [ -e "$pidfile" ] && die "runner $name is already started in run $RUN_ID"
-  # Its own clones and worktrees, so two runners in one run never share a checkout.
-  local root="$RUN_DIR/worktrees/$name"
+  # Its own state directory, so two runners in one run never share a checkout.
+  local root="$RUN_DIR/runner/$name"
   mkdir -p "$root"
-  # The live-check models (SKILL.md). `--codex-model` only where this checkout's `pl` has it,
-  # so the same script drives an older `main`.
-  local models=(--model haiku)
-  if "$REPO/target/debug/pl" runner start --help | grep -q -- --codex-model; then
+  # The live-check models (SKILL.md). `--codex-model` and `--state-dir` only where this
+  # checkout's `pl` has them, so the same script drives an older `main`.
+  local help models=(--model haiku) state=(--worktree-root "$root")
+  help="$("$REPO/target/debug/pl" runner start --help)"
+  if grep -q -- --codex-model <<<"$help"; then
     models+=(--codex-model gpt-6-luna)
   fi
+  if grep -q -- --state-dir <<<"$help"; then
+    state=(--state-dir "$root")
+  fi
   (cd "$REPO" && PUNCHLIST_CONFIG="$CONFIG" exec setsid "$REPO/target/debug/pl" runner start \
-     --name "$name" --worktree-root "$root" "${models[@]}" "$@" </dev/null >"$log" 2>&1) &
+     --name "$name" "${state[@]}" "${models[@]}" "$@" </dev/null >"$log" 2>&1) &
   local pgid=$!
   echo "$pgid" >"$pidfile"
   for _ in $(seq 1 60); do
@@ -259,7 +263,7 @@ cmd_runner() {
     rm -f "$pidfile"
     die "runner $name did not register"
   }
-  echo "runner $name started (pgid $pgid); log $log; worktrees $root" >&2
+  echo "runner $name started (pgid $pgid); log $log; state $root" >&2
 }
 
 stop_group() { # stop_group PGID

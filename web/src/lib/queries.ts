@@ -63,6 +63,16 @@ export const issuesQuery = queryOptions({
   staleTime: Infinity,
 })
 
+// Read again on a `pull_request`, `transition` or `workflow` event, and after the stream reopens.
+export const pullRequestsQuery = queryOptions({
+  queryKey: ['pull-requests'],
+  queryFn: () => call(api.GET('/api/pull-requests')),
+  staleTime: Infinity,
+})
+
+// The kinds that can change a row of the Pull requests page or move it between sections.
+const PULL_REQUEST_KINDS: ReadonlySet<string> = new Set(['pull_request', 'transition', 'workflow'])
+
 const setIssues = (client: QueryClient, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery.queryKey, (cache) => (cache ? change(cache) : cache))
 }
@@ -86,6 +96,8 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       setIssues(client, (cache) => applyStream(cache, item))
       // An open issue page reads its issue again: its timeline, runs, proof, gates and moves.
       void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
+      if (PULL_REQUEST_KINDS.has(item.event.detail.kind))
+        void client.invalidateQueries({ queryKey: pullRequestsQuery.queryKey })
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
       if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
@@ -105,6 +117,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
           client.refetchQueries({ queryKey: sessionQuery.queryKey }),
           client.refetchQueries({ queryKey: issuesQuery.queryKey }),
           client.refetchQueries({ queryKey: workflowQuery.queryKey }),
+          client.invalidateQueries({ queryKey: pullRequestsQuery.queryKey }),
         ]).then(() => {
           setOpened((count) => count + 1)
         })
@@ -270,6 +283,12 @@ export const useIssues = () => useQuery(issuesQuery)
 export const useWorkflow = () => useQuery(workflowQuery)
 export const useActors = () => useQuery(actorsQuery)
 export const useProjects = () => useQuery(projectsQuery)
+/**
+ * The workspace's open pull requests, read once `ready`: after `GET /api/issues` has succeeded, so the header's
+ * count never delays the list, and the stream, opened after the list's last event, reads them again on any later
+ * change.
+ */
+export const usePullRequests = (ready: boolean) => useQuery({ ...pullRequestsQuery, enabled: ready })
 
 /** The filter's text as the server reads it: trimmed, each whitespace run one space. */
 const searchText = (text: string) => text.trim().split(/\s+/).join(' ')

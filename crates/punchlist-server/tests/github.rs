@@ -1037,3 +1037,146 @@ async fn an_issue_in_merging_with_its_pull_request_merged_moves_to_done_at_start
         .unwrap();
     assert_eq!(count(&pool, "transition").await, 1);
 }
+
+/// A GET with a bearer token: the status and the JSON body.
+async fn get(s: &Setup, token: &str, uri: &str) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = s.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// `fixture` as pull request `number` on `branch` of `gannonh/<repository>`, titled `title`.
+fn pull_request(fixture: &str, number: i64, branch: &str, title: &str, repository: &str) -> String {
+    edited(fixture, |v| {
+        v["number"] = json!(number);
+        v["pull_request"]["number"] = json!(number);
+        v["pull_request"]["head"]["ref"] = json!(branch);
+        v["pull_request"]["title"] = json!(title);
+        v["pull_request"]["html_url"] = json!(format!(
+            "https://github.com/gannonh/{repository}/pull/{number}"
+        ));
+        v["repository"]["name"] = json!(repository);
+        v["repository"]["full_name"] = json!(format!("gannonh/{repository}"));
+    })
+}
+
+#[sqlx::test]
+async fn open_pull_requests_list_the_workspaces_open_and_draft_ones_with_what_they_wait_on(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    bootstrap(
+        &pool,
+        &Bootstrap {
+            workspace_name: "Other".into(),
+            issue_prefix: "OT".into(),
+            repository_owner: "gannonh".into(),
+            repository_name: "other".into(),
+            person_name: "Someone".into(),
+        },
+    )
+    .await
+    .unwrap();
+    for title in ["Merge me", "Review me", "Draft in merging", "Gone"] {
+        create_issue(&s, title).await;
+    }
+    force_status(&pool, "PL-1", "merging").await;
+    force_status(&pool, "PL-2", "human_review").await;
+    force_status(&pool, "PL-3", "merging").await;
+
+    let deliveries = [
+        pull_request(READY, 1, "feature/pl-1-a", "Merge me", "punchlist"),
+        pull_request(READY, 2, "feature/pl-2-b", "Review me", "punchlist"),
+        pull_request(OPENED, 3, "feature/pl-3-c", "Draft in merging", "punchlist"),
+        pull_request(MERGED, 4, "feature/pl-4-d", "Merged", "punchlist"),
+        pull_request(CLOSED, 5, "feature/pl-4-e", "Closed", "punchlist"),
+        pull_request(READY, 6, "stray", "Bump deps", "punchlist"),
+        pull_request(READY, 7, "feature/ot-1-x", "Elsewhere", "other"),
+    ];
+    for (n, body) in deliveries.iter().enumerate() {
+        deliver(&s, "pull_request", &format!("d{n}"), body).await;
+    }
+    assert_eq!(count(&pool, "pull_request").await, 7);
+    sqlx::query(
+        "UPDATE pull_request SET updated_at = '2026-10-09T18:00:00Z',
+             url = CASE number WHEN 2 THEN 'javascript:alert(1)' ELSE url END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, body) = get(&s, &s.person.token, "/api/pull-requests").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let issue = |id: &str, title: &str, status: &str, name: &str| json!({"id": id, "title": title, "status": status, "status_name": name});
+    let item = |number: i64, title: &str, branch: &str, draft: bool, url: Value, issue: Value| {
+        json!({
+            "number": number, "title": title, "branch": branch, "url": url, "draft": draft,
+            "merge_state": if draft { "unknown" } else { "clean" },
+            "checks_passed": 0, "checks_total": 0, "open_threads": 0,
+            "updated_at": "2026-10-09T18:00:00Z", "issue": issue,
+            "waits_on_merge": number == 1,
+        })
+    };
+    let url = |n: i64| json!(format!("https://github.com/gannonh/punchlist/pull/{n}"));
+    assert_eq!(
+        body,
+        json!([
+            item(6, "Bump deps", "stray", false, url(6), Value::Null),
+            item(
+                3,
+                "Draft in merging",
+                "feature/pl-3-c",
+                true,
+                url(3),
+                issue("PL-3", "Draft in merging", "merging", "Merging")
+            ),
+            item(
+                2,
+                "Review me",
+                "feature/pl-2-b",
+                false,
+                Value::Null,
+                issue("PL-2", "Review me", "human_review", "Human Review")
+            ),
+            item(
+                1,
+                "Merge me",
+                "feature/pl-1-a",
+                false,
+                url(1),
+                issue("PL-1", "Merge me", "merging", "Merging")
+            ),
+        ])
+    );
+
+    let agent = agent_token(&s).await;
+    let (status, body) = get(&s, &agent, "/api/pull-requests").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+/// A standalone agent's token.
+async fn agent_token(s: &Setup) -> String {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/actors")
+        .header("authorization", format!("Bearer {}", s.person.token))
+        .header("content-type", "application/json")
+        .body(Body::from(json!({ "kind": "codex" }).to_string()))
+        .unwrap();
+    let response = s.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice::<Value>(&bytes).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}

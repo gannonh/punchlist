@@ -8,6 +8,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { AppHeader, inField } from '@/components/app-header'
 import { BoardView, ListView } from '@/components/issue-views'
 import { IssueSheet } from '@/components/issue-sheet'
 import { NewIssue } from '@/components/new-issue'
@@ -29,6 +30,7 @@ import {
   useEventStream,
   useIssues,
   useProjects,
+  usePullRequests,
   useSearch,
   useSignOut,
   useTransitions,
@@ -124,10 +126,6 @@ function navOrder(groups: Group[], layout: Layout, narrow: boolean, column: stri
   return shown.flatMap((g) => g.rows.map((row) => row.issue.id))
 }
 
-const inField = (target: EventTarget | null) =>
-  target instanceof HTMLElement &&
-  (target.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName))
-
 const SHORTCUTS: Record<Layout, [string, string][]> = {
   list: [
     ['j', 'next issue'],
@@ -136,6 +134,7 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
     ['s', 'change status'],
     ['/', 'filter'],
     ['1 2', 'switch layout'],
+    ['g p', 'pull requests'],
     ['Esc', 'close'],
   ],
   board: [
@@ -147,6 +146,7 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
     ['l', 'move issue right'],
     ['/', 'filter'],
     ['1 2', 'switch layout'],
+    ['g p', 'pull requests'],
     ['Esc', 'close'],
   ],
 }
@@ -184,6 +184,7 @@ export function IssuesScreen({
   const navigate = useNavigate()
   const { transitions, request, dismiss } = useTransitions()
   useEventStream(workspaceId, issues.isSuccess)
+  const pullRequests = usePullRequests(issues.isSuccess)
 
   const [local, setLocal] = useState<Pick<Filter, 'text' | 'who'>>({ text: '', who: '' })
   const layout: Layout = url.layout ?? 'list'
@@ -355,8 +356,7 @@ export function IssuesScreen({
 
   return (
     <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
-      <header className="sticky top-0 z-5 flex flex-wrap items-center gap-x-3.5 gap-y-2.5 border-b bg-background px-3 py-2 sm:px-4 sm:py-2.5">
-        <div className="flex items-center gap-2 text-lead font-semibold">Punchlist</div>
+      <AppHeader current="issues" pullRequests={pullRequests.data?.length}>
         <div className="inline-flex rounded-lg border bg-card p-0.5" role="group" aria-label="Layout">
           {(['list', 'board'] as const).map((key, index) => (
             <button
@@ -503,7 +503,7 @@ export function IssuesScreen({
             Sign out
           </button>
         </div>
-      </header>
+      </AppHeader>
 
       <main className="flex-1 px-3 py-2 sm:px-4 sm:py-3" aria-live="polite">
         {issues.isPending || workflow.isPending ? (

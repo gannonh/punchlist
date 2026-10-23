@@ -18,8 +18,9 @@ pub struct RunnerConfig {
     pub name: String,
     /// Agent keys this runner can start, reported when it registers: `claude-code`, `codex`.
     pub agents: Vec<String>,
-    /// Where repository clones and worktrees live.
-    pub worktree_root: PathBuf,
+    /// The runner's state: repository clones (`repos/`), worktrees (`worktrees/`), MCP configs
+    /// (`mcp/`), run credentials (`github/`) and Codex homes (`codex-home/`).
+    pub state_dir: PathBuf,
     /// The `claude` executable.
     pub claude_command: PathBuf,
     /// The `pl` executable, which serves Punchlist's MCP tools to each run as `pl mcp`.
@@ -48,6 +49,8 @@ mod orchestrator;
 pub mod path_safety;
 pub mod workspace;
 mod worktree;
+
+pub use worktree::move_state_dir;
 
 /// Registers, then heartbeats and claims until `shutdown` resolves.
 pub async fn run(

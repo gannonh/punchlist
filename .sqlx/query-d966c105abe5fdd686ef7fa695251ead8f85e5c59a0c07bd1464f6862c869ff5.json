@@ -1,0 +1,172 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.number, p.title, p.branch, p.url, p.draft, p.merge_state, p.checks_passed,\n                  p.checks_total, p.open_threads, p.updated_at, i.id AS \"issue_id?\",\n                  i.title AS \"issue_title?\", i.status AS \"issue_status?\"\n           FROM pull_request p\n           JOIN repository r ON r.id = p.repository_id\n           LEFT JOIN issue i ON i.id = p.issue_id\n           WHERE r.workspace_id = $1 AND p.state = 'open'\n           ORDER BY p.number DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "number",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "number"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "branch",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "branch"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "draft",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "draft"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "merge_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "merge_state"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "checks_passed",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks_passed"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "checks_total",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "checks_total"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "open_threads",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "open_threads"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pull_request",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "issue_id?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "issue_title?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "issue_status?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d966c105abe5fdd686ef7fa695251ead8f85e5c59a0c07bd1464f6862c869ff5"
+}

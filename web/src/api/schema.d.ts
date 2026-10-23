@@ -314,6 +314,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/pull-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace repository's open and draft pull requests, newest number first, each with
+         *     the issue it names and whether that issue waits on its merge. Reads no GitHub. People
+         *     only.
+         */
+        get: operations["open_pull_requests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/pull-requests/unlinked": {
         parameters: {
             query?: never;
@@ -748,6 +769,11 @@ export interface components {
             model?: string | null;
             /** Format: int64 */
             output_tokens?: number | null;
+            /**
+             * @description The model the agent said it runs on, such as `claude-haiku-5-5` for `haiku`; `None`
+             *     until it says.
+             */
+            reported_model?: string | null;
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
@@ -1356,6 +1382,32 @@ export interface components {
              */
             warning?: string | null;
         };
+        /**
+         * @description `GET /api/pull-requests`: an open or draft pull request of the workspace's repository, as
+         *     the Pull requests page shows it. Its title and branch are text from outside the team.
+         */
+        OpenPullRequest: {
+            branch: string;
+            /** Format: int32 */
+            checks_passed: number;
+            /** Format: int32 */
+            checks_total: number;
+            draft: boolean;
+            issue?: components["schemas"]["PullRequestIssue"] | null;
+            /** @description GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`. */
+            merge_state: string;
+            /** Format: int64 */
+            number: number;
+            /** Format: int32 */
+            open_threads: number;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description `None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL. */
+            url?: string | null;
+            /** @description Open, not a draft, and its issue is in a status the workflow moves on `pr_merged`. */
+            waits_on_merge: boolean;
+        };
         Project: {
             /** Format: uuid */
             id: string;
@@ -1471,6 +1523,13 @@ export interface components {
             /** @description Its review threads, resolved or not. Read for an open pull request. */
             review_threads: components["schemas"]["ReviewThreadEvidence"][];
             state: components["schemas"]["PullRequestState"];
+            title: string;
+        };
+        /** @description The issue a pull request names. */
+        PullRequestIssue: {
+            id: string;
+            status: string;
+            status_name: string;
             title: string;
         };
         /**
@@ -1631,6 +1690,8 @@ export interface components {
             outcome: components["schemas"]["RunOutcome"];
             /** Format: int64 */
             output_tokens?: number | null;
+            /** @description The model the latest attempt's agent said it runs on; `None` until it says. */
+            reported_model?: string | null;
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
@@ -2788,6 +2849,42 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    open_pull_requests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenPullRequest"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
