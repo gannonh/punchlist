@@ -56,7 +56,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 
 enum Target {
-    /// The lowest-numbered claimable issue that no other claim has locked.
+    /// The claimable issue furthest along the workflow that no other claim has locked.
     Any,
     /// The issue a notification named: it entered Start or a status with a dispatch rule, or
     /// the run it waited behind ended.
@@ -78,17 +78,18 @@ struct Claimable {
     run_id: Option<Uuid>,
 }
 
-/// Selects what the runner can claim and locks its issue row: the lowest-numbered issue no
-/// other claim has locked that is in Start, when the runner can run the agent In Progress
-/// dispatches, or whose dispatch waits in the status it entered, names an agent the runner
-/// can run, and is not behind a run of the issue that is still running (one run works on an
-/// issue at a time; `finish_run` wakes the runners when that run ends), or whose running run
-/// for the status it is in has no running attempt and an agent the runner can run: its
-/// attempt was lost (`settle_run`). The three kinds are ordered together, so started issues
-/// do not hold back a dispatch on an older one. An issue in a status the workflow locks to
-/// agents or runners is never claimed, even with a dispatch waiting there from an older
-/// workflow. A new run in a status whose dispatch rule is `serial` waits while any run in that
-/// status is running in the workspace, which has one repository.
+/// Selects what the runner can claim and locks its issue row: an issue no other claim has
+/// locked that is in Start, when the runner can run the agent In Progress dispatches, or whose
+/// dispatch waits in the status it entered, names an agent the runner can run, and is not
+/// behind a run of the issue that is still running (one run works on an issue at a time;
+/// `finish_run` wakes the runners when that run ends), or whose running run for the status it
+/// is in has no running attempt and an agent the runner can run: its attempt was lost
+/// (`settle_run`). The three kinds are ordered together: the status latest in the workflow's
+/// `statuses` first, so work near Done does not wait behind work not started, then the
+/// lowest-numbered issue. An issue in a status the workflow locks to agents or runners is
+/// never claimed, even with a dispatch waiting there from an older workflow. A new run in a
+/// status whose dispatch rule is `serial` waits while any run in that status is running in
+/// the workspace, which has one repository.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -113,6 +114,7 @@ async fn select_claimable(
         .map(|status| status.as_str())
         .filter(|status| workflow.dispatch_for(status).is_some_and(|d| d.serial))
         .collect();
+    let order: Vec<&str> = workflow.statuses().iter().map(|s| s.as_str()).collect();
     let only = match target {
         Target::Any => None,
         Target::Issue(id) => {
@@ -151,7 +153,8 @@ async fn select_claimable(
                                  AND s.outcome = 'running'
                                  AND s.status = CASE WHEN i.status = $4 THEN $7
                                                      ELSE i.status END))
-           ORDER BY i.number LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
+           ORDER BY array_position($9::text[], i.status) DESC NULLS LAST, i.number
+           LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
         workspace_id,
         &runner.agents,
         only,
@@ -160,6 +163,7 @@ async fn select_claimable(
         &locked as &[&str],
         IN_PROGRESS,
         &serial as &[&str],
+        &order as &[&str],
     )
     .fetch_optional(&mut *tx)
     .await
