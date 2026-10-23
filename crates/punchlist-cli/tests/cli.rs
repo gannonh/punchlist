@@ -1564,7 +1564,10 @@ async fn search_prints_hits_and_snippets_without_control_characters(pool: PgPool
         ),
         ("Reword ci_green", "Plain."),
         ("Docs pass", "Nothing."),
-        ("Escape test", "<img src=x onerror=\"window.__x=1\"> ci_green"),
+        (
+            "Escape test",
+            "<img src=x onerror=\"window.__x=1\"> ci_green",
+        ),
         ("Red\u{1b}[1m", "\u{1b}[31mred\u{1b}[0m"),
     ] {
         let request = punchlist_api::CreateIssue {
@@ -1574,7 +1577,10 @@ async fn search_prints_hits_and_snippets_without_control_characters(pool: PgPool
         client.create_issue(&request).await.unwrap();
     }
     client
-        .comment("PL-3", "We saw ciXgreen in the log and 100% of retries pass.")
+        .comment(
+            "PL-3",
+            "We saw ciXgreen in the log and 100% of retries pass.",
+        )
         .await
         .unwrap();
 

@@ -42,7 +42,10 @@ async fn call(
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 async fn create(app: &Router, token: &str, title: &str, body: &str) -> String {
@@ -125,7 +128,11 @@ async fn finds_titles_first_then_bodies_with_literal_snippets(pool: PgPool) {
         assert_eq!(status, StatusCode::OK, "{results}");
         assert_eq!(
             summary(&results),
-            json!([["PL-2", true, null], ["PL-4", false, "body"], ["PL-1", false, "body"]]),
+            json!([
+                ["PL-2", true, null],
+                ["PL-4", false, "body"],
+                ["PL-1", false, "body"]
+            ]),
             "{query}"
         );
         assert_eq!(results["more"], false);
@@ -231,7 +238,11 @@ async fn searches_only_the_callers_workspace(pool: PgPool) {
     let (_, results) = search(&app, &first.token, "q=ci_green").await;
     assert_eq!(
         summary(&results),
-        json!([["PL-2", true, null], ["PL-4", false, "body"], ["PL-1", false, "body"]])
+        json!([
+            ["PL-2", true, null],
+            ["PL-4", false, "body"],
+            ["PL-1", false, "body"]
+        ])
     );
     let (_, results) = search(&app, &other.token, "q=ci_green").await;
     assert_eq!(summary(&results), json!([["OT-1", true, "comment"]]));

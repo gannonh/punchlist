@@ -8,8 +8,7 @@ use punchlist_api::{
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project,
     ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
-    UpdateIssue,
-    WaitForPerson, WorkflowInfo, proof_type_by_extension,
+    UpdateIssue, WaitForPerson, WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;

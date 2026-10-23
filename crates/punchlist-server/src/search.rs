@@ -275,7 +275,10 @@ mod tests {
         assert_eq!(before, "é".repeat(120));
         assert_eq!(hit, "");
         assert_eq!(after, "…");
-        assert_eq!(parts("short", "zzz"), ("short".into(), "".into(), "".into()));
+        assert_eq!(
+            parts("short", "zzz"),
+            ("short".into(), "".into(), "".into())
+        );
     }
 
     #[test]

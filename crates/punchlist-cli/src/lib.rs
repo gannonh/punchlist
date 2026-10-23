@@ -14,8 +14,8 @@ use clap::{Parser, Subcommand};
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
-    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue, WorkflowInfo,
-    gate_lines,
+    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
+    WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -1354,7 +1354,10 @@ fn render_search(results: &SearchResults) -> String {
         text.push_str(&format!("{}  {title}\n", hit.issue_id));
         if let Some(s) = &hit.snippet {
             let field = s.field.as_str();
-            text.push_str(&format!("    {field}: {}[{}]{}\n", s.before, s.hit, s.after));
+            text.push_str(&format!(
+                "    {field}: {}[{}]{}\n",
+                s.before, s.hit, s.after
+            ));
         }
     }
     if results.more {
