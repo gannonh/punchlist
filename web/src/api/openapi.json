@@ -1122,6 +1122,45 @@
         }
       }
     },
+    "/api/pull-requests": {
+      "get": {
+        "summary": "The workspace repository's open and draft pull requests, newest number first, each with\nthe issue it names and whether that issue waits on its merge. Reads no GitHub. People\nonly.",
+        "operationId": "open_pull_requests",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OpenPullRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pull-requests/unlinked": {
       "get": {
         "summary": "The workspace repository's pull requests that name no issue, newest number first.",
@@ -4014,6 +4053,79 @@
           }
         }
       },
+      "OpenPullRequest": {
+        "type": "object",
+        "description": "`GET /api/pull-requests`: an open or draft pull request of the workspace's repository, as\nthe Pull requests page shows it. Its title and branch are text from outside the team.",
+        "required": [
+          "number",
+          "title",
+          "branch",
+          "draft",
+          "merge_state",
+          "checks_passed",
+          "checks_total",
+          "open_threads",
+          "updated_at",
+          "waits_on_merge"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "checks_passed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "checks_total": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "draft": {
+            "type": "boolean"
+          },
+          "issue": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PullRequestIssue",
+                "description": "The issue it names; `None` when it names none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "merge_state": {
+            "type": "string",
+            "description": "GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "open_threads": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL."
+          },
+          "waits_on_merge": {
+            "type": "boolean",
+            "description": "Open, not a draft, and its issue is in a status the workflow moves on `pr_merged`."
+          }
+        }
+      },
       "Project": {
         "type": "object",
         "required": [
@@ -4277,6 +4389,30 @@
           },
           "state": {
             "$ref": "#/components/schemas/PullRequestState"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "PullRequestIssue": {
+        "type": "object",
+        "description": "The issue a pull request names.",
+        "required": [
+          "id",
+          "title",
+          "status",
+          "status_name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_name": {
+            "type": "string"
           },
           "title": {
             "type": "string"

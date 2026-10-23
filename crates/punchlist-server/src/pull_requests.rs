@@ -1,5 +1,6 @@
-//! `/api/issues/{id}/pull-requests` and `/api/pull-requests/unlinked`: the pull requests
-//! that GitHub's events recorded, read by issue or as the ones no issue claimed.
+//! `/api/issues/{id}/pull-requests`, `/api/pull-requests` and `/api/pull-requests/unlinked`:
+//! the pull requests that GitHub's events recorded, read by issue, as the open ones, or as
+//! the ones no issue claimed.
 //! `/api/issues/{id}/pull-requests/refresh` reads GitHub first, and adds what the reviewers
 //! wrote.
 
@@ -7,13 +8,17 @@ use axum::Json;
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ChecksState, ErrorBody, PullRequest, PullRequestState, PullRequestsNow, ReviewThread,
+    ChecksState, ErrorBody, OpenPullRequest, PullRequest, PullRequestIssue, PullRequestState,
+    PullRequestsNow, ReviewThread, plain_pull_request_url,
 };
+use punchlist_core::display_name;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::actors::person_only;
 use crate::auth::Actor;
 use crate::github::{newest_check_runs, refresh_pull_requests};
+use crate::workflow::active_workflow;
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -21,6 +26,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(issue_pull_requests))
         .routes(routes!(refresh_issue_pull_requests))
         .routes(routes!(unlinked_pull_requests))
+        .routes(routes!(open_pull_requests))
 }
 
 struct PullRequestRow {
@@ -225,5 +231,72 @@ async fn unlinked_pull_requests(
         rows.into_iter()
             .map(PullRequest::try_from)
             .collect::<Result<_, _>>()?,
+    ))
+}
+
+/// The workspace repository's open and draft pull requests, newest number first, each with
+/// the issue it names and whether that issue waits on its merge. Reads no GitHub. People
+/// only.
+#[utoipa::path(
+    get,
+    path = "/api/pull-requests",
+    responses(
+        (status = 200, body = Vec<OpenPullRequest>),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "Not a person's token."),
+    )
+)]
+async fn open_pull_requests(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> Result<Json<Vec<OpenPullRequest>>, ApiError> {
+    person_only(&actor)?;
+    let mut conn = state.pool.acquire().await?;
+    let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+    let rows = sqlx::query!(
+        r#"SELECT p.number, p.title, p.branch, p.url, p.draft, p.merge_state, p.checks_passed,
+                  p.checks_total, p.open_threads, p.updated_at, i.id AS "issue_id?",
+                  i.title AS "issue_title?", i.status AS "issue_status?"
+           FROM pull_request p
+           JOIN repository r ON r.id = p.repository_id
+           LEFT JOIN issue i ON i.id = p.issue_id
+           WHERE r.workspace_id = $1 AND p.state = 'open'
+           ORDER BY p.number DESC"#,
+        actor.workspace_id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                let issue = match (row.issue_id, row.issue_title, row.issue_status) {
+                    (Some(id), Some(title), Some(status)) => Some(PullRequestIssue {
+                        id,
+                        title,
+                        status_name: display_name(&status),
+                        status,
+                    }),
+                    _ => None,
+                };
+                let waits_on_merge = !row.draft
+                    && issue.as_ref().is_some_and(|issue| {
+                        workflow.transition_on(&issue.status, "pr_merged").is_some()
+                    });
+                OpenPullRequest {
+                    url: plain_pull_request_url(row.number, &row.url).map(str::to_string),
+                    number: row.number,
+                    title: row.title,
+                    branch: row.branch,
+                    draft: row.draft,
+                    merge_state: row.merge_state,
+                    checks_passed: row.checks_passed,
+                    checks_total: row.checks_total,
+                    open_threads: row.open_threads,
+                    updated_at: row.updated_at,
+                    issue,
+                    waits_on_merge,
+                }
+            })
+            .collect(),
     ))
 }

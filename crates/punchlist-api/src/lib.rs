@@ -999,6 +999,37 @@ pub struct PullRequestsNow {
     pub refreshed: bool,
 }
 
+/// `GET /api/pull-requests`: an open or draft pull request of the workspace's repository, as
+/// the Pull requests page shows it. Its title and branch are text from outside the team.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OpenPullRequest {
+    pub number: i64,
+    pub title: String,
+    pub branch: String,
+    /// `None` unless it is a plain `https://github.com/<owner>/<name>/pull/<number>` URL.
+    pub url: Option<String>,
+    pub draft: bool,
+    /// GitHub's mergeable_state, such as `clean`, `dirty` or `unknown`.
+    pub merge_state: String,
+    pub checks_passed: i32,
+    pub checks_total: i32,
+    pub open_threads: i32,
+    pub updated_at: DateTime<Utc>,
+    /// The issue it names; `None` when it names none.
+    pub issue: Option<PullRequestIssue>,
+    /// Open, not a draft, and its issue is in a status the workflow moves on `pr_merged`.
+    pub waits_on_merge: bool,
+}
+
+/// The issue a pull request names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PullRequestIssue {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub status_name: String,
+}
+
 /// An unresolved review thread. Its path, authors and bodies are text from outside the team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ReviewThread {
