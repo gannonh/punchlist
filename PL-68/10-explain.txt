@@ -1,0 +1,26 @@
+                                                                      QUERY PLAN                                                                       
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=250.20..250.20 rows=1 width=147) (actual time=1.184..1.187 rows=50 loops=1)
+   Sort Key: p.number DESC
+   Sort Method: quicksort  Memory: 33kB
+   InitPlan 1
+     ->  Limit  (cost=0.00..1.01 rows=1 width=16) (actual time=0.007..0.007 rows=1 loops=1)
+           ->  Seq Scan on workspace  (cost=0.00..1.01 rows=1 width=16) (actual time=0.006..0.006 rows=1 loops=1)
+   ->  Nested Loop Left Join  (cost=0.43..249.18 rows=1 width=147) (actual time=0.033..1.157 rows=50 loops=1)
+         ->  Nested Loop  (cost=0.16..247.60 rows=1 width=123) (actual time=0.025..1.078 rows=50 loops=1)
+               ->  Seq Scan on pull_request p  (cost=0.00..244.12 rows=50 width=139) (actual time=0.008..1.050 rows=50 loops=1)
+                     Filter: (state = 'open'::text)
+                     Rows Removed by Filter: 5000
+               ->  Memoize  (cost=0.16..1.14 rows=1 width=16) (actual time=0.000..0.000 rows=1 loops=50)
+                     Cache Key: p.repository_id
+                     Cache Mode: logical
+                     Hits: 49  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                     ->  Index Scan using repository_pkey on repository r  (cost=0.15..1.13 rows=1 width=16) (actual time=0.014..0.014 rows=1 loops=1)
+                           Index Cond: (id = p.repository_id)
+                           Filter: (workspace_id = (InitPlan 1).col1)
+         ->  Index Scan using issue_pkey on issue i  (cost=0.27..1.57 rows=1 width=30) (actual time=0.001..0.001 rows=1 loops=50)
+               Index Cond: (id = p.issue_id)
+ Planning Time: 0.909 ms
+ Execution Time: 1.236 ms
+(22 rows)
+

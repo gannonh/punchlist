@@ -1,0 +1,101 @@
+{
+  "mode": "main",
+  "check1": {
+    "link": false,
+    "route": 404
+  },
+  "loads": [
+    {
+      "render": 17,
+      "issuesResponseEnd": 76.80000019073486,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 19.90000009536743,
+      "issuesResponseEnd": 72.79999995231628,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 20.299999952316284,
+      "issuesResponseEnd": 78.70000004768372,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 19.5,
+      "issuesResponseEnd": 80,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 17.90000009536743,
+      "issuesResponseEnd": 72,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 25.90000009536743,
+      "issuesResponseEnd": 75.09999990463257,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 21.700000047683716,
+      "issuesResponseEnd": 78.69999980926514,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 22.40000009536743,
+      "issuesResponseEnd": 75.20000004768372,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 22.299999952316284,
+      "issuesResponseEnd": 76.5,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 20.199999809265137,
+      "issuesResponseEnd": 70.69999980926514,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 17.899999856948853,
+      "issuesResponseEnd": 72.29999995231628,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 18.59999990463257,
+      "issuesResponseEnd": 70,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 20.399999856948853,
+      "issuesResponseEnd": 70.69999980926514,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 19.200000047683716,
+      "issuesResponseEnd": 77.20000004768372,
+      "pullRequestsStart": null,
+      "count": null
+    },
+    {
+      "render": 20.700000047683716,
+      "issuesResponseEnd": 80.09999990463257,
+      "pullRequestsStart": null,
+      "count": null
+    }
+  ],
+  "listRenderMedian": 20.199999809265137,
+  "prAfterIssues": true
+}

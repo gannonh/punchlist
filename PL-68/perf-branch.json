@@ -1,0 +1,124 @@
+{
+  "mode": "branch",
+  "check1": {
+    "link": true,
+    "route": 200
+  },
+  "loads": [
+    {
+      "render": 16.90000009536743,
+      "issuesResponseEnd": 77.59999990463257,
+      "pullRequestsStart": 97.89999985694885,
+      "count": "50"
+    },
+    {
+      "render": 21.300000190734863,
+      "issuesResponseEnd": 73.90000009536743,
+      "pullRequestsStart": 100,
+      "count": "50"
+    },
+    {
+      "render": 19.5,
+      "issuesResponseEnd": 74.80000019073486,
+      "pullRequestsStart": 98.10000014305115,
+      "count": "50"
+    },
+    {
+      "render": 18.40000009536743,
+      "issuesResponseEnd": 74.40000009536743,
+      "pullRequestsStart": 96.70000004768372,
+      "count": "50"
+    },
+    {
+      "render": 22.299999952316284,
+      "issuesResponseEnd": 75.29999995231628,
+      "pullRequestsStart": 101.5,
+      "count": "50"
+    },
+    {
+      "render": 23.299999952316284,
+      "issuesResponseEnd": 73.79999995231628,
+      "pullRequestsStart": 102,
+      "count": "50"
+    },
+    {
+      "render": 17.700000047683716,
+      "issuesResponseEnd": 75.20000004768372,
+      "pullRequestsStart": 98,
+      "count": "50"
+    },
+    {
+      "render": 19.40000009536743,
+      "issuesResponseEnd": 71.10000014305115,
+      "pullRequestsStart": 94.20000004768372,
+      "count": "50"
+    },
+    {
+      "render": 19.700000047683716,
+      "issuesResponseEnd": 78.60000014305115,
+      "pullRequestsStart": 102.70000004768372,
+      "count": "50"
+    },
+    {
+      "render": 21.600000143051147,
+      "issuesResponseEnd": 77.70000004768372,
+      "pullRequestsStart": 103.10000014305115,
+      "count": "50"
+    },
+    {
+      "render": 19.799999952316284,
+      "issuesResponseEnd": 79.09999990463257,
+      "pullRequestsStart": 103.09999990463257,
+      "count": "50"
+    },
+    {
+      "render": 20.09999990463257,
+      "issuesResponseEnd": 71.59999990463257,
+      "pullRequestsStart": 95.09999990463257,
+      "count": "50"
+    },
+    {
+      "render": 18.40000009536743,
+      "issuesResponseEnd": 71.20000004768372,
+      "pullRequestsStart": 93.20000004768372,
+      "count": "50"
+    },
+    {
+      "render": 20.700000047683716,
+      "issuesResponseEnd": 77,
+      "pullRequestsStart": 101.70000004768372,
+      "count": "50"
+    },
+    {
+      "render": 23.59999990463257,
+      "issuesResponseEnd": 75.79999995231628,
+      "pullRequestsStart": 105.29999995231628,
+      "count": "50"
+    }
+  ],
+  "listRenderMedian": 19.799999952316284,
+  "prAfterIssues": true,
+  "pageRenders": [
+    {
+      "duration": 7.8999998569488525,
+      "rows": 50
+    },
+    {
+      "duration": 8,
+      "rows": 50
+    },
+    {
+      "duration": 7.5,
+      "rows": 50
+    },
+    {
+      "duration": 6.800000190734863,
+      "rows": 50
+    },
+    {
+      "duration": 8.099999904632568,
+      "rows": 50
+    }
+  ],
+  "pageRenderMedian": 7.8999998569488525
+}
