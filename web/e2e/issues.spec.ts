@@ -440,6 +440,47 @@ test('the label and status filters live in the URL, follow edits, and pick the b
   await expect(page).toHaveURL('/?layout=board')
 })
 
+test('the filter finds bodies and comments with a marked snippet, and Enter opens the matched comment', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const word = `ci_green_${randomUUID().slice(0, 8)}`
+  const issue = async (title: string, body: string) =>
+    (await ok<{ row: { issue: { id: string } } }>(await request.post('/api/issues', { headers: person, data: { title, body } })))
+      .row.issue.id
+  const inBody = await issue('Gate the transition', `The runner restarts and leaks ${word} on every retry.`)
+  const inComment = await issue('Docs pass', 'Nothing.')
+  const { seq } = await ok<{ seq: number }>(
+    await request.post(`/api/issues/${inComment}/comments`, {
+      headers: person,
+      data: { body: `We saw ${word.toUpperCase()} in the log.` },
+    }),
+  )
+  await signIn(page)
+
+  await page.getByLabel('Filter issues').fill(word)
+  const snippet = (id: string) => row(page, id).locator('[data-snippet]')
+  await expect(snippet(inBody)).toHaveText(`bodyThe runner restarts and leaks ${word} on every retry.`)
+  await expect(snippet(inBody).locator('mark')).toHaveText(word)
+  await expect(snippet(inComment)).toHaveText(`commentWe saw ${word.toUpperCase()} in the log.`)
+  await expect(page.locator('[data-issue]')).toHaveCount(2)
+  await page.getByLabel('Filter issues').fill('')
+  await expect(page.locator('[data-snippet]')).toHaveCount(0)
+
+  await page.getByLabel('Filter issues').fill(word)
+  await expect(snippet(inComment)).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByLabel('Filter issues')).toHaveValue(word)
+  // A click on the selected row opens the sheet instead.
+  if ((await row(page, inComment).getAttribute('aria-selected')) !== 'true') await row(page, inComment).click()
+  await expect(row(page, inComment)).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/issues/${inComment}#seq-${String(seq)}$`))
+  await expect(page.locator(`#seq-${String(seq)}`)).toBeInViewport()
+  await expect(page.locator(`#seq-${String(seq)}`)).toHaveAttribute('data-target', 'true')
+})
+
 // The issue page. These come last: their runs and dispatches must not be what an earlier test's runner claims.
 
 /** A 1×1 PNG. */

@@ -27,6 +27,7 @@ const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 100;
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SearchQuery {
     /// One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one
     /// space, matched as a substring in any case.

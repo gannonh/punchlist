@@ -1874,7 +1874,7 @@
         "parameters": [
           {
             "name": "q",
-            "in": "path",
+            "in": "query",
             "description": "One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one\nspace, matched as a substring in any case.",
             "required": true,
             "schema": {
@@ -1883,14 +1883,11 @@
           },
           {
             "name": "limit",
-            "in": "path",
+            "in": "query",
             "description": "The most hits to answer: 50 by default, at most 100.",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int32",
               "minimum": 0
             }

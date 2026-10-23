@@ -3420,17 +3420,17 @@ export interface operations {
     };
     search: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
+            query: {
                 /**
                  * @description One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one
                  *     space, matched as a substring in any case.
                  */
                 q: string;
                 /** @description The most hits to answer: 50 by default, at most 100. */
-                limit: number | null;
+                limit?: number;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;

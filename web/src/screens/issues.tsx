@@ -29,6 +29,7 @@ import {
   useEventStream,
   useIssues,
   useProjects,
+  useSearch,
   useSignOut,
   useTransitions,
   useWorkflow,
@@ -216,10 +217,16 @@ export function IssuesScreen({
   const closed = useMemo(() => statuses.filter((status) => status.closed), [statuses])
   // Chosen statuses replace `hide Done and Canceled`, so choosing Done shows Done issues.
   const hiding = hideClosed && filter.statuses.length === 0
+  const searched = useSearch(local.text)
+  const hitIds = useMemo(() => searched?.hits.map((hit) => hit.issue_id) ?? [], [searched])
+  const snippets = useMemo(
+    () => new Map(searched?.hits.flatMap((hit) => (hit.snippet ? [[hit.issue_id, hit.snippet] as const] : []))),
+    [searched],
+  )
   const visible = useMemo(() => {
-    const shown = filterRows(rows, filter)
+    const shown = filterRows(rows, filter, hitIds)
     return hiding ? shown.filter((row) => !closed.some((status) => status.key === row.issue.status)) : shown
-  }, [rows, filter, hiding, closed])
+  }, [rows, filter, hitIds, hiding, closed])
   const columns = useMemo(
     () => (filter.statuses.length > 0 ? statuses.filter((status) => filter.statuses.includes(status.key)) : statuses),
     [statuses, filter.statuses],
@@ -296,7 +303,9 @@ export function IssuesScreen({
           step(-1)
         },
         Enter: () => {
-          if (current) void navigate({ to: '/issues/$id', params: { id: current } })
+          if (!current) return
+          const seq = snippets.get(current)?.comment_seq
+          void navigate({ to: '/issues/$id', params: { id: current }, hash: seq == null ? undefined : `seq-${String(seq)}` })
         },
         s: () => {
           if (current) openMenu(current)
@@ -327,7 +336,7 @@ export function IssuesScreen({
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout, navigate])
+  }, [sheet, menu, creating, order, current, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate])
 
   const filtered = Object.values({ ...filter }).some((value) => value.length > 0)
   const projectList = projects.data ?? []
@@ -342,7 +351,7 @@ export function IssuesScreen({
   const strayMilestone = ref(filter.milestone) && !milestones.some((m) => m.id === filter.milestone)
   const menuRow = rowById(menu?.id ?? null)
   const sheetRow = rowById(sheet)
-  const viewProps = { groups, selected: current, transitions, now, onPick: pick, onDismiss: dismiss }
+  const viewProps = { groups, selected: current, transitions, snippets, now, onPick: pick, onDismiss: dismiss }
 
   return (
     <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
@@ -374,6 +383,10 @@ export function IssuesScreen({
             className="h-7.5 flex-[1_1_120px] rounded-md border bg-card px-2 py-1.25 focus:outline-2 focus:outline-offset-1 focus:outline-ring sm:w-45 sm:flex-none"
             onChange={(event) => {
               setLocal((f) => ({ ...f, text: event.target.value }))
+            }}
+            // Esc leaves the filter (the page's key handler blurs it) with its text, which a search input would clear.
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') event.preventDefault()
             }}
           />
           <select

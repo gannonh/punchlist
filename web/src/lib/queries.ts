@@ -17,6 +17,7 @@ import {
   type IssueRow,
   type MilestoneRef,
   type ProjectRef,
+  type SearchResults,
   type StatusInfo,
   type StreamItem,
   type Transitions,
@@ -269,6 +270,38 @@ export const useIssues = () => useQuery(issuesQuery)
 export const useWorkflow = () => useQuery(workflowQuery)
 export const useActors = () => useQuery(actorsQuery)
 export const useProjects = () => useQuery(projectsQuery)
+
+/** The filter's text as the server reads it: trimmed, each whitespace run one space. */
+const searchText = (text: string) => text.trim().split(/\s+/).join(' ')
+// In code points, as the server counts.
+const searchable = (q: string) => Array.from(q).length >= 3 && Array.from(q).length <= 200
+
+/**
+ * `GET /api/search` for the filter's text, sent 150 ms after the last keystroke and only from 3 characters. While
+ * the next answer loads it keeps the last one; under 3 characters it is `undefined` at once. Each text is its own
+ * query, so an earlier answer never replaces a later one.
+ */
+export function useSearch(text: string): SearchResults | undefined {
+  const q = searchText(text)
+  const [debounced, setDebounced] = useState(q)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebounced(q)
+    }, 150)
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [q])
+  const search = useQuery({
+    queryKey: ['search', debounced],
+    queryFn: ({ signal }) => call(api.GET('/api/search', { params: { query: { q: debounced } }, signal })),
+    enabled: searchable(debounced),
+    // Not across an emptied filter: hits from before it was cleared would show for the next text's first 150 ms.
+    placeholderData: (previous) => (searchable(q) ? previous : undefined),
+    staleTime: 30_000,
+  })
+  return searchable(q) ? search.data : undefined
+}
 
 /** Every query of one issue's page starts with this key, so one invalidation reads the page again. */
 export const issueKey = (id: string) => ['issue', id] as const
