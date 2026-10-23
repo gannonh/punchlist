@@ -237,8 +237,12 @@ pub struct RunnerStart {
     /// The name `pl runner list` shows. Default: the machine's hostname.
     #[arg(long)]
     pub name: Option<String>,
-    /// Where repository clones and worktrees live.
+    /// The runner's state: repository clones, worktrees, MCP configs and Codex homes.
+    /// Default: `~/.local/share/punchlist/runner`.
     #[arg(long)]
+    pub state_dir: Option<String>,
+    /// Deprecated: `--state-dir`.
+    #[arg(long, hide = true, conflicts_with = "state_dir")]
     pub worktree_root: Option<String>,
     /// Passed to `claude --model`, such as `haiku`.
     #[arg(long)]
@@ -328,7 +332,8 @@ pub struct Config {
 pub struct RunnerSection {
     pub name: Option<String>,
     pub agents: Option<Vec<String>>,
-    pub worktree_root: Option<String>,
+    #[serde(alias = "worktree_root")]
+    pub state_dir: Option<String>,
     pub claude_command: Option<String>,
     pub model: Option<String>,
     pub codex_command: Option<String>,
@@ -406,7 +411,19 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::Runner(RunnerCommand::Start(flags)) => {
             init_logging();
             let home = std::env::var("HOME").ok();
-            let runner = runner_config(&config, *flags, home.as_deref(), &hostname());
+            if flags.worktree_root.is_some() {
+                eprintln!("--worktree-root is deprecated; use --state-dir");
+            }
+            let (runner, move_from) =
+                runner_config(&config, *flags, home.as_deref(), &hostname(), Path::exists);
+            if let Some(from) = move_from {
+                let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+                    .map(PathBuf::from)
+                    .or_else(|| home.as_ref().map(|h| Path::new(h).join(".claude")));
+                punchlist_runner::move_state_dir(&from, &runner.state_dir, claude_dir.as_deref())
+                    .map_err(anyhow::Error::msg)?;
+                eprintln!("moved {} to {}", from.display(), runner.state_dir.display());
+            }
             punchlist_runner::run(runner, shutdown_signal()).await
         }
         Command::Proof(ProofCommand::Attach {
@@ -668,18 +685,29 @@ fn expand_home(path: &str, home: Option<&str>) -> PathBuf {
     }
 }
 
-/// Flags, then the `[runner]` table, then defaults.
+/// Flags, then the `[runner]` table, then defaults. With the default state directory, also
+/// the old default to move there first, when it `exists` and the new one does not: the state
+/// directory was `~/.local/share/punchlist/worktrees` until it held more than worktrees.
 pub fn runner_config(
     config: &Config,
     flags: RunnerStart,
     home: Option<&str>,
     hostname: &str,
-) -> punchlist_runner::RunnerConfig {
+    exists: impl Fn(&Path) -> bool,
+) -> (punchlist_runner::RunnerConfig, Option<PathBuf>) {
     let table = &config.runner;
-    let worktree_root = flags
-        .worktree_root
-        .or_else(|| table.worktree_root.clone())
-        .unwrap_or_else(|| "~/.local/share/punchlist/worktrees".to_string());
+    let chosen = flags
+        .state_dir
+        .or(flags.worktree_root)
+        .or_else(|| table.state_dir.clone());
+    let state_dir = expand_home(
+        chosen
+            .as_deref()
+            .unwrap_or("~/.local/share/punchlist/runner"),
+        home,
+    );
+    let old = expand_home("~/.local/share/punchlist/worktrees", home);
+    let move_from = (chosen.is_none() && !exists(&state_dir) && exists(&old)).then_some(old);
     let claude_command = flags
         .claude_command
         .or_else(|| table.claude_command.clone())
@@ -688,7 +716,7 @@ pub fn runner_config(
         .codex_command
         .or_else(|| table.codex_command.clone())
         .unwrap_or_else(|| "codex".to_string());
-    punchlist_runner::RunnerConfig {
+    let runner = punchlist_runner::RunnerConfig {
         server_url: config.server_url.clone(),
         token: config.token.clone(),
         name: flags
@@ -699,7 +727,7 @@ pub fn runner_config(
             .agents
             .or_else(|| table.agents.clone())
             .unwrap_or_else(|| vec!["claude-code".to_string()]),
-        worktree_root: expand_home(&worktree_root, home),
+        state_dir,
         claude_command: expand_home(&claude_command, home),
         mcp_command: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pl")),
         model: flags.model.or_else(|| table.model.clone()),
@@ -712,7 +740,8 @@ pub fn runner_config(
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
-    }
+    };
+    (runner, move_from)
 }
 
 fn render_created(created: &CreatedAgent) -> String {
@@ -1798,18 +1827,15 @@ mod tests {
 
     #[test]
     fn runner_config_layers_flags_table_and_defaults() {
-        let defaults = runner_config(
+        let (defaults, _) = runner_config(
             &config("").unwrap(),
             RunnerStart::default(),
             Some("/h"),
             "box",
+            |_| false,
         );
         assert_eq!(defaults.name, "box");
         assert_eq!(defaults.agents, vec!["claude-code".to_string()]);
-        assert_eq!(
-            defaults.worktree_root,
-            PathBuf::from("/h/.local/share/punchlist/worktrees")
-        );
         assert_eq!(defaults.claude_command, PathBuf::from("claude"));
         assert_eq!(defaults.codex_command, PathBuf::from("codex"));
         assert_eq!(defaults.codex_model, None);
@@ -1817,7 +1843,7 @@ mod tests {
         assert_eq!((defaults.model, defaults.max_concurrent), (None, 1));
 
         let table = config(
-            "[runner]\nname = \"t\"\nworktree_root = \"~/wt\"\nmodel = \"haiku\"\nmax_concurrent = 3\n",
+            "[runner]\nname = \"t\"\nstate_dir = \"~/wt\"\nmodel = \"haiku\"\nmax_concurrent = 3\n",
         )
         .unwrap();
         let flags = RunnerStart {
@@ -1827,13 +1853,72 @@ mod tests {
             codex_effort: Some("low".into()),
             ..RunnerStart::default()
         };
-        let merged = runner_config(&table, flags, Some("/h"), "box");
+        let (merged, _) = runner_config(&table, flags, Some("/h"), "box", |_| false);
         assert_eq!(merged.name, "f");
         assert_eq!(merged.agents, ["claude-code", "codex"]);
         assert_eq!(merged.codex_model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(merged.codex_effort, "low");
-        assert_eq!(merged.worktree_root, PathBuf::from("/h/wt"));
+        assert_eq!(merged.state_dir, PathBuf::from("/h/wt"));
         assert_eq!(merged.model.as_deref(), Some("haiku"));
         assert_eq!(merged.max_concurrent, 3);
+    }
+
+    #[test]
+    fn runner_state_dir_resolves_and_moves_only_the_old_default() {
+        fn resolve(
+            table: &str,
+            flags: RunnerStart,
+            existing: &[&str],
+        ) -> (PathBuf, Option<PathBuf>) {
+            let (runner, move_from) =
+                runner_config(&config(table).unwrap(), flags, Some("/h"), "box", |p| {
+                    existing.iter().any(|e| p == Path::new(e))
+                });
+            (runner.state_dir, move_from)
+        }
+        let old = "/h/.local/share/punchlist/worktrees";
+        let new = "/h/.local/share/punchlist/runner";
+
+        // No option.
+        assert_eq!(
+            resolve("", RunnerStart::default(), &[]),
+            (PathBuf::from(new), None)
+        );
+        // `--state-dir`.
+        let state_dir = RunnerStart {
+            state_dir: Some("~/state".into()),
+            ..RunnerStart::default()
+        };
+        assert_eq!(
+            resolve("", state_dir, &[old]),
+            (PathBuf::from("/h/state"), None)
+        );
+        // `--worktree-root`, the deprecated name.
+        let worktree_root = RunnerStart {
+            worktree_root: Some("/tmp/x".into()),
+            ..RunnerStart::default()
+        };
+        assert_eq!(
+            resolve("", worktree_root, &[old]),
+            (PathBuf::from("/tmp/x"), None)
+        );
+        // The table's old key.
+        assert_eq!(
+            resolve(
+                "[runner]\nworktree_root = \"~/wt\"\n",
+                RunnerStart::default(),
+                &[old]
+            ),
+            (PathBuf::from("/h/wt"), None)
+        );
+        // An existing old default moves to the new one, unless the new one exists.
+        assert_eq!(
+            resolve("", RunnerStart::default(), &[old]),
+            (PathBuf::from(new), Some(PathBuf::from(old)))
+        );
+        assert_eq!(
+            resolve("", RunnerStart::default(), &[old, new]),
+            (PathBuf::from(new), None)
+        );
     }
 }

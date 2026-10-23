@@ -635,7 +635,7 @@ fn runner_start_help_lists_the_flags() {
     let help = String::from_utf8(output.stdout).unwrap();
     for flag in [
         "--name",
-        "--worktree-root",
+        "--state-dir",
         "--model",
         "--claude-command",
         "--agents",
@@ -646,6 +646,8 @@ fn runner_start_help_lists_the_flags() {
     ] {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
     }
+    assert!(help.contains("~/.local/share/punchlist/runner"), "{help}");
+    assert!(!help.contains("--worktree-root"), "{help}");
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]

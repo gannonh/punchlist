@@ -405,9 +405,135 @@ fn prepare_blocking(
     Ok(worktree)
 }
 
+/// Moves the runner's state directory from `from` to `to` with one `rename`, so both must be
+/// on one filesystem, and keeps each worktree's attempt resumable: git's links between a
+/// clone and its worktrees, and Claude Code's sessions, are filed under absolute paths.
+/// `claude_dir` is Claude Code's config directory, where sessions live under `projects/`.
+pub fn move_state_dir(from: &Path, to: &Path, claude_dir: Option<&Path>) -> Result<(), String> {
+    let from = std::path::absolute(from).map_err(|e| e.to_string())?;
+    let to = std::path::absolute(to).map_err(|e| e.to_string())?;
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    std::fs::rename(&from, &to)
+        .map_err(|e| format!("cannot move {} to {}: {e}", from.display(), to.display()))?;
+    let git = Git {
+        cancel: Cancel::default(),
+        timeout: Duration::from_secs(30),
+        env: Vec::new(),
+    };
+    // `repos/<owner>/<name>` and its worktrees, `worktrees/<owner>/<name>/<issue>`.
+    for clone in subdirs(&to.join("repos")).iter().flat_map(|o| subdirs(o)) {
+        let Ok(repo) = clone.strip_prefix(to.join("repos")) else {
+            continue;
+        };
+        let worktrees = subdirs(&to.join("worktrees").join(repo));
+        if worktrees.is_empty() {
+            continue;
+        }
+        let mut args = vec!["worktree".to_string(), "repair".to_string()];
+        args.extend(worktrees.iter().map(|w| w.to_string_lossy().to_string()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        // A worktree left unrepaired is not resumed: its attempt is reported lost.
+        if let Err(e) = git.run(Some(&clone), &args, "git worktree repair") {
+            tracing::warn!("{e}");
+        }
+        let Some(projects) = claude_dir.map(|dir| dir.join("projects")) else {
+            continue;
+        };
+        for worktree in worktrees {
+            let old = from.join(worktree.strip_prefix(&to).expect("under `to`"));
+            let old_sessions = projects.join(claude_project(&old));
+            let new_sessions = projects.join(claude_project(&worktree));
+            if old_sessions.exists()
+                && !new_sessions.exists()
+                && let Err(e) = std::fs::rename(&old_sessions, &new_sessions)
+            {
+                tracing::warn!("cannot move {}: {e}", old_sessions.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The directories in `dir`, none when it cannot be read.
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// The directory under Claude Code's `projects/` that holds the sessions started in `dir`:
+/// its path with every character but a letter or digit made `-`.
+// ponytail: Claude Code shortens paths over 200 characters with a hash; such a worktree's
+// session is not moved and its attempt is reported lost.
+fn claude_project(dir: &Path) -> String {
+    dir.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn claude_files_a_directory_s_sessions_under_its_path_with_dashes() {
+        assert_eq!(
+            claude_project(Path::new(
+                "/home/g/.local/share/punchlist/runner/worktrees/o/n/PL-64"
+            )),
+            "-home-g--local-share-punchlist-runner-worktrees-o-n-PL-64"
+        );
+    }
+
+    #[test]
+    fn moving_the_state_dir_keeps_worktrees_and_claude_sessions_resumable() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let origin = base.join("origin");
+        make_origin(&origin);
+        let old = base.join("share/worktrees");
+        let clone = old.join("repos/acme/widgets");
+        git(
+            None,
+            &[
+                "clone",
+                &origin.join("acme/widgets.git").to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+            "clone",
+        )
+        .unwrap();
+        let worktree = old.join("worktrees/acme/widgets/PL-1");
+        run(
+            &clone,
+            &["worktree", "add", "-b", "pl-1", &worktree.to_string_lossy()],
+        );
+        let claude = base.join("claude");
+        let sessions = claude.join("projects").join(claude_project(&worktree));
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("s.jsonl"), "{}\n").unwrap();
+
+        let new = base.join("share/runner");
+        move_state_dir(&old, &new, Some(&claude)).unwrap();
+
+        assert!(!old.exists());
+        let moved = new.join("worktrees/acme/widgets/PL-1");
+        assert_eq!(run(&moved, &["rev-parse", "--abbrev-ref", "HEAD"]), "pl-1");
+        let moved_sessions = claude.join("projects").join(claude_project(&moved));
+        assert_eq!(
+            std::fs::read_to_string(moved_sessions.join("s.jsonl")).unwrap(),
+            "{}\n"
+        );
+    }
 
     fn git(dir: Option<&Path>, args: &[&str], context: &str) -> Result<String, String> {
         Git {

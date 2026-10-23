@@ -127,7 +127,7 @@ impl Drop for CodexHome {
     }
 }
 
-/// Where one run's home goes under the runner's worktree root. Absolute: Codex gets it as
+/// Where one run's home goes under the runner's state directory. Absolute: Codex gets it as
 /// `CODEX_HOME` with the worktree as its directory, and a relative root would name another
 /// place from there.
 fn run_home(root: &Path, run_id: &str) -> std::io::Result<PathBuf> {
@@ -755,7 +755,7 @@ done"#
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(found(Some("rel/codex")), cwd.join("rel/codex"));
 
-        // A run's home is absolute too, whatever the worktree root is.
+        // A run's home is absolute too, whatever the state directory is.
         assert_eq!(
             run_home(Path::new("rel/root"), "run-1").unwrap(),
             cwd.join("rel/root/codex-home/run-1")
