@@ -26,7 +26,7 @@ RUN=$($C up)            # or: RUN=$($C up my-check)
 
 It:
 
-1. Starts the dev Postgres container with `docker compose up -d --wait db` (`127.0.0.1:5433`, shared by every run).
+1. Starts the dev Postgres container with `docker compose up -d --wait db` (`127.0.0.1:5433`, shared by every run). Inside a runner's attempt the container carries the label `punchlist.attempt=$PUNCHLIST_ATTEMPT`, and the runner removes it when the attempt ends, with every process that carries the attempt's `PUNCHLIST_ATTEMPT`, so a check need not stop it.
 2. Creates a fresh database `punchlist_verify_<RUN_ID>` in it, so runs never share data.
 3. Builds `punchlist-server` and `pl` with `SQLX_OFFLINE=true`.
 4. Runs `pnpm dev` with `DATABASE_URL` pointing at the fresh database, `GITHUB_WEBHOOK_SECRET` (the environment's value if set, else a random one; kept in the 0600 file `webhook-secret` in the state directory, never printed) `PUNCHLIST_BIND` on a free port (on `PUNCHLIST_VERIFY_HOST` when set, else 127.0.0.1), `PUNCHLIST_WEB_DIR` on the run's own directory linking `web/dist`, `PUNCHLIST_PROOF_DIR` in the run's directory, and `PUNCHLIST_DEV_VITE=0`, in its own process group. The server runs migrations at start.
@@ -137,7 +137,7 @@ Proof standards:
 $C down "$RUN"
 ```
 
-It stops the run's runners and its own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `/tmp/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running; stop it with `docker compose down` only if you started it and nothing else uses it. Run `down` after a failed run too, so no server or database is left behind.
+It stops the run's runners and its own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `/tmp/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running until the attempt ends (outside a run, stop it with `docker compose down` only if you started it and nothing else uses it). Run `down` after a failed run too, so no server or database is left behind.
 
 ## Main versus branch
 

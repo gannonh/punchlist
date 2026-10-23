@@ -6,6 +6,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME=punchlist-host PUNCHLIST_HOST=127.0.0.1 PUNCHLIST_PORT=7880 PUNCHLIST_DB_PORT=5440
+# The dogfood instance outlives any run: a run that starts it does not label it as its own.
+export PUNCHLIST_ATTEMPT=
 # `up` refuses to start without the App, which would run but read nothing from GitHub. `:?` names
 # the variable, never its value.
 exec with-env bash -c 'if [ "$1" = up ]; then : "${DOGFOOD_GITHUB_APP_ID:?}" "${DOGFOOD_GITHUB_APP_PRIVATE_KEY:?}" "${DOGFOOD_GITHUB_WEBHOOK_SECRET:?}"; fi

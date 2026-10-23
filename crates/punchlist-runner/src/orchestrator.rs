@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, build_prompt, claude_args, kill_runner, run_claude, write_mcp_config,
+    ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
+    kill_runner, run_claude, write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
@@ -575,10 +576,12 @@ async fn run_attempt(
         ))),
         _ => None,
     };
-    let env = match &github {
+    let mut env = match &github {
         Ok(Some(access)) => access.env(),
         _ => Vec::new(),
     };
+    let attempt_id = format!("{run_id}-{attempt}");
+    env.push((ATTEMPT_MARKER, Some(attempt_id.clone().into())));
     // Stopping the runner drops the preparation, which kills the git command it is running.
     let exit = match (resume_in, prompt) {
         _ if github.is_err() => {
@@ -643,6 +646,13 @@ async fn run_attempt(
             }
         }
     };
+    // Before the outcome, so the next run of the issue finds its ports free.
+    let (processes, containers) = end_attempt(&attempt_id, ATTEMPT_GRACE).await;
+    let line = format!(
+        "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left"
+    );
+    tracing::info!("run {run_id}: {line}");
+    let _ = lines_tx.send(line).await;
     if let Some(refresher) = refresher {
         // Its log sender has to go before the flusher can end.
         refresher.abort();
@@ -1342,17 +1352,23 @@ mod tests {
             .unwrap();
         let argv = temp.path().join("argv");
         let github = temp.path().join("github");
+        let detached = temp.path().join("detached");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        // Each agent also leaves a `sleep` outside its process group, as `setsid pnpm dev`
+        // does, and records its pid and attempt.
         let claude = crate::agent::tests::fake_agent(
             &bin,
             &format!(
                 r#"echo "$@" >> {}
 test "$1" = --probe || echo "${{GH_TOKEN-unset}} $(cat "$PUNCHLIST_GITHUB_TOKEN_FILE") $GIT_AUTHOR_NAME" >> {}
+setsid sleep 300 </dev/null >/dev/null 2>&1 &
+echo "$! $PUNCHLIST_ATTEMPT" >> {}
 cat > /dev/null
 echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
                 argv.display(),
-                github.display()
+                github.display(),
+                detached.display()
             ),
         );
         let seen: Seen = Arc::default();
@@ -1415,6 +1431,23 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
             assert_eq!(
                 (body["outcome"].as_str(), body["lost"].as_bool()),
                 (Some("succeeded"), Some(false))
+            );
+        }
+
+        // Each attempt's `sleep` carried the attempt and was gone when its outcome was sent.
+        let detached = std::fs::read_to_string(&detached).unwrap();
+        let mut attempts: Vec<&str> = (detached.lines())
+            .map(|line| line.split_once(' ').unwrap().1)
+            .collect();
+        attempts.sort();
+        assert_eq!(attempts, [format!("{RESUMED}-1"), format!("{FRESH}-1")]);
+        for line in detached.lines() {
+            let pid = line.split_once(' ').unwrap().0;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let state = stat.rsplit_once(") ").map(|(_, rest)| &rest[..1]);
+            assert!(
+                matches!(state, None | Some("Z")),
+                "sleep {pid} still runs: {stat}"
             );
         }
 

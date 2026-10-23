@@ -1739,3 +1739,93 @@ async fn max_concurrent_is_read_from_the_active_workflow_at_each_claim(pool: PgP
         (StatusCode::OK, Some("PL-3"))
     );
 }
+
+/// Makes the built-in workflow, with a person's move from Todo to Merging and a Claude Code
+/// dispatch rule for Merging that sets `serial`, the workspace's active version.
+async fn set_merging_dispatch(pool: &PgPool, serial: bool) {
+    let built_in = punchlist_core::default_workflow();
+    let text = format!(
+        "{}\n[[transition]]\nfrom = \"todo\"\nto = \"merging\"\nby = [\"person\"]\n\
+         [dispatch.status.merging]\nagent = \"claude-code\"\nserial = {serial}\n",
+        built_in.source()
+    );
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            SELECT id, $1, $1, $2, $3 FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+    )
+    .bind(format!("serial-{serial}"))
+    .bind(text)
+    .bind(serde_json::to_value(built_in.prompts()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn claimed_issue(answer: &(StatusCode, Value)) -> (StatusCode, Option<&str>) {
+    (answer.0, answer.1["issue"]["id"].as_str())
+}
+
+#[sqlx::test]
+async fn a_serial_status_runs_one_run_at_a_time_and_other_work_is_claimed(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_merging_dispatch(&pool, true).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Merge one", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Merge two", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+
+    let first = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+    let second = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&second), (StatusCode::OK, Some("PL-3")));
+    let third = claim(&app, &r2, 0).await;
+    assert_eq!(third, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(status_and_runs(&pool, "PL-2").await, ("merging".into(), 0));
+
+    let waiting = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let answer = claim(&app, &r2, 20).await;
+            (answer, std::time::Instant::now())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the claim waits behind the Merging run"
+    );
+    // PL-1's merge needs a person, so its end queues no next run of it.
+    let run_id = first.1["run_id"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        first.1["agent_token"].as_str().unwrap(),
+        "POST",
+        &format!("/api/runs/{run_id}/waiting"),
+        Some(json!({"reason": "A check failed."})),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let finished_at = std::time::Instant::now();
+    let (status, run) = finish(&app, &r1, run_id, succeeded()).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let (next, answered_at) = waiting.await.unwrap();
+    assert_eq!(claimed_issue(&next), (StatusCode::OK, Some("PL-2")));
+    assert!(answered_at - finished_at < Duration::from_secs(2));
+}
+
+#[sqlx::test]
+async fn a_status_without_serial_runs_its_dispatches_together(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_merging_dispatch(&pool, false).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Merge one", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Merge two", &["todo", "merging"]).await;
+
+    let first = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+    let second = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&second), (StatusCode::OK, Some("PL-2")));
+}

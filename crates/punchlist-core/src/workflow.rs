@@ -165,6 +165,9 @@ pub struct Dispatch {
     pub agent: String,
     /// A path under `.punchlist/`, such as `prompts/in_progress.md`.
     pub prompt: Option<String>,
+    /// At most one run in this status at a time for the workspace's repository, such as
+    /// merges into its default branch.
+    pub serial: bool,
     /// The line of `agent` in the file, for an error about it.
     agent_line: usize,
     /// The line of `prompt` in the file, for an error about it.
@@ -251,6 +254,8 @@ pub enum Problem {
     UnknownAgent(String),
     #[error("`max_concurrent` must be at least 1")]
     BadMaxConcurrent,
+    #[error("`serial` is true or false")]
+    BadSerial,
     #[error("the runtime needs the status `{0}`")]
     MissingStatus(&'static str),
     #[error("the runtime needs a transition from `start` to `in_progress`")]
@@ -590,12 +595,21 @@ impl Workflow {
                 let problem = Problem::BadPromptPath(prompt.get_ref().clone());
                 return Err(errors.at(prompt.span(), key("prompt"), problem));
             }
+            // Read as any value, so a wrong type names its key, not only its line.
+            let serial = match rule.serial {
+                None => false,
+                Some(value) => match value.get_ref() {
+                    toml::Value::Boolean(serial) => *serial,
+                    _ => return Err(errors.at(value.span(), key("serial"), Problem::BadSerial)),
+                },
+            };
             dispatch.push(Dispatch {
                 status,
                 agent_line: errors.line(rule.agent.span().start),
                 agent: rule.agent.into_inner(),
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
                 prompt: rule.prompt.map(Spanned::into_inner),
+                serial,
             });
         }
 
@@ -1045,6 +1059,12 @@ struct RawDispatchRule {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     prompt: Option<Spanned<String>>,
+    /// At most one run in this status at a time for the workspace's repository; a dispatch
+    /// waits while one runs. For merges, which each change the default branch the next one
+    /// merges into.
+    #[serde(default)]
+    #[schemars(with = "Option<bool>")]
+    serial: Option<Spanned<toml::Value>>,
 }
 
 // Schema-only types: the names a field accepts.
@@ -1463,6 +1483,31 @@ mod tests {
                 Some(3),
                 "dispatch.max_concurrent".into(),
                 Problem::BadMaxConcurrent
+            )
+        );
+    }
+
+    #[test]
+    fn serial_is_kept() {
+        let serial = |rule: &str| {
+            let text = runnable(&format!("[dispatch.status.a]\nagent = \"codex\"\n{rule}"));
+            Workflow::from_toml(&text)
+                .unwrap()
+                .dispatch_for("a")
+                .unwrap()
+                .serial
+        };
+        assert!(serial("serial = true"));
+        assert!(!serial("serial = false"));
+        assert!(!serial(""));
+        assert_eq!(
+            error(&runnable(
+                "[dispatch.status.a]\nagent = \"codex\"\nserial = \"yes\""
+            )),
+            (
+                Some(4),
+                "dispatch.status.a.serial".into(),
+                Problem::BadSerial
             )
         );
     }
@@ -1902,6 +1947,10 @@ mod tests {
         assert_eq!(
             schema["$defs"]["RawDispatchRule"]["properties"]["agent"]["description"],
             format!("The agent to start: one of {} and {last}.", rest.join(", "))
+        );
+        assert_eq!(
+            schema["$defs"]["RawDispatchRule"]["properties"]["serial"]["type"],
+            serde_json::json!(["boolean", "null"])
         );
     }
 }
