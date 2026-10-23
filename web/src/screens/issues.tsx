@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { Plus } from 'lucide-react'
+import { ChevronDown, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -70,13 +70,16 @@ function CheckMenu({
     ...chosen.filter((value) => !options.some((o) => o.value === value)).map((value) => ({ value, text: value })),
   ]
   const shown = all.filter((option) => chosen.includes(option.value))
+  const text = shown.length > 0 ? `${name}: ${shown.map((option) => option.text).join(', ')}` : name
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={label}
-        className="h-7.5 max-w-55 cursor-pointer truncate rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
+        title={text}
+        className="inline-flex h-7.5 max-w-55 cursor-pointer items-center gap-1 rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
       >
-        {shown.length > 0 ? `${name}: ${shown.map((option) => option.text).join(', ')}` : name}
+        <span className="truncate">{text}</span>
+        <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" aria-label={label} collisionPadding={12}>
         {all.length === 0 && <p className="px-2 py-1.5 text-meta text-ink-3">No {name.toLowerCase()}</p>}
