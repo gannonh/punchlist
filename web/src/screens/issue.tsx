@@ -163,7 +163,8 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return
+      // An open dialog handles its own keys, `Esc` included, wherever focus is.
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
       if (inField(event.target)) {
         if (event.key === 'Escape') (event.target as HTMLElement).blur()
         return
@@ -642,6 +643,8 @@ function ProofViewer({
 }) {
   const src = `/api/proof/${proof.id}`
   const media = 'max-h-[calc(100dvh-9rem)] max-w-full object-contain'
+  // The card that opened it; Radix would return focus to a `DialogTrigger`, and the cards are not one.
+  const [opener] = useState(() => document.activeElement)
   return (
     <Dialog
       open
@@ -652,6 +655,10 @@ function ProofViewer({
       <DialogContent
         className="w-max max-w-[calc(100vw-2rem)] gap-2 bg-card p-3 sm:max-w-[calc(100vw-2rem)]"
         data-proof-viewer={proof.id}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          if (opener instanceof HTMLElement) opener.focus()
+        }}
         // The page's own keys (`Esc` back to the list, `g`, `t`, `c`) stay out of the overlay.
         onKeyDown={(event) => {
           event.stopPropagation()
