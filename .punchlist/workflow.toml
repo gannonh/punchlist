@@ -15,6 +15,11 @@ to = "start"
 by = ["person"]                  # start signal
 
 [[transition]]
+from = ["backlog", "todo"]
+to = "canceled"
+by = ["person"]                  # dropped or a duplicate, before any run
+
+[[transition]]
 from = "start"
 to = "in_progress"
 by = ["runner"]                  # a runner claims the issue
