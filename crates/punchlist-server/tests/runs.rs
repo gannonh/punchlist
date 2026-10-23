@@ -726,6 +726,64 @@ async fn a_retried_log_batch_is_stored_once_and_first_line_starts_at_one(pool: P
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn reporting_a_model_locks_the_workspace_before_the_attempt(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let runner = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Model lock order", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &runner, 0).await;
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+
+    // A finisher already owns the workspace; a log append must wait before
+    // owning the attempt, so the finisher can still acquire that attempt.
+    let mut finisher = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM workspace FOR NO KEY UPDATE")
+        .fetch_all(&mut *finisher)
+        .await
+        .unwrap();
+    let log_uri = format!("/api/runs/{run_id}/log");
+    let append = tokio::spawn(async move {
+        call(
+            &app,
+            &runner.token,
+            "POST",
+            &log_uri,
+            Some(json!({"attempt": 1, "first_line": 1, "lines": [
+                r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5"}"#,
+            ]})),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("log append should wait for the workspace lock");
+    let attempt_lock = sqlx::query("SELECT id FROM attempt WHERE run_id = $1 FOR UPDATE NOWAIT")
+        .bind(uuid::Uuid::parse_str(&run_id).unwrap())
+        .fetch_all(&mut *finisher)
+        .await;
+    finisher.rollback().await.unwrap();
+    let (status, body) = append.await.unwrap();
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        attempt_lock.is_ok(),
+        "the log append locked the attempt first"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn the_first_model_the_agent_reports_is_the_attempts(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;

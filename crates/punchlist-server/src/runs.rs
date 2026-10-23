@@ -545,6 +545,9 @@ async fn append_log(
         return Ok(StatusCode::NO_CONTENT);
     }
     let mut tx = state.pool.begin().await?;
+    // A first reported model writes an event. Take its workspace lock before the
+    // attempt lock, in the same order as finish and lease expiry.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
     // Locking the attempt row serializes appends with finish and with lease expiry.
     let Some(held) = sqlx::query!(
         "SELECT issue_id, reported_model FROM attempt
