@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Check the sandbox token: it reaches gannonh/punchlist-sandbox and not gannonh/punchlist, a
+# second call reuses it, and git reads the sandbox with it. The sandbox is private, so a 200 is
+# access; gannonh/punchlist is public, so any token reads it, and a refused write is the scope.
+# Run under with-env:
+#   with-env .claude/skills/verify-punchlist/bin/check-sandbox-token
+set -euo pipefail
+C="$(dirname "$0")/control-punchlist"
+fail=0
+check() { # check LABEL EXPECTED ACTUAL
+  if [ "$2" = "$3" ]; then echo "ok   $1: $3"; else echo "FAIL $1: expected $2, got $3"; fail=1; fi
+}
+status() { "$C" gh api -i "repos/$1" 2>/dev/null | sed -n '1s/^HTTP[^ ]* \([0-9]*\).*/\1/p'; }
+check "gh api repos/gannonh/punchlist-sandbox" 200 "$(status gannonh/punchlist-sandbox)"
+# A ref at a commit that does not exist: refused before GitHub reads the sha, and harmless if not.
+check "a write to gannonh/punchlist" 403 "$("$C" gh api -i -X POST repos/gannonh/punchlist/git/refs \
+  -f ref=refs/heads/check-sandbox-token -f sha=0000000000000000000000000000000000000001 2>/dev/null |
+  sed -n '1s/^HTTP[^ ]* \([0-9]*\).*/\1/p')"
+[ "$("$C" sandbox-token)" = "$("$C" sandbox-token)" ] && same=yes || same=no
+check "a second call reuses the cached token" yes "$same"
+"$C" git ls-remote https://github.com/gannonh/punchlist-sandbox.git HEAD >/dev/null 2>&1 && git=yes || git=no
+check "git ls-remote on the sandbox" yes "$git"
+exit "$fail"
