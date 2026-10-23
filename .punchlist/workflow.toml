@@ -56,6 +56,7 @@ from = ["in_progress", "agent_review"]
 to = "todo"
 on = "pr_closed_unmerged"
 require = ["comment"]
+by = ["person", "agent"]         # also requested: runs ran out (a usage limit, a stuck agent); start it again later
 
 [lock]
 human_review = ["agent", "runner"]   # stand-down: agents cannot comment, push or be dispatched
