@@ -28,6 +28,7 @@ import {
   gateSummary,
   gateText,
   logView,
+  modelView,
   moveView,
   plainPullRequestUrl,
   PROOF_TYPES,
@@ -1024,6 +1025,7 @@ function AttemptCard({
   useLayoutEffect(() => {
     if (follow.current && box.current) box.current.scrollTop = box.current.scrollHeight
   }, [lines.length])
+  const model = modelView(attempt)
   const took = running ? now.getTime() - Date.parse(attempt.started_at) : attempt.duration_ms
   return (
     <article
@@ -1049,6 +1051,17 @@ function AttemptCard({
           {attempt.state}
         </span>
       </div>
+      <div className="flex flex-wrap items-baseline gap-x-2 text-body" data-model>
+        <b className="text-meta font-medium text-ink-3">model</b>
+        {model.name === null ? (
+          <span className="text-muted-foreground">{model.note}</span>
+        ) : (
+          <>
+            <span className="font-mono font-medium text-foreground wrap-anywhere">{model.name}</span>
+            <span className="text-meta text-muted-foreground">({model.note})</span>
+          </>
+        )}
+      </div>
       <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-meta text-muted-foreground" data-facts>
         <span>
           <b className="font-medium text-ink-3">started</b> {age(attempt.started_at, now)} ago
@@ -1058,10 +1071,6 @@ function AttemptCard({
         </span>
         <span>
           <b className="font-medium text-ink-3">tokens</b> {tokens(attempt.input_tokens, attempt.output_tokens)}
-        </span>
-        <span>
-          <b className="font-medium text-ink-3">model</b>{' '}
-          <span className="font-mono">{attempt.model ?? 'default'}</span>
         </span>
       </div>
       {attempt.failure_reason && <div className="text-meta text-bad wrap-anywhere">{attempt.failure_reason}</div>}

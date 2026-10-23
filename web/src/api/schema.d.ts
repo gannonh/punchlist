@@ -731,6 +731,11 @@ export interface components {
             model?: string | null;
             /** Format: int64 */
             output_tokens?: number | null;
+            /**
+             * @description The model the agent said it runs on, such as `claude-haiku-5-5` for `haiku`; `None`
+             *     until it says.
+             */
+            reported_model?: string | null;
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
@@ -1614,6 +1619,8 @@ export interface components {
             outcome: components["schemas"]["RunOutcome"];
             /** Format: int64 */
             output_tokens?: number | null;
+            /** @description The model the latest attempt's agent said it runs on; `None` until it says. */
+            reported_model?: string | null;
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
