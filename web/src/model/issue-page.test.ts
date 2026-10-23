@@ -4,6 +4,7 @@ import {
   eventText,
   feedEntries,
   gateSummary,
+  logView,
   moveView,
   plainPullRequestUrl,
   proofType,
@@ -219,5 +220,73 @@ describe('specBlocks and run facts', () => {
       '—',
     ])
     expect([tokens(12_400, 3_100), tokens(800, 20), tokens(null, 5)]).toEqual(['12.4k in · 3.1k out', '800 in · 20 out', '—'])
+  })
+})
+
+describe('logView', () => {
+  const claude = (message: unknown) => JSON.stringify({ type: 'assistant', message, session_id: 's' })
+
+  test('a Claude Code assistant line shows its text whole', () => {
+    const line = claude({ role: 'assistant', content: [{ type: 'text', text: 'I will read the issue, then open the pull request.' }] })
+    expect(logView(line)).toEqual({ kind: 'message', text: 'I will read the issue, then open the pull request.' })
+  })
+
+  test('a Claude Code tool call shows the tool and its file or command', () => {
+    expect(logView(claude({ content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/w/src/main.rs' } }] }))).toEqual({
+      kind: 'tool',
+      text: 'Read /w/src/main.rs',
+    })
+    const bash = claude({ content: [{ type: 'tool_use', name: 'Bash', input: { command: 'cargo test -p core\necho done', description: 'Run tests' } }] })
+    expect(logView(bash)).toEqual({ kind: 'tool', text: 'Bash cargo test -p core …' })
+    expect(logView(claude({ content: [{ type: 'tool_use', name: 'mcp__punchlist__get_issue', input: {} }] }))).toEqual({
+      kind: 'tool',
+      text: 'mcp__punchlist__get_issue',
+    })
+  })
+
+  test('a Claude Code tool result, session start and finish', () => {
+    const result = JSON.stringify({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'fn main() {}\n// more' }] }] },
+    })
+    expect(logView(result)).toEqual({ kind: 'result', text: 'result: fn main() {} …' })
+    const failed = JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true, content: 'No such file' }] } })
+    expect(logView(failed)).toEqual({ kind: 'error', text: 'error: No such file' })
+    expect(logView(JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-haiku-5-5' }))).toEqual({
+      kind: 'event',
+      text: 'session started, model claude-haiku-5-5',
+    })
+    expect(logView(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Opened #12.' }))).toEqual({
+      kind: 'result',
+      text: 'finished success: Opened #12.',
+    })
+  })
+
+  test('a Codex item line shows its summary', () => {
+    const item = (method: string, item: unknown) => JSON.stringify({ method, params: { item, threadId: 't' } })
+    expect(logView(item('item/completed', { type: 'agentMessage', id: 'm', text: 'PR #99 has one failing check.', phase: 'commentary' }))).toEqual({
+      kind: 'message',
+      text: 'PR #99 has one failing check.',
+    })
+    const command = {
+      type: 'commandExecution',
+      command: "/usr/bin/bash -lc 'gh pr checks 99'",
+      commandActions: [{ type: 'unknown', command: 'gh pr checks 99' }],
+      exitCode: null,
+    }
+    expect(logView(item('item/started', command))).toEqual({ kind: 'tool', text: '$ gh pr checks 99' })
+    expect(logView(item('item/completed', { ...command, exitCode: 1 }))).toEqual({ kind: 'error', text: '$ gh pr checks 99 → exit 1' })
+    expect(logView(item('item/completed', { type: 'mcpToolCall', server: 'punchlist', tool: 'request_transition', arguments: { to: 'human_review' }, error: null }))).toEqual({
+      kind: 'tool',
+      text: 'punchlist.request_transition {"to":"human_review"}',
+    })
+    const usage = { method: 'thread/tokenUsage/updated', params: { tokenUsage: { total: { totalTokens: 21810 } } } }
+    expect(logView(JSON.stringify(usage))).toEqual({ kind: 'event', text: 'tokens 21,810' })
+  })
+
+  test('a line that is not a JSON object is shown as written', () => {
+    expect(logView('stderr: warning: unused import')).toEqual({ kind: 'plain', text: 'stderr: warning: unused import' })
+    expect(logView('{"type": "assistant"')).toEqual({ kind: 'plain', text: '{"type": "assistant"' })
+    expect(logView('42')).toEqual({ kind: 'plain', text: '42' })
   })
 })
