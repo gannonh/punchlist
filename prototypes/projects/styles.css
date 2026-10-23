@@ -70,7 +70,7 @@ input:focus, textarea:focus { outline: 2px solid var(--ring); outline-offset: 1p
 .issue-list li:first-child { border-top: 0; }
 .issue-list a { display: inline-flex; gap: 8px; align-items: baseline; text-decoration: none; color: var(--foreground); flex: 1 1 220px; }
 .issue-list a:hover .ititle { text-decoration: underline; }
-.issue-list .id { color: var(--ink-3); font-size: var(--text-meta); white-space: nowrap; }
+.issue-list .id { color: var(--ink-3); font-size: var(--text-meta); white-space: nowrap; flex: none; }
 .ititle { overflow-wrap: anywhere; }
 [data-left-out-list] li { opacity: .75; }
 [data-left-out-list] .ititle { text-decoration: line-through; }
