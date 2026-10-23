@@ -26,7 +26,7 @@ with-env $C git clone https://github.com/gannonh/punchlist-sandbox.git /tmp/sand
 with-env $C git -C /tmp/sandbox-$RUN push -u origin <branch>   # the token is git's credential for the sandbox's URL only
 ```
 
-The token lasts an hour and is cached in `/tmp/punchlist-verify/sandbox-token.json` (0600); a call mints a new one when it has under 10 minutes left. Nothing prints it except `with-env $C sandbox-token`, so never run that into evidence. The token cannot write to `gannonh/punchlist` (a write answers 403; the repository is public, so reads answer as they would for anyone). `with-env bin/check-sandbox-token` checks all of this.
+`with-env` picks the 1Password Environment by the current repository, so run these from this checkout's root and point git at a sandbox clone with `-C`; from inside the clone `with-env` answers `no Environment for 'punchlist-sandbox'`. The token lasts an hour and is cached in `/tmp/punchlist-verify/sandbox-token.json` (0600); a call mints a new one when it has under 10 minutes left. Nothing prints it except `with-env $C sandbox-token`, so never run that into evidence. The token cannot write to `gannonh/punchlist` (a write answers 403; the repository is public, so reads answer as they would for anyone). `with-env bin/check-sandbox-token` checks all of this.
 
 ## Launch
 
