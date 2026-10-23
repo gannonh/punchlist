@@ -1,11 +1,11 @@
 //! Punchlist's MCP server over stdio (PRD R10). The runner attaches it to each agent run,
 //! bound to the run's issue and acting with the run's agent token. Its tools read the
-//! issue, comment on it, attach proof and request a transition; the server checks every
-//! request.
+//! issue, edit its title and body, comment on it, attach proof and request a transition; the
+//! server checks every request.
 
 use punchlist_api::{
     ChecksState, Event, EventDetail, GateResult, Issue, ProofKind, PullRequestsNow, ReviewThread,
-    gate_line, plain_pull_request_url,
+    UpdateIssue, gate_line, plain_pull_request_url,
 };
 use punchlist_client::{Client, ClientError};
 use punchlist_core::{fenced, quoted};
@@ -28,6 +28,15 @@ pub struct Tools {
 struct CommentRequest {
     /// The comment, in Markdown.
     body: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct EditRequest {
+    /// The new title. Optional: absent leaves it as it is.
+    title: Option<String>,
+    /// The new body, in Markdown, in full: it replaces the body. Optional: absent leaves it
+    /// as it is.
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -76,6 +85,29 @@ impl Tools {
             Ok::<_, ClientError>(render_issue(&issue, &pull_requests, &events))
         };
         text(read.await.map_err(|error| error.to_string()))
+    }
+
+    #[tool(
+        description = "Edit your issue's title or body, its spec, when your work changes it. The body you give replaces the whole body."
+    )]
+    async fn edit_issue(
+        &self,
+        Parameters(EditRequest { title, body }): Parameters<EditRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if title.is_none() && body.is_none() {
+            return text(Err("give a title, a body or both".into()));
+        }
+        let edit = UpdateIssue {
+            title,
+            body,
+            ..UpdateIssue::default()
+        };
+        text(
+            match self.client.update_issue(&self.issue_id, &edit).await {
+                Ok(_) => Ok(format!("Edited {}.", self.issue_id)),
+                Err(error) => Err(render_error(&error)),
+            },
+        )
     }
 
     #[tool(description = "Comment on your issue, in Markdown.")]

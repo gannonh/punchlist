@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use assert_cmd::Command;
 use punchlist_api::{AppendLog, FinishRun, RegisterRunner, RunOutcome};
-use punchlist_client::Client;
+use punchlist_client::{Client, ClientError};
 use punchlist_server::{AppState, Bootstrap, ProofStore, bootstrap, router};
 use sqlx::PgPool;
 
@@ -982,31 +982,31 @@ async fn a_move_to_start_under_a_version_no_runner_can_claim_warns(pool: PgPool)
     );
 }
 
-/// `pl mcp` over real pipes, as Claude Code runs it: the handshake, then a refused
-/// `request_transition` and a `comment`, with the agent token a claim returns.
-#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
-async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) {
+/// `pl mcp` over real pipes, as Claude Code runs it, bound to `issue` with `token`: the
+/// handshake, then each `tools/call` in turn. Answers each call's `isError` and text.
+async fn mcp(
+    pl: &Pl,
+    token: &str,
+    issue: &str,
+    calls: &[serde_json::Value],
+) -> Vec<(bool, String)> {
     use std::io::{BufRead, BufReader, Write};
 
-    let pl = Pl::start(&pool).await;
-    pl.run(&["issue", "create", "--title", "Do it"]).await;
-    pl.run(&["issue", "move", "PL-1", "todo"]).await;
-    pl.run(&["issue", "move", "PL-1", "start"]).await;
-    let claim = register(&pl, "r1").await.claim(0).await.unwrap().unwrap();
-
-    let shot = pl.config.with_file_name("shot.png");
-    std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").unwrap();
-    let attach = serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-        "params": {"name": "attach_proof",
-                   "arguments": {"path": shot, "title": "List at 1280×800"}}})
-    .to_string();
-    let url = pl.url.clone();
+    let (url, token, issue) = (pl.url.clone(), token.to_string(), issue.to_string());
+    let calls: Vec<String> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, params)| {
+            serde_json::json!({"jsonrpc": "2.0", "id": i + 2, "method": "tools/call", "params": params})
+                .to_string()
+        })
+        .collect();
     let lines = tokio::task::spawn_blocking(move || {
         let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("pl"))
             .arg("mcp")
             .env("PUNCHLIST_SERVER_URL", url)
-            .env("PUNCHLIST_TOKEN", claim.agent_token)
-            .env("PUNCHLIST_ISSUE", "PL-1")
+            .env("PUNCHLIST_TOKEN", token)
+            .env("PUNCHLIST_ISSUE", issue)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -1026,38 +1026,59 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
             true,
         );
         exchange(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, false);
-        let refused = exchange(
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_transition","arguments":{"to":"agent_review"}}}"#,
-            true,
-        );
-        let commented = exchange(
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"comment","arguments":{"body":"Started."}}}"#,
-            true,
-        );
-        let attached = exchange(&attach, true);
+        let lines: Vec<String> = calls.iter().map(|call| exchange(call, true)).collect();
         drop(stdin);
         assert!(child.wait().unwrap().success());
-        [refused, commented, attached]
+        lines
     })
     .await
     .unwrap();
+    lines
+        .iter()
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            let result = &value["result"];
+            (
+                result["isError"].as_bool().unwrap_or(false),
+                result["content"][0]["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
 
-    let result = |line: &str| -> (bool, String) {
-        let value: serde_json::Value = serde_json::from_str(line).unwrap();
-        let result = &value["result"];
-        (
-            result["isError"].as_bool().unwrap_or(false),
-            result["content"][0]["text"].as_str().unwrap().to_string(),
-        )
-    };
-    let (is_error, text) = result(&lines[0]);
+/// `pl mcp` refuses a gated `request_transition`, and comments and attaches proof as the
+/// agent, with the agent token a claim returns.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let claim = register(&pl, "r1").await.claim(0).await.unwrap().unwrap();
+
+    let shot = pl.config.with_file_name("shot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\n").unwrap();
+    let results = mcp(
+        &pl,
+        &claim.agent_token,
+        "PL-1",
+        &[
+            serde_json::json!({"name": "request_transition", "arguments": {"to": "agent_review"}}),
+            serde_json::json!({"name": "comment", "arguments": {"body": "Started."}}),
+            serde_json::json!({"name": "attach_proof",
+                               "arguments": {"path": shot, "title": "List at 1280×800"}}),
+        ],
+    )
+    .await;
+
+    let (is_error, text) = &results[0];
     assert!(is_error);
     assert_eq!(
         text.lines().next().unwrap(),
         "Refused (gate_failed): gate pr_open failed: no open pull request is linked to PL-1"
     );
-    assert_eq!(result(&lines[1]), (false, "Commented on PL-1.".to_string()));
-    let (is_error, text) = result(&lines[2]);
+    assert_eq!(results[1], (false, "Commented on PL-1.".to_string()));
+    let (is_error, text) = &results[2];
     assert!(!is_error, "{text}");
     assert!(
         text.starts_with("Attached proof ")
@@ -1075,6 +1096,113 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
         ),
         "{}",
         show.stdout
+    );
+}
+
+/// `edit_issue` edits the run's own issue as its agent, and is refused, changing nothing, in
+/// a status locked to agents. The run token cannot edit another issue.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn mcp_edits_its_own_issue_as_the_agent(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it", "--body", "Spec"])
+        .await;
+    pl.run(&["issue", "create", "--title", "Other", "--body", "Theirs"])
+        .await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let claim = register(&pl, "r1").await.claim(0).await.unwrap().unwrap();
+    let issue = |id: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, String)>("SELECT title, body FROM issue WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    let edit = |arguments: serde_json::Value| serde_json::json!({"name": "edit_issue", "arguments": arguments});
+    let results = mcp(
+        &pl,
+        &claim.agent_token,
+        "PL-1",
+        &[
+            edit(serde_json::json!({"body": "Spec\nedited by the agent\n"})),
+            edit(serde_json::json!({"title": "Do it — `now`"})),
+            edit(serde_json::json!({})),
+        ],
+    )
+    .await;
+    assert_eq!(
+        results,
+        [
+            (false, "Edited PL-1.".to_string()),
+            (false, "Edited PL-1.".to_string()),
+            (true, "give a title, a body or both".to_string()),
+        ]
+    );
+    assert_eq!(
+        issue("PL-1").await,
+        (
+            "Do it — `now`".to_string(),
+            "Spec\nedited by the agent\n".to_string()
+        )
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    for line in ["edited body", "edited title"] {
+        assert!(
+            show.stdout
+                .contains(&format!("Claude Code (agent, claude-code)  {line}\n")),
+            "{}",
+            show.stdout
+        );
+    }
+
+    let other = Client::new(&pl.url, &claim.agent_token)
+        .unwrap()
+        .update_issue(
+            "PL-2",
+            &punchlist_api::UpdateIssue {
+                body: Some("Mine".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(
+        matches!(other, Err(ClientError::Api { status, .. }) if status == 403),
+        "{other:?}"
+    );
+    assert_eq!(
+        issue("PL-2").await,
+        ("Other".to_string(), "Theirs".to_string())
+    );
+
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let locked = mcp(
+        &pl,
+        &claim.agent_token,
+        "PL-1",
+        &[edit(serde_json::json!({"title": "Mine", "body": "Mine"}))],
+    )
+    .await;
+    assert_eq!(
+        locked,
+        [(
+            true,
+            "Refused (locked): human_review is locked: an agent cannot act on an issue in it"
+                .to_string()
+        )]
+    );
+    assert_eq!(
+        issue("PL-1").await,
+        (
+            "Do it — `now`".to_string(),
+            "Spec\nedited by the agent\n".to_string()
+        )
     );
 }
 
