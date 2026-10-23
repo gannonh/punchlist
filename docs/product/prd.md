@@ -362,7 +362,7 @@ Punchlist is the second product, and Groundwork's Gate 1 comes first. Months ass
 | --- | --- | --- | --- |
 | Gate 0. Spec, stack and prototype | Oct 2026 | This PRD; ADRs for the workflow format, license, backend and frontend; three prototype variants each for the issue list and the issue page; ADRs for the stack questions Gate 1 depends on | A variant picked for each prototype, the stack ADRs accepted, and Gate 1 sliced in Linear |
 | Gate 1. Dogfood | Nov to Dec 2026 | P0: R1 to R8, R10, R11, R13 to R15, R20 | Groundwork's and Punchlist's own issues run from Punchlist for 14 days |
-| Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19 | Every P1 requirement is Done, and Gannon runs both projects from Punchlist with no workaround outside it |
+| Phase 2. P1 requirements | Jan to Feb 2027 | P1: R9, R12, R16 to R19; one sign-in across several workspaces (ADR 0011); the Pull requests page | Every P1 requirement is Done, and Gannon runs Punchlist and Groundwork from Punchlist with no workaround outside it |
 | Phase 3. Verified pull requests | Mar to Apr 2027 | P2: R21, R24, R25. Punchlist runs each issue's live checks itself, and `proof_verified` replaces `proof_attached` | Every dogfood pull request carries a Punchlist-run verification |
 | Phase 4. Launch | Q2 2027 | P3: R22, R23, R26; public docs and a 1.0 release | Launch metrics tracking toward 90-day targets |
 | Phase 5. Team scale | H2 2027 | No requirements yet. Candidates: cycles, roadmaps, email and push notifications, SSO, Jira import | Decide after Phase 4 |
@@ -393,6 +393,7 @@ The largest risk is Linear. It owns the issue data, already merges agent pull re
 - [x] Does the workflow file live in the code repository or in the workspace, for teams with several repositories? In the repository, on its default branch, decided Oct 7, 2026 (ADR 0010).
 - [x] One repository per workspace in v1, or several? One, decided Oct 7, 2026 (ADR 0010).
 - [x] Merge from Punchlist, or leave merging on GitHub? A person approves by moving the issue to Merging, and an agent dispatched there merges the pull request on GitHub, decided Oct 22, 2026.
+- [x] How does one person reach several workspaces? An account above workspaces, decided Oct 23, 2026 (ADR 0011).
 - [ ] Trademark and domain check for the name; punchlist.com is a design-feedback product.
 
 ## Sources
