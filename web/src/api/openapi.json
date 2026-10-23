@@ -1906,6 +1906,74 @@
         }
       }
     },
+    "/api/search": {
+      "get": {
+        "summary": "Search the workspace's issues: their id, title, body and comments. A person's token.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one\nspace, matched as a substring in any case.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The most hits to answer: 50 by default, at most 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query under 3 or over 200 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/session": {
       "get": {
         "summary": "Who the request is signed in as, by its bearer token or its session cookie.",
@@ -5002,6 +5070,61 @@
           }
         }
       },
+      "SearchHit": {
+        "type": "object",
+        "required": [
+          "issue_id",
+          "title",
+          "status_name",
+          "in_title"
+        ],
+        "properties": {
+          "in_title": {
+            "type": "boolean",
+            "description": "The query matches the issue's id or title."
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "snippet": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Snippet",
+                "description": "Where the query matches the body, or else the newest comment it matches; `None` when\nit matches neither."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status_name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "SearchResults": {
+        "type": "object",
+        "description": "`GET /api/search`: hits in the id or title first, then the rest, each group newest issue\nfirst.",
+        "required": [
+          "hits",
+          "more"
+        ],
+        "properties": {
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            }
+          },
+          "more": {
+            "type": "boolean",
+            "description": "More issues match than `limit`."
+          }
+        }
+      },
       "Session": {
         "type": "object",
         "description": "Who a request is signed in as.",
@@ -5031,6 +5154,46 @@
             "description": "A person's bearer token."
           }
         }
+      },
+      "Snippet": {
+        "type": "object",
+        "description": "One line around the first match, with whitespace runs and control characters made one\nspace. `before` starts and `after` ends with `…` where the text was cut.",
+        "required": [
+          "field",
+          "before",
+          "hit",
+          "after"
+        ],
+        "properties": {
+          "after": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "comment_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The `seq` of the comment's `comment` event; `None` for the body."
+          },
+          "field": {
+            "$ref": "#/components/schemas/SnippetField"
+          },
+          "hit": {
+            "type": "string",
+            "description": "The matched text as the document writes it. Empty when the server could not find the\nmatch again, and `before` is then the text's first 120 characters."
+          }
+        }
+      },
+      "SnippetField": {
+        "type": "string",
+        "enum": [
+          "body",
+          "comment"
+        ]
       },
       "StatusInfo": {
         "type": "object",

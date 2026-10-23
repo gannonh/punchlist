@@ -152,6 +152,17 @@ describe('filters and groups', () => {
     expect(ids({ who: 'none' })).toEqual(['PL-1'])
   })
 
+  test('search hits pass the text filter and no other', () => {
+    const ids = (filter: Partial<Filter>, hitIds?: string[]) =>
+      filterRows(rows, { ...any, ...filter }, hitIds).map((r) => r.issue.id)
+    expect(ids({ text: 'ci_green' }, ['PL-1'])).toEqual(['PL-1'])
+    expect(ids({ text: 'ci_green', who: 'agents' }, ['PL-1'])).toEqual([])
+    expect(ids({ text: 'ci_green', statuses: ['in_progress'] }, ['PL-1'])).toEqual([])
+    expect(ids({ text: 'login' }, ['PL-3'])).toEqual(['PL-1', 'PL-3'])
+    expect(ids({ text: 'login' }, [])).toEqual(ids({ text: 'login' }))
+    expect(ids({ text: 'login' }, [])).toEqual(['PL-1'])
+  })
+
   test('project and milestone filters, combined with the others', () => {
     const p1 = { id: 'p1', name: 'Alpha' }
     const placed = [

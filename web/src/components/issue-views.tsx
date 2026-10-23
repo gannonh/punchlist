@@ -2,7 +2,16 @@ import { memo, useLayoutEffect } from 'react'
 import { Lock } from 'lucide-react'
 import { cn } from 'cn'
 import { Assignee, Gates, Labels, LockBadge, PullRequest, Run, StatusDot, TransitionNote } from '@/components/atoms'
-import { agentName, peopleOnly, rowView, type Group, type IssueRow, type Transition, type Transitions } from '@/model/issues'
+import {
+  agentName,
+  peopleOnly,
+  rowView,
+  type Group,
+  type IssueRow,
+  type Snippet,
+  type Transition,
+  type Transitions,
+} from '@/model/issues'
 
 /**
  * Records a `pl:render` measure for each commit of the list or the board, from the start of the view's render to
@@ -21,6 +30,8 @@ interface RowProps {
   row: IssueRow
   selected: boolean
   transition: Transition | undefined
+  /** Where the filter's text matched the body or a comment. */
+  snippet?: Snippet | undefined
   now: Date
   onPick: (id: string) => void
   onDismiss: (id: string) => void
@@ -45,7 +56,19 @@ function GroupHead({ group }: { group: Group }) {
   )
 }
 
-const ListRow = memo(function ListRow({ row, selected, transition, now, onPick, onDismiss }: RowProps) {
+/** One line: the field, then the text around the match with the match marked. */
+function SnippetLine({ snippet }: { snippet: Snippet }) {
+  return (
+    <span className="truncate text-meta text-muted-foreground" data-snippet>
+      <span className="mr-1.5 font-medium text-ink-3">{snippet.field}</span>
+      {snippet.before}
+      <mark className="rounded-sm bg-warn-soft px-px text-foreground">{snippet.hit}</mark>
+      {snippet.after}
+    </span>
+  )
+}
+
+const ListRow = memo(function ListRow({ row, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
   const view = rowView(row, now)
   return (
     <div
@@ -70,6 +93,7 @@ const ListRow = memo(function ListRow({ row, selected, transition, now, onPick, 
         <PullRequest view={view.pullRequest} />
         <Gates view={view.gates} />
       </span>
+      {snippet && <SnippetLine snippet={snippet} />}
       {transition && (
         <TransitionNote
           transition={transition}
@@ -82,7 +106,7 @@ const ListRow = memo(function ListRow({ row, selected, transition, now, onPick, 
   )
 })
 
-const Card = memo(function Card({ row, selected, transition, now, onPick, onDismiss }: RowProps) {
+const Card = memo(function Card({ row, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
   const view = rowView(row, now)
   return (
     <article
@@ -101,6 +125,7 @@ const Card = memo(function Card({ row, selected, transition, now, onPick, onDism
         <Assignee view={view.assignee} short />
       </div>
       <div className="title leading-snug font-medium wrap-anywhere">{view.title}</div>
+      {snippet && <SnippetLine snippet={snippet} />}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Run view={view.run} />
         <PullRequest view={view.pullRequest} />
@@ -124,12 +149,13 @@ interface ViewProps {
   groups: Group[]
   selected: string | null
   transitions: Transitions
+  snippets: ReadonlyMap<string, Snippet>
   now: Date
   onPick: (id: string) => void
   onDismiss: (id: string) => void
 }
 
-export function ListView({ groups, selected, transitions, now, onPick, onDismiss }: ViewProps) {
+export function ListView({ groups, selected, transitions, snippets, now, onPick, onDismiss }: ViewProps) {
   useRenderMeasure('list', groups)
   return (
     <div data-layout="list">
@@ -147,6 +173,7 @@ export function ListView({ groups, selected, transitions, now, onPick, onDismiss
                   row={row}
                   selected={row.issue.id === selected}
                   transition={transitions[row.issue.id]}
+                  snippet={snippets.get(row.issue.id)}
                   now={now}
                   onPick={onPick}
                   onDismiss={onDismiss}
@@ -164,7 +191,7 @@ export function BoardView({
   onColumn,
   ...props
 }: ViewProps & { column: string; onColumn: (key: string) => void }) {
-  const { groups, selected, transitions, now, onPick, onDismiss } = props
+  const { groups, selected, transitions, snippets, now, onPick, onDismiss } = props
   useRenderMeasure('board', groups)
   return (
     <div data-layout="board">
@@ -221,6 +248,7 @@ export function BoardView({
                       row={row}
                       selected={row.issue.id === selected}
                       transition={transitions[row.issue.id]}
+                      snippet={snippets.get(row.issue.id)}
                       now={now}
                       onPick={onPick}
                       onDismiss={onDismiss}

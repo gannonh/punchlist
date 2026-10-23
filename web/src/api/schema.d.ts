@@ -549,6 +549,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search the workspace's issues: their id, title, body and comments. A person's token. */
+        get: operations["search"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -1729,6 +1746,23 @@ export interface components {
             id: string;
             name: string;
         };
+        SearchHit: {
+            /** @description The query matches the issue's id or title. */
+            in_title: boolean;
+            issue_id: string;
+            snippet?: components["schemas"]["Snippet"] | null;
+            status_name: string;
+            title: string;
+        };
+        /**
+         * @description `GET /api/search`: hits in the id or title first, then the rest, each group newest issue
+         *     first.
+         */
+        SearchResults: {
+            hits: components["schemas"]["SearchHit"][];
+            /** @description More issues match than `limit`. */
+            more: boolean;
+        };
         /** @description Who a request is signed in as. */
         Session: {
             actor: components["schemas"]["Actor"];
@@ -1740,6 +1774,27 @@ export interface components {
             /** @description A person's bearer token. */
             token: string;
         };
+        /**
+         * @description One line around the first match, with whitespace runs and control characters made one
+         *     space. `before` starts and `after` ends with `…` where the text was cut.
+         */
+        Snippet: {
+            after: string;
+            before: string;
+            /**
+             * Format: int64
+             * @description The `seq` of the comment's `comment` event; `None` for the body.
+             */
+            comment_seq?: number | null;
+            field: components["schemas"]["SnippetField"];
+            /**
+             * @description The matched text as the document writes it. Empty when the server could not find the
+             *     match again, and `before` is then the text's first 120 characters.
+             */
+            hit: string;
+        };
+        /** @enum {string} */
+        SnippetField: "body" | "comment";
         StatusInfo: {
             /** @description No transition leaves it, as with Done and Canceled. The list hides these by default. */
             closed: boolean;
@@ -3450,6 +3505,59 @@ export interface operations {
                 };
             };
             /** @description The reason is empty or too long. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    search: {
+        parameters: {
+            query: {
+                /**
+                 * @description One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one
+                 *     space, matched as a substring in any case.
+                 */
+                q: string;
+                /** @description The most hits to answer: 50 by default, at most 100. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchResults"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description A query under 3 or over 200 characters. */
             422: {
                 headers: {
                     [name: string]: unknown;

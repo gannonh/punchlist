@@ -1614,3 +1614,68 @@ async fn import_linear_twice_then_status(pool: PgPool) {
         show.stdout
     );
 }
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn search_prints_hits_and_snippets_without_control_characters(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let client = Client::new(&pl.url, &pl.token).unwrap();
+    for (title, body) in [
+        (
+            "Gate the transition",
+            "The runner restarts and leaks ci_green on every retry.",
+        ),
+        ("Reword ci_green", "Plain."),
+        ("Docs pass", "Nothing."),
+        (
+            "Escape test",
+            "<img src=x onerror=\"window.__x=1\"> ci_green",
+        ),
+        ("Red\u{1b}[1m", "\u{1b}[31mred\u{1b}[0m"),
+    ] {
+        let request = punchlist_api::CreateIssue {
+            title: title.into(),
+            body: body.into(),
+        };
+        client.create_issue(&request).await.unwrap();
+    }
+    client
+        .comment(
+            "PL-3",
+            "We saw ciXgreen in the log and 100% of retries pass.",
+        )
+        .await
+        .unwrap();
+
+    let found = pl.run(&["search", "ci_green"]).await;
+    assert_eq!(found.code, 0, "{}", found.stderr);
+    insta::assert_snapshot!(found.stdout, @r#"
+    PL-2  Reword ci_green
+    PL-4  Escape test
+        body: <img src=x onerror="window.__x=1"> [ci_green]
+    PL-1  Gate the transition
+        body: The runner restarts and leaks [ci_green] on every retry.
+    "#);
+
+    let found = pl.run(&["search", "100%", "of"]).await;
+    assert_eq!(
+        found.stdout,
+        "PL-3  Docs pass\n    comment: We saw ciXgreen in the log and [100% of] retries pass.\n"
+    );
+
+    let found = pl.run(&["search", "red"]).await;
+    assert_eq!(found.stdout, "PL-5  Red [1m\n    body:  [31m[red] [0m\n");
+    assert!(!found.stdout.contains('\u{1b}'));
+
+    let more = pl.run(&["search", "ci_green", "--limit", "1"]).await;
+    assert_eq!(
+        more.stdout,
+        "PL-2  Reword ci_green\n… more matches; narrow the query\n"
+    );
+
+    let none = pl.run(&["search", "zzzz"]).await;
+    assert_eq!((none.code, none.stdout.as_str()), (0, "No matches.\n"));
+
+    let refused = pl.run(&["search", "ci"]).await;
+    assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
+    insta::assert_snapshot!(refused.stderr, @"error: search needs at least 3 characters (422 Unprocessable Entity)");
+}

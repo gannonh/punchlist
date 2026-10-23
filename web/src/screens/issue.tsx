@@ -2,7 +2,7 @@
 // status and moves, gates, runs and properties in a sticky rail that stacks above the main column on phones.
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Bot, GitMerge, GitPullRequest, Lock, Paperclip, Server, HardDrive } from 'lucide-react'
 import { cn } from 'cn'
 import { toast } from 'sonner'
@@ -162,6 +162,13 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
   const attempts = (runs.data ?? []).reduce((n, run) => n + (run.attempts ?? []).length, 0)
   useRenderMeasure(events.data?.length ?? 0, attempts)
 
+  // `#seq-<n>` names a timeline entry, such as the comment a search matched: once the timeline is there, show it.
+  const target = useLocation({ select: (location) => location.hash })
+  const timelineLoaded = events.isSuccess
+  useEffect(() => {
+    if (target && timelineLoaded) document.getElementById(target)?.scrollIntoView({ block: 'center' })
+  }, [target, timelineLoaded])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // An open dialog handles its own keys, `Esc` included, wherever focus is.
@@ -286,6 +293,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
               viewer={viewer}
               moves={moves}
               composer={composer}
+              target={target}
               now={now}
             />
           </div>
@@ -706,6 +714,7 @@ function ActivityPanel({
   viewer,
   moves,
   composer,
+  target,
   now,
 }: {
   id: string
@@ -715,6 +724,7 @@ function ActivityPanel({
   viewer: Actor
   moves: TransitionList | undefined
   composer: RefObject<HTMLTextAreaElement | null>
+  target: string
   now: Date
 }) {
   const shown = useMemo(() => feedEntries(events, feed), [events, feed])
@@ -747,7 +757,7 @@ function ActivityPanel({
       {shown.length === 0 ? (
         <div className="empty">No {feed === 'all' ? 'activity' : feed} yet.</div>
       ) : (
-        <Timeline events={shown} now={now} />
+        <Timeline events={shown} target={target} now={now} />
       )}
       <form
         className="composer"
@@ -801,17 +811,17 @@ function ActivityPanel({
   )
 }
 
-const Timeline = memo(function Timeline({ events, now }: { events: IssueEvent[]; now: Date }) {
+const Timeline = memo(function Timeline({ events, target, now }: { events: IssueEvent[]; target: string; now: Date }) {
   return (
     <ol className="timeline">
       {events.map((event) => (
-        <Entry key={event.seq} event={event} now={now} />
+        <Entry key={event.seq} event={event} targeted={target === `seq-${String(event.seq)}`} now={now} />
       ))}
     </ol>
   )
 })
 
-const Entry = memo(function Entry({ event, now }: { event: IssueEvent; now: Date }) {
+const Entry = memo(function Entry({ event, targeted, now }: { event: IssueEvent; targeted: boolean; now: Date }) {
   const mark = actorMark(event)
   const { detail } = event
   const at = (
@@ -826,7 +836,14 @@ const Entry = memo(function Entry({ event, now }: { event: IssueEvent; now: Date
     </>
   )
   return (
-    <li className="relative py-1.25" data-kind={detail.kind} data-actor-type={mark.mark} data-seq={event.seq}>
+    <li
+      id={`seq-${String(event.seq)}`}
+      className="relative scroll-mt-20 py-1.25"
+      data-kind={detail.kind}
+      data-actor-type={mark.mark}
+      data-seq={event.seq}
+      data-target={targeted || undefined}
+    >
       <div className="grid grid-cols-[20px_minmax(0,1fr)_auto] items-start gap-2 text-meta text-muted-foreground">
         <Avatar mark={mark} />
         <span className="flex min-h-5 flex-wrap items-center gap-x-1.5 gap-y-1">

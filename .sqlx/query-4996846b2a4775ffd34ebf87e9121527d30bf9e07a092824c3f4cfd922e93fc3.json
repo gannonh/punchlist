@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH matched AS (\n               SELECT id FROM issue\n               WHERE workspace_id = $1\n                 AND (id ILIKE $2 ESCAPE '\\' OR title ILIKE $2 ESCAPE '\\'\n                      OR body ILIKE $2 ESCAPE '\\')\n               UNION\n               SELECT c.issue_id FROM comment c JOIN issue i ON i.id = c.issue_id\n               WHERE i.workspace_id = $1 AND c.body ILIKE $2 ESCAPE '\\'\n           )\n           SELECT i.id, i.title, i.body, i.status,\n                  (i.id ILIKE $2 ESCAPE '\\' OR i.title ILIKE $2 ESCAPE '\\') AS \"in_title!\",\n                  i.body ILIKE $2 ESCAPE '\\' AS \"in_body!\"\n           FROM matched JOIN issue i USING (id)\n           ORDER BY \"in_title!\" DESC, i.created_at DESC, i.number DESC\n           LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "body",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "body"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "in_title!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "in_body!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "4996846b2a4775ffd34ebf87e9121527d30bf9e07a092824c3f4cfd922e93fc3"
+}

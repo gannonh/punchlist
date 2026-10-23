@@ -16,6 +16,7 @@ mod pull_requests;
 mod rows;
 mod runners;
 mod runs;
+mod search;
 mod session;
 mod workflow;
 
@@ -139,6 +140,7 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
         .merge(pull_requests::routes())
         .merge(runners::routes())
         .merge(runs::routes())
+        .merge(search::routes())
         .merge(session::routes())
         .merge(workflow::routes())
 }

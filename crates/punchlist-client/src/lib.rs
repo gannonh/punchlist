@@ -7,8 +7,8 @@ use punchlist_api::{
     GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList,
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
     Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
-    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, Session, UpdateIssue,
-    WaitForPerson, WorkflowInfo, proof_type_by_extension,
+    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
+    UpdateIssue, WaitForPerson, WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -346,6 +346,15 @@ impl Client {
         )
         .await
         .map(|_| ())
+    }
+
+    /// The workspace's issues whose id, title, body or comments contain `q`, in any case.
+    pub async fn search(&self, q: &str, limit: Option<u32>) -> Result<SearchResults, ClientError> {
+        let mut request = self.builder(Method::GET, &["search"])?.query(&[("q", q)]);
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit)]);
+        }
+        Ok(Self::respond(request).await?.json().await?)
     }
 
     pub async fn run_log(&self, run_id: &str) -> Result<RunLog, ClientError> {

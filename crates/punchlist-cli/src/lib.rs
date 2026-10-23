@@ -14,7 +14,8 @@ use clap::{Parser, Subcommand};
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
-    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, UpdateIssue, WorkflowInfo, gate_lines,
+    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
+    WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -62,6 +63,16 @@ pub enum Command {
     /// Import issues from Linear.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Find the workspace's issues whose id, title, body or comments contain a text, in any
+    /// case, with the line where it matched.
+    Search {
+        /// One phrase of at least 3 characters, matched literally.
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// The most issues to print: 50 by default, at most 100.
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Serve Punchlist's MCP tools on stdio for one issue. The runner starts this for each
     /// agent run.
     Mcp(McpArgs),
@@ -499,6 +510,11 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             };
             let status = client.import_status(&workspace).await?;
             write!(out, "{}", render_import_status(&status))?;
+            Ok(())
+        }
+        Command::Search { query, limit } => {
+            let results = client.search(&query.join(" "), limit).await?;
+            write!(out, "{}", render_search(&results))?;
             Ok(())
         }
         Command::Workflow(WorkflowCommand::Show) => {
@@ -1376,6 +1392,31 @@ fn render_unlinked(pull_requests: &[PullRequest]) -> String {
             )
         })
         .collect()
+}
+
+fn render_search(results: &SearchResults) -> String {
+    if results.hits.is_empty() {
+        return "No matches.\n".to_string();
+    }
+    let mut text = String::new();
+    for hit in &results.hits {
+        // The server makes a snippet one line; a title is as its author wrote it.
+        let title: String = (hit.title.chars())
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        text.push_str(&format!("{}  {title}\n", hit.issue_id));
+        if let Some(s) = &hit.snippet {
+            let field = s.field.as_str();
+            text.push_str(&format!(
+                "    {field}: {}[{}]{}\n",
+                s.before, s.hit, s.after
+            ));
+        }
+    }
+    if results.more {
+        text.push_str("… more matches; narrow the query\n");
+    }
+    text
 }
 
 fn render_list(issues: &[Issue]) -> String {

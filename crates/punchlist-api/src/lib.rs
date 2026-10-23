@@ -658,6 +658,57 @@ pub struct ActorList {
     pub actors: Vec<ActorInfo>,
 }
 
+/// `GET /api/search`: hits in the id or title first, then the rest, each group newest issue
+/// first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    /// More issues match than `limit`.
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SearchHit {
+    pub issue_id: String,
+    pub title: String,
+    pub status_name: String,
+    /// The query matches the issue's id or title.
+    pub in_title: bool,
+    /// Where the query matches the body, or else the newest comment it matches; `None` when
+    /// it matches neither.
+    pub snippet: Option<Snippet>,
+}
+
+/// One line around the first match, with whitespace runs and control characters made one
+/// space. `before` starts and `after` ends with `…` where the text was cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Snippet {
+    pub field: SnippetField,
+    pub before: String,
+    /// The matched text as the document writes it. Empty when the server could not find the
+    /// match again, and `before` is then the text's first 120 characters.
+    pub hit: String,
+    pub after: String,
+    /// The `seq` of the comment's `comment` event; `None` for the body.
+    pub comment_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnippetField {
+    Body,
+    Comment,
+}
+
+impl SnippetField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SnippetField::Body => "body",
+            SnippetField::Comment => "comment",
+        }
+    }
+}
+
 /// `GET /api/runners`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RunnerList {

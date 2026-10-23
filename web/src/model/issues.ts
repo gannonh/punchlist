@@ -15,6 +15,8 @@ export type ProjectRef = Schemas['ProjectRef']
 export type MilestoneRef = Schemas['MilestoneRef']
 export type RunState = Schemas['RunSummary']['state']
 export type ChecksState = Schemas['ChecksState']
+export type SearchResults = Schemas['SearchResults']
+export type Snippet = Schemas['Snippet']
 
 export const AGENT_NAMES: Readonly<Record<string, string>> = {
   'claude-code': 'Claude Code',
@@ -179,8 +181,10 @@ function matchesWho(actor: Actor | null | undefined, who: Who): boolean {
   return actor.role === 'agent' && `agent:${actor.kind ?? ''}` === who
 }
 
-export function filterRows(rows: readonly IssueRow[], filter: Filter): IssueRow[] {
+/** The rows that pass every filter. A row whose id is in `hitIds`, the server's search hits, passes the text filter too. */
+export function filterRows(rows: readonly IssueRow[], filter: Filter, hitIds: readonly string[] = []): IssueRow[] {
   const text = filter.text.trim().toLowerCase()
+  const hits = new Set(hitIds)
   return rows.filter(({ issue }) => {
     if (filter.project && (issue.project?.id ?? 'none') !== filter.project) return false
     if (filter.milestone && (issue.milestone?.id ?? 'none') !== filter.milestone) return false
@@ -190,7 +194,7 @@ export function filterRows(rows: readonly IssueRow[], filter: Filter): IssueRow[
     if (!text) return true
     const assignee = issue.assignee ? `${issue.assignee.name} ${agentName(issue.assignee.kind)}` : ''
     const haystack = `${issue.id} ${issue.title} ${(issue.labels ?? []).join(' ')} ${assignee} ${issue.status_name}`
-    return haystack.toLowerCase().includes(text)
+    return hits.has(issue.id) || haystack.toLowerCase().includes(text)
   })
 }
 

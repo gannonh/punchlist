@@ -130,7 +130,7 @@
     .list-row { grid-template-columns: 64px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
     .list-row > :not(:first-child) { grid-column: auto; }
     .list-row .meta { display: contents; }
-    .list-row .transition-note { grid-column: 2 / -1; }
+    .list-row :is(.transition-note, [data-snippet]) { grid-column: 2 / -1; }
   }
 }
 
@@ -177,6 +177,8 @@
   .run-pulse { animation: pl-pulse 1.4s ease-out infinite; }
 
   .timeline { @apply relative m-0 list-none p-0; }
+  /* The entry the URL's `#seq-<n>` names. pushState does not move `:target`, so the page marks it itself. */
+  .timeline > li[data-target] { @apply -mx-1.5 rounded-md bg-warn-soft px-1.5; }
   .timeline::before { content: ""; position: absolute; left: 9px; top: 10px; bottom: 10px; border-left: 1px solid var(--border); }
 
   .feed-filter { @apply inline-flex rounded-md border bg-card p-px; }
