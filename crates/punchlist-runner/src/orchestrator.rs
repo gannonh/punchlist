@@ -114,12 +114,7 @@ pub async fn run(
     config: RunnerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> anyhow::Result<()> {
-    run_with_worktrees(
-        Worktrees::new(config.worktree_root.clone()),
-        config,
-        shutdown,
-    )
-    .await
+    run_with_worktrees(Worktrees::new(config.state_dir.clone()), config, shutdown).await
 }
 
 pub(crate) async fn run_with_worktrees(
@@ -136,6 +131,11 @@ pub(crate) async fn run_with_worktrees(
             "unsupported agent `{unsupported}`; this runner can run {}",
             AGENTS.join(" and ")
         );
+    }
+    for dir in ["repos", "worktrees", "mcp", "codex-home"] {
+        let dir = config.state_dir.join(dir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))?;
     }
     let registered = Client::new(&config.server_url, &config.token)?
         .register_runner(&RegisterRunner {
@@ -559,7 +559,7 @@ async fn run_attempt(
     // server without App credentials sends none, and the run uses the runner's own.
     let github = match (&claim.github_error, &claim.github) {
         (Some(error), _) => Err(format!("GitHub refused the run's token: {error}")),
-        (None, Some(token)) => GithubAccess::create(&ctx.config.worktree_root, &run_id, token)
+        (None, Some(token)) => GithubAccess::create(&ctx.config.state_dir, &run_id, token)
             .map(|access| Some(Arc::new(access)))
             .map_err(|e| format!("cannot write the run's GitHub token: {e}")),
         (None, None) => Ok(None),
@@ -769,7 +769,7 @@ async fn run_agent(
     match claim.agent.as_str() {
         "codex" => {
             // Outside the worktree, and removed when this returns or is dropped.
-            let home = match CodexHome::create(&config.worktree_root, &claim.run_id.to_string()) {
+            let home = match CodexHome::create(&config.state_dir, &claim.run_id.to_string()) {
                 Ok(home) => home,
                 Err(e) => return failed(format!("cannot make the Codex home: {e}")),
             };
@@ -795,7 +795,7 @@ async fn run_agent(
         }
         "claude-code" => {
             // Outside the worktree, so the agent cannot commit its token.
-            let mcp_dir = config.worktree_root.join("mcp");
+            let mcp_dir = config.state_dir.join("mcp");
             let run_id = claim.run_id.to_string();
             let mcp_config = match write_mcp_config(&mcp_dir, &run_id, config, claim) {
                 Ok(mcp_config) => mcp_config,
@@ -1249,13 +1249,13 @@ mod tests {
         url
     }
 
-    fn fake_config(server_url: String, worktree_root: PathBuf, claude: PathBuf) -> RunnerConfig {
+    fn fake_config(server_url: String, state_dir: PathBuf, claude: PathBuf) -> RunnerConfig {
         RunnerConfig {
             server_url,
             token: "person-token".into(),
             name: "sartre".into(),
             agents: vec!["claude-code".into()],
-            worktree_root,
+            state_dir,
             claude_command: claude,
             mcp_command: "pl".into(),
             model: None,
@@ -1314,6 +1314,13 @@ mod tests {
             ran.unwrap_err().to_string(),
             "another `pl runner start` registered runner `sartre`; this one stopped"
         );
+        // It made its state directory's four parts before registering.
+        let mut made: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        made.sort();
+        assert_eq!(made, ["codex-home", "mcp", "repos", "worktrees"]);
     }
 
     /// A runner restarts holding two Claude Code attempts: it resumes the one whose worktree

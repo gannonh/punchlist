@@ -106,7 +106,7 @@ $C pl "$RUN" run log <run-id>
 $C runner-stop "$RUN" r1         # SIGINT; running attempts finish failed, "runner stopped"
 ```
 
-The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its clones and worktrees are under `/tmp/punchlist-verify/<RUN_ID>/worktrees/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
+The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its state directory, with its clones and worktrees, is `/tmp/punchlist-verify/<RUN_ID>/runner/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
 
 A GitHub delivery, signed with the run's webhook secret: `$C webhook "$RUN" pull_request payload.json [DELIVERY_ID]` prints the HTTP status and records it in the transcript. Recipes are in [features/github.md](features/github.md).
 
