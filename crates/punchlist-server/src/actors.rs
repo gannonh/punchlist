@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use punchlist_api::{ActorInfo, ActorList, CreateAgent, CreatedAgent, ErrorBody};
-use punchlist_core::{AGENT_KINDS, Role, agent_display_name};
+use punchlist_core::{Role, agent_display_name, unknown_agent_kind};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
@@ -70,11 +70,8 @@ async fn create_agent(
 ) -> Result<(StatusCode, Json<CreatedAgent>), ApiError> {
     person_only(&actor)?;
     let kind = request.kind.trim();
-    if !AGENT_KINDS.contains(&kind) {
-        return Err(ApiError::Invalid(format!(
-            "unknown agent kind `{kind}`; the kinds are {}",
-            AGENT_KINDS.join(", ")
-        )));
+    if let Some(unknown) = unknown_agent_kind(kind) {
+        return Err(ApiError::Invalid(unknown));
     }
     let model = request
         .model

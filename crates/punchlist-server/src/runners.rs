@@ -9,7 +9,7 @@ use punchlist_api::{
     ErrorBody, Heartbeat, HeartbeatReply, HeldAttempt, Lease, RegisterRunner, RegisteredRunner,
     Repository, Runner, RunnerList,
 };
-use punchlist_core::Role;
+use punchlist_core::{Role, unknown_agent_kind};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
@@ -121,6 +121,9 @@ async fn register_runner(
         return Err(ApiError::Invalid(
             "a runner needs at least one agent key".into(),
         ));
+    }
+    if let Some(unknown) = agents.iter().find_map(|agent| unknown_agent_kind(agent)) {
+        return Err(ApiError::Invalid(unknown));
     }
     let token = new_token();
     let mut tx = state.pool.begin().await?;

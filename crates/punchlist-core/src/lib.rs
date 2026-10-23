@@ -10,6 +10,7 @@ mod workflow;
 
 pub use agent::{
     AGENT_KINDS, FenceError, agent_display_name, branch_name, fence, fenced, is_plain_name, quoted,
+    unknown_agent_kind,
 };
 pub use gate::{
     CheckRunEvidence, Evidence, Gate, GateResult, ProofEvidence, PullRequestEvidence,

@@ -12,6 +12,7 @@ use punchlist_api::{
     AppendLog, Claim, FinishRun, Heartbeat, HeldAttempt, Lease, RegisterRunner, RunOutcome,
 };
 use punchlist_client::{Client, ClientError};
+use punchlist_core::unknown_agent_kind;
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -126,6 +127,10 @@ pub(crate) async fn run_with_worktrees(
     config: RunnerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> anyhow::Result<()> {
+    // A word that is no agent kind is a typo; a kind with no adapter here is a missing feature.
+    if let Some(unknown) = (config.agents.iter()).find_map(|a| unknown_agent_kind(a)) {
+        anyhow::bail!(unknown);
+    }
     if let Some(unsupported) = (config.agents.iter()).find(|a| !AGENTS.contains(&a.as_str())) {
         anyhow::bail!(
             "unsupported agent `{unsupported}`; this runner can run {}",
@@ -1261,6 +1266,33 @@ mod tests {
             heartbeat_interval: Duration::from_secs(1),
             claim_wait: Duration::ZERO,
         }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_kind_and_a_kind_without_an_adapter_fail_before_registering() {
+        let temp = tempfile::tempdir().unwrap();
+        // Nothing listens there: a call to the server would fail with a different error.
+        let refused = |agent: &str| {
+            let mut config = fake_config(
+                "http://127.0.0.1:9".into(),
+                temp.path().into(),
+                "claude".into(),
+            );
+            config.agents = vec!["claude-code".into(), agent.into()];
+            run_with_worktrees(
+                Worktrees::new(temp.path().into()),
+                config,
+                std::future::pending(),
+            )
+        };
+        assert_eq!(
+            refused("opncode").await.unwrap_err().to_string(),
+            "unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+        );
+        assert_eq!(
+            refused("pi").await.unwrap_err().to_string(),
+            "unsupported agent `pi`; this runner can run claude-code and codex"
+        );
     }
 
     #[tokio::test]
