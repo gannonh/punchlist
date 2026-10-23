@@ -684,6 +684,114 @@ async fn a_comment_and_a_github_move_show_on_the_timeline(pool: PgPool) {
     });
 }
 
+/// Starts `pl runner start` with `args`, `env` and `stdin`, and returns its stderr up to the
+/// first line holding `until`, then kills it.
+async fn runner_stderr_until(
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    stdin: String,
+    until: &'static str,
+) -> String {
+    tokio::task::spawn_blocking(move || {
+        use std::io::{BufRead, Write};
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("pl"))
+            .args(["runner", "start"])
+            .args(args)
+            .envs(env)
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let mut seen = String::new();
+        for line in std::io::BufReader::new(child.stderr.take().unwrap()).lines() {
+            let line = line.unwrap();
+            seen.push_str(&line);
+            seen.push('\n');
+            if line.contains(until) {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        seen
+    })
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn a_runner_without_an_agent_user_warns_that_agents_can_read_the_config(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let state = pl.dir.path().join("state");
+    let stderr = runner_stderr_until(
+        vec![
+            "--name".into(),
+            "w".into(),
+            "--state-dir".into(),
+            state.display().to_string(),
+        ],
+        vec![
+            ("PUNCHLIST_CONFIG".into(), pl.config.display().to_string()),
+            ("USER".into(), "gannonh".into()),
+        ],
+        String::new(),
+        "registered runner",
+    )
+    .await;
+    let warning = format!(
+        "agents run as gannonh and can read this user's files, including the Punchlist config at {}",
+        pl.config.display()
+    );
+    let first = stderr.lines().next().unwrap_or_default();
+    assert!(
+        first.contains(" WARN ") && first.ends_with(&warning),
+        "{stderr}"
+    );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn the_runner_an_agent_user_runs_works_from_the_runner_token_alone(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let person = Client::new(&pl.url, &pl.token).unwrap();
+    let registered = person
+        .register_runner(&RegisterRunner {
+            name: "sartre".into(),
+            agents: vec!["claude-code".into()],
+            models: Default::default(),
+        })
+        .await
+        .unwrap();
+    let state = pl.dir.path().join("agent-state");
+    let handoff = serde_json::json!({
+        "server_url": pl.url,
+        "runner_id": registered.runner.id.to_string(),
+        "runner_token": registered.token,
+        "runner": { "name": "sartre", "state_dir": state.display().to_string() },
+    });
+    // No config it could read: the agent user has none.
+    let missing = pl.dir.path().join("missing.toml").display().to_string();
+    let stderr = runner_stderr_until(
+        vec!["--handoff".into()],
+        vec![("PUNCHLIST_CONFIG".into(), missing)],
+        handoff.to_string(),
+        "claims up to",
+    )
+    .await;
+    assert!(stderr.contains("claims up to"), "{stderr}");
+    assert!(!stderr.contains("registered runner"), "{stderr}");
+    assert!(!stderr.contains("WARN"), "{stderr}");
+    assert!(state.join("worktrees").is_dir(), "{stderr}");
+    let list = pl.run(&["runner", "list"]).await;
+    assert_eq!(list.stdout.lines().count(), 1, "{}", list.stdout);
+}
+
 #[test]
 fn runner_start_help_lists_the_flags() {
     let output = Command::cargo_bin("pl")
@@ -703,6 +811,7 @@ fn runner_start_help_lists_the_flags() {
         "--codex-effort",
         "--codex-command",
         "--max-concurrent",
+        "--agent-user",
     ] {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
     }

@@ -37,8 +37,10 @@ The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 The workspace has one runner, in the pane `runner` of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runner again after a reboot:
 
 ```sh
-PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
+PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex --agent-user punchlist-agent
 ```
+
+The agents run as the OS user `punchlist-agent` (devops `machines.md`, Agent user), which cannot read `/home/gannonh`, so no agent can read Gannon's Punchlist token in `~/.config/punchlist/`. `pl runner start` registers the runner with that token, then runs the runner itself as `punchlist-agent` through `sudo -n -i -u punchlist-agent pl runner start --handoff`, given only the runner's own token on stdin; no process of that user ever holds Gannon's. The runner's state, its worktrees included, is under `/home/punchlist-agent/.local/share/punchlist/runner`, and the runs use that user's `claude` and `codex` sign-ins, `pl` on its `PATH` (`sudo install -m 755 ~/.cargo/bin/pl /usr/local/bin/pl` after each `cargo install`), its rootless Docker and its `with-env`. Without `--agent-user` the runner warns at start: `agents run as gannonh and can read this user's files, including the Punchlist config at <path>`. Either way an agent's environment holds no `PUNCHLIST_*` variable but the ones the runner sets (`PUNCHLIST_RUNNER`, `PUNCHLIST_ATTEMPT`, `PUNCHLIST_GITHUB_TOKEN_FILE`). The user keeps `with-env` and the Punchlist 1Password Environment for live checks, so an agent can still read the dogfood App's private key and webhook secret: an accepted risk (Gannon, 2026-10-23, PL-99).
 
 The runner needs no `gh` login: each run gets an installation token of the App from the server, for `gannonh/punchlist` alone, and its agent sees no other GitHub credential. A run whose claim says the App cannot write the repository fails with that reason; accept the App's new permissions on the installation (GitHub, Settings, Applications, `punchlist-sartre`, Review request).
 

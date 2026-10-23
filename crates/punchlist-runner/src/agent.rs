@@ -302,8 +302,6 @@ pub async fn run_claude(
     let spawned = command
         .args(args)
         .current_dir(worktree)
-        // The agent reads untrusted issue text; keep the person's config path out of its reach.
-        .env_remove("PUNCHLIST_CONFIG")
         .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -499,18 +497,34 @@ async fn remove_containers(attempt: &str) -> usize {
     if removed.is_some() { count } else { 0 }
 }
 
-/// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
-/// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
-/// Sets each `Some` variable of `env` on `command` and removes each `None` one.
+/// Gives `command` the agent's whole environment: the runner's, without any `PUNCHLIST_*`
+/// variable, then each `Some` variable of `env` set and each `None` one removed. The agent
+/// reads untrusted text, so it gets only the `PUNCHLIST_*` variables the runner sets, never
+/// the person's `PUNCHLIST_CONFIG`.
 pub(crate) fn with_env(command: &mut Command, env: &[(&'static str, Option<OsString>)]) {
-    for (name, value) in env {
-        match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+    command
+        .env_clear()
+        .envs(agent_env(std::env::vars_os(), env));
 }
 
+fn agent_env(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    env: &[(&'static str, Option<OsString>)],
+) -> Vec<(OsString, OsString)> {
+    let mut vars: Vec<(OsString, OsString)> = inherited
+        .into_iter()
+        .filter(|(name, _)| !name.as_encoded_bytes().starts_with(b"PUNCHLIST_"))
+        .filter(|(name, _)| !env.iter().any(|(set, _)| name == set))
+        .collect();
+    vars.extend(
+        env.iter()
+            .filter_map(|(name, value)| Some((name.into(), value.clone()?))),
+    );
+    vars
+}
+
+/// Sends SIGKILL to the process group led by `leader`, so commands the agent started die
+/// with it. Uses `kill(1)`: the workspace forbids unsafe code, which rules out `libc::kill`.
 pub(crate) fn kill_group(leader: Option<u32>) {
     if let Some(pid) = leader {
         let _ = std::process::Command::new("kill")
@@ -550,6 +564,39 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         child
+    }
+
+    #[test]
+    fn an_agent_gets_only_the_punchlist_variables_the_runner_sets() {
+        let os = |s: &str| OsString::from(s);
+        let inherited = [
+            (os("PATH"), os("/usr/bin")),
+            (
+                os("PUNCHLIST_CONFIG"),
+                os("/home/p/.config/punchlist/punchlist.toml"),
+            ),
+            (os("PUNCHLIST_TOKEN"), os("person")),
+            (os("PUNCHLIST_ATTEMPT"), os("stale-1")),
+            (os("GH_TOKEN"), os("gho_person")),
+            (os("HOME"), os("/home/p")),
+        ];
+        let env = [
+            ("PUNCHLIST_ATTEMPT", Some(os("run-2"))),
+            (
+                "PUNCHLIST_GITHUB_TOKEN_FILE",
+                Some(os("/s/github/run/token")),
+            ),
+            ("GH_TOKEN", None),
+        ];
+        assert_eq!(
+            agent_env(inherited, &env),
+            [
+                (os("PATH"), os("/usr/bin")),
+                (os("HOME"), os("/home/p")),
+                (os("PUNCHLIST_ATTEMPT"), os("run-2")),
+                (os("PUNCHLIST_GITHUB_TOKEN_FILE"), os("/s/github/run/token")),
+            ]
+        );
     }
 
     #[test]

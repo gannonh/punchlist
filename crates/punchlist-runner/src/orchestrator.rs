@@ -17,7 +17,6 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::RunnerConfig;
 use crate::agent::{
     ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
     kill_runner, run_claude, write_mcp_config,
@@ -25,6 +24,7 @@ use crate::agent::{
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
 use crate::worktree::Worktrees;
+use crate::{Credential, RunnerConfig};
 
 /// The agent keys this runner has an adapter for.
 const AGENTS: [&str; 2] = ["claude-code", "codex"];
@@ -118,6 +118,34 @@ pub async fn run(
     run_with_worktrees(Worktrees::new(config.state_dir.clone()), config, shutdown).await
 }
 
+/// Registers the runner with the person's token and returns its id and its own token. A name
+/// the person already registered gets that runner back, and its old token stops working.
+pub async fn register(config: &RunnerConfig) -> anyhow::Result<(String, String)> {
+    let Credential::Person(token) = &config.credential else {
+        anyhow::bail!("only a person's token registers a runner");
+    };
+    let registered = Client::new(&config.server_url, token)?
+        .register_runner(&RegisterRunner {
+            name: config.name.clone(),
+            agents: config.agents.clone(),
+            models: [
+                ("claude-code", &config.model),
+                ("codex", &config.codex_model),
+            ]
+            .into_iter()
+            .filter_map(|(agent, model)| Some((agent.to_string(), model.clone()?)))
+            .collect(),
+        })
+        .await?;
+    let runner_id = registered.runner.id.to_string();
+    tracing::info!(
+        "registered runner {} ({runner_id}), lease {}s",
+        registered.runner.name,
+        registered.lease_seconds
+    );
+    Ok((runner_id, registered.token))
+}
+
 pub(crate) async fn run_with_worktrees(
     worktrees: Worktrees,
     config: RunnerConfig,
@@ -138,26 +166,11 @@ pub(crate) async fn run_with_worktrees(
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))?;
     }
-    let registered = Client::new(&config.server_url, &config.token)?
-        .register_runner(&RegisterRunner {
-            name: config.name.clone(),
-            agents: config.agents.clone(),
-            models: [
-                ("claude-code", &config.model),
-                ("codex", &config.codex_model),
-            ]
-            .into_iter()
-            .filter_map(|(agent, model)| Some((agent.to_string(), model.clone()?)))
-            .collect(),
-        })
-        .await?;
-    let runner_id = registered.runner.id.to_string();
-    tracing::info!(
-        "registered runner {} ({runner_id}), lease {}s",
-        registered.runner.name,
-        registered.lease_seconds
-    );
-    let client = Client::new(&config.server_url, &registered.token)?;
+    let (runner_id, token) = match &config.credential {
+        Credential::Person(_) => register(&config).await?,
+        Credential::Runner { id, token } => (id.clone(), token.clone()),
+    };
+    let client = Client::new(&config.server_url, &token)?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     // Set when the server stops taking this runner's token: another `pl runner start`
@@ -293,6 +306,7 @@ pub(crate) async fn run_with_worktrees(
         Err(e) => tracing::warn!("cannot read this runner's leases: {e}; they will expire"),
     }
 
+    tracing::info!("runner {runner_id} claims up to {max_concurrent} issue(s) at once");
     loop {
         let permit = tokio::select! {
             _ = &mut shutdown => break,
@@ -1263,7 +1277,7 @@ mod tests {
     fn fake_config(server_url: String, state_dir: PathBuf, claude: PathBuf) -> RunnerConfig {
         RunnerConfig {
             server_url,
-            token: "person-token".into(),
+            credential: Credential::Person("person-token".into()),
             name: "sartre".into(),
             agents: vec!["claude-code".into()],
             state_dir,

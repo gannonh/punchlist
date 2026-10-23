@@ -12,8 +12,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub server_url: String,
-    /// A person's token, used once to register. The runner gets its own token back.
-    pub token: String,
+    pub credential: Credential,
     /// The name people read in `pl runner list`.
     pub name: String,
     /// Agent keys this runner can start, reported when it registers: `claude-code`, `codex`.
@@ -41,6 +40,16 @@ pub struct RunnerConfig {
     pub claim_wait: Duration,
 }
 
+/// What the runner starts with.
+#[derive(Debug, Clone)]
+pub enum Credential {
+    /// A person's token, used once to register. The runner gets its own token back.
+    Person(String),
+    /// A runner `pl runner start --agent-user` registered with the person's token before it
+    /// handed over to the agent user, so no process of that user holds the person's token.
+    Runner { id: String, token: String },
+}
+
 mod agent;
 mod codex;
 pub mod error;
@@ -50,6 +59,7 @@ pub mod path_safety;
 pub mod workspace;
 mod worktree;
 
+pub use orchestrator::register;
 pub use worktree::move_state_dir;
 
 /// Registers, then heartbeats and claims until `shutdown` resolves.

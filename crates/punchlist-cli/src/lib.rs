@@ -18,7 +18,7 @@ use punchlist_api::{
     WorkflowInfo, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(name = "pl", version, about = "Drive Punchlist from a terminal")]
@@ -280,6 +280,43 @@ pub struct RunnerStart {
     /// Issues to work on at once.
     #[arg(long)]
     pub max_concurrent: Option<usize>,
+    /// The OS user the agents run as, which cannot read your files. `pl runner start`
+    /// registers the runner with your token, then runs it as that user with
+    /// `sudo -n -i -u <user> pl runner start`, which never gets your token. That needs a sudo
+    /// rule that lets you run commands as the user without a password, and `pl`, `claude`,
+    /// `codex`, `git` and `gh` on the user's login `PATH`. Paths starting with `~` are in the
+    /// user's home.
+    #[arg(long)]
+    pub agent_user: Option<String>,
+    /// Read the runner `--agent-user` registered from stdin.
+    #[arg(long, hide = true)]
+    pub handoff: bool,
+}
+
+impl RunnerStart {
+    /// The flags over the `[runner]` table.
+    fn over(self, table: &RunnerSection) -> RunnerSection {
+        RunnerSection {
+            name: self.name.or_else(|| table.name.clone()),
+            agents: self.agents.or_else(|| table.agents.clone()),
+            state_dir: (self.state_dir.or(self.worktree_root)).or_else(|| table.state_dir.clone()),
+            claude_command: self.claude_command.or_else(|| table.claude_command.clone()),
+            model: self.model.or_else(|| table.model.clone()),
+            codex_command: self.codex_command.or_else(|| table.codex_command.clone()),
+            codex_model: self.codex_model.or_else(|| table.codex_model.clone()),
+            codex_effort: self.codex_effort.or_else(|| table.codex_effort.clone()),
+            max_concurrent: self.max_concurrent.or(table.max_concurrent),
+        }
+    }
+}
+
+/// What `pl runner start --agent-user` hands the runner it starts as that user, on stdin.
+#[derive(Debug, Serialize, Deserialize)]
+struct Handoff {
+    server_url: String,
+    runner_id: String,
+    runner_token: String,
+    runner: RunnerSection,
 }
 
 #[derive(Debug, Subcommand)]
@@ -338,7 +375,7 @@ pub struct Config {
 }
 
 /// The optional `[runner]` table.
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSection {
     pub name: Option<String>,
@@ -377,6 +414,32 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         init_logging();
         let client = Client::new(&args.server_url, &args.token)?;
         return punchlist_mcp::serve_stdio(client, args.issue, args.run).await;
+    }
+    // The runner `--agent-user` started reads no config: the agent user cannot.
+    if let Command::Runner(RunnerCommand::Start(flags)) = &cli.command
+        && flags.handoff
+    {
+        init_logging();
+        let handoff: Handoff = serde_json::from_reader(std::io::stdin().lock())
+            .context("cannot read the runner from stdin")?;
+        let config = Config {
+            server_url: handoff.server_url,
+            token: String::new(),
+            runner: handoff.runner,
+        };
+        let home = std::env::var("HOME").ok();
+        let (mut runner, _) = runner_config(
+            &config,
+            RunnerStart::default(),
+            home.as_deref(),
+            &hostname(),
+            Path::exists,
+        );
+        runner.credential = punchlist_runner::Credential::Runner {
+            id: handoff.runner_id,
+            token: handoff.runner_token,
+        };
+        return punchlist_runner::run(runner, shutdown_signal()).await;
     }
     let path = match cli.config {
         Some(path) => path,
@@ -425,6 +488,14 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             if flags.worktree_root.is_some() {
                 eprintln!("--worktree-root is deprecated; use --state-dir");
             }
+            if let Some(user) = flags.agent_user.clone() {
+                return hand_off(&config, *flags, &user).await;
+            }
+            tracing::warn!(
+                "agents run as {} and can read this user's files, including the Punchlist config at {}",
+                current_user(),
+                path.display()
+            );
             let (runner, move_from) =
                 runner_config(&config, *flags, home.as_deref(), &hostname(), Path::exists);
             if let Some(from) = move_from {
@@ -667,6 +738,66 @@ fn init_logging() {
         .try_init();
 }
 
+/// Registers the runner with the person's token, then becomes the runner run as `user`
+/// (`sudo -n -i -u <user> pl runner start --handoff`), given the runner's own token on stdin.
+/// `exec` replaces this process, so no process holds the person's token once the runner
+/// runs, and signals reach the runner through sudo.
+async fn hand_off(config: &Config, flags: RunnerStart, user: &str) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let table = flags.over(&config.runner);
+    let registering = Config {
+        server_url: config.server_url.clone(),
+        token: config.token.clone(),
+        runner: table.clone(),
+    };
+    let (runner, _) = runner_config(
+        &registering,
+        RunnerStart::default(),
+        None,
+        &hostname(),
+        |_| false,
+    );
+    let (runner_id, runner_token) = punchlist_runner::register(&runner).await?;
+    let handoff = Handoff {
+        server_url: config.server_url.clone(),
+        runner_id,
+        runner_token,
+        runner: RunnerSection {
+            name: Some(runner.name),
+            ..table
+        },
+    };
+    let (reader, mut writer) = std::io::pipe()?;
+    // Well under a pipe's buffer, so this does not wait for the reader.
+    serde_json::to_writer(&mut writer, &handoff)?;
+    drop(writer);
+    tracing::info!("handing the runner over to {user}");
+    let error = std::process::Command::new("sudo")
+        .args([
+            "-n",
+            "-i",
+            "-u",
+            user,
+            "--",
+            "pl",
+            "runner",
+            "start",
+            "--handoff",
+        ])
+        .stdin(reader)
+        .exec();
+    Err(anyhow::anyhow!("cannot run sudo: {error}"))
+}
+
+/// The user this process runs as, for the warning.
+fn current_user() -> String {
+    use std::os::unix::fs::MetadataExt;
+    std::env::var("USER").unwrap_or_else(|_| match std::fs::metadata("/proc/self") {
+        Ok(meta) => format!("uid {}", meta.uid()),
+        Err(_) => "this user".to_string(),
+    })
+}
+
 /// Resolves on Ctrl-C or SIGTERM.
 async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -711,49 +842,34 @@ pub fn runner_config(
     hostname: &str,
     exists: impl Fn(&Path) -> bool,
 ) -> (punchlist_runner::RunnerConfig, Option<PathBuf>) {
-    let table = &config.runner;
-    let chosen = flags
-        .state_dir
-        .or(flags.worktree_root)
-        .or_else(|| table.state_dir.clone());
+    let table = flags.over(&config.runner);
     let state_dir = expand_home(
-        chosen
+        table
+            .state_dir
             .as_deref()
             .unwrap_or("~/.local/share/punchlist/runner"),
         home,
     );
     let old = expand_home("~/.local/share/punchlist/worktrees", home);
-    let move_from = (chosen.is_none() && !exists(&state_dir) && exists(&old)).then_some(old);
-    let claude_command = flags
-        .claude_command
-        .or_else(|| table.claude_command.clone())
-        .unwrap_or_else(|| "claude".to_string());
-    let codex_command = flags
-        .codex_command
-        .or_else(|| table.codex_command.clone())
-        .unwrap_or_else(|| "codex".to_string());
+    let move_from =
+        (table.state_dir.is_none() && !exists(&state_dir) && exists(&old)).then_some(old);
+    let claude_command = table.claude_command.as_deref().unwrap_or("claude");
+    let codex_command = table.codex_command.as_deref().unwrap_or("codex");
     let runner = punchlist_runner::RunnerConfig {
         server_url: config.server_url.clone(),
-        token: config.token.clone(),
-        name: flags
-            .name
-            .or_else(|| table.name.clone())
-            .unwrap_or_else(|| hostname.to_string()),
-        agents: flags
+        credential: punchlist_runner::Credential::Person(config.token.clone()),
+        name: table.name.unwrap_or_else(|| hostname.to_string()),
+        agents: table
             .agents
-            .or_else(|| table.agents.clone())
             .unwrap_or_else(|| vec!["claude-code".to_string()]),
         state_dir,
-        claude_command: expand_home(&claude_command, home),
+        claude_command: expand_home(claude_command, home),
         mcp_command: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pl")),
-        model: flags.model.or_else(|| table.model.clone()),
-        codex_command: expand_home(&codex_command, home),
-        codex_model: flags.codex_model.or_else(|| table.codex_model.clone()),
-        codex_effort: flags
-            .codex_effort
-            .or_else(|| table.codex_effort.clone())
-            .unwrap_or_else(|| "medium".to_string()),
-        max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
+        model: table.model,
+        codex_command: expand_home(codex_command, home),
+        codex_model: table.codex_model,
+        codex_effort: table.codex_effort.unwrap_or_else(|| "medium".to_string()),
+        max_concurrent: table.max_concurrent.unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
     };
