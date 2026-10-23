@@ -243,6 +243,13 @@ export function proofType(name: string): string | null {
   return dot < 0 ? null : (PROOF_TYPES[name.slice(dot + 1).toLowerCase()] ?? null)
 }
 
+/** The image or video proof `delta` steps from `id` in card order, skipping reports; `null` past either end. */
+export function mediaStep(proof: readonly Pick<Proof, 'id' | 'kind'>[], id: string, delta: 1 | -1): string | null {
+  const media = proof.filter((item) => item.kind !== 'report')
+  const at = media.findIndex((item) => item.id === id)
+  return at < 0 ? null : (media[at + delta]?.id ?? null)
+}
+
 /** `512 B`, `12 KB` or `3.4 MB`. */
 export function fileSize(bytes: number): string {
   if (bytes < 1024) return `${String(bytes)} B`
