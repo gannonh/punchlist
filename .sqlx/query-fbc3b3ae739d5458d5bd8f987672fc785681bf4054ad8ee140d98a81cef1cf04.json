@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id FROM dispatch d JOIN issue i ON i.id = d.issue_id\n         WHERE i.workspace_id = $1 AND d.run_id IS NULL\n           AND i.status = (SELECT status FROM run WHERE id = $2)\n         ORDER BY i.number LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fbc3b3ae739d5458d5bd8f987672fc785681bf4054ad8ee140d98a81cef1cf04"
+}
