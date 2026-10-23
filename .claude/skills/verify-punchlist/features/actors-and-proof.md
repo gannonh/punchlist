@@ -10,7 +10,7 @@ A person mints a standalone agent actor with `pl actor create` and sees its toke
 - `proof-attach` prints `Attached <uuid>: <kind> "<title>" (<size>) to <id> for attempt <n>`. Sizes are in powers of 1000 (`3 B`, `12.3 kB`).
 - `proof-list` prints `No proof attached to <id>.` or one line per file, oldest first: `<time>  <kind>  "<title>"  <size>  <actor>  <uuid>`, the actor marked `Name (person)` or `Name (agent, <kind>)`. `pl issue show` prints the same lines under `Proof`, or `  None attached.`
 - `proof-refusals`: an extension outside `PROOF_TYPES` fails in `pl` before any request; a `--kind` unlike the file's type answers 422; over `--proof-max-bytes` 413; an upload across a move to a new attempt 409 `stale_attempt`; a status locked to the uploader's role 409 `locked`.
-- `proof-serve`: `GET /api/proof/{id}` answers the bytes with their content type, `x-content-type-options: nosniff` and `content-security-policy: sandbox`; an agent token gets 403, another workspace's file 404.
+- `proof-serve`: `GET /api/proof/{id}` answers the bytes with their content type, `x-content-type-options: nosniff` and `content-security-policy: sandbox`; a standalone agent's token gets the same, a run's agent token 403, another workspace's file 404.
 
 ## How to get to it (user POV)
 
@@ -29,7 +29,7 @@ Preconditions:
 - **Scope.** `curl -s -w ' %{http_code}' -H "Authorization: Bearer $AG" -X POST "$SERVER_URL/api/projects" -H 'content-type: application/json' -d '{"name":"p"}'` answers `{"code":"forbidden","message":"an agent acts only on the workspace's issues"} 403`; `GET` on `$SERVER_URL/api/actors` and `$SERVER_URL/api/issues/PL-1` answers 200, and on `$SERVER_URL/api/session` 200 with `{"actor":{…,"name":"Claude Code","role":"agent","kind":"claude-code"},"workspace_id":…}`. `PUNCHLIST_AGENT_TOKEN=$AG $C request-transition "$RUN" <an In Progress issue> agent_review` is refused at a gate, not for the agent ([issue-refusals.md](issue-refusals.md)).
 - **Attach.** `printf 'ok\n' > $EVIDENCE/p.txt; $C pl "$RUN" proof attach PL-1 $EVIDENCE/p.txt --title Log`. Exit `0`, stdout `Attached <uuid>: report "Log" (3 B) to PL-1 for attempt 0`.
 - **List and rows.** `$C pl "$RUN" proof list PL-1` prints one line ending `report  "Log"  3 B  Verify Person (person)  <uuid>`, and `pl issue show PL-1` has it under `Proof`. `$C sql "$RUN" "SELECT kind, title, content_type, size, attempt FROM proof"` is `report | Log | text/plain | 3 | 0`. The file is under `/tmp/punchlist-verify/$RUN/proof/`.
-- **Serve.** `$C curl "$RUN" -i "$SERVER_URL/api/proof/<uuid>"` answers `HTTP/1.1 200 OK`, `content-type: text/plain`, `x-content-type-options: nosniff`, `content-security-policy: sandbox` and body `ok`. With `-H "Authorization: Bearer $AG"` through plain `curl` it answers 403.
+- **Serve.** `$C curl "$RUN" -i "$SERVER_URL/api/proof/<uuid>"` answers `HTTP/1.1 200 OK`, `content-type: text/plain`, `x-content-type-options: nosniff`, `content-security-policy: sandbox` and body `ok`. With `-H "Authorization: Bearer $AG"` through plain `curl` it answers 200 and `ok` too.
 - **Refusals.** `cp $EVIDENCE/p.txt $EVIDENCE/x.exe; $C pl "$RUN" proof attach PL-1 $EVIDENCE/x.exe --title t` exits `1` with `error: <path> is not a file proof can be; use one of .png, .jpg, .jpeg, .gif, .webp, .mp4, .webm, .mov, .txt, .log, .md, .xml, .pdf`. `proof attach PL-1 $EVIDENCE/p.txt --title t --kind image` exits `1` with ``error: `text/plain` is report proof, not `image` (422 Unprocessable Entity)``. `SELECT count(*) FROM proof` is still `1`.
 
 ## Gotchas
