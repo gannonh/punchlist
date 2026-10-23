@@ -2,12 +2,19 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { useNavigate } from '@tanstack/react-router'
 import { Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { BoardView, ListView } from '@/components/issue-views'
 import { IssueSheet } from '@/components/issue-sheet'
 import { NewIssue } from '@/components/new-issue'
 import { StatusMenu } from '@/components/status-menu'
 import {
   AGENT_NAMES,
+  distinctLabels,
   filterRows,
   groupByStatus,
   neighbourStatus,
@@ -29,11 +36,72 @@ import {
 
 export type Layout = 'list' | 'board'
 
-/** What the list's URL holds: the layout and the project and milestone filters, each `'none'` or an id. */
+/**
+ * What the list's URL holds: the layout, the project and milestone filters, each `'none'` or an id, and the
+ * chosen labels and status keys.
+ */
 export interface ListSearch {
   layout?: 'board'
   project?: string
   milestone?: string
+  label?: string[]
+  status?: string[]
+}
+
+/**
+ * A menu of checkboxes whose trigger reads `<name>` or `<name>: <chosen, in option order>`. A chosen value
+ * no option has, from a link or a label no issue has any more, is listed too, so it can be unchecked.
+ */
+function CheckMenu({
+  name,
+  label,
+  options,
+  chosen,
+  onChange,
+}: {
+  name: string
+  label: string
+  options: readonly { value: string; text: string }[]
+  chosen: readonly string[]
+  onChange: (chosen: string[]) => void
+}) {
+  const all = [
+    ...options,
+    ...chosen.filter((value) => !options.some((o) => o.value === value)).map((value) => ({ value, text: value })),
+  ]
+  const shown = all.filter((option) => chosen.includes(option.value))
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label={label}
+        className="h-7.5 max-w-55 cursor-pointer truncate rounded-md border bg-card px-2 focus:outline-2 focus:outline-offset-1 focus:outline-ring"
+      >
+        {shown.length > 0 ? `${name}: ${shown.map((option) => option.text).join(', ')}` : name}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" aria-label={label} collisionPadding={12}>
+        {all.length === 0 && <p className="px-2 py-1.5 text-meta text-ink-3">No {name.toLowerCase()}</p>}
+        {all.map((option) => (
+          <DropdownMenuCheckboxItem
+            key={option.value}
+            className="text-body"
+            checked={chosen.includes(option.value)}
+            onSelect={(event) => {
+              event.preventDefault()
+            }}
+            onCheckedChange={(checked) => {
+              onChange(
+                all
+                  .map((o) => o.value)
+                  .filter((value) => (value === option.value ? checked : chosen.includes(value))),
+              )
+            }}
+          >
+            {option.text}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 const NARROW = '(max-width: 767px)'
@@ -116,8 +184,14 @@ export function IssuesScreen({
   const [local, setLocal] = useState<Pick<Filter, 'text' | 'who'>>({ text: '', who: '' })
   const layout: Layout = url.layout ?? 'list'
   const filter = useMemo<Filter>(
-    () => ({ ...local, project: url.project ?? '', milestone: url.milestone ?? '' }),
-    [local, url.project, url.milestone],
+    () => ({
+      ...local,
+      project: url.project ?? '',
+      milestone: url.milestone ?? '',
+      labels: url.label ?? [],
+      statuses: url.status ?? [],
+    }),
+    [local, url.project, url.milestone, url.label, url.status],
   )
   const onLayout = useCallback(
     (next: Layout) => {
@@ -137,11 +211,22 @@ export function IssuesScreen({
   const statuses = useMemo(() => workflow.data?.statuses ?? [], [workflow.data])
   const rows = useMemo(() => issues.data?.rows ?? [], [issues.data])
   const closed = useMemo(() => statuses.filter((status) => status.closed), [statuses])
+  // Chosen statuses replace `hide Done and Canceled`, so choosing Done shows Done issues.
+  const hiding = hideClosed && filter.statuses.length === 0
   const visible = useMemo(() => {
     const shown = filterRows(rows, filter)
-    return hideClosed ? shown.filter((row) => !closed.some((status) => status.key === row.issue.status)) : shown
-  }, [rows, filter, hideClosed, closed])
-  const groups = useMemo(() => groupByStatus(visible, statuses), [visible, statuses])
+    return hiding ? shown.filter((row) => !closed.some((status) => status.key === row.issue.status)) : shown
+  }, [rows, filter, hiding, closed])
+  const columns = useMemo(
+    () => (filter.statuses.length > 0 ? statuses.filter((status) => filter.statuses.includes(status.key)) : statuses),
+    [statuses, filter.statuses],
+  )
+  const groups = useMemo(() => groupByStatus(visible, columns), [visible, columns])
+  const labelOptions = useMemo(
+    () => distinctLabels(rows).map((label) => ({ value: label, text: label })),
+    [rows],
+  )
+  const statusOptions = useMemo(() => statuses.map((status) => ({ value: status.key, text: status.name })), [statuses])
   const shownColumn = column ?? groups.find((g) => g.rows.length > 0)?.status.key ?? statuses[0]?.key ?? ''
   const order = useMemo(() => navOrder(groups, layout, narrow, shownColumn), [groups, layout, narrow, shownColumn])
   const current = selected !== null && order.includes(selected) ? selected : (order[0] ?? null)
@@ -241,7 +326,7 @@ export function IssuesScreen({
     }
   }, [sheet, menu, creating, order, current, layout, statuses, transitions, rowById, move, openMenu, onLayout, navigate])
 
-  const filtered = Object.values(filter).some((value) => value !== '')
+  const filtered = Object.values({ ...filter }).some((value) => value.length > 0)
   const projectList = projects.data ?? []
   const allMilestones = projectList.flatMap((project) =>
     project.milestones.map((m) => ({ id: m.id, project: project.id, label: `${project.name} · ${m.name}` })),
@@ -349,6 +434,24 @@ export function IssuesScreen({
               </option>
             )}
           </select>
+          <CheckMenu
+            name="Labels"
+            label="Label filter"
+            options={labelOptions}
+            chosen={filter.labels}
+            onChange={(label) => {
+              onSearch({ ...url, label: label.length > 0 ? label : undefined })
+            }}
+          />
+          <CheckMenu
+            name="Statuses"
+            label="Status filter"
+            options={statusOptions}
+            chosen={filter.statuses}
+            onChange={(status) => {
+              onSearch({ ...url, status: status.length > 0 ? status : undefined })
+            }}
+          />
           {closed.length > 0 && (
             <label className="flex items-center gap-1.5 text-meta text-ink-3">
               <input
