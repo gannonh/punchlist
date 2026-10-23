@@ -1406,3 +1406,220 @@ async fn a_claim_whose_app_cannot_write_says_why_and_has_no_token(pool: PgPool) 
          settings, Permissions, then accept them on the installation)"
     );
 }
+
+/// Makes the built-in workflow with `[dispatch] max_concurrent = max` (none: no key) the
+/// workspace's active version, as a load would.
+async fn set_max_concurrent(pool: &PgPool, max: Option<u32>) {
+    let built_in = punchlist_core::default_workflow();
+    let limit = max.map_or(String::new(), |max| format!("max_concurrent = {max}"));
+    let text = built_in.source().replace("max_concurrent = 5", &limit);
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            SELECT id, $1, $1, $2, $3 FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+    )
+    .bind(format!("max-{max:?}"))
+    .bind(text)
+    .bind(serde_json::to_value(built_in.prompts()).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn status_and_runs(pool: &PgPool, issue: &str) -> (String, i64) {
+    sqlx::query_as(
+        "SELECT status, (SELECT count(*) FROM run WHERE issue_id = $1) FROM issue WHERE id = $1",
+    )
+    .bind(issue)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The run's agent moves its issue to Agent Review over a recorded pull request, so the run's
+/// end dispatches no Claude Code run of it again.
+async fn move_to_agent_review(app: &Router, pool: &PgPool, claimed: &Value) {
+    let issue = claimed["issue"]["id"].as_str().unwrap();
+    let branch = claimed["branch"].as_str().unwrap();
+    pull_request(pool, 1, issue, branch, "open").await;
+    let (status, body) = call(
+        app,
+        claimed["agent_token"].as_str().unwrap(),
+        "POST",
+        &format!("/api/issues/{issue}/transitions"),
+        Some(json!({"to": "agent_review"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+fn succeeded() -> Value {
+    json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1})
+}
+
+#[sqlx::test]
+async fn a_claim_at_max_concurrent_gets_nothing_until_an_attempt_finishes(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "One", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo", "start"]).await;
+    let (status, first) = claim(&app, &r1, 0).await;
+    assert_eq!(
+        (status, first["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-1"))
+    );
+
+    let (status, body) = claim(&app, &r2, 0).await;
+    assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(status_and_runs(&pool, "PL-2").await, ("start".into(), 0));
+
+    move_to_agent_review(&app, &pool, &first).await;
+    let (status, run) = finish(&app, &r1, first["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let (status, second) = claim(&app, &r2, 0).await;
+    assert_eq!(
+        (status, second["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-2"))
+    );
+    assert_eq!(
+        status_and_runs(&pool, "PL-2").await,
+        ("in_progress".into(), 1)
+    );
+}
+
+#[sqlx::test]
+async fn a_waiting_claim_at_max_concurrent_gets_the_slot_a_finish_frees(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "One", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    move_to_agent_review(&app, &pool, &first).await;
+
+    let waiting = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let answer = claim(&app, &r2, 20).await;
+            (answer, std::time::Instant::now())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the claim waits at the limit");
+    let finished_at = std::time::Instant::now();
+    let (status, _) = finish(&app, &r1, first["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    let ((status, second), answered_at) = waiting.await.unwrap();
+    assert_eq!(
+        (status, second["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-2"))
+    );
+    assert!(answered_at - finished_at < Duration::from_secs(2));
+}
+
+#[sqlx::test]
+async fn a_lost_attempt_holds_no_slot_and_its_next_attempt_waits_for_one(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Later", &["todo"]).await;
+    create_and_move(&app, &person.token, "Lost", &["todo", "start"]).await;
+    let (_, lost_claim) = claim(&app, &r1, 0).await;
+    assert_eq!(lost_claim["issue"]["id"], "PL-2");
+    let (status, run) = finish(&app, &r1, lost_claim["run_id"].as_str().unwrap(), lost(1)).await;
+    assert_eq!(
+        (status, run["outcome"].as_str()),
+        (StatusCode::OK, Some("running"))
+    );
+
+    // The run waiting for its next attempt runs no agent, so PL-1 gets the slot.
+    let (status, _) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "start"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, holder) = claim(&app, &r1, 0).await;
+    assert_eq!(
+        (status, holder["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-1"))
+    );
+    let (status, _) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM attempt WHERE issue_id = 'PL-2'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 1);
+}
+
+#[sqlx::test]
+async fn a_resume_at_max_concurrent_succeeds_and_a_lapsed_lease_holds_its_slot(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "One", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r1, 0).await;
+    let run_id = first["run_id"].as_str().unwrap();
+
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let (status, resumed) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &format!("/api/runs/{run_id}/resume"),
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+
+    lapse_leases(&pool).await;
+    let (status, _) = claim(&app, &r2, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(expire_leases(&pool).await.unwrap(), 1);
+    let (status, next) = claim(&app, &r2, 0).await;
+    assert_eq!(status, StatusCode::OK, "{next}");
+    assert_eq!(
+        (next["run_id"].as_str(), next["attempt"].as_i64()),
+        (Some(run_id), Some(2))
+    );
+}
+
+#[sqlx::test]
+async fn max_concurrent_is_read_from_the_active_workflow_at_each_claim(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    for title in ["One", "Two", "Three"] {
+        create_and_move(&app, &person.token, title, &["todo", "start"]).await;
+    }
+    let (status, _) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    set_max_concurrent(&pool, Some(2)).await;
+    let (status, second) = claim(&app, &r1, 0).await;
+    assert_eq!(
+        (status, second["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-2"))
+    );
+    let (status, _) = claim(&app, &r1, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    set_max_concurrent(&pool, None).await;
+    let (status, third) = claim(&app, &r1, 0).await;
+    assert_eq!(
+        (status, third["issue"]["id"].as_str()),
+        (StatusCode::OK, Some("PL-3"))
+    );
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.name FROM issue i JOIN actor a ON a.id = i.created_by WHERE i.id = 'PL-1'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9f3001eb1c43d15d5106743c18ddf5701bc7000b866a313aad0cacf97a45a04f"
+}

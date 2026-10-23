@@ -3,6 +3,7 @@ import {
   applyMove,
   applyStream,
   applyWrite,
+  distinctLabels,
   filterRows,
   fromList,
   groupByStatus,
@@ -124,6 +125,7 @@ describe('refusalText', () => {
 })
 
 describe('filters and groups', () => {
+  const any: Filter = { text: '', who: '', project: '', milestone: '', labels: [], statuses: [] }
   const rows = [
     row('PL-1', { title: 'Fix the login', status: 'todo', status_name: 'Todo' }),
     row('PL-2', { assignee: { id: 'a', name: 'codex (Ana)', role: 'agent', kind: 'codex' } }),
@@ -140,7 +142,7 @@ describe('filters and groups', () => {
 
   test('text and assignee filters', () => {
     const ids = (filter: Partial<Filter>) =>
-      filterRows(rows, { text: '', who: '', project: '', milestone: '', ...filter }).map((r) => r.issue.id)
+      filterRows(rows, { ...any, ...filter }).map((r) => r.issue.id)
     expect(ids({ text: 'login' })).toEqual(['PL-1'])
     expect(ids({ text: 'WEB' })).toEqual(['PL-3'])
     expect(ids({ who: 'agents' })).toEqual(['PL-2'])
@@ -160,7 +162,7 @@ describe('filters and groups', () => {
       row('PL-5'),
     ]
     const ids = (filter: Partial<Filter>) =>
-      filterRows(placed, { text: '', who: '', project: '', milestone: '', ...filter }).map((r) => r.issue.id)
+      filterRows(placed, { ...any, ...filter }).map((r) => r.issue.id)
     expect(ids({})).toEqual(['PL-1', 'PL-2', 'PL-3', 'PL-4', 'PL-5'])
     expect(ids({ project: 'p1' })).toEqual(['PL-1', 'PL-2', 'PL-3'])
     expect(ids({ project: 'none' })).toEqual(['PL-5'])
@@ -171,6 +173,25 @@ describe('filters and groups', () => {
     expect(ids({ milestone: 'm1', text: 'beta' })).toEqual([])
     expect(ids({ project: 'p1', who: 'agents' })).toEqual([])
     expect(ids({ milestone: '00000000-0000-0000-0000-000000000000' })).toEqual([])
+  })
+
+  test('label and status filters, combined with the others', () => {
+    const labelled = [
+      row('PL-1', { labels: ['a'], status: 'todo' }),
+      row('PL-2', { labels: ['a', 'b'] }),
+      row('PL-3'),
+      row('PL-4', { title: 'about a', status: 'done' }),
+    ]
+    const ids = (filter: Partial<Filter>) =>
+      filterRows(labelled, { ...any, ...filter }).map((r) => r.issue.id)
+    expect(ids({})).toEqual(['PL-1', 'PL-2', 'PL-3', 'PL-4'])
+    expect(ids({ labels: ['a'] })).toEqual(['PL-1', 'PL-2'])
+    expect(ids({ labels: ['a', 'b'] })).toEqual(['PL-2'])
+    expect(ids({ text: 'a' })).toEqual(['PL-1', 'PL-2', 'PL-4'])
+    expect(ids({ statuses: ['todo', 'done'] })).toEqual(['PL-1', 'PL-4'])
+    expect(ids({ statuses: ['todo', 'done'], labels: ['a'] })).toEqual(['PL-1'])
+    expect(ids({ statuses: ['human_review'] })).toEqual([])
+    expect(distinctLabels(labelled)).toEqual(['a', 'b'])
   })
 })
 

@@ -164,6 +164,10 @@ export interface Filter {
   project: string
   /** `''` is any, `'none'` an issue with none, else a milestone id. */
   milestone: string
+  /** An issue matches when it has every one; `[]` is any. */
+  labels: string[]
+  /** Status keys; an issue matches when its status is one of them; `[]` is any. */
+  statuses: string[]
 }
 
 function matchesWho(actor: Actor | null | undefined, who: Who): boolean {
@@ -181,12 +185,18 @@ export function filterRows(rows: readonly IssueRow[], filter: Filter): IssueRow[
     if (filter.project && (issue.project?.id ?? 'none') !== filter.project) return false
     if (filter.milestone && (issue.milestone?.id ?? 'none') !== filter.milestone) return false
     if (!matchesWho(issue.assignee, filter.who)) return false
+    if (filter.statuses.length > 0 && !filter.statuses.includes(issue.status)) return false
+    if (!filter.labels.every((label) => issue.labels?.includes(label))) return false
     if (!text) return true
     const assignee = issue.assignee ? `${issue.assignee.name} ${agentName(issue.assignee.kind)}` : ''
     const haystack = `${issue.id} ${issue.title} ${(issue.labels ?? []).join(' ')} ${assignee} ${issue.status_name}`
     return haystack.toLowerCase().includes(text)
   })
 }
+
+/** Every label on the rows, once each, sorted. */
+export const distinctLabels = (rows: readonly IssueRow[]): string[] =>
+  [...new Set(rows.flatMap(({ issue }) => issue.labels ?? []))].sort()
 
 export interface Group {
   status: StatusInfo

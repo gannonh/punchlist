@@ -152,13 +152,14 @@ async fn select_claimable(
 /// In Progress as the runner if that is where it is, then creates the run, attempt 1 and the
 /// agent actor the run acts as, leases the attempt, and marks the issue's dispatch claimed.
 /// A run waiting for its next attempt gets that attempt instead, on the run's branch with the
-/// run's prompt, and no dispatch is touched.
+/// run's prompt, and no dispatch is touched. Claims nothing while the workspace runs the
+/// workflow's `[dispatch] max_concurrent` attempts.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
     runner: &RunnerRow,
     target: &Target,
-) -> Result<Option<Claim>, ApiError> {
+) -> Result<Claimed, ApiError> {
     let mut tx = state.pool.begin().await?;
     // Before the workflow is read, so a claim waiting behind a load uses the new one.
     lock_workspace(&mut tx, actor.workspace_id).await?;
@@ -171,6 +172,20 @@ async fn try_claim(
         return Err(ApiError::Unauthorized);
     }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    // Under the workspace lock, so two claims cannot both take the last slot.
+    if let Some(max) = workflow.max_concurrent() {
+        let running = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
+               WHERE r.workspace_id = $1 AND a.state = 'running'"#,
+            actor.workspace_id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if running >= i64::from(max) {
+            tx.rollback().await?;
+            return Ok(Claimed::AtLimit);
+        }
+    }
     let claimable =
         select_claimable(&mut tx, actor.workspace_id, &workflow, runner, target).await?;
     let Some(Claimable {
@@ -185,7 +200,7 @@ async fn try_claim(
         // behind that run, lost the race for it. Otherwise there is nothing here for this
         // runner, or not yet.
         let Target::Issue(id) = target else {
-            return Ok(None);
+            return Ok(Claimed::Nothing);
         };
         let holder = sqlx::query_scalar!(
             "SELECT r.name FROM attempt a JOIN runner r ON r.id = a.runner_id
@@ -201,7 +216,7 @@ async fn try_claim(
             Some(holder) => Err(ApiError::ClaimTaken(format!(
                 "{id} was claimed by runner {holder}"
             ))),
-            None => Ok(None),
+            None => Ok(Claimed::Nothing),
         };
     };
     let merged_branches = merged_branches(&mut tx, &id).await?;
@@ -258,7 +273,7 @@ async fn try_claim(
     record_row_event(&mut tx, actor.workspace_id, &id, actor.id, "run").await?;
     let repository = repository(&mut tx, actor.workspace_id).await?;
     tx.commit().await?;
-    Ok(Some(Claim {
+    Ok(Claimed::Claim(Box::new(Claim {
         run_id,
         attempt,
         agent,
@@ -273,7 +288,15 @@ async fn try_claim(
         next_line: 1,
         github: None,
         github_error: None,
-    }))
+    })))
+}
+
+/// What `try_claim` did.
+enum Claimed {
+    Claim(Box<Claim>),
+    Nothing,
+    /// The workspace runs `max_concurrent` attempts already.
+    AtLimit,
 }
 
 /// A new run for what `select_claimable` found, `(issue, status it is in, agent)`, and the
@@ -421,8 +444,9 @@ async fn set_agent_token(
 }
 
 /// Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
-/// names an agent the runner can run. Runner token. 204 when nothing is claimable; with
-/// `wait_seconds` the request waits for one. When several runners wait, each issue goes to
+/// names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
+/// workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+/// request waits for one. When several runners wait, each issue goes to
 /// one of them and the others get 409 `claim_taken`.
 #[utoipa::path(
     post,
@@ -450,24 +474,26 @@ async fn claim(
     let runner = runner_of(&state, &actor).await?;
     // Subscribe before the first attempt so a move in between is not missed.
     let mut starts = state.starts.subscribe();
-    if let Some(claim) = try_claim(&state, &actor, &runner, &Target::Any).await? {
-        return Ok(Json(with_github_token(&state, claim).await).into_response());
-    }
+    let mut claimed = try_claim(&state, &actor, &runner, &Target::Any).await?;
     let deadline = Instant::now() + wait;
     loop {
+        let at_limit = match claimed {
+            Claimed::Claim(claim) => {
+                return Ok(Json(with_github_token(&state, *claim).await).into_response());
+            }
+            Claimed::Nothing => false,
+            Claimed::AtLimit => true,
+        };
         let target = match tokio::time::timeout_at(deadline, starts.recv()).await {
             Err(_) | Ok(Err(RecvError::Closed)) => break,
-            Ok(Ok((workspace_id, issue_id))) => {
-                if workspace_id != actor.workspace_id {
-                    continue;
-                }
-                Target::Issue(issue_id)
-            }
+            Ok(Ok((workspace_id, _))) if workspace_id != actor.workspace_id => continue,
+            // At the limit a wake may be a run that ended, which frees a slot for any issue,
+            // not only the one the wake names.
+            Ok(Ok(_)) if at_limit => Target::Any,
+            Ok(Ok((_, issue_id))) => Target::Issue(issue_id),
             Ok(Err(RecvError::Lagged(_))) => Target::Any,
         };
-        if let Some(claim) = try_claim(&state, &actor, &runner, &target).await? {
-            return Ok(Json(with_github_token(&state, claim).await).into_response());
-        }
+        claimed = try_claim(&state, &actor, &runner, &target).await?;
     }
     Ok(StatusCode::NO_CONTENT.into_response())
 }

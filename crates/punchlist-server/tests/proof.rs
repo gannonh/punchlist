@@ -296,7 +296,7 @@ async fn a_file_over_the_limit_is_refused_and_its_part_removed(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn an_agent_cannot_attach_proof_in_human_review_or_download_it(pool: PgPool) {
+async fn an_agent_downloads_proof_and_cannot_attach_it_in_human_review(pool: PgPool) {
     let s = setup(&pool, "PL").await;
     let id = issue(&s).await;
     let (status, agent) = call(
@@ -315,16 +315,16 @@ async fn an_agent_cannot_attach_proof_in_human_review_or_download_it(pool: PgPoo
     assert_eq!(status, StatusCode::CREATED, "{proof}");
     assert_eq!(proof["actor"]["role"], "agent");
     assert_eq!(proof["actor"]["kind"], "claude-code");
-    // Agents reach only issues, so not the file.
-    let (status, _) = call(
-        &s.app,
-        &agent,
-        "GET",
-        &format!("/api/proof/{}", proof["id"].as_str().unwrap()),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // A standalone agent downloads its workspace's proof file.
+    let request = Request::builder()
+        .uri(format!("/api/proof/{}", proof["id"].as_str().unwrap()))
+        .header("authorization", format!("Bearer {agent}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = s.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"png");
 
     // Test-only: the path to Human Review needs pull request evidence from GitHub.
     sqlx::query!("UPDATE issue SET status = 'human_review' WHERE id = $1", id)

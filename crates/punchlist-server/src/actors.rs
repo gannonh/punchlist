@@ -51,7 +51,8 @@ pub(crate) fn person_only(actor: &Actor) -> Result<(), ApiError> {
 }
 
 /// Mint an agent actor with its own token and no run. Its token reaches the workspace's
-/// issues, `/api/issues/<id>` and below, and nothing else. Person token.
+/// issues, creating and listing them and the event stream, projects, the workflow, actors and
+/// proof files, and nothing else. Person token.
 #[utoipa::path(
     post,
     path = "/api/actors",
@@ -60,7 +61,7 @@ pub(crate) fn person_only(actor: &Actor) -> Result<(), ApiError> {
         (status = 201, body = CreatedAgent),
         (status = 401, body = ErrorBody),
         (status = 403, body = ErrorBody, description = "Not a person's token."),
-        (status = 422, body = ErrorBody, description = "An unknown kind or owner."),
+        (status = 422, body = ErrorBody, description = "An unknown kind or owner, or a name over 100 characters."),
     )
 )]
 async fn create_agent(
@@ -73,6 +74,15 @@ async fn create_agent(
     if let Some(unknown) = unknown_agent_kind(kind) {
         return Err(ApiError::Invalid(unknown));
     }
+    let name = match request.name.as_deref().map(str::trim) {
+        None | Some("") => agent_display_name(kind),
+        Some(name) if name.chars().count() > 100 => {
+            return Err(ApiError::Invalid(
+                "an agent's name is at most 100 characters".into(),
+            ));
+        }
+        Some(name) => name.to_string(),
+    };
     let model = request
         .model
         .as_deref()
@@ -115,7 +125,7 @@ async fn create_agent(
            SELECT c.id, c.name, c.role, c.kind, c.model, o.name AS "owner?", c.created_at
            FROM created c JOIN actor o ON o.id = c.owner_id"#,
         actor.workspace_id,
-        agent_display_name(kind),
+        name,
         hash_token(&token),
         kind,
         model,
@@ -132,21 +142,26 @@ async fn create_agent(
     ))
 }
 
-/// List the workspace's people, agents and runners, oldest first. Person token.
+/// List the workspace's people, agents and runners, oldest first. A person's or a
+/// standalone agent's token.
 #[utoipa::path(
     get,
     path = "/api/actors",
     responses(
         (status = 200, body = ActorList),
         (status = 401, body = ErrorBody),
-        (status = 403, body = ErrorBody, description = "Not a person's token."),
+        (status = 403, body = ErrorBody, description = "A runner's or a run's agent's token."),
     )
 )]
 async fn list_actors(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<ActorList>, ApiError> {
-    person_only(&actor)?;
+    if actor.role == Role::Runner {
+        return Err(ApiError::Forbidden(
+            "this needs a person's or an agent's token".into(),
+        ));
+    }
     let rows = sqlx::query_as!(
         ActorRow,
         r#"SELECT a.id, a.name, a.role, a.kind, a.model, o.name AS "owner?", a.created_at

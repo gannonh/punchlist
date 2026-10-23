@@ -159,12 +159,6 @@ async fn a_person_mints_an_agent_that_comments_as_itself(pool: PgPool) {
     assert_eq!(actors[0].get("kind"), None);
     assert_eq!(actors.last().unwrap()["kind"], "codex");
 
-    // A standalone agent reaches issues only.
-    let (status, _) = call(&app, token, "GET", "/api/issues", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = call(&app, token, "GET", "/api/runners", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-
     let (status, list) = call(&app, &person.token, "GET", "/api/actors", None).await;
     assert_eq!(status, StatusCode::OK);
     let rows: Vec<(String, String, Value)> = list["actors"]
@@ -435,4 +429,234 @@ async fn a_runs_agent_is_its_dispatch_kind_owned_by_the_runners_person(pool: PgP
     assert_eq!(agent.kind.as_deref(), Some("claude-code"));
     assert_eq!(agent.model, None);
     assert_eq!(agent.owner_id, Some(person.actor_id));
+}
+
+/// The status of a request, without reading its body: an event stream's never ends.
+async fn status_of(app: &Router, token: &str, uri: &str) -> StatusCode {
+    let request = Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+async fn event_actors(pool: &PgPool, id: &str) -> Vec<(String, String, String)> {
+    sqlx::query!(
+        "SELECT e.kind, a.name, a.role FROM event e JOIN actor a ON a.id = e.actor_id
+         WHERE e.issue_id = $1 ORDER BY e.seq",
+        id,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| (row.kind, row.name, row.role))
+    .collect()
+}
+
+#[sqlx::test]
+async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: PgPool) {
+    let a = workspace(&pool, "PL", "Gannon").await;
+    let b = workspace(&pool, "OT", "Other").await;
+    let app = router(AppState::new(pool.clone()));
+    let (status, created) = call(
+        &app,
+        &a.token,
+        "POST",
+        "/api/actors",
+        Some(json!({"kind": "claude-code", "name": " Orchestrator "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["actor"]["name"], "Orchestrator");
+    let agent = created["token"].as_str().unwrap().to_string();
+    let (status, project) = call(
+        &app,
+        &b.token,
+        "POST",
+        "/api/projects",
+        Some(json!({"name": "Theirs"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    issue_in(&app, &b.token, &[]).await;
+
+    // It files an issue, edits it and comments on it as itself.
+    let (status, filed) = call(
+        &app,
+        &agent,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Filed", "body": "Spec"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{filed}");
+    assert_eq!(filed["row"]["issue"]["id"], "PL-1");
+    let (status, body) = call(
+        &app,
+        &agent,
+        "PATCH",
+        "/api/issues/PL-1",
+        Some(json!({"body": "Longer spec"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = comment(&app, &agent, "PL-1").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let agent_row = |kind: &str| (kind.into(), "Orchestrator".into(), "agent".into());
+    assert_eq!(
+        event_actors(&pool, "PL-1").await,
+        [
+            agent_row("created"),
+            agent_row("edited"),
+            agent_row("comment")
+        ]
+    );
+    let created_by = sqlx::query_scalar!(
+        "SELECT a.name FROM issue i JOIN actor a ON a.id = i.created_by WHERE i.id = 'PL-1'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(created_by, "Orchestrator");
+
+    // It reads its own workspace, never another's.
+    let (status, list) = call(&app, &agent, "GET", "/api/issues", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let ids: Vec<&str> = (list["issues"].as_array().unwrap().iter())
+        .map(|row| row["issue"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["PL-1"]);
+    let (status, projects) = call(&app, &agent, "GET", "/api/projects", None).await;
+    assert_eq!(
+        (status, projects),
+        (StatusCode::OK, json!({"projects": []}))
+    );
+    let (status, actors) = call(&app, &agent, "GET", "/api/actors", None).await;
+    assert_eq!(status, StatusCode::OK, "{actors}");
+    let names: Vec<&str> = (actors["actors"].as_array().unwrap().iter())
+        .map(|actor| actor["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Gannon", "Orchestrator"]);
+    let (status, workflow) = call(&app, &agent, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{workflow}");
+    let own = format!("/api/workspaces/{}/events?after=0", a.workspace_id);
+    assert_eq!(status_of(&app, &agent, &own).await, StatusCode::OK);
+    let other = format!("/api/workspaces/{}/events?after=0", b.workspace_id);
+    assert_eq!(status_of(&app, &agent, &other).await, StatusCode::NOT_FOUND);
+    let (status, _) = call(&app, &agent, "GET", "/api/issues/OT-1", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Everything else stays people's and runners'.
+    let (_, runner) = call(
+        &app,
+        &a.token,
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r1", "agents": ["claude-code"]})),
+    )
+    .await;
+    let rows = || async {
+        sqlx::query!(
+            r#"SELECT (SELECT count(*) FROM actor) AS "actors!",
+                      (SELECT count(*) FROM project) AS "projects!",
+                      (SELECT count(*) FROM runner) AS "runners!""#
+        )
+        .fetch_one(&pool)
+        .await
+        .map(|r| (r.actors, r.projects, r.runners))
+        .unwrap()
+    };
+    let before = rows().await;
+    let project_id = project["id"].as_str().unwrap();
+    for (method, uri, body) in [
+        ("POST", "/api/actors".to_string(), json!({"kind": "codex"})),
+        ("POST", "/api/projects".into(), json!({"name": "Mine"})),
+        (
+            "POST",
+            format!("/api/projects/{project_id}/milestones"),
+            json!({"name": "M"}),
+        ),
+        (
+            "POST",
+            "/api/runners".into(),
+            json!({"name": "r2", "agents": ["codex"]}),
+        ),
+        ("GET", "/api/runners".into(), Value::Null),
+        (
+            "GET",
+            format!("/api/workspaces/{}/imports", a.workspace_id),
+            Value::Null,
+        ),
+        ("GET", "/api/pull-requests/unlinked".into(), Value::Null),
+        ("POST", "/api/runs/claim".into(), json!({"wait_seconds": 0})),
+    ] {
+        let (status, answer) = call(&app, &agent, method, &uri, Some(body)).await;
+        assert_eq!(
+            (status, answer["message"].as_str()),
+            (
+                StatusCode::FORBIDDEN,
+                Some("an agent acts only on the workspace's issues")
+            ),
+            "{method} {uri}"
+        );
+    }
+    assert_eq!(rows().await, before);
+    // The workflow's `by` rules keep a person's moves from it.
+    let (status, body) = call(
+        &app,
+        &agent,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("role_not_allowed"))
+    );
+    let (_, transitions) = rows_for(&pool, "PL-1").await;
+    assert_eq!(transitions, 0);
+
+    // A run's agent still reaches only its run's issue.
+    let id = issue_in(&app, &a.token, &["todo", "start"]).await;
+    let (status, claim) = call(
+        &app,
+        runner["token"].as_str().unwrap(),
+        "POST",
+        "/api/runs/claim",
+        Some(json!({"wait_seconds": 0})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    let run_agent = claim["agent_token"].as_str().unwrap();
+    assert_eq!(id, "PL-2");
+    let (status, _) = call(&app, run_agent, "GET", "/api/issues/PL-2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    for uri in [
+        "/api/issues/PL-1",
+        "/api/issues",
+        "/api/projects",
+        "/api/session",
+    ] {
+        let (status, body) = call(&app, run_agent, "GET", uri, None).await;
+        assert_eq!(
+            (status, body["message"].as_str()),
+            (
+                StatusCode::FORBIDDEN,
+                Some("an agent acts only on its run's issue, PL-2")
+            ),
+            "{uri}"
+        );
+    }
+    let (status, _) = call(
+        &app,
+        run_agent,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Mine"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

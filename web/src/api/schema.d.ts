@@ -11,12 +11,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the workspace's people, agents and runners, oldest first. Person token. */
+        /**
+         * List the workspace's people, agents and runners, oldest first. A person's or a
+         *     standalone agent's token.
+         */
         get: operations["list_actors"];
         put?: never;
         /**
          * Mint an agent actor with its own token and no run. Its token reaches the workspace's
-         *     issues, `/api/issues/<id>` and below, and nothing else. Person token.
+         *     issues, creating and listing them and the event stream, projects, the workflow, actors and
+         *     proof files, and nothing else. Person token.
          */
         post: operations["create_agent"];
         delete?: never;
@@ -298,8 +302,8 @@ export interface paths {
         };
         /**
          * A proof file's bytes, with its content type. It is served so that a browser neither
-         *     guesses another type nor runs it. An agent's token gets 403: agents reach only
-         *     `/api/issues/...`.
+         *     guesses another type nor runs it. A run's agent's token gets 403: it reaches only its
+         *     run's issue.
          */
         get: operations["get_proof"];
         put?: never;
@@ -407,8 +411,9 @@ export interface paths {
         put?: never;
         /**
          * Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
-         *     names an agent the runner can run. Runner token. 204 when nothing is claimable; with
-         *     `wait_seconds` the request waits for one. When several runners wait, each issue goes to
+         *     names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
+         *     workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+         *     request waits for one. When several runners wait, each issue goes to
          *     one of them and the others get 409 `claim_taken`.
          */
         post: operations["claim"];
@@ -824,6 +829,11 @@ export interface components {
             /** @description The agent key, such as `codex`. */
             kind: string;
             model?: string | null;
+            /**
+             * @description What the timeline calls the agent, 1 to 100 characters. The kind's name by default,
+             *     such as `Codex`.
+             */
+            name?: string | null;
             /**
              * @description The name of the person in the workspace the agent acts for. The requesting person by
              *     default.
@@ -1787,7 +1797,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Not a person's token. */
+            /** @description A runner's or a run's agent's token. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -1836,7 +1846,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description An unknown kind or owner. */
+            /** @description An unknown kind or owner, or a name over 100 characters. */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Punchlist · Projects prototype</title>
+  <link rel="stylesheet" href="../issue-list/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Punchlist <span class="tag">prototype · projects</span></div>
+    <div class="switcher" role="group" aria-label="Layout">
+      <button type="button" data-variant="sections" aria-pressed="true"><kbd>1</kbd> Sections</button>
+      <button type="button" data-variant="panes" aria-pressed="false"><kbd>2</kbd> Two panes</button>
+      <button type="button" data-variant="cards" aria-pressed="false"><kbd>3</kbd> Cards</button>
+    </div>
+  </header>
+
+  <nav class="appbar" aria-label="App">
+    <span class="app-name">Punchlist</span>
+    <a href="?screen=list" data-screen="list">Issues</a>
+    <a href="?screen=projects" data-screen="projects">Projects</a>
+    <span class="appbar-keys muted"><kbd>g</kbd> <kbd>i</kbd> issues · <kbd>g</kbd> <kbd>m</kbd> projects</span>
+  </nav>
+
+  <main id="view"></main>
+
+  <footer class="shortcuts">
+    <span class="title">Keys</span>
+    <span><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> layout</span>
+    <span><kbd>g</kbd> <kbd>m</kbd> projects</span>
+    <span><kbd>g</kbd> <kbd>i</kbd> issues</span>
+    <span><kbd>Tab</kbd> next milestone, link or field</span>
+    <span><kbd>Enter</kbd> opens a milestone</span>
+    <span><kbd>Esc</kbd> closes a form or a milestone</span>
+  </footer>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
