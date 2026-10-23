@@ -982,17 +982,20 @@ async fn a_move_to_start_under_a_version_no_runner_can_claim_warns(pool: PgPool)
     );
 }
 
-/// `pl mcp` over real pipes, as Claude Code runs it, bound to `issue` with `token`: the
-/// handshake, then each `tools/call` in turn. Answers each call's `isError` and text.
+/// `pl mcp` over real pipes, as Claude Code runs it, bound to `issue`, and `run` when given,
+/// with `token`: the handshake, then each `tools/call` in turn. Answers each call's `isError`
+/// and text.
 async fn mcp(
     pl: &Pl,
     token: &str,
     issue: &str,
+    run: Option<&str>,
     calls: &[serde_json::Value],
 ) -> Vec<(bool, String)> {
     use std::io::{BufRead, BufReader, Write};
 
     let (url, token, issue) = (pl.url.clone(), token.to_string(), issue.to_string());
+    let run = run.map(str::to_string);
     let calls: Vec<String> = calls
         .iter()
         .enumerate()
@@ -1007,6 +1010,7 @@ async fn mcp(
             .env("PUNCHLIST_SERVER_URL", url)
             .env("PUNCHLIST_TOKEN", token)
             .env("PUNCHLIST_ISSUE", issue)
+            .envs(run.map(|run| ("PUNCHLIST_RUN", run)))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -1062,6 +1066,7 @@ async fn mcp_refuses_a_gated_transition_and_comments_as_the_agent(pool: PgPool) 
         &pl,
         &claim.agent_token,
         "PL-1",
+        None,
         &[
             serde_json::json!({"name": "request_transition", "arguments": {"to": "agent_review"}}),
             serde_json::json!({"name": "comment", "arguments": {"body": "Started."}}),
@@ -1127,6 +1132,7 @@ async fn mcp_edits_its_own_issue_as_the_agent(pool: PgPool) {
         &pl,
         &claim.agent_token,
         "PL-1",
+        None,
         &[
             edit(serde_json::json!({"body": "Spec\nedited by the agent\n"})),
             edit(serde_json::json!({"title": "Do it — `now`"})),
@@ -1186,6 +1192,7 @@ async fn mcp_edits_its_own_issue_as_the_agent(pool: PgPool) {
         &pl,
         &claim.agent_token,
         "PL-1",
+        None,
         &[edit(serde_json::json!({"title": "Mine", "body": "Mine"}))],
     )
     .await;
@@ -1203,6 +1210,80 @@ async fn mcp_edits_its_own_issue_as_the_agent(pool: PgPool) {
             "Do it — `now`".to_string(),
             "Spec\nedited by the agent\n".to_string()
         )
+    );
+}
+
+/// `pl mcp`'s `wait_for_person` sends the reason for the run it is attached to, and prints
+/// the server's refusal.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn mcp_says_the_run_waits_on_a_person(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let runner = register(&pl, "r1").await;
+    let claim = runner.claim(0).await.unwrap().unwrap();
+    let run = claim.run_id.to_string();
+    let wait = |reason: &str| serde_json::json!({"name": "wait_for_person", "arguments": {"reason": reason}});
+
+    let unbound = mcp(&pl, &claim.agent_token, "PL-1", None, &[wait("Fix it.")]).await;
+    let bound = mcp(
+        &pl,
+        &claim.agent_token,
+        "PL-1",
+        Some(&run),
+        &[wait(" "), wait("Fix the check `test` on the branch.")],
+    )
+    .await;
+    assert_eq!(
+        [unbound, bound].concat(),
+        [
+            (true, "this MCP server is not attached to a run".to_string()),
+            (
+                true,
+                "a reason is 1 to 500 characters (422 Unprocessable Entity)".to_string()
+            ),
+            (false, "PL-1 waits on a person. End your turn.".to_string()),
+        ]
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout.contains(
+            "waiting on a person: Claude Code is waiting on a person: Fix the check `test` on the branch.\n"
+        ),
+        "{}",
+        show.stdout
+    );
+
+    runner
+        .finish_run(
+            &run,
+            &FinishRun {
+                attempt: claim.attempt,
+                outcome: RunOutcome::Succeeded,
+                reason: None,
+                duration_ms: 1,
+                input_tokens: None,
+                output_tokens: None,
+                lost: false,
+            },
+        )
+        .await
+        .unwrap();
+    let ended = mcp(
+        &pl,
+        &claim.agent_token,
+        "PL-1",
+        Some(&run),
+        &[wait("Again.")],
+    )
+    .await;
+    assert_eq!(
+        ended,
+        [(
+            true,
+            format!("Refused (stale_attempt): run {run} has ended")
+        )]
     );
 }
 

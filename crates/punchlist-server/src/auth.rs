@@ -114,8 +114,16 @@ impl FromRequestParts<AppState> for Actor {
         if from_cookie && role != Role::Person {
             return Err(ApiError::Unauthorized);
         }
-        // A run's agent's token works only while its run is running.
-        if role == Role::Agent && row.run_id.is_some() && row.outcome.as_deref() != Some("running")
+        // A run's agent says its own run waits on a person, which that route refuses once the
+        // run has ended.
+        let own_waiting = parts.method == Method::POST
+            && (row.run_id)
+                .is_some_and(|run| parts.uri.path() == format!("/api/runs/{run}/waiting"));
+        // A run's agent's token works only while its run is running, but for that route.
+        if role == Role::Agent
+            && row.run_id.is_some()
+            && row.outcome.as_deref() != Some("running")
+            && !own_waiting
         {
             return Err(ApiError::Unauthorized);
         }
@@ -137,12 +145,13 @@ impl FromRequestParts<AppState> for Actor {
             )));
         }
         // An agent reaches only issues: a run's agent its run's issue, `/api/issues/<id>` and
-        // below, and a standalone agent any issue of its workspace, and who it is
+        // below, and its run's waiting route, and a standalone agent any issue of its
+        // workspace, and who it is
         // (`GET /api/session`), so the web app can show an issue as that agent. Every other
         // endpoint, such as creating issues or reading the rest of the workspace, is for
         // people and runners.
         let own_session = parts.method == Method::GET && parts.uri.path() == "/api/session";
-        if role == Role::Agent && !(row.run_id.is_none() && own_session) {
+        if role == Role::Agent && !(row.run_id.is_none() && own_session) && !own_waiting {
             match (row.run_id, row.issue_id.as_deref()) {
                 (Some(_), own) if issue_id.is_none() || issue_id != own => {
                     return Err(ApiError::Forbidden(format!(

@@ -1,7 +1,7 @@
 //! Punchlist's MCP server over stdio (PRD R10). The runner attaches it to each agent run,
 //! bound to the run's issue and acting with the run's agent token. Its tools read the
-//! issue, edit its title and body, comment on it, attach proof and request a transition; the
-//! server checks every request.
+//! issue, edit its title and body, comment on it, attach proof, request a transition and say
+//! the run waits on a person; the server checks every request.
 
 use punchlist_api::{
     ChecksState, Event, EventDetail, GateResult, Issue, ProofKind, PullRequestsNow, ReviewThread,
@@ -15,11 +15,12 @@ use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-/// The tools, bound to one issue.
+/// The tools, bound to one issue, and to the run when there is one.
 #[derive(Clone)]
 pub struct Tools {
     client: Client,
     issue_id: String,
+    run_id: Option<String>,
     #[allow(dead_code, reason = "tool_handler reads the router")]
     tool_router: ToolRouter<Tools>,
 }
@@ -37,6 +38,12 @@ struct EditRequest {
     /// The new body, in Markdown, in full: it replaces the body. Optional: absent leaves it
     /// as it is.
     body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct WaitRequest {
+    /// What a person must do before the work can go on, 1 to 500 characters.
+    reason: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -64,10 +71,11 @@ fn text(result: Result<String, String>) -> Result<CallToolResult, ErrorData> {
 
 #[tool_router]
 impl Tools {
-    pub fn new(client: Client, issue_id: String) -> Tools {
+    pub fn new(client: Client, issue_id: String, run_id: Option<String>) -> Tools {
         Tools {
             client,
             issue_id,
+            run_id,
             tool_router: Tools::tool_router(),
         }
     }
@@ -168,6 +176,25 @@ impl Tools {
             Err(error) => Err(render_error(&error)),
         })
     }
+
+    #[tool(
+        description = "Say that this run cannot go on without a person, with what the person must do. Punchlist posts it on your issue and runs no agent on it again until a person moves it. Then end your turn."
+    )]
+    async fn wait_for_person(
+        &self,
+        Parameters(WaitRequest { reason }): Parameters<WaitRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(run_id) = &self.run_id else {
+            return text(Err("this MCP server is not attached to a run".into()));
+        };
+        text(match self.client.wait_for_person(run_id, &reason).await {
+            Ok(()) => Ok(format!(
+                "{} waits on a person. End your turn.",
+                self.issue_id
+            )),
+            Err(error) => Err(render_error(&error)),
+        })
+    }
 }
 
 #[tool_handler]
@@ -182,9 +209,14 @@ impl ServerHandler for Tools {
     }
 }
 
-/// Serves the tools for `issue_id` on stdin and stdout until the client disconnects.
-pub async fn serve_stdio(client: Client, issue_id: String) -> anyhow::Result<()> {
-    let server = Tools::new(client, issue_id)
+/// Serves the tools for `issue_id`, and `run_id` when a run attached them, on stdin and
+/// stdout until the client disconnects.
+pub async fn serve_stdio(
+    client: Client,
+    issue_id: String,
+    run_id: Option<String>,
+) -> anyhow::Result<()> {
+    let server = Tools::new(client, issue_id, run_id)
         .serve(rmcp::transport::stdio())
         .await?;
     server.waiting().await?;

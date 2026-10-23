@@ -3014,6 +3014,97 @@ async fn a_new_transition_into_the_status_starts_the_count_again(pool: PgPool) {
     assert_eq!(waiting_on_person(&s).await, Value::Null);
 }
 
+async fn waiting_reason(pool: &PgPool, run: &str) -> Option<String> {
+    sqlx::query_scalar("SELECT waiting_reason FROM run WHERE id = $1::uuid")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_run_that_waits_on_a_person_is_not_dispatched_again_until_the_issue_moves(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, claude_runner, first) = claimed_by_runner(&s).await;
+    person_moves(&s, "agent_review").await;
+    finish(&s, &claude_runner, &first).await;
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let agent = claimed["agent_token"].as_str().unwrap();
+    let run = claimed["run_id"].as_str().unwrap();
+    let uri = format!("/api/runs/{run}/waiting");
+    let wait = async |token: &str, uri: &str, reason: &str| {
+        call(&s.app, token, "POST", uri, Some(json!({"reason": reason}))).await
+    };
+
+    // A reason is 1 to 500 characters.
+    for reason in ["  ".to_string(), "é".repeat(501)] {
+        let (status, body) = wait(agent, &uri, &reason).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    // Only the run's own agent: not on another run, ended or not, nor a person.
+    let other = first["run_id"].as_str().unwrap();
+    let (status, body) = wait(agent, &format!("/api/runs/{other}/waiting"), "No.").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(waiting_reason(&pool, other).await, None);
+    let (status, body) = wait(&s.person.token, &uri, "No.").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(waiting_reason(&pool, run).await, None);
+
+    let reason = "The check `test` failed: fix it on the branch, then move the issue back.";
+    let (status, body) = wait(agent, &uri, &format!("{reason}\n")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(waiting_reason(&pool, run).await.as_deref(), Some(reason));
+    let shown = format!("Codex is waiting on a person: {reason}");
+    assert_eq!(waiting_on_person(&s).await, shown.as_str());
+    let (_, events) = call(
+        &s.app,
+        &s.person.token,
+        "GET",
+        "/api/issues/PL-1/events",
+        None,
+    )
+    .await;
+    let last = events.as_array().unwrap().last().unwrap();
+    assert_eq!(last["detail"]["body"], format!("{reason}\n\n(agent)"));
+    assert_eq!(last["actor"]["role"], "agent");
+    assert_eq!(last["actor"]["kind"], "codex");
+
+    // The run ends with the issue still in Agent Review: nothing is dispatched again.
+    finish(&s, &codex_runner, &claimed).await;
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, false)]);
+    assert_eq!(waiting_dispatches(&pool).await, []);
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(waiting_on_person(&s).await, shown.as_str());
+    // Its ended run's agent is answered 409, and nothing changes.
+    let (status, body) = wait(agent, &uri, "Again.").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "stale_attempt");
+    assert_eq!(waiting_reason(&pool, run).await.as_deref(), Some(reason));
+    // The token reaches nothing else.
+    let (status, _) = call(&s.app, agent, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Out and in again: a new entry, dispatched as usual, and the text is gone.
+    person_moves(&s, "in_progress").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    person_moves(&s, "agent_review").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (1, true)]
+    );
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    finish(&s, &codex_runner, &claimed).await;
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (1, false), (2, true)]
+    );
+}
+
 #[sqlx::test]
 async fn a_run_that_ends_in_a_status_the_active_workflow_no_longer_dispatches_is_the_last(
     pool: PgPool,

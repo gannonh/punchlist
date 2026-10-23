@@ -107,6 +107,9 @@ pub struct McpArgs {
     /// The issue the tools act on.
     #[arg(long, env = "PUNCHLIST_ISSUE")]
     pub issue: String,
+    /// The run the agent works in, for `wait_for_person`.
+    #[arg(long, env = "PUNCHLIST_RUN")]
+    pub run: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -351,7 +354,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         // stderr only: stdout carries the protocol.
         init_logging();
         let client = Client::new(&args.server_url, &args.token)?;
-        return punchlist_mcp::serve_stdio(client, args.issue).await;
+        return punchlist_mcp::serve_stdio(client, args.issue, args.run).await;
     }
     let path = match cli.config {
         Some(path) => path,

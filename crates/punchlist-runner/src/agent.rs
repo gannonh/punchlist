@@ -91,6 +91,7 @@ pub fn write_mcp_config(
                     "PUNCHLIST_SERVER_URL": config.server_url,
                     "PUNCHLIST_TOKEN": claim.agent_token,
                     "PUNCHLIST_ISSUE": claim.issue.id,
+                    "PUNCHLIST_RUN": claim.run_id,
                 }
             }
         }

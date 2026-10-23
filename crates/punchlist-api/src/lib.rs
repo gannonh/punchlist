@@ -1086,6 +1086,13 @@ pub struct CreateComment {
     pub body: String,
 }
 
+/// `POST /api/runs/{id}/waiting`: the run cannot go on without a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WaitForPerson {
+    /// What the person must do, 1 to 500 characters.
+    pub reason: String,
+}
+
 /// What a proof file shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
