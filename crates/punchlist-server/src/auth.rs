@@ -114,8 +114,16 @@ impl FromRequestParts<AppState> for Actor {
         if from_cookie && role != Role::Person {
             return Err(ApiError::Unauthorized);
         }
-        // A run's agent's token works only while its run is running.
-        if role == Role::Agent && row.run_id.is_some() && row.outcome.as_deref() != Some("running")
+        // A run's agent says its own run waits on a person, which that route refuses once the
+        // run has ended.
+        let own_waiting = parts.method == Method::POST
+            && (row.run_id)
+                .is_some_and(|run| parts.uri.path() == format!("/api/runs/{run}/waiting"));
+        // A run's agent's token works only while its run is running, but for that route.
+        if role == Role::Agent
+            && row.run_id.is_some()
+            && row.outcome.as_deref() != Some("running")
+            && !own_waiting
         {
             return Err(ApiError::Unauthorized);
         }
@@ -136,12 +144,13 @@ impl FromRequestParts<AppState> for Actor {
                 issue_id.unwrap_or_default()
             )));
         }
-        // A run's agent reaches only its run's issue, `/api/issues/<id>` and below. A
-        // standalone agent reaches any issue of its workspace, and the few reads and the one
-        // write an orchestrator needs to file, list and watch them (`standalone_agent_route`).
+        // A run's agent reaches only its run's issue, `/api/issues/<id>` and below, and its
+        // run's waiting route. A standalone agent reaches any issue of its workspace, and the
+        // few reads and the one write an orchestrator needs to file, list and watch them
+        // (`standalone_agent_route`).
         // Everything else, such as sessions, runners, minting actors and creating projects, is
         // for people and runners.
-        if role == Role::Agent {
+        if role == Role::Agent && !own_waiting {
             match (row.run_id, row.issue_id.as_deref()) {
                 (Some(_), own) if issue_id.is_none() || issue_id != own => {
                     return Err(ApiError::Forbidden(format!(

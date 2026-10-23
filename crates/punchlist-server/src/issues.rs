@@ -11,7 +11,8 @@ use punchlist_api::{
 };
 use punchlist_core::{
     Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence, PullRequestState,
-    Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow, display_name,
+    Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow, agent_display_name,
+    display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -200,12 +201,32 @@ async fn get_issue(
     )
     .fetch_optional(&mut *conn)
     .await?;
-    issue.waiting_on_person = ended.map(|runs| {
-        format!(
-            "{runs} runs in {} ended without moving it",
-            issue.status_name
-        )
-    });
+    // A run of the entry said it waits on a person (`wait_for_person`), which
+    // `queue_redispatch` reads too: it is the entry's last, since its end dispatches nothing.
+    let waiting = sqlx::query!(
+        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    issue.waiting_on_person = match (waiting, ended) {
+        (Some(waiting), _) => Some(format!(
+            "{} is waiting on a person: {}",
+            agent_display_name(&waiting.agent),
+            waiting.waiting_reason
+        )),
+        (None, ended) => ended.map(|runs| {
+            format!(
+                "{runs} runs in {} ended without moving it",
+                issue.status_name
+            )
+        }),
+    };
     Ok(Json(issue))
 }
 
@@ -956,7 +977,7 @@ pub(crate) fn is_signed_by_agent(body: &str) -> bool {
 }
 
 /// An agent's comment ends with `(agent)` on its own line. Punchlist adds it when missing.
-fn signed_by_agent(body: &str) -> String {
+pub(crate) fn signed_by_agent(body: &str) -> String {
     let body = body.trim_end();
     if is_signed_by_agent(body) {
         body.to_string()

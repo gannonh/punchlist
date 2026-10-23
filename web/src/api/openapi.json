@@ -1786,6 +1786,87 @@
         }
       }
     },
+    "/api/runs/{id}/waiting": {
+      "post": {
+        "summary": "Say that the run cannot go on without a person, and what the person must do: stored on the\nrun, so its end dispatches the issue nothing more (`queue_redispatch`), and posted on the\nissue as the agent's comment. Only the run's own agent, while its run runs: another run is\n403, and its own run once ended is 409 (`Actor` lets that token through to this route\nalone). Nobody in a role the issue's status locks may say it, as for comments.",
+        "operationId": "wait_for_person",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Run id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WaitForPerson"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Stored, and commented."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not this run's agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The run has ended, or the issue's status is locked to agents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The reason is empty or too long.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/session": {
       "get": {
         "summary": "Who the request is signed in as, by its bearer token or its session cookie.",
@@ -5019,6 +5100,19 @@
           }
         ],
         "description": "What `POST /api/issues/{id}/transitions` would answer the caller, without the read of\nGitHub a gated request makes first, so a request can still answer differently."
+      },
+      "WaitForPerson": {
+        "type": "object",
+        "description": "`POST /api/runs/{id}/waiting`: the run cannot go on without a person.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "What the person must do, 1 to 500 characters."
+          }
+        }
       },
       "WorkflowInfo": {
         "type": "object",

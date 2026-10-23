@@ -307,6 +307,7 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/runs/{id}/github-token",
             "/api/runs/{id}/log",
             "/api/runs/{id}/resume",
+            "/api/runs/{id}/waiting",
             "/api/session",
             "/api/workflow",
             "/api/workflow/schema.json",

@@ -505,6 +505,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{id}/waiting": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Say that the run cannot go on without a person, and what the person must do: stored on the
+         *     run, so its end dispatches the issue nothing more (`queue_redispatch`), and posted on the
+         *     issue as the agent's comment. Only the run's own agent, while its run runs: another run is
+         *     403, and its own run once ended is 409 (`Actor` lets that token through to this route
+         *     alone). Nobody in a role the issue's status locks may say it, as for comments.
+         */
+        post: operations["wait_for_person"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -1738,6 +1761,11 @@ export interface components {
             /** @enum {string} */
             kind: "refused";
             message: string;
+        };
+        /** @description `POST /api/runs/{id}/waiting`: the run cannot go on without a person. */
+        WaitForPerson: {
+            /** @description What the person must do, 1 to 500 characters. */
+            reason: string;
         };
         /** @description `GET /api/workflow`: the workspace's active workflow. */
         WorkflowInfo: {
@@ -3258,6 +3286,74 @@ export interface operations {
             };
             /** @description The attempt is not the runner's running attempt. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    wait_for_person: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Run id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WaitForPerson"];
+            };
+        };
+        responses: {
+            /** @description Stored, and commented. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not this run's agent. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The run has ended, or the issue's status is locked to agents. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The reason is empty or too long. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

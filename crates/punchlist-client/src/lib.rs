@@ -8,7 +8,7 @@ use punchlist_api::{
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, PROOF_TYPES, Project,
     ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, Session, UpdateIssue,
-    WorkflowInfo, proof_type_by_extension,
+    WaitForPerson, WorkflowInfo, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -324,6 +324,21 @@ impl Client {
     pub async fn finish_run(&self, run_id: &str, request: &FinishRun) -> Result<Run, ClientError> {
         self.send(Method::POST, &["runs", run_id, "finish"], Some(request))
             .await
+    }
+
+    /// Says the run cannot go on without a person, and what the person must do. The run's
+    /// agent token only.
+    pub async fn wait_for_person(&self, run_id: &str, reason: &str) -> Result<(), ClientError> {
+        let request = WaitForPerson {
+            reason: reason.to_string(),
+        };
+        self.send_optional::<_, serde_json::Value>(
+            Method::POST,
+            &["runs", run_id, "waiting"],
+            Some(&request),
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn run_log(&self, run_id: &str) -> Result<RunLog, ClientError> {

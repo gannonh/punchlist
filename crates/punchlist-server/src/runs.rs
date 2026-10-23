@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
     AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, GithubToken, Issue, LogLine,
-    RefreshGithubToken, Repository, ResumeRun, Run, RunLog, RunOutcome, RunnerRef,
+    RefreshGithubToken, Repository, ResumeRun, Run, RunLog, RunOutcome, RunnerRef, WaitForPerson,
 };
 use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
 use crate::events::record_row_event;
-use crate::issues::{check_move, record_transition};
+use crate::issues::{check_move, record_comment, record_transition, signed_by_agent};
 use crate::rows::issue;
 use crate::runners::{RunnerRow, runner_of};
 use crate::workflow::{active_workflow, dispatch_workflow, lock_workspace};
@@ -32,6 +32,7 @@ const MAX_WAIT_SECONDS: u32 = 30;
 const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
 const LOG_TAIL: i64 = 20;
+const MAX_WAITING_REASON_CHARS: usize = 500;
 /// How many runs one entry into a status gets before the issue waits on a person.
 // ponytail: one limit for every status of every workspace. Upgrade path: a `[dispatch]`
 // field in the workflow file, read from the version of the entering transition.
@@ -49,6 +50,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(finish_run))
         .routes(routes!(resume_run))
         .routes(routes!(github_token))
+        .routes(routes!(wait_for_person))
         .routes(routes!(run_log))
         .routes(routes!(issue_runs))
 }
@@ -886,6 +888,77 @@ async fn github_token(
     Ok(Json(token))
 }
 
+/// Say that the run cannot go on without a person, and what the person must do: stored on the
+/// run, so its end dispatches the issue nothing more (`queue_redispatch`), and posted on the
+/// issue as the agent's comment. Only the run's own agent, while its run runs: another run is
+/// 403, and its own run once ended is 409 (`Actor` lets that token through to this route
+/// alone). Nobody in a role the issue's status locks may say it, as for comments.
+#[utoipa::path(
+    post,
+    path = "/api/runs/{id}/waiting",
+    params(("id" = Uuid, Path, description = "Run id")),
+    request_body = WaitForPerson,
+    responses(
+        (status = 204, description = "Stored, and commented."),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "Not this run's agent."),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody, description = "The run has ended, or the issue's status is locked to agents."),
+        (status = 422, body = ErrorBody, description = "The reason is empty or too long."),
+    )
+)]
+async fn wait_for_person(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<Uuid>,
+    Json(request): Json<WaitForPerson>,
+) -> Result<StatusCode, ApiError> {
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.chars().count() > MAX_WAITING_REASON_CHARS {
+        return Err(ApiError::Invalid(format!(
+            "a reason is 1 to {MAX_WAITING_REASON_CHARS} characters"
+        )));
+    }
+    ensure_run(&state.pool, &actor, id).await?;
+    let mut tx = state.pool.begin().await?;
+    // The workspace, then the issue, as `finish_run` locks them, so the run cannot end
+    // between the check and the write.
+    lock_workspace(&mut tx, actor.workspace_id).await?;
+    let run = sqlx::query!(
+        "SELECT i.id AS issue_id, i.status AS issue_status, r.outcome FROM run r
+         JOIN issue i ON i.id = r.issue_id JOIN actor a ON a.run_id = r.id
+         WHERE r.id = $1 AND a.id = $2
+         FOR UPDATE OF i",
+        id,
+        actor.id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::Forbidden(format!("only run {id}'s agent says it waits")))?;
+    if run.outcome != RunOutcome::Running.as_str() {
+        return Err(ApiError::StaleAttempt(format!("run {id} has ended")));
+    }
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    workflow.check_unlocked(&run.issue_status, actor.role)?;
+    sqlx::query!(
+        "UPDATE run SET waiting_reason = $2 WHERE id = $1",
+        id,
+        reason
+    )
+    .execute(&mut *tx)
+    .await?;
+    record_comment(
+        &mut tx,
+        &actor,
+        &run.issue_id,
+        &signed_by_agent(reason),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// After an attempt of the run ended with `outcome`: ends the run with it and dispatches the
 /// issue again (`queue_redispatch`), or keeps the run running for its next attempt. A run is
 /// kept when the attempt was lost, `lost` is its number and it is not the run's
@@ -942,9 +1015,10 @@ async fn settle_run(
 /// gives its run the prompt of the transition's workflow version. Nothing is queued for a
 /// run without a dispatch, an issue that moved, a status the active workflow now locks to
 /// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
-/// run `RUNS_PER_ENTRY` of the entry: that issue waits on a person. Nor when the active
-/// workflow cannot be read, which is logged. `get_issue` reads the
-/// same two rules, the latest transition and the limit, to say so; change them together.
+/// run `RUNS_PER_ENTRY` of the entry, or a run whose agent said it waits on a person
+/// (`wait_for_person`): that issue waits on a person. Nor when the active workflow cannot be
+/// read, which is logged. `get_issue` reads the same three rules, the latest transition, the
+/// limit and the waiting reason, to say so; change them together.
 ///
 /// Once per run: an attempt leaves `running` once, under its row lock, so one transaction
 /// gets here; and `dispatch` is unique on the transition and the run number.
@@ -953,9 +1027,16 @@ async fn queue_redispatch(
     workspace_id: Uuid,
     run_id: Uuid,
 ) -> sqlx::Result<()> {
-    let status = sqlx::query_scalar!("SELECT status FROM run WHERE id = $1", run_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let run = sqlx::query!(
+        "SELECT status, waiting_reason FROM run WHERE id = $1",
+        run_id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if run.waiting_reason.is_some() {
+        return Ok(());
+    }
+    let status = run.status;
     // Ending the run must commit whatever the stored workflow looks like: one this server
     // cannot read queues nothing, and the run still ends.
     let active = match active_workflow(tx, workspace_id).await {

@@ -57,6 +57,7 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
                 "PUNCHLIST_SERVER_URL": config.server_url,
                 "PUNCHLIST_TOKEN": claim.agent_token,
                 "PUNCHLIST_ISSUE": claim.issue.id,
+                "PUNCHLIST_RUN": claim.run_id,
             }
         }
     })
