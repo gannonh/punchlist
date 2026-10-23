@@ -618,6 +618,10 @@ pub struct RegisteredRunner {
 pub struct CreateAgent {
     /// The agent key, such as `codex`.
     pub kind: String,
+    /// What the timeline calls the agent, 1 to 100 characters. The kind's name by default,
+    /// such as `Codex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// The name of the person in the workspace the agent acts for. The requesting person by
