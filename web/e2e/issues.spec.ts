@@ -1,23 +1,7 @@
 import { execFileSync } from 'node:child_process'
-import { createHmac, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-
-// The person token `bootstrap` wrote into the run's `pl` config.
-function personToken(): string {
-  const config = process.env.E2E_CONFIG
-  if (!config) throw new Error('E2E_CONFIG is not set; run `pnpm e2e`')
-  const token = /^token = "(.*)"$/m.exec(readFileSync(config, 'utf8'))?.[1]
-  if (!token) throw new Error(`no token in ${config}`)
-  return token
-}
-
-const bearer = (token: string) => ({ Authorization: `Bearer ${token}` })
-
-async function ok<T>(response: Awaited<ReturnType<APIRequestContext['post']>>): Promise<T> {
-  expect(response.ok(), `${response.url()} answered ${String(response.status())}: ${await response.text()}`).toBe(true)
-  return (await response.json()) as T
-}
+import { bearer, deliver, deliverPullRequest, fixture, ok, personToken, signIn } from './support'
 
 interface Claimed {
   id: string
@@ -50,47 +34,6 @@ async function claimedInProgress(request: APIRequestContext, title: string): Pro
 const issueInProgress = async (request: APIRequestContext, title: string) =>
   (await claimedInProgress(request, title)).id
 
-const fixture = (name: string): unknown =>
-  JSON.parse(
-    readFileSync(new URL(`../../crates/punchlist-server/tests/fixtures/github/${name}.json`, import.meta.url), 'utf8'),
-  )
-
-/** A delivery to the webhook on the run's repository, signed as GitHub signs one. */
-async function deliver(request: APIRequestContext, event: string, payload: { repository: { name: string } }) {
-  const secret = process.env.E2E_WEBHOOK_SECRET_FILE
-  if (!secret) throw new Error('E2E_WEBHOOK_SECRET_FILE is not set; run `pnpm e2e`')
-  payload.repository.name = 'punchlist-sandbox'
-  const body = JSON.stringify(payload)
-  const signature = createHmac('sha256', readFileSync(secret, 'utf8')).update(body).digest('hex')
-  const response = await request.post('/api/github/webhook', {
-    headers: {
-      'content-type': 'application/json',
-      'x-github-event': event,
-      'x-github-delivery': randomUUID(),
-      'x-hub-signature-256': `sha256=${signature}`,
-    },
-    data: body,
-  })
-  expect(response.status()).toBe(202)
-}
-
-/** A `pull_request` delivery for the issue's branch: number 7 on the fixture's head commit unless given. */
-async function deliverPullRequest(
-  request: APIRequestContext,
-  id: string,
-  action: 'opened' | 'ready_for_review',
-  head: { number: number; sha: string } = { number: 7, sha: '6dcb09b5b57875f334f61aebed695e2e4193db5e' },
-) {
-  const payload = fixture(`pull_request_${action}`) as {
-    repository: { name: string }
-    pull_request: { number: number; head: { ref: string; sha: string } }
-  }
-  payload.pull_request.number = head.number
-  payload.pull_request.head.ref = `feature/${id.toLowerCase()}-live`
-  payload.pull_request.head.sha = head.sha
-  await deliver(request, 'pull_request', payload)
-}
-
 /** Waits until the jobs behind the 202s have recorded what `seen` looks for in the issue's pull requests. */
 async function recorded(
   request: APIRequestContext,
@@ -122,14 +65,6 @@ async function deliverCheck(
   const linked = payload.check_run.pull_requests[0]
   if (linked) Object.assign(linked, { number: head.number, head: { ...linked.head, ref: `feature/${id.toLowerCase()}-live`, sha: head.sha } })
   await deliver(request, 'check_run', payload)
-}
-
-async function signIn(page: Page) {
-  await page.goto('/')
-  await expect(page).toHaveURL(/\/sign-in$/)
-  await page.getByLabel('Token').fill(personToken())
-  await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page).toHaveURL(/\/$/)
 }
 
 const row = (page: Page, id: string) => page.locator(`[data-issue="${id}"]`)

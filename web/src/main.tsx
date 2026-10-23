@@ -13,6 +13,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { sessionQuery } from '@/lib/queries'
 import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type ListSearch } from '@/screens/issues'
+import { PullRequestsScreen } from '@/screens/pull-requests'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
 
@@ -101,8 +102,22 @@ const issue = createRoute({
   },
 })
 
+const pullRequests = createRoute({
+  getParentRoute: () => root,
+  path: '/pull-requests',
+  beforeLoad: async ({ context }) => {
+    const session = await context.queryClient.query(sessionQuery)
+    if (!session) throw redirect({ to: '/sign-in' })
+    return { session }
+  },
+  component: function PullRequests() {
+    const { session } = pullRequests.useRouteContext()
+    return <PullRequestsScreen workspaceId={session.workspace_id} me={session.actor.name} />
+  },
+})
+
 const router = createRouter({
-  routeTree: root.addChildren([signIn, issues, issue]),
+  routeTree: root.addChildren([signIn, issues, issue, pullRequests]),
   context: { queryClient },
   parseSearch,
   stringifySearch,
