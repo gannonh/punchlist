@@ -5,6 +5,7 @@
 ## Sub-features
 
 - `register` makes a runner actor (role `runner`) and a `runner` row; `pl runner list` shows it with its last heartbeat, or `No runners.`. `runner.models` holds the `models` it sent, by agent key (`--model` as `claude-code`, `--codex-model` as `codex`).
+- `agent-kinds`: `pl runner start --agents opncode` exits 1 with ``unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor`` (a typo), and `--agents pi` with ``unsupported agent `pi`; this runner can run claude-code and codex`` (a kind it has no adapter for); both fail before registering, so `SELECT count(*) FROM runner` is unchanged. `POST /api/runners` with `{"name":"r","agents":["opncode"]}` answers 422 with the first text.
 - `model`: a claim copies its agent's model from `runner.models` onto `attempt.model` (NULL when the runner sent none: the agent's own default). The API's runs and attempts carry it and the issue page shows it; `pl` does not print it.
 - `heartbeat` updates `runner.last_heartbeat` and renews only the leases of the attempts the body lists in `held`; a claim the runner never received expires. The answer's `stale` lists the held attempts it did not renew (finished, or failed by `lease-expiry`); the runner stops their agents and its log says `run <id>: lease lost; stopping the agent`.
 - `claim` moves `start → in_progress` as the runner, writes a `run` row and an `attempt` row with `attempt = 1`.

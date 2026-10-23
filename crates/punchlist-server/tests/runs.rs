@@ -480,6 +480,13 @@ async fn registering_needs_a_person_and_heartbeats_are_own_runner_only(pool: PgP
         let (status, _) = call(&app, &person.token, "POST", "/api/runners", Some(bad)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
+    let unknown = json!({"name": "r3", "agents": ["claude-code", "opncode"]});
+    let (status, body) = call(&app, &person.token, "POST", "/api/runners", Some(unknown)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["message"],
+        "unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+    );
 
     let (status, body) = call(
         &app,
