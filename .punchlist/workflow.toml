@@ -7,7 +7,7 @@ statuses = ["backlog", "todo", "start", "in_progress", "agent_review",
 [[transition]]
 from = ["backlog", "merging"]    # merging: after a gate refused its merge
 to = "todo"
-by = ["person"]                  # approval
+by = ["person", "agent"]         # ready to work; agents groom and promote
 
 [[transition]]
 from = "todo"
@@ -17,7 +17,7 @@ by = ["person"]                  # start signal
 [[transition]]
 from = ["backlog", "todo"]
 to = "canceled"
-by = ["person"]                  # dropped or a duplicate, before any run
+by = ["person", "agent"]         # dropped or a duplicate, before any run
 
 [[transition]]
 from = "start"
