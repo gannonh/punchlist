@@ -163,10 +163,17 @@
   .transition.locked .verdict { @apply text-warn; }
 
   .run-log {
-    @apply m-0 max-h-48 overflow-auto rounded-md bg-stone-900 px-2.5 py-2 font-mono text-caption whitespace-pre text-stone-200;
+    @apply m-0 grid max-h-64 list-none content-start gap-px overflow-x-hidden overflow-y-auto rounded-md border bg-muted px-2.5 py-2 font-mono text-caption text-foreground;
     line-height: 1.55;
   }
-  .run-log.live { border: 1px solid #0f766e; }
+  .run-log.live { @apply border-ok; }
+  .run-log li { @apply whitespace-pre-wrap wrap-anywhere; }
+  .run-log summary { @apply cursor-pointer list-none rounded-sm hover:bg-accent; }
+  .run-log summary::-webkit-details-marker { display: none; }
+  .run-log [data-raw] { @apply m-0 mb-1 rounded-sm border bg-card px-2 py-1 whitespace-pre-wrap wrap-anywhere text-muted-foreground; }
+  .run-log [data-line-kind="tool"] summary { @apply text-agent; }
+  .run-log [data-line-kind="error"] summary { @apply text-bad; }
+  .run-log :is([data-line-kind="event"], [data-line-kind="plain"], [data-line-kind="result"]) { @apply text-ink-3; }
   .run-pulse { animation: pl-pulse 1.4s ease-out infinite; }
 
   .timeline { @apply relative m-0 list-none p-0; }

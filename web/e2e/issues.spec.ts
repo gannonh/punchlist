@@ -370,6 +370,76 @@ test('the milestone filter lives in the URL, follows edits, and combines with th
   await expect(page).toHaveURL('/?layout=board')
 })
 
+test('the label and status filters live in the URL, follow edits, and pick the board\'s columns', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const tag = randomUUID().slice(0, 8)
+  const [idea, ui] = [`idea-${tag}`, `ui-${tag}`]
+  const issue = async (title: string, labels: string[], to: string[] = []) => {
+    const { row } = await ok<{ row: { issue: { id: string } } }>(
+      await request.post('/api/issues', { headers: person, data: { title, body: '' } }),
+    )
+    const id = row.issue.id
+    await ok(await request.patch(`/api/issues/${id}`, { headers: person, data: { labels } }))
+    for (const status of to)
+      await ok(await request.post(`/api/issues/${id}/transitions`, { headers: person, data: { to: status } }))
+    return id
+  }
+  const a = await issue('Labelled idea', [idea])
+  const b = await issue('Labelled idea and ui', [idea, ui])
+  const c = await issue(`Titled ${idea}`, [])
+  const d = await issue('Labelled ui in Todo', [ui], ['todo'])
+  const e = await issue('Labelled ui in Start', [ui], ['todo', 'start'])
+  const shown = () => page.locator('[data-issue]').evaluateAll((rows) => rows.map((r) => r.getAttribute('data-issue')))
+  const choose = async (filter: string, item: string) => {
+    await page.getByLabel(filter, { exact: true }).first().click()
+    await page.getByRole('menuitemcheckbox', { name: item, exact: true }).click()
+    await page.keyboard.press('Escape')
+    // A click on the trigger while the menu is still closing does not open it again.
+    await expect(page.getByRole('menu')).toHaveCount(0)
+  }
+  await signIn(page)
+
+  await page.getByLabel('Filter issues').fill(idea)
+  await expect.poll(shown).toEqual([a, b, c])
+  await page.getByLabel('Filter issues').fill('')
+
+  await choose('Label filter', idea)
+  await expect.poll(shown).toEqual([a, b])
+  await choose('Label filter', ui)
+  await expect.poll(shown).toEqual([b])
+  await expect(page.getByLabel('Label filter', { exact: true })).toHaveText(`Labels: ${idea}, ${ui}`)
+  await expect(page).toHaveURL(`/?label=${idea}&label=${ui}`)
+
+  await ok(await request.patch(`/api/issues/${a}`, { headers: person, data: { labels: [idea, ui] } }))
+  await expect.poll(shown).toEqual([a, b])
+  await ok(await request.patch(`/api/issues/${b}`, { headers: person, data: { labels: [idea] } }))
+  await expect.poll(shown).toEqual([a])
+
+  await choose('Label filter', idea)
+  await expect.poll(shown).toEqual([a, d, e])
+  await choose('Status filter', 'Todo')
+  await expect.poll(shown).toEqual([d])
+  await expect(page).toHaveURL(`/?label=${ui}&status=todo`)
+  await page.reload()
+  await expect.poll(shown).toEqual([d])
+  await expect(page.getByLabel('Status filter', { exact: true })).toHaveText('Statuses: Todo')
+
+  await choose('Status filter', 'Start')
+  await expect.poll(shown).toEqual([d, e])
+
+  await page.getByRole('button', { name: 'Board' }).click()
+  await expect
+    .poll(() => page.locator('[data-column-section]').evaluateAll((s) => s.map((c) => c.getAttribute('data-column-section'))))
+    .toEqual(['todo', 'start'])
+  await expect(page).toHaveURL(`/?layout=board&label=${ui}&status=todo&status=start`)
+  await page.getByLabel('Filter issues').fill('nothing has this title')
+  await page.getByRole('button', { name: 'Clear filters' }).click()
+  await expect(page).toHaveURL('/?layout=board')
+})
+
 // The issue page. These come last: their runs and dispatches must not be what an earlier test's runner claims.
 
 /** A 1×1 PNG. */

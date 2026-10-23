@@ -178,6 +178,8 @@ pub struct Workflow {
     /// Each locked status and the roles that may not act on an issue in it.
     locks: Vec<(Status, Vec<Role>)>,
     dispatch: Vec<Dispatch>,
+    /// `[dispatch] max_concurrent`: the most attempts that run at once in the workspace.
+    max_concurrent: Option<u32>,
     /// The checks `ci_green` requires, from `[gate.ci_green]`. Empty when the file has none.
     required_checks: Vec<RequiredCheck>,
     /// `[import.linear.states]`: a Linear state's name and the status it imports into.
@@ -559,10 +561,19 @@ impl Workflow {
             locks.push((status, roles(locked.into_inner(), &key)?));
         }
 
-        if let Some(max) = raw.dispatch.max_concurrent.filter(|max| *max.get_ref() < 1) {
+        if let Some(max) = raw
+            .dispatch
+            .max_concurrent
+            .as_ref()
+            .filter(|max| *max.get_ref() < 1)
+        {
             let problem = Problem::BadMaxConcurrent;
             return Err(errors.at(max.span(), "dispatch.max_concurrent", problem));
         }
+        let max_concurrent = raw
+            .dispatch
+            .max_concurrent
+            .map(|max| u32::try_from(max.into_inner()).unwrap_or(u32::MAX));
         let mut dispatch = Vec::new();
         for (name, rule) in raw.dispatch.status {
             let key = |field: &str| format!("dispatch.status.{name}.{field}");
@@ -625,6 +636,7 @@ impl Workflow {
             transitions,
             locks,
             dispatch,
+            max_concurrent,
             required_checks,
             linear_states,
             prompts: BTreeMap::new(),
@@ -738,6 +750,11 @@ impl Workflow {
     /// stored before the table existed is.
     pub fn required_checks(&self) -> &[RequiredCheck] {
         &self.required_checks
+    }
+
+    /// The most attempts that may run at once in the workspace; `None` for no limit.
+    pub fn max_concurrent(&self) -> Option<u32> {
+        self.max_concurrent
     }
 
     /// The dispatch rule for a status, if a runner starts an agent there.
@@ -1411,6 +1428,25 @@ mod tests {
         assert_eq!(
             error(text),
             (Some(4), "transition[0]".into(), Problem::NoActor)
+        );
+    }
+
+    #[test]
+    fn max_concurrent_is_kept() {
+        let limit = |body: &str| {
+            Workflow::from_toml(&runnable(body))
+                .unwrap()
+                .max_concurrent()
+        };
+        assert_eq!(limit("[dispatch]\nmax_concurrent = 3"), Some(3));
+        assert_eq!(limit(""), None);
+        assert_eq!(
+            error(&runnable("[dispatch]\nmax_concurrent = 0")),
+            (
+                Some(3),
+                "dispatch.max_concurrent".into(),
+                Problem::BadMaxConcurrent
+            )
         );
     }
 

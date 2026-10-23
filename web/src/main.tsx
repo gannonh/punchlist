@@ -30,6 +30,28 @@ const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
 const signIn = createRoute({ getParentRoute: () => root, path: '/sign-in', component: SignInScreen })
 
 const id = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
+const ids = (value: unknown) => {
+  const list = [value].flat().filter((item): item is string => typeof item === 'string' && item !== '')
+  return list.length > 0 ? list : undefined
+}
+
+// Search values are plain strings, and a list is the key repeated: `?label=idea&label=ui`.
+function parseSearch(text: string): Record<string, string | string[]> {
+  const search: Record<string, string | string[]> = {}
+  for (const [key, value] of new URLSearchParams(text)) {
+    const before = search[key]
+    search[key] = before === undefined ? value : [before, value].flat()
+  }
+  return search
+}
+
+function stringifySearch(search: Record<string, unknown>): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(search))
+    for (const item of [value].flat()) if (typeof item === 'string') params.append(key, item)
+  const text = params.toString()
+  return text ? `?${text}` : ''
+}
 
 const issues = createRoute({
   getParentRoute: () => root,
@@ -38,6 +60,8 @@ const issues = createRoute({
     layout: search.layout === 'board' ? 'board' : undefined,
     project: id(search.project),
     milestone: id(search.milestone),
+    label: ids(search.label),
+    status: ids(search.status),
   }),
   beforeLoad: async ({ context }) => {
     const session = await context.queryClient.query(sessionQuery)
@@ -53,8 +77,8 @@ const issues = createRoute({
         workspaceId={session.workspace_id}
         me={session.actor.name}
         search={search}
-        onSearch={({ layout, project, milestone }) =>
-          void navigate({ search: { layout, project, milestone }, replace: true })
+        onSearch={({ layout, project, milestone, label, status }) =>
+          void navigate({ search: { layout, project, milestone, label, status }, replace: true })
         }
       />
     )
@@ -77,7 +101,12 @@ const issue = createRoute({
   },
 })
 
-const router = createRouter({ routeTree: root.addChildren([signIn, issues, issue]), context: { queryClient } })
+const router = createRouter({
+  routeTree: root.addChildren([signIn, issues, issue]),
+  context: { queryClient },
+  parseSearch,
+  stringifySearch,
+})
 
 declare module '@tanstack/react-router' {
   interface Register {
