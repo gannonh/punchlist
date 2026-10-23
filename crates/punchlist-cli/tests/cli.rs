@@ -920,6 +920,7 @@ async fn edit_sets_title_body_and_labels(pool: PgPool) {
         .unwrap()
         .create_agent(&punchlist_api::CreateAgent {
             kind: "codex".into(),
+            name: None,
             model: None,
             owner: None,
         })
@@ -949,6 +950,111 @@ async fn edit_sets_title_body_and_labels(pool: PgPool) {
         )
     );
     assert_eq!(body(&pool).await, "From stdin\n");
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn create_reads_the_body_from_a_file_or_stdin(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let spec = pl.dir.path().join("spec.md");
+    let text = "# Spec\n\n- [ ] tabs\tand trailing space \n\n\n";
+    std::fs::write(&spec, text).unwrap();
+    let filed = (pl.run(&[
+        "issue",
+        "create",
+        "--title",
+        "Filed",
+        "--body-file",
+        spec.to_str().unwrap(),
+    ]))
+    .await;
+    assert_eq!(
+        (filed.code, filed.stdout.as_str()),
+        (0, "PL-1\n"),
+        "{}",
+        filed.stderr
+    );
+
+    let config = pl.config.clone();
+    let piped = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("pl")
+            .unwrap()
+            .env("PUNCHLIST_CONFIG", config)
+            .args(["issue", "create", "--title", "Piped", "--body-file", "-"])
+            .write_stdin("From stdin\n")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(piped.status.success(), "{piped:?}");
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM issue ORDER BY number")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(bodies, [text, "From stdin\n"]);
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn an_orchestrator_agent_files_and_comments_as_itself(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let minted = (pl.run(&[
+        "actor",
+        "create",
+        "--agent",
+        "--kind",
+        "claude-code",
+        "--name",
+        "Orchestrator",
+    ]))
+    .await;
+    assert_eq!(minted.code, 0, "{}", minted.stderr);
+    assert!(
+        minted.stdout.starts_with("Created agent Orchestrator\n"),
+        "{}",
+        minted.stdout
+    );
+    let token = (minted.stdout.lines())
+        .find_map(|line| line.strip_prefix("Token"))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("no token in {}", minted.stdout));
+    let config = pl.dir.path().join("orchestrator.toml");
+    std::fs::write(
+        &config,
+        format!("server_url = \"{}\"\ntoken = \"{token}\"\n", pl.url),
+    )
+    .unwrap();
+    let env = [("PUNCHLIST_CONFIG", config.to_str().unwrap())];
+    let filed = pl
+        .run_with(&["issue", "create", "--title", "Probe"], &env)
+        .await;
+    assert_eq!(
+        (filed.code, filed.stdout.as_str()),
+        (0, "PL-1\n"),
+        "{}",
+        filed.stderr
+    );
+    let commented = (pl.run_with(&["issue", "comment", "PL-1", "--body", "x"], &env)).await;
+    assert_eq!(commented.code, 0, "{}", commented.stderr);
+    let listed = pl.run_with(&["issue", "list"], &env).await;
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    assert!(listed.stdout.contains("PL-1"), "{}", listed.stdout);
+    let projects = pl.run_with(&["project", "list"], &env).await;
+    assert_eq!(projects.code, 0, "{}", projects.stderr);
+
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    let named = (show.stdout.lines())
+        .filter(|line| line.contains("Orchestrator (agent, claude-code)"))
+        .count();
+    assert_eq!(named, 2, "{}", show.stdout);
+
+    let refused = (pl.run_with(&["project", "create", "p"], &env)).await;
+    assert_eq!(
+        (refused.code, refused.stderr.as_str()),
+        (
+            1,
+            "error: an agent acts only on the workspace's issues (403 Forbidden)\n"
+        )
+    );
 }
 
 #[sqlx::test(migrator = "punchlist_server::MIGRATOR")]

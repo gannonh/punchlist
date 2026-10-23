@@ -386,7 +386,7 @@ async fn a_failing_check_blocks_by_name_and_a_locked_status_locks_the_agent(pool
 }
 
 #[sqlx::test]
-async fn a_standalone_agent_reads_its_session_and_nothing_else_of_the_workspace(pool: PgPool) {
+async fn a_standalone_agent_reads_its_session_and_cannot_sign_in(pool: PgPool) {
     let s = setup(&pool).await;
     let (status, session) = call(&s.app, &s.agent, "GET", "/api/session", None).await;
     assert_eq!(status, StatusCode::OK, "{session}");
@@ -394,19 +394,9 @@ async fn a_standalone_agent_reads_its_session_and_nothing_else_of_the_workspace(
     assert_eq!(session["actor"]["kind"], "codex");
     assert_eq!(session["actor"]["name"], "Codex");
     assert_eq!(session["workspace_id"], json!(s.person.workspace_id));
-    for (method, uri) in [
-        ("GET", "/api/issues"),
-        ("GET", "/api/workflow"),
-        ("DELETE", "/api/session"),
-    ] {
-        let (status, body) = call(&s.app, &s.agent, method, uri, None).await;
-        if method == "DELETE" {
-            // Signing out needs no token at all.
-            assert_eq!(status, StatusCode::NO_CONTENT);
-        } else {
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
-        }
-    }
+    // Signing out needs no token at all.
+    let (status, _) = call(&s.app, &s.agent, "DELETE", "/api/session", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     // A browser cannot sign in with it.
     let (status, _) = call(
         &s.app,

@@ -210,6 +210,9 @@ pub enum ActorCommand {
         /// The agent key: claude-code, codex, opencode, pi or cursor.
         #[arg(long)]
         kind: String,
+        /// What the timeline calls the agent. The kind's name by default, such as `Codex`.
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         model: Option<String>,
         /// The name of the person the agent acts for. You by default.
@@ -279,8 +282,11 @@ pub enum IssueCommand {
         #[arg(long)]
         title: String,
         /// Markdown.
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", conflicts_with = "body_file")]
         body: String,
+        /// A file holding the body, or `-` for stdin.
+        #[arg(long)]
+        body_file: Option<PathBuf>,
     },
     /// Show an issue and its timeline.
     Show { id: String },
@@ -367,10 +373,16 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::Actor(ActorCommand::Create {
             agent: _,
             kind,
+            name,
             model,
             owner,
         }) => {
-            let request = CreateAgent { kind, model, owner };
+            let request = CreateAgent {
+                kind,
+                name,
+                model,
+                owner,
+            };
             write!(
                 out,
                 "{}",
@@ -927,7 +939,15 @@ fn render_runs(runs: &[Run]) -> String {
 
 async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> anyhow::Result<()> {
     match command {
-        IssueCommand::Create { title, body } => {
+        IssueCommand::Create {
+            title,
+            body,
+            body_file,
+        } => {
+            let body = match body_file {
+                Some(path) => read_body_file(&path)?,
+                None => body,
+            };
             let written = client.create_issue(&CreateIssue { title, body }).await?;
             writeln!(out, "{}", written.row.issue.id)?;
         }
@@ -992,6 +1012,15 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
     Ok(())
 }
 
+/// The text of `--body-file`: the file, or stdin for `-`.
+fn read_body_file(path: &std::path::Path) -> anyhow::Result<String> {
+    if path.as_os_str() == "-" {
+        return Ok(std::io::read_to_string(std::io::stdin())?);
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))
+}
+
 /// A project by its name.
 fn find_project<'a>(projects: &'a [Project], name: &str) -> anyhow::Result<&'a Project> {
     (projects.iter())
@@ -1003,11 +1032,7 @@ fn find_project<'a>(projects: &'a [Project], name: &str) -> anyhow::Result<&'a P
 /// A milestone's name is looked up in `--project`, else in the issue's project.
 async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Result<UpdateIssue> {
     let body = match &edit.body_file {
-        Some(path) if path.as_os_str() == "-" => Some(std::io::read_to_string(std::io::stdin())?),
-        Some(path) => Some(
-            std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?,
-        ),
+        Some(path) => Some(read_body_file(path)?),
         None => edit.body,
     };
     let labels = (!edit.label.is_empty() || edit.no_labels).then_some(edit.label);

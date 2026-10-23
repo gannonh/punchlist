@@ -144,14 +144,13 @@ impl FromRequestParts<AppState> for Actor {
                 issue_id.unwrap_or_default()
             )));
         }
-        // An agent reaches only issues: a run's agent its run's issue, `/api/issues/<id>` and
-        // below, and its run's waiting route, and a standalone agent any issue of its
-        // workspace, and who it is
-        // (`GET /api/session`), so the web app can show an issue as that agent. Every other
-        // endpoint, such as creating issues or reading the rest of the workspace, is for
-        // people and runners.
-        let own_session = parts.method == Method::GET && parts.uri.path() == "/api/session";
-        if role == Role::Agent && !(row.run_id.is_none() && own_session) && !own_waiting {
+        // A run's agent reaches only its run's issue, `/api/issues/<id>` and below, and its
+        // run's waiting route. A standalone agent reaches any issue of its workspace, and the
+        // few reads and the one write an orchestrator needs to file, list and watch them
+        // (`standalone_agent_route`).
+        // Everything else, such as sessions, runners, minting actors and creating projects, is
+        // for people and runners.
+        if role == Role::Agent && !own_waiting {
             match (row.run_id, row.issue_id.as_deref()) {
                 (Some(_), own) if issue_id.is_none() || issue_id != own => {
                     return Err(ApiError::Forbidden(format!(
@@ -159,8 +158,13 @@ impl FromRequestParts<AppState> for Actor {
                         own.unwrap_or("none")
                     )));
                 }
-                (None, _) if issue_id.is_none() => {
-                    return Err(ApiError::Forbidden("an agent acts only on issues".into()));
+                (None, _)
+                    if issue_id.is_none()
+                        && !standalone_agent_route(&parts.method, parts.uri.path()) =>
+                {
+                    return Err(ApiError::Forbidden(
+                        "an agent acts only on the workspace's issues".into(),
+                    ));
                 }
                 _ => {}
             }
@@ -174,6 +178,22 @@ impl FromRequestParts<AppState> for Actor {
             token_hash: Some(token_hash),
         })
     }
+}
+
+/// The routes outside `/api/issues/<id>` a standalone agent's token reaches. Each handler
+/// keeps it to the token's workspace.
+fn standalone_agent_route(method: &Method, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    matches!(
+        (method.as_str(), segments.as_slice()),
+        ("GET" | "POST", ["", "api", "issues"])
+            | ("GET", ["", "api", "workspaces", _, "events"])
+            | ("GET", ["", "api", "projects"])
+            | ("GET", ["", "api", "workflow"])
+            | ("GET", ["", "api", "actors"])
+            | ("GET", ["", "api", "proof", _])
+            | ("GET", ["", "api", "session"])
+    )
 }
 
 pub struct BearerAuth;
