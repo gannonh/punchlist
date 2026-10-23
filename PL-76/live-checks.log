@@ -1,0 +1,29 @@
+PASS 1. main vs branch: main prototypes/=[issue-list,issue-page,pull-requests], open on main: page.goto: net::ERR_FILE_NOT_FOUND at file:///home/gannonh/.cache/pl76/main/prototypes/inbox/index.html; branch switcher: ["1 Page","2 Two-pane","3 Panel"]
+PASS 2. three variants: switcher=3, console errors=0 []
+PASS 3. kinds (page): waiting=3 run=2 refusal=1; PL-27: "Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test"
+PASS 4. third run (page): "Third run ended: 3 runs in In Progress ended without moving it"
+PASS 5. entry points (page): list=4 board=4 unread=4
+PASS 3. kinds (split): waiting=3 run=2 refusal=1; PL-27: "Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test"
+PASS 4. third run (split): "Third run ended: 3 runs in In Progress ended without moving it"
+PASS 5. entry points (split): list=4 board=4 unread=4
+PASS 3. kinds (panel): waiting=3 run=2 refusal=1; PL-27: "Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test"
+PASS 4. third run (panel): "Third run ended: 3 runs in In Progress ended without moving it"
+PASS 5. entry points (panel): list=4 board=4 unread=4
+PASS 6. unread count (page): before=4 after=3 PL-31 unread mark=false list entry=3
+PASS 6. unread count (split): before=4 after=3 PL-31 unread mark=false list entry=3
+PASS 6. unread count (panel): before=4 after=3 PL-31 unread mark=false list entry=3
+PASS 7. done with it (page, clears): items 6 -> 5; PL-12 gone
+PASS 7. done with it (split, dismiss): items 6 -> 5; PL-12 gone
+PASS 7. done with it (panel, markread): items 6 -> 6; PL-12 kind=waiting, status=Merging
+PASS 8. rule (page): rule lists ["Backlog","Todo","Human Review","Merging"]; items 6 -> 7; PL-5 kind=waiting
+PASS 8. rule (split): rule lists ["Backlog","Todo","Human Review","Merging"]; items 6 -> 7; PL-5 kind=waiting
+PASS 8. rule (panel): rule lists ["Backlog","Todo","Human Review","Merging"]; items 6 -> 7; PL-5 kind=waiting
+PASS 9. 390 px (page): scrollWidth=390 clientWidth=390
+PASS 9. 390 px (split): scrollWidth=390 clientWidth=390
+PASS 9. 390 px (panel): scrollWidth=390 clientWidth=390
+PASS 9. no hard-coded colors: grep printed ""
+PASS 10. keyboard (page): 18 items and actions, missing=[]; Enter on PL-22 -> toast "Opens PL-22's issue page (/issues/PL-22)"
+PASS 10. keyboard (split): 24 items and actions, missing=[]; Enter on PL-22 -> toast "Opens PL-22's issue page (/issues/PL-22)"
+PASS 10. keyboard (panel): 19 items and actions, missing=[]; Enter on PL-22 -> toast "Opens PL-22's issue page (/issues/PL-22)"
+PASS 2. console errors over every check: errors=0
+28 of 28 assertions pass

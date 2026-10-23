@@ -1,0 +1,170 @@
+[
+  {
+    "n": 1,
+    "name": "main vs branch",
+    "pass": true,
+    "detail": "main prototypes/=[issue-list,issue-page,pull-requests], open on main: page.goto: net::ERR_FILE_NOT_FOUND at file:///home/gannonh/.cache/pl76/main/prototypes/inbox/index.html; branch switcher: [\"1 Page\",\"2 Two-pane\",\"3 Panel\"]"
+  },
+  {
+    "n": 2,
+    "name": "three variants",
+    "pass": true,
+    "detail": "switcher=3, console errors=0 []"
+  },
+  {
+    "n": 3,
+    "name": "kinds (page)",
+    "pass": true,
+    "detail": "waiting=3 run=2 refusal=1; PL-27: \"Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test\""
+  },
+  {
+    "n": 4,
+    "name": "third run (page)",
+    "pass": true,
+    "detail": "\"Third run ended: 3 runs in In Progress ended without moving it\""
+  },
+  {
+    "n": 5,
+    "name": "entry points (page)",
+    "pass": true,
+    "detail": "list=4 board=4 unread=4"
+  },
+  {
+    "n": 3,
+    "name": "kinds (split)",
+    "pass": true,
+    "detail": "waiting=3 run=2 refusal=1; PL-27: \"Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test\""
+  },
+  {
+    "n": 4,
+    "name": "third run (split)",
+    "pass": true,
+    "detail": "\"Third run ended: 3 runs in In Progress ended without moving it\""
+  },
+  {
+    "n": 5,
+    "name": "entry points (split)",
+    "pass": true,
+    "detail": "list=4 board=4 unread=4"
+  },
+  {
+    "n": 3,
+    "name": "kinds (panel)",
+    "pass": true,
+    "detail": "waiting=3 run=2 refusal=1; PL-27: \"Codex (codex) asked for Agent Review → Human Review. Refused: gate ci_green failed: 1 of 6 checks failed on 3f2a1c4: test\""
+  },
+  {
+    "n": 4,
+    "name": "third run (panel)",
+    "pass": true,
+    "detail": "\"Third run ended: 3 runs in In Progress ended without moving it\""
+  },
+  {
+    "n": 5,
+    "name": "entry points (panel)",
+    "pass": true,
+    "detail": "list=4 board=4 unread=4"
+  },
+  {
+    "n": 6,
+    "name": "unread count (page)",
+    "pass": true,
+    "detail": "before=4 after=3 PL-31 unread mark=false list entry=3"
+  },
+  {
+    "n": 6,
+    "name": "unread count (split)",
+    "pass": true,
+    "detail": "before=4 after=3 PL-31 unread mark=false list entry=3"
+  },
+  {
+    "n": 6,
+    "name": "unread count (panel)",
+    "pass": true,
+    "detail": "before=4 after=3 PL-31 unread mark=false list entry=3"
+  },
+  {
+    "n": 7,
+    "name": "done with it (page, clears)",
+    "pass": true,
+    "detail": "items 6 -> 5; PL-12 gone"
+  },
+  {
+    "n": 7,
+    "name": "done with it (split, dismiss)",
+    "pass": true,
+    "detail": "items 6 -> 5; PL-12 gone"
+  },
+  {
+    "n": 7,
+    "name": "done with it (panel, markread)",
+    "pass": true,
+    "detail": "items 6 -> 6; PL-12 kind=waiting, status=Merging"
+  },
+  {
+    "n": 8,
+    "name": "rule (page)",
+    "pass": true,
+    "detail": "rule lists [\"Backlog\",\"Todo\",\"Human Review\",\"Merging\"]; items 6 -> 7; PL-5 kind=waiting"
+  },
+  {
+    "n": 8,
+    "name": "rule (split)",
+    "pass": true,
+    "detail": "rule lists [\"Backlog\",\"Todo\",\"Human Review\",\"Merging\"]; items 6 -> 7; PL-5 kind=waiting"
+  },
+  {
+    "n": 8,
+    "name": "rule (panel)",
+    "pass": true,
+    "detail": "rule lists [\"Backlog\",\"Todo\",\"Human Review\",\"Merging\"]; items 6 -> 7; PL-5 kind=waiting"
+  },
+  {
+    "n": 9,
+    "name": "390 px (page)",
+    "pass": true,
+    "detail": "scrollWidth=390 clientWidth=390"
+  },
+  {
+    "n": 9,
+    "name": "390 px (split)",
+    "pass": true,
+    "detail": "scrollWidth=390 clientWidth=390"
+  },
+  {
+    "n": 9,
+    "name": "390 px (panel)",
+    "pass": true,
+    "detail": "scrollWidth=390 clientWidth=390"
+  },
+  {
+    "n": 9,
+    "name": "no hard-coded colors",
+    "pass": true,
+    "detail": "grep printed \"\""
+  },
+  {
+    "n": 10,
+    "name": "keyboard (page)",
+    "pass": true,
+    "detail": "18 items and actions, missing=[]; Enter on PL-22 -> toast \"Opens PL-22's issue page (/issues/PL-22)\""
+  },
+  {
+    "n": 10,
+    "name": "keyboard (split)",
+    "pass": true,
+    "detail": "24 items and actions, missing=[]; Enter on PL-22 -> toast \"Opens PL-22's issue page (/issues/PL-22)\""
+  },
+  {
+    "n": 10,
+    "name": "keyboard (panel)",
+    "pass": true,
+    "detail": "19 items and actions, missing=[]; Enter on PL-22 -> toast \"Opens PL-22's issue page (/issues/PL-22)\""
+  },
+  {
+    "n": 2,
+    "name": "console errors over every check",
+    "pass": true,
+    "detail": "errors=0"
+  }
+]
