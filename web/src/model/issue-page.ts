@@ -279,3 +279,132 @@ export function specBlocks(body: string): SpecBlock[] {
   }
   return blocks
 }
+
+/** What a run log line says, as the log box shows it: `plain` is a line that is not a JSON object, shown as written. */
+export type LogKind = 'message' | 'tool' | 'result' | 'error' | 'event' | 'plain'
+
+export interface LogView {
+  kind: LogKind
+  text: string
+}
+
+type Json = Record<string, unknown>
+const obj = (value: unknown): Json =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Json) : {}
+const str = (value: unknown): string => (typeof value === 'string' ? value : '')
+const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
+
+/** The first non-empty line of `text`, cut at `max` characters; `…` marks a cut. */
+function clip(text: string, max = 200): string {
+  const lines = text.trim().split('\n')
+  const first = lines[0] ?? ''
+  return first.length > max ? `${first.slice(0, max)}…` : lines.length > 1 ? `${first} …` : first
+}
+
+/**
+ * One line of a run's log as a short summary: Claude Code's `stream-json` (an assistant's text, a tool call and
+ * its target, a tool's result) or Codex's app-server messages (an item, token use, the turn's end). Anything
+ * else is shown as written.
+ */
+export function logView(line: string): LogView {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return { kind: 'plain', text: line }
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { kind: 'plain', text: line }
+  const message = parsed as Json
+  return typeof message.type === 'string' ? claudeLine(message) : codexLine(message)
+}
+
+const TOOL_TARGETS = ['file_path', 'notebook_path', 'path', 'command', 'pattern', 'url', 'query', 'description']
+
+function toolCall(name: string, input: Json): string {
+  const target = TOOL_TARGETS.map((key) => str(input[key])).find(Boolean)
+  return target ? `${name} ${clip(target, 300)}` : name
+}
+
+function claudeLine(line: Json): LogView {
+  const content = list(obj(line.message).content).map(obj)
+  switch (line.type) {
+    case 'system':
+      return { kind: 'event', text: line.subtype === 'init' ? `session started, model ${str(line.model)}` : `system ${str(line.subtype)}` }
+    case 'assistant':
+      return {
+        kind: content.some((block) => block.type === 'tool_use') ? 'tool' : 'message',
+        text: content
+          .map((block) =>
+            block.type === 'text' ? str(block.text) : block.type === 'tool_use' ? toolCall(str(block.name), obj(block.input)) : str(block.type),
+          )
+          .join('\n'),
+      }
+    case 'user': {
+      const results = content.filter((block) => block.type === 'tool_result')
+      if (results.length === 0) return { kind: 'event', text: 'user message' }
+      const said = (block: Json) =>
+        typeof block.content === 'string' ? block.content : list(block.content).map((part) => str(obj(part).text)).join('\n')
+      return {
+        kind: results.some((block) => block.is_error === true) ? 'error' : 'result',
+        text: results.map((block) => `${block.is_error === true ? 'error' : 'result'}: ${clip(said(block))}`).join('\n'),
+      }
+    }
+    case 'result':
+      return {
+        kind: line.is_error === true ? 'error' : 'result',
+        text: `finished ${str(line.subtype)}${str(line.result) ? `: ${str(line.result)}` : ''}`,
+      }
+    default:
+      return { kind: 'event', text: str(line.type) }
+  }
+}
+
+function codexLine(line: Json): LogView {
+  const method = str(line.method)
+  const params = obj(line.params)
+  if (method === 'item/started' || method === 'item/completed') return codexItem(obj(params.item), method === 'item/completed')
+  if (method === 'thread/tokenUsage/updated') {
+    const total = obj(obj(params.tokenUsage).total).totalTokens
+    return { kind: 'event', text: `tokens ${typeof total === 'number' ? total.toLocaleString('en-US') : '?'}` }
+  }
+  if (method === 'turn/completed') {
+    const status = str(obj(params.turn).status)
+    return { kind: status === 'completed' ? 'result' : 'error', text: `turn ${status}` }
+  }
+  if (method === 'error') return { kind: 'error', text: `error: ${str(obj(params.error).message)}` }
+  if (method) return { kind: 'event', text: method }
+  if ('error' in line) return { kind: 'error', text: `error: ${str(obj(line.error).message)}` }
+  return { kind: 'event', text: `response ${JSON.stringify(line.id ?? null)}` }
+}
+
+function codexItem(item: Json, done: boolean): LogView {
+  switch (item.type) {
+    case 'agentMessage':
+      return { kind: 'message', text: str(item.text) || 'agent message' }
+    case 'reasoning': {
+      const summary = list(item.summary).map(str).join('\n')
+      return { kind: 'event', text: summary || 'reasoning' }
+    }
+    case 'userMessage':
+      return { kind: 'event', text: 'prompt' }
+    case 'commandExecution': {
+      const actions = list(item.commandActions).map(obj)
+      const command = clip((actions.length === 1 && str(actions[0]?.command)) || str(item.command), 300)
+      const exit = item.exitCode
+      if (!done || typeof exit !== 'number') return { kind: 'tool', text: `$ ${command}` }
+      return { kind: exit === 0 ? 'tool' : 'error', text: `$ ${command} → exit ${String(exit)}` }
+    }
+    case 'mcpToolCall': {
+      const args = obj(item.arguments)
+      const name = `${str(item.server)}.${str(item.tool)}`
+      const text = Object.keys(args).length > 0 ? `${name} ${clip(JSON.stringify(args), 300)}` : name
+      return { kind: done && item.error != null ? 'error' : 'tool', text }
+    }
+    case 'fileChange':
+      return { kind: 'tool', text: `edit ${list(item.changes).map((change) => str(obj(change).path)).join(', ')}` }
+    case 'webSearch':
+      return { kind: 'tool', text: `search ${str(item.query)}` }
+    default:
+      return { kind: 'event', text: str(item.type) }
+  }
+}

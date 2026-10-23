@@ -27,6 +27,7 @@ import {
   fileSize,
   gateSummary,
   gateText,
+  logView,
   moveView,
   plainPullRequestUrl,
   PROOF_TYPES,
@@ -1012,11 +1013,17 @@ function AttemptCard({
 }) {
   const running = attempt.state === 'running'
   const log = useQuery({ ...runLogQuery(issueId, run.id, running), enabled: person && latest })
-  const lines = (log.data ?? run.log_tail).filter((line: LogLine) => line.attempt === attempt.attempt)
-  const pre = useRef<HTMLPreElement>(null)
-  useEffect(() => {
-    if (running && pre.current) pre.current.scrollTop = pre.current.scrollHeight
-  }, [running, lines.length])
+  const all = log.data ?? run.log_tail
+  const lines = useMemo(
+    () => all.filter((line: LogLine) => line.attempt === attempt.attempt).map((line) => ({ ...line, view: logView(line.line) })),
+    [all, attempt.attempt],
+  )
+  const box = useRef<HTMLOListElement>(null)
+  // Follows the newest line until the person scrolls up, and again once they scroll back to the bottom.
+  const follow = useRef(true)
+  useLayoutEffect(() => {
+    if (follow.current && box.current) box.current.scrollTop = box.current.scrollHeight
+  }, [lines.length])
   const took = running ? now.getTime() - Date.parse(attempt.started_at) : attempt.duration_ms
   return (
     <article
@@ -1059,9 +1066,29 @@ function AttemptCard({
       </div>
       {attempt.failure_reason && <div className="text-meta text-bad wrap-anywhere">{attempt.failure_reason}</div>}
       {latest && lines.length > 0 && (
-        <pre ref={pre} className={cn('run-log', running && 'live')} data-log={running ? 'live' : 'done'} aria-live={running ? 'polite' : undefined}>
-          {lines.map((line) => line.line).join('\n')}
-        </pre>
+        <ol
+          ref={box}
+          className={cn('run-log', running && 'live')}
+          data-log={running ? 'live' : 'done'}
+          aria-live={running ? 'polite' : undefined}
+          onScroll={(e) => {
+            const el = e.currentTarget
+            follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+          }}
+        >
+          {lines.map(({ seq, line, view }) => (
+            <li key={seq} data-line-kind={view.kind}>
+              {view.kind === 'plain' ? (
+                view.text
+              ) : (
+                <details>
+                  <summary>{view.text}</summary>
+                  <pre data-raw>{line}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ol>
       )}
     </article>
   )
