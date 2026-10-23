@@ -732,7 +732,7 @@
     },
     "/api/issues/{id}/pull-requests/refresh": {
       "post": {
-        "summary": "An issue's pull requests and the unresolved review threads of the open ones, after\nreading both from GitHub as a gated request does: a new review thread sends no webhook,\nso this is how an agent reads what its reviewers wrote. The thread text is from outside\nthe team. When GitHub cannot be read, or there is no GitHub\nApp, `refreshed` is false and the answer is what is recorded.",
+        "summary": "An issue's pull requests and the unresolved review threads of the open ones, after\nreading both from GitHub as a gated request does: a new review thread sends no webhook,\nso this is how an agent reads what its reviewers wrote. The thread text is from outside\nthe team. When GitHub cannot be read, or there is no GitHub App, `refreshed` is false\nand the answer is what is recorded.",
         "operationId": "refresh_issue_pull_requests",
         "parameters": [
           {

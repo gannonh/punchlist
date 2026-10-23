@@ -204,8 +204,8 @@ export interface paths {
          * An issue's pull requests and the unresolved review threads of the open ones, after
          *     reading both from GitHub as a gated request does: a new review thread sends no webhook,
          *     so this is how an agent reads what its reviewers wrote. The thread text is from outside
-         *     the team. When GitHub cannot be read, or there is no GitHub
-         *     App, `refreshed` is false and the answer is what is recorded.
+         *     the team. When GitHub cannot be read, or there is no GitHub App, `refreshed` is false
+         *     and the answer is what is recorded.
          */
         post: operations["refresh_issue_pull_requests"];
         delete?: never;
