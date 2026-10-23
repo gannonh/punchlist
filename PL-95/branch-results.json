@@ -1,0 +1,184 @@
+[
+  {
+    "n": 1,
+    "name": "branch has Label filter; idea shows PL-1, PL-2",
+    "pass": true,
+    "detail": {
+      "hasLabelFilter": true,
+      "ids": [
+        "PL-1",
+        "PL-2"
+      ],
+      "url": "http://127.0.0.1:40289/?label=idea"
+    }
+  },
+  {
+    "n": 2,
+    "name": "PL-3 hidden with idea chosen",
+    "pass": true,
+    "detail": {
+      "ids": [
+        "PL-1",
+        "PL-2"
+      ]
+    }
+  },
+  {
+    "n": 2,
+    "name": "text \"idea\" with no label shows PL-1, PL-2, PL-3",
+    "pass": true,
+    "detail": {
+      "ids": [
+        "PL-1",
+        "PL-2",
+        "PL-3"
+      ]
+    }
+  },
+  {
+    "n": 3,
+    "name": "idea + ui shows only PL-2, trigger \"Labels: idea, ui\"",
+    "pass": true,
+    "detail": {
+      "ids": [
+        "PL-2"
+      ],
+      "triggerText": "Labels: idea, ui",
+      "url": "http://127.0.0.1:40289/?label=idea&label=ui"
+    }
+  },
+  {
+    "n": 4,
+    "name": "Todo shows only PL-4, equal to SQL",
+    "pass": true,
+    "detail": {
+      "ids": [
+        "PL-4"
+      ],
+      "sql": "PL-4"
+    }
+  },
+  {
+    "n": 5,
+    "name": "hide checked, Done chosen shows PL-5",
+    "pass": true,
+    "detail": {
+      "hideChecked": true,
+      "before": [
+        "PL-1",
+        "PL-2",
+        "PL-3",
+        "PL-4"
+      ],
+      "after": [
+        "PL-5"
+      ]
+    }
+  },
+  {
+    "n": 6,
+    "name": "board has exactly Backlog and Todo columns; search keeps status= and layout=board",
+    "pass": true,
+    "detail": {
+      "columns": [
+        "backlog",
+        "todo"
+      ],
+      "headings": [
+        "Backlog3PL-1Unassign",
+        "Todo1PL-4UnassignedF"
+      ],
+      "search": "?layout=board&status=backlog&status=todo"
+    }
+  },
+  {
+    "n": 7,
+    "name": "project Solo + idea shows only PL-1, count \"1 of 5\"",
+    "pass": true,
+    "detail": {
+      "ids": [
+        "PL-1"
+      ],
+      "count": "1 of 5",
+      "url": "http://127.0.0.1:40289/?project=26d59864-25bc-4919-b972-fe0c32d1a33a&label=idea"
+    }
+  },
+  {
+    "n": 8,
+    "name": "pasted link keeps label and status; Clear filters drops them",
+    "pass": true,
+    "detail": {
+      "href": "http://127.0.0.1:40289/?label=idea&status=todo",
+      "ids": [],
+      "idsNewTab": [],
+      "menus": [
+        "Labels: idea",
+        "Statuses: Todo"
+      ],
+      "menusNewTab": [
+        "Labels: idea",
+        "Statuses: Todo"
+      ],
+      "checkedNewTab": [
+        "idea"
+      ],
+      "searchAfterClear": ""
+    }
+  },
+  {
+    "n": 9,
+    "name": "PL-1 appears within 2 s after PATCH, no reload",
+    "pass": true,
+    "detail": {
+      "patchStatus": 200,
+      "before": [
+        "PL-2",
+        "PL-4"
+      ],
+      "after": [
+        "PL-1",
+        "PL-2",
+        "PL-4"
+      ],
+      "ms": 614
+    }
+  },
+  {
+    "n": 10,
+    "name": "at 390 px no horizontal scroll",
+    "pass": true,
+    "detail": {
+      "withFilters": [
+        390,
+        390
+      ],
+      "without": [
+        390,
+        390
+      ]
+    }
+  },
+  {
+    "n": 10,
+    "name": "Space toggles a focused item",
+    "pass": true,
+    "detail": {
+      "focused": "idea",
+      "afterSpace": [
+        "idea"
+      ],
+      "afterSecondSpace": []
+    }
+  },
+  {
+    "n": 10,
+    "name": "Tab reaches both triggers",
+    "pass": true,
+    "detail": {
+      "reached": [
+        "Label filter",
+        "Status filter"
+      ]
+    }
+  }
+]
