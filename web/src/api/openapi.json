@@ -2464,6 +2464,13 @@
             ],
             "format": "int64"
           },
+          "reported_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the agent said it runs on, such as `claude-haiku-5-5` for `haiku`; `None`\nuntil it says."
+          },
           "runner": {
             "$ref": "#/components/schemas/RunnerRef"
           },
@@ -4657,6 +4664,13 @@
               "null"
             ],
             "format": "int64"
+          },
+          "reported_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the latest attempt's agent said it runs on; `None` until it says."
           },
           "runner": {
             "$ref": "#/components/schemas/RunnerRef"

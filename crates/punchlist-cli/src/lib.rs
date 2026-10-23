@@ -876,12 +876,31 @@ fn truncate_line(line: &str) -> String {
     }
 }
 
+/// The model an attempt ran on, as the issue page's run card says it: what the agent
+/// reported, beside what the runner pinned, if anything.
+fn model_label(pinned: Option<&str>, reported: Option<&str>, running: bool) -> String {
+    match (reported, pinned) {
+        (Some(reported), None) => format!("{reported} (agent default)"),
+        (Some(reported), Some(pinned)) if pinned == reported => format!("{reported} (pinned)"),
+        (Some(reported), Some(pinned)) => format!("{reported} (pinned {pinned})"),
+        (None, None) if running => "waiting for the agent".into(),
+        (None, Some(pinned)) if running => format!("waiting for the agent, pinned {pinned}"),
+        (None, None) => "agent default".into(),
+        (None, Some(pinned)) => format!("{pinned} (pinned)"),
+    }
+}
+
 /// A run and its latest attempt on one line, indented two spaces.
 fn run_line(run: &Run) -> String {
     let mut text = format!(
-        "  {}  {}  runner {}  started {}  duration {}  {}",
+        "  {}  {}  model {}  runner {}  started {}  duration {}  {}",
         run.id,
         run.agent_name,
+        model_label(
+            run.model.as_deref(),
+            run.reported_model.as_deref(),
+            run.outcome == RunOutcome::Running
+        ),
         run.runner.name,
         run.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
         format_duration(run.duration_ms),
@@ -909,8 +928,13 @@ fn render_run_list(runs: &[Run]) -> String {
         text.push_str(&run_line(run));
         for attempt in &run.attempts {
             text.push_str(&format!(
-                "    attempt {}  runner {}  {}",
+                "    attempt {}  model {}  runner {}  {}",
                 attempt.attempt,
+                model_label(
+                    attempt.model.as_deref(),
+                    attempt.reported_model.as_deref(),
+                    attempt.state == RunOutcome::Running
+                ),
                 attempt.runner.name,
                 attempt.state.as_str()
             ));
@@ -1697,7 +1721,8 @@ mod tests {
         let attempt = |n, name, state, reason: Option<&str>| punchlist_api::AttemptInfo {
             attempt: n,
             runner: runner(name),
-            model: None,
+            model: Some("haiku".into()),
+            reported_model: (n == 1).then(|| "claude-haiku-5-5".into()),
             duration_ms: None,
             input_tokens: None,
             output_tokens: None,
@@ -1716,7 +1741,8 @@ mod tests {
             started_at: at("2026-10-16T10:00:00Z"),
             finished_at: None,
             attempt: 2,
-            model: None,
+            model: Some("haiku".into()),
+            reported_model: None,
             runner: runner("sartre"),
             failure_reason: None,
             duration_ms: None,
@@ -1731,9 +1757,25 @@ mod tests {
         assert_eq!(
             render_run_list(&[run]),
             "Runs\n\
-             \x20 00000000-0000-0000-0000-000000000000  Claude Code  runner sartre  started 2026-10-16 10:00:00 UTC  duration —  running\n\
-             \x20   attempt 1  runner sartre  failed  (runner restarted)\n\
-             \x20   attempt 2  runner sartre  running\n"
+             \x20 00000000-0000-0000-0000-000000000000  Claude Code  model waiting for the agent, pinned haiku  runner sartre  started 2026-10-16 10:00:00 UTC  duration —  running\n\
+             \x20   attempt 1  model claude-haiku-5-5 (pinned haiku)  runner sartre  failed  (runner restarted)\n\
+             \x20   attempt 2  model waiting for the agent, pinned haiku  runner sartre  running\n"
+        );
+        assert_eq!(
+            [
+                model_label(None, Some("claude-opus-5-5"), false),
+                model_label(Some("gpt-6-luna"), Some("gpt-6-luna"), true),
+                model_label(None, None, true),
+                model_label(None, None, false),
+                model_label(Some("haiku"), None, false),
+            ],
+            [
+                "claude-opus-5-5 (agent default)",
+                "gpt-6-luna (pinned)",
+                "waiting for the agent",
+                "agent default",
+                "haiku (pinned)",
+            ]
         );
         assert_eq!(render_run_list(&[]), "Runs\n  No runs yet.\n");
     }

@@ -5,6 +5,7 @@ import {
   feedEntries,
   gateSummary,
   logView,
+  modelView,
   moveView,
   plainPullRequestUrl,
   proofType,
@@ -288,5 +289,19 @@ describe('logView', () => {
     expect(logView('stderr: warning: unused import')).toEqual({ kind: 'plain', text: 'stderr: warning: unused import' })
     expect(logView('{"type": "assistant"')).toEqual({ kind: 'plain', text: '{"type": "assistant"' })
     expect(logView('42')).toEqual({ kind: 'plain', text: '42' })
+  })
+})
+
+describe('modelView', () => {
+  test('names the model the agent reported, beside what the runner pinned', () => {
+    const view = (model: string | null, reported_model: string | null, state: 'running' | 'succeeded' = 'running') =>
+      modelView({ model, reported_model, state })
+    expect(view(null, 'claude-opus-5-5')).toEqual({ name: 'claude-opus-5-5', note: 'agent default' })
+    expect(view('haiku', 'claude-haiku-5-5')).toEqual({ name: 'claude-haiku-5-5', note: 'pinned haiku' })
+    expect(view('gpt-6-luna', 'gpt-6-luna')).toEqual({ name: 'gpt-6-luna', note: 'pinned' })
+    expect(view(null, null)).toEqual({ name: null, note: 'waiting for the agent' })
+    expect(view('haiku', null)).toEqual({ name: null, note: 'waiting for the agent, pinned haiku' })
+    expect(view(null, null, 'succeeded')).toEqual({ name: null, note: 'agent default' })
+    expect(view('haiku', null, 'succeeded')).toEqual({ name: 'haiku', note: 'pinned' })
   })
 })

@@ -371,7 +371,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           [time]  r1 (runner)  Start → In Progress
 
         Runs
-          [run]  Claude Code  runner r1  started [time]  duration —  running
+          [run]  Claude Code  model waiting for the agent  runner r1  started [time]  duration —  running
             cloning
             editing
             [200 x]
@@ -418,7 +418,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           [time]  r1 (runner)  Start → In Progress
 
         Runs
-          [run]  Claude Code  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out
+          [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out
             cloning
             editing
             [200 x]

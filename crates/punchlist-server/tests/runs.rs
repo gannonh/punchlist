@@ -725,6 +725,64 @@ async fn a_retried_log_batch_is_stored_once_and_first_line_starts_at_one(pool: P
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn the_first_model_the_agent_reports_is_the_attempts(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Model", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r1, 0).await;
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+    let log_uri = format!("/api/runs/{run_id}/log");
+    let reported = |runs: &Value| {
+        (
+            runs[0]["reported_model"].clone(),
+            runs[0]["attempts"][0]["reported_model"].clone(),
+        )
+    };
+
+    let (_, runs) = call(&app, &person.token, "GET", "/api/issues/PL-1/runs", None).await;
+    assert_eq!(reported(&runs), (Value::Null, Value::Null));
+
+    let lines = [
+        r#"{"type":"system","subtype":"hook_started"}"#,
+        r#"{"type":"system","subtype":"init","model":"claude-haiku-5-5"}"#,
+    ];
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &log_uri,
+        Some(json!({"attempt": 1, "first_line": 1, "lines": lines})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(
+        &app,
+        &r1.token,
+        "POST",
+        &log_uri,
+        Some(json!({"attempt": 1, "first_line": 3, "lines": [
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5"},"parent_tool_use_id":null}"#,
+        ]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, runs) = call(&app, &person.token, "GET", "/api/issues/PL-1/runs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        reported(&runs),
+        (json!("claude-haiku-5-5"), json!("claude-haiku-5-5"))
+    );
+    let events = sqlx::query_scalar!(
+        "SELECT count(*) AS \"n!\" FROM event WHERE issue_id = 'PL-1' AND kind = 'run'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 2, "the claim's event and the model's");
+}
+
 /// Records a pull request for the issue, as a GitHub event would.
 async fn pull_request(pool: &PgPool, number: i64, issue: &str, branch: &str, state: &str) {
     sqlx::query(
