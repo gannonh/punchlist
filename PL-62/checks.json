@@ -1,0 +1,183 @@
+[
+  {
+    "name": "1 main: the assistant text is clipped",
+    "pass": true,
+    "detail": {
+      "tag": "PRE",
+      "text": "The README is present, but `notes/` does not exist in this repo, so the three-fi",
+      "found": true,
+      "rightmost": 3881,
+      "boxRight": 1236,
+      "clipped": true,
+      "hscroll": true,
+      "lines": 1
+    }
+  }
+][
+  {
+    "name": "2 assistant text in the box's visible text, not clipped",
+    "pass": true,
+    "detail": {
+      "text": "The README is present, but `notes/` does not exist in this repo, so the three-fi",
+      "found": true,
+      "rightmost": 1221,
+      "boxRight": 1236,
+      "clipped": false,
+      "hscroll": false,
+      "lines": 15
+    }
+  },
+  {
+    "name": "1 branch: the assistant text is shown in full",
+    "pass": true,
+    "detail": {
+      "found": true,
+      "rightmost": 1221,
+      "boxRight": 1236,
+      "clipped": false,
+      "hscroll": false,
+      "lines": 15
+    }
+  },
+  {
+    "name": "3 tool call shows the tool and its target",
+    "pass": true,
+    "detail": {
+      "tool": "Bash",
+      "target": "cat README.md && echo \"---LS---\" && ls -la notes/",
+      "summary": "Bash cat README.md && echo \"---LS---\" && ls -la notes/"
+    }
+  },
+  {
+    "name": "5 one click shows the raw JSON",
+    "pass": true,
+    "detail": {
+      "before": false,
+      "after": true,
+      "raw": "{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_id\":\"53556508-3ac0-42b8-aabf-8dafb6541cb7\",\"hook_nam"
+    }
+  },
+  {
+    "name": "6 at the bottom, a new line scrolls into view within 2 s",
+    "pass": true,
+    "detail": {
+      "from": 30,
+      "to": 31,
+      "ms": 8,
+      "scrollTop": 764,
+      "scrollHeight": 1018,
+      "clientHeight": 254,
+      "lastInView": true
+    }
+  },
+  {
+    "name": "7 scrolled up, the scroll offset does not change as lines arrive",
+    "pass": true,
+    "detail": {
+      "before": 614,
+      "after": 614,
+      "from": 31,
+      "to": 33
+    }
+  },
+  {
+    "name": "9 the box uses theme variables only",
+    "pass": true,
+    "detail": {
+      "light": {
+        "bg": "rgb(241, 240, 238)",
+        "fg": "rgb(24, 24, 27)",
+        "wantBg": "rgb(241, 240, 238)",
+        "wantFg": "rgb(24, 24, 27)"
+      },
+      "dark": {
+        "bg": "rgb(28, 28, 31)",
+        "fg": "rgb(244, 244, 245)",
+        "wantBg": "rgb(28, 28, 31)",
+        "wantFg": "rgb(244, 244, 245)"
+      }
+    }
+  },
+  {
+    "name": "8 at 390 px the box has no horizontal scroll",
+    "pass": true,
+    "detail": {
+      "scrollWidth": 308,
+      "clientWidth": 308,
+      "page": [
+        390,
+        390
+      ]
+    }
+  }
+][
+  {
+    "name": "codex: 2 assistant text in the box's visible text, not clipped",
+    "pass": true,
+    "detail": {
+      "text": "I’ll load the Punchlist issue first, then inspect the pull request only through ",
+      "found": true,
+      "rightmost": 1228,
+      "boxRight": 1236,
+      "clipped": false,
+      "hscroll": false,
+      "lines": 9
+    }
+  },
+  {
+    "name": "4 codex: an item line shows its summary",
+    "pass": true,
+    "detail": {
+      "command": "$ gh pr checks 280 --repo gannonh/punchlist-sandbox → exit 0",
+      "message": "I’ll load the Punchlist issue first, then inspect the pull request only through "
+    }
+  },
+  {
+    "name": "codex: 5 one click shows the raw JSON",
+    "pass": true,
+    "detail": {
+      "before": false,
+      "after": true,
+      "raw": "{\"id\":1,\"result\":{\"userAgent\":\"punchlist-runner/0.163.0 (Linux Unknown; x86_64) herdr/0.9.5 (punchli"
+    }
+  }
+][
+  {
+    "name": "finished: 2 assistant text in the box's visible text, not clipped",
+    "pass": true,
+    "detail": {
+      "text": "PR #280 is ready for review. Requesting the move to Agent Review now.",
+      "found": true,
+      "rightmost": 1186,
+      "boxRight": 1236,
+      "clipped": false,
+      "hscroll": false,
+      "lines": 5
+    }
+  },
+  {
+    "name": "finished: 3 tool call shows the tool and its target",
+    "pass": true,
+    "detail": {
+      "tool": "Read",
+      "target": "/tmp/punchlist-verify/pl62b/worktrees/r1/worktrees/gannonh/p",
+      "summary": "Read /tmp/punchlist-verify/pl62b/worktrees/r1/worktrees/gannonh/punchlist-sandbox/PL-2/README.md"
+    }
+  },
+  {
+    "name": "finished: 5 one click shows the raw JSON",
+    "pass": true,
+    "detail": {
+      "before": false,
+      "after": true,
+      "raw": "{\"type\":\"system\",\"subtype\":\"hook_started\",\"hook_id\":\"08a99e8e-b155-48ca-904f-b4cc86954975\",\"hook_nam"
+    }
+  },
+  {
+    "name": "10 finished attempt renders the same way",
+    "pass": true,
+    "detail": {
+      "data_log": "done"
+    }
+  }
+]
