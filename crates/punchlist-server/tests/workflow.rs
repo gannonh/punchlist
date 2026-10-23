@@ -2458,6 +2458,40 @@ async fn a_reverted_workflow_reports_the_commit_it_was_loaded_from(pool: PgPool)
 }
 
 #[sqlx::test]
+async fn a_pushed_agent_that_is_not_a_kind_is_refused_and_a_kind_without_a_runner_loads(
+    pool: PgPool,
+) {
+    let s = setup(&pool).await;
+    let token = s.person.token.clone();
+    let push = |sha: char, agent: &str| {
+        let mut repo = s.github.lock().unwrap();
+        repo.sha = sha.to_string().repeat(40);
+        let file = PRD_WORKFLOW.replace("agent = \"codex\"", &format!("agent = \"{agent}\""));
+        repo.files.insert("workflow.toml".into(), file);
+        repo.files
+            .insert("prompts/in_progress.md".into(), "Build it.\n".into());
+        repo.files
+            .insert("prompts/agent_review.md".into(), "Review it.\n".into());
+    };
+    push('a', "opncode");
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 0);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["refused"]["commit_sha"], "a".repeat(40));
+    assert_eq!(
+        shown["refused"]["reason"],
+        "line 61, `dispatch.status.agent_review.agent`: unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+    );
+
+    push('b', "opencode");
+    deliver(&s, "push", "push-2", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (_, shown) = call(&s.app, &token, "GET", "/api/workflow", None).await;
+    assert_eq!(shown["commit_sha"], "b".repeat(40));
+    assert_eq!(shown["refused"], Value::Null);
+}
+
+#[sqlx::test]
 async fn a_workflow_that_drops_a_status_in_use_is_refused(pool: PgPool) {
     let s = setup(&pool).await;
     let token = s.person.token.clone();

@@ -5,6 +5,17 @@
 /// but an agent of any kind can act through its own token.
 pub const AGENT_KINDS: [&str; 5] = ["claude-code", "codex", "opencode", "pi", "cursor"];
 
+/// Why `kind` is not an agent kind, or `None` when it is one of `AGENT_KINDS`. The workflow
+/// file, `pl runner start` and the server refuse an unknown kind with this text.
+pub fn unknown_agent_kind(kind: &str) -> Option<String> {
+    (!AGENT_KINDS.contains(&kind)).then(|| {
+        format!(
+            "unknown agent kind `{kind}`; the kinds are {}",
+            AGENT_KINDS.join(", ")
+        )
+    })
+}
+
 /// The name people read for an agent key: `claude-code` is "Claude Code".
 pub fn agent_display_name(agent: &str) -> String {
     match agent {
@@ -170,6 +181,17 @@ mod tests {
     #[test]
     fn branch_names() {
         assert_eq!(branch_name("PL-12"), "feature/pl-12");
+    }
+
+    #[test]
+    fn an_unknown_agent_kind_names_the_kinds() {
+        assert_eq!(
+            unknown_agent_kind("opncode").as_deref(),
+            Some(
+                "unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+            )
+        );
+        assert_eq!(unknown_agent_kind("pi"), None);
     }
 
     #[test]

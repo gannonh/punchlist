@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use toml::Spanned;
 
+use crate::agent::unknown_agent_kind;
 use crate::gate::{Gate, RequiredCheck};
 
 const DEFAULT_WORKFLOW_TOML: &str = include_str!("default/workflow.toml");
@@ -164,6 +165,8 @@ pub struct Dispatch {
     pub agent: String,
     /// A path under `.punchlist/`, such as `prompts/in_progress.md`.
     pub prompt: Option<String>,
+    /// The line of `agent` in the file, for an error about it.
+    agent_line: usize,
     /// The line of `prompt` in the file, for an error about it.
     prompt_line: Option<usize>,
 }
@@ -244,6 +247,8 @@ pub enum Problem {
     BadRequiredCheck,
     #[error("the dispatch rule names no agent")]
     NoAgent,
+    #[error("{}", unknown_agent_kind(.0).unwrap_or_default())]
+    UnknownAgent(String),
     #[error("`max_concurrent` must be at least 1")]
     BadMaxConcurrent,
     #[error("the runtime needs the status `{0}`")]
@@ -587,6 +592,7 @@ impl Workflow {
             }
             dispatch.push(Dispatch {
                 status,
+                agent_line: errors.line(rule.agent.span().start),
                 agent: rule.agent.into_inner(),
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
                 prompt: rule.prompt.map(Spanned::into_inner),
@@ -650,7 +656,9 @@ impl Workflow {
     /// Refuses a workflow in which a runner's claim could not run: it needs the statuses
     /// `start` and `in_progress`, a runner transition between them that no lock blocks (asked
     /// of `check_transition`, as the claim does) and that has no gates, and a dispatch rule
-    /// for `in_progress`. Each error points at the nearest place that exists in the file.
+    /// for `in_progress`; and each dispatch rule's agent must be one of `AGENT_KINDS`, or no
+    /// runner claims from its status. Each error points at the nearest place that exists in
+    /// the file.
     fn check_claimable(
         &self,
         errors: &Errors,
@@ -687,6 +695,14 @@ impl Workflow {
         }
         if self.dispatch_for(IN_PROGRESS).is_none() {
             return Err(at_statuses(Problem::NoClaimDispatch));
+        }
+        if let Some(rule) = (self.dispatch.iter()).find(|r| unknown_agent_kind(&r.agent).is_some())
+        {
+            return Err(LoadError {
+                line: Some(rule.agent_line),
+                key: format!("dispatch.status.{}.agent", rule.status),
+                problem: Problem::UnknownAgent(rule.agent.clone()),
+            });
         }
         Ok(())
     }
@@ -1022,7 +1038,7 @@ struct RawDispatch {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawDispatchRule {
-    /// The agent to start, such as `claude-code` or `codex`.
+    /// The agent to start: one of `claude-code`, `codex`, `opencode`, `pi` and `cursor`.
     #[schemars(with = "String")]
     agent: Spanned<String>,
     /// The prompt file, relative to `.punchlist/`, such as `prompts/in_progress.md`.
@@ -1101,6 +1117,7 @@ enum RequirementName {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AGENT_KINDS;
 
     use Role::{Agent, Person, Runner};
 
@@ -1542,7 +1559,7 @@ mod tests {
         );
         assert_eq!(
             error(
-                "statuses = [\"a\"]\n[dispatch.status.a]\nagent = \"x\"\nprompt = \"../secrets\""
+                "statuses = [\"a\"]\n[dispatch.status.a]\nagent = \"codex\"\nprompt = \"../secrets\""
             ),
             (
                 Some(4),
@@ -1620,6 +1637,39 @@ mod tests {
         assert_eq!(problem, None);
         // Nothing to keep in force.
         assert!(Workflow::from_stored("statuses = [", prompts()).is_err());
+    }
+
+    #[test]
+    fn an_unknown_agent_kind_is_refused_and_a_stored_one_stays_readable() {
+        let typo = edited("agent = \"codex\"", "agent = \"opncode\"");
+        let error = Workflow::from_toml(&typo).unwrap_err();
+        assert_eq!(
+            (error.line, error.key.as_str()),
+            (Some(61), "dispatch.status.agent_review.agent")
+        );
+        assert_eq!(
+            error.to_string(),
+            "line 61, `dispatch.status.agent_review.agent`: unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+        );
+        let prompts = BTreeMap::from(
+            ["prompts/in_progress.md", "prompts/agent_review.md"].map(|p| (p.into(), "Do.".into())),
+        );
+        let (stored, problem) = Workflow::from_stored(&typo, prompts).unwrap();
+        assert_eq!(problem, Some(error));
+        assert_eq!(
+            stored.dispatch_for("agent_review").unwrap().agent,
+            "opncode"
+        );
+        // A kind no runner has an adapter for yet still loads.
+        let known = edited("agent = \"codex\"", "agent = \"pi\"");
+        assert_eq!(
+            Workflow::from_toml(&known)
+                .unwrap()
+                .dispatch_for("agent_review")
+                .unwrap()
+                .agent,
+            "pi"
+        );
     }
 
     #[test]
@@ -1847,5 +1897,11 @@ mod tests {
             );
         }
         assert_eq!(schema["title"], "Punchlist workflow");
+        let kinds = AGENT_KINDS.map(|kind| format!("`{kind}`"));
+        let (last, rest) = kinds.split_last().unwrap();
+        assert_eq!(
+            schema["$defs"]["RawDispatchRule"]["properties"]["agent"]["description"],
+            format!("The agent to start: one of {} and {last}.", rest.join(", "))
+        );
     }
 }
