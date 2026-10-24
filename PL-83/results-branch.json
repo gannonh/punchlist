@@ -1,0 +1,169 @@
+[
+  {
+    "n": 1,
+    "name": "branch: g m opens /w/PL/projects, header links Projects",
+    "pass": true,
+    "detail": {
+      "path": "/w/PL/projects",
+      "headerLink": 1
+    }
+  },
+  {
+    "n": 2,
+    "name": "projects and milestones oldest first",
+    "pass": true,
+    "detail": {
+      "projects": [
+        "Punchlist\n2 milestones"
+      ],
+      "shown": [
+        "Gate 1",
+        "Gate 2"
+      ],
+      "stored": "name  \n--------\n Gate 1\n Gate 2\n(2 rows)"
+    }
+  },
+  {
+    "n": 3,
+    "name": "PASS when keeps line breaks; empty reads No PASS when yet",
+    "pass": true,
+    "detail": {
+      "pw1": "PASS when\nLine one\nLine two",
+      "pw2": "PASS when\nNo PASS when yet"
+    }
+  },
+  {
+    "n": 4,
+    "name": "Gate 1 reads 1 of 2 done",
+    "pass": true,
+    "detail": {
+      "done1": "1 of 2 done",
+      "byStatus": "status  | count \n----------+-------\n backlog  |     1\n canceled |     1\n done     |     1\n(3 rows)"
+    }
+  },
+  {
+    "n": 5,
+    "name": "bar segments done 1 and backlog 1 in workflow order, named",
+    "pass": true,
+    "detail": {
+      "segs": [
+        [
+          "backlog",
+          "1",
+          "Backlog: 1"
+        ],
+        [
+          "done",
+          "1",
+          "Done: 1"
+        ]
+      ],
+      "order": [
+        "backlog",
+        "todo",
+        "start",
+        "in_progress",
+        "agent_review",
+        "human_review",
+        "merging",
+        "done",
+        "canceled"
+      ]
+    }
+  },
+  {
+    "n": 6,
+    "name": "open milestone lists PL-1, PL-2 not PL-3; links; Show in list filters",
+    "pass": true,
+    "detail": {
+      "links": [
+        [
+          "PL-2",
+          "/issues/PL-2"
+        ],
+        [
+          "PL-1",
+          "/issues/PL-1"
+        ]
+      ],
+      "canceledText": "1 canceled, not counted",
+      "issuePath": "/issues/PL-2",
+      "listUrl": "/w/PL?milestone=9f9f2a4e-df4f-412d-bdb0-926949768e80",
+      "select": "Punchlist · Gate 1",
+      "listed": [
+        "PL-2"
+      ]
+    }
+  },
+  {
+    "n": 7,
+    "name": "live count 1 of 3 done within 2 s, no reload, one more edited event",
+    "pass": true,
+    "detail": {
+      "ms": 846,
+      "noReload": true,
+      "editedBefore": 3,
+      "editedAfter": 4
+    }
+  },
+  {
+    "n": 8,
+    "name": "HTML in pass_when shows as text",
+    "pass": true,
+    "detail": {
+      "xssText": "PASS when\n<img src=x onerror=alert(1)>",
+      "imgs": 0,
+      "dialogs": []
+    }
+  },
+  {
+    "n": 9,
+    "name": "no sideways scroll at 390 px; PASS when not clipped",
+    "pass": true,
+    "detail": {
+      "scrollWidth": 390,
+      "clientWidth": 390,
+      "passWhen": [
+        {
+          "text": "Line one\nLine two",
+          "clipped": false,
+          "lines": 2
+        },
+        {
+          "text": "No PASS when yet",
+          "clipped": false,
+          "lines": 1
+        },
+        {
+          "text": "<img src=x onerror=alert(1)>",
+          "clipped": false,
+          "lines": 1
+        }
+      ]
+    }
+  },
+  {
+    "n": 10,
+    "name": "Tab reaches milestones and issue links, Enter opens, Esc to list, pl:render projects",
+    "pass": true,
+    "detail": {
+      "reached": [
+        "m:PunchlistPL",
+        "m:Gate 1",
+        "i:PL-2",
+        "i:PL-4",
+        "i:PL-1",
+        "m:Gate 2",
+        "m:XSS"
+      ],
+      "opened": true,
+      "escPath": "/w/PL",
+      "renders": [
+        {
+          "layout": "projects",
+          "milestones": 3
+        }
+      ]
+    }
+  }
+]

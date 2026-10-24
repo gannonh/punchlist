@@ -1,0 +1,11 @@
+[
+  {
+    "n": 1,
+    "name": "main: g m stays on /w/PL, no Projects link",
+    "pass": true,
+    "detail": {
+      "path": "/w/PL",
+      "headerLink": 0
+    }
+  }
+]
