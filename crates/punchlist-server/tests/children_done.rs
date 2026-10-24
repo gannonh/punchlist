@@ -226,3 +226,80 @@ async fn a_workflow_without_children_done_moves_nothing(pool: PgPool) {
     assert_eq!(status(&pool, &epic).await, "backlog");
     assert_eq!(transitions(&pool, &epic).await, []);
 }
+
+/// Sets statuses with SQL, as children closed before `children_done` existed were.
+async fn closed_before(pool: &PgPool, ids: &[(&str, &str)]) {
+    for (id, status) in ids {
+        sqlx::query("UPDATE issue SET status = $2 WHERE id = $1")
+            .bind(id)
+            .bind(status)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+async fn transition_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM transition")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_start_moves_epics_whose_children_were_already_done(pool: PgPool) {
+    let (app, person) = setup(&pool, true).await;
+    let t = &person.token;
+    let epic = issue(&app, t, "Epic", None).await;
+    let first = issue(&app, t, "First", Some(&epic)).await;
+    let second = issue(&app, t, "Second", Some(&epic)).await;
+    let open = issue(&app, t, "Open", None).await;
+    let closed = issue(&app, t, "Closed", Some(&open)).await;
+    let todo = issue(&app, t, "Todo", Some(&open)).await;
+    let top = issue(&app, t, "Top", None).await;
+    let middle = issue(&app, t, "Middle", Some(&top)).await;
+    let leaf = issue(&app, t, "Leaf", Some(&middle)).await;
+    closed_before(
+        &pool,
+        &[
+            (&first, "done"),
+            (&second, "canceled"),
+            (&closed, "done"),
+            (&todo, "todo"),
+            (&leaf, "done"),
+        ],
+    )
+    .await;
+
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
+    assert_eq!(status(&pool, &epic).await, "done");
+    assert_eq!(
+        transitions(&pool, &epic).await,
+        [by_punchlist("backlog", "done")]
+    );
+    assert_eq!(status(&pool, &open).await, "backlog");
+    assert_eq!(transitions(&pool, &open).await, []);
+    // The top comes before its child epic, and moves once that epic does.
+    assert_eq!(status(&pool, &middle).await, "done");
+    assert_eq!(status(&pool, &top).await, "done");
+    assert_eq!(
+        transitions(&pool, &top).await,
+        [by_punchlist("backlog", "done")]
+    );
+
+    assert_eq!(transition_count(&pool).await, 3);
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
+    assert_eq!(transition_count(&pool).await, 3);
+}
+
+#[sqlx::test]
+async fn a_start_without_children_done_in_the_workflow_moves_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, false).await;
+    let t = &person.token;
+    let epic = issue(&app, t, "Epic", None).await;
+    let child = issue(&app, t, "Child", Some(&epic)).await;
+    closed_before(&pool, &[(&child, "done")]).await;
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
+    assert_eq!(status(&pool, &epic).await, "backlog");
+    assert_eq!(transition_count(&pool).await, 0);
+}

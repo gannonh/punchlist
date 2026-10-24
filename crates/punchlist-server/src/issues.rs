@@ -726,8 +726,8 @@ pub(crate) async fn write_transition(
     }
     let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
     let (seq, created_at) = record_transition_event(tx, actor, id, transition_id).await?;
-    if to == DONE || to == CANCELED {
-        children_done(tx, actor.workspace_id, workflow, id).await?;
+    if let (DONE | CANCELED, Some(parent)) = (to, &issue.parent) {
+        children_done(tx, actor.workspace_id, workflow, parent).await?;
     }
     let mut detail = EventDetail::transition(from, to.to_string(), workflow_version.to_string());
     if let EventDetail::Transition {
@@ -756,28 +756,24 @@ pub(crate) async fn write_transition(
 /// the event from its status, if the workflow has one and its gates pass, as the workspace's
 /// `Punchlist` actor, in the child's transaction. `write_transition` then checks the parent's
 /// own parent. The parent's row is locked before its children are read, so of two children
-/// closing at once the second sees the first's status.
-async fn children_done(
+/// closing at once the second sees the first's status. A parent with no children stays.
+pub(crate) async fn children_done(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     workflow: &Workflow,
-    child: &str,
+    parent: &str,
 ) -> Result<(), ApiError> {
-    let Some(parent) = sqlx::query!(
-        "SELECT p.id, p.status FROM issue c JOIN issue p ON p.id = c.parent_id
-         WHERE c.id = $1 FOR UPDATE OF p",
-        child,
+    let parent = sqlx::query!(
+        "SELECT id, status FROM issue WHERE id = $1 FOR UPDATE",
+        parent,
     )
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        return Ok(());
-    };
+    .fetch_one(&mut *tx)
+    .await?;
     let Some(transition) = workflow.transition_on(&parent.status, "children_done") else {
         return Ok(());
     };
     let done = sqlx::query_scalar!(
-        r#"SELECT bool_and(status IN ($2, $3)) AND bool_or(status = $2) AS "done!"
+        r#"SELECT COALESCE(bool_and(status IN ($2, $3)) AND bool_or(status = $2), false) AS "done!"
            FROM issue WHERE parent_id = $1"#,
         parent.id,
         DONE,
