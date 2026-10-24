@@ -51,9 +51,10 @@ export async function deliverPullRequest(
 ) {
   const payload = fixture(`pull_request_${action}`) as {
     repository: { name: string }
-    pull_request: { number: number; head: { ref: string; sha: string } }
+    pull_request: { number: number; html_url: string; head: { ref: string; sha: string } }
   }
   payload.pull_request.number = head.number
+  payload.pull_request.html_url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(head.number)}`
   payload.pull_request.head.ref = `feature/${id.toLowerCase()}-live`
   payload.pull_request.head.sha = head.sha
   await deliver(request, 'pull_request', payload)

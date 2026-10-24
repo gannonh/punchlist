@@ -1210,7 +1210,13 @@ async fn open_pull_requests_list_the_workspaces_open_and_draft_ones_with_what_th
 
     let (status, body) = get(&s, &s.person.token, "/api/pull-requests").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let issue = |id: &str, title: &str, status: &str, name: &str| json!({"id": id, "title": title, "status": status, "status_name": name});
+    let issue = |id: &str, title: &str, status: &str, name: &str| {
+        let mut issue = json!({"id": id, "title": title, "status": status, "status_name": name});
+        if status == "merging" {
+            issue["on_merge_to"] = json!("Done");
+        }
+        issue
+    };
     let item = |number: i64, title: &str, branch: &str, draft: bool, url: Value, issue: Value| {
         json!({
             "number": number, "title": title, "branch": branch, "url": url, "draft": draft,

@@ -1651,6 +1651,30 @@ async fn a_locked_status_refuses_agent_comments(pool: PgPool) {
     assert_eq!(body["code"], "locked");
 }
 
+#[sqlx::test]
+async fn only_merging_waits_on_a_merge(pool: PgPool) {
+    let s = setup(&pool).await;
+    let (status, body) = call(&s.app, &s.person.token, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let status = |key: &str, name: &str, dispatch: Value| json!({"key": key, "name": name, "locked_to": [], "dispatch": dispatch, "closed": false});
+    assert_eq!(
+        body["statuses"],
+        json!([
+            status("backlog", "Backlog", Value::Null),
+            status("todo", "Todo", Value::Null),
+            status("start", "Start", Value::Null),
+            status("in_progress", "In Progress", json!("claude-code")),
+            status("agent_review", "Agent Review", json!("codex")),
+            {"key": "human_review", "name": "Human Review", "locked_to": ["agent", "runner"],
+             "dispatch": null, "closed": false},
+            {"key": "merging", "name": "Merging", "locked_to": [], "dispatch": null,
+             "closed": false, "on_merge_to": "Done"},
+            {"key": "done", "name": "Done", "locked_to": [], "dispatch": null, "closed": true},
+            {"key": "canceled", "name": "Canceled", "locked_to": [], "dispatch": null, "closed": true},
+        ])
+    );
+}
+
 async fn workflow_versions(pool: &PgPool) -> i64 {
     sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM workflow_version"#)
         .fetch_one(pool)

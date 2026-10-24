@@ -62,6 +62,6 @@ export const mergeTone = (state: string): Tone => (MERGE_STATES.get(state) ?? UN
 
 /** The notice on a row that waits on a merge, after its bold lead `Waits on a merge on GitHub.` */
 export const waitNotice = (pr: OpenPullRequest): string =>
-  `${pr.issue?.id ?? 'Its issue'} moves to Done when GitHub reports the merge.${pr.merge_state === 'dirty' ? ' Resolve the conflicts first.' : ''}`
+  `${pr.issue?.id ?? 'Its issue'} moves to ${pr.issue?.on_merge_to ?? 'its next status'} when GitHub reports the merge.${pr.merge_state === 'dirty' ? ' Resolve the conflicts first.' : ''}`
 
 export const threadsText = (n: number): string => `${String(n)} open thread${n === 1 ? '' : 's'}`

@@ -18,7 +18,13 @@ const pr = (
   checks_total: 6,
   open_threads: 0,
   updated_at: '2026-10-09T18:00:00Z',
-  issue: issue && { id: issue[0], title: 'An issue', status: issue[1], status_name: issue[2] },
+  issue: issue && {
+    id: issue[0],
+    title: 'An issue',
+    status: issue[1],
+    status_name: issue[2],
+    ...(issue[1] === 'merging' && { on_merge_to: 'Done' }),
+  },
   waits_on_merge: !draft && issue?.[1] === 'merging',
 })
 

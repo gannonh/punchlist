@@ -1,14 +1,26 @@
 import { memo, useLayoutEffect } from 'react'
 import { Lock } from 'lucide-react'
 import { cn } from 'cn'
-import { Assignee, Gates, Labels, LockBadge, PullRequest, Run, StatusDot, TransitionNote } from '@/components/atoms'
+import {
+  Assignee,
+  Gates,
+  Labels,
+  LockBadge,
+  MergeWait,
+  PullRequest,
+  Run,
+  StatusDot,
+  TransitionNote,
+} from '@/components/atoms'
 import {
   agentName,
   peopleOnly,
   rowView,
   type Group,
   type IssueRow,
+  type RowView,
   type Snippet,
+  type StatusInfo,
   type Transition,
   type Transitions,
 } from '@/model/issues'
@@ -28,6 +40,8 @@ function useRenderMeasure(layout: 'list' | 'board', groups: Group[]) {
 
 interface RowProps {
   row: IssueRow
+  /** The status of the group or column the row is in. */
+  status: StatusInfo
   selected: boolean
   transition: Transition | undefined
   /** Where the filter's text matched the body or a comment. */
@@ -68,14 +82,23 @@ function SnippetLine({ snippet }: { snippet: Snippet }) {
   )
 }
 
-const ListRow = memo(function ListRow({ row, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
-  const view = rowView(row, now)
+function GatesOrMergeWait({ view }: { view: RowView }) {
+  return view.waitsOnMerge ? (
+    <MergeWait id={view.id} number={view.pullRequest.number} wait={view.waitsOnMerge} />
+  ) : (
+    <Gates view={view.gates} />
+  )
+}
+
+const ListRow = memo(function ListRow({ row, status, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
+  const view = rowView(row, now, status)
   return (
     <div
       className="list-row cursor-default items-center border-t px-2.5 py-2 outline-none first:border-t-0 hover:bg-stone-50"
       role="option"
       data-issue={view.id}
       data-status={view.status}
+      data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
       aria-selected={selected}
       tabIndex={-1}
       onClick={() => {
@@ -90,8 +113,8 @@ const ListRow = memo(function ListRow({ row, selected, transition, snippet, now,
       <Assignee view={view.assignee} />
       <span className="meta">
         <Run view={view.run} />
-        <PullRequest view={view.pullRequest} />
-        <Gates view={view.gates} />
+        <PullRequest view={view.pullRequest} link />
+        <GatesOrMergeWait view={view} />
       </span>
       {snippet && <SnippetLine snippet={snippet} />}
       {transition && (
@@ -106,14 +129,15 @@ const ListRow = memo(function ListRow({ row, selected, transition, snippet, now,
   )
 })
 
-const Card = memo(function Card({ row, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
-  const view = rowView(row, now)
+const Card = memo(function Card({ row, status, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
+  const view = rowView(row, now, status)
   return (
     <article
       className="grid cursor-default gap-1.5 rounded-md border bg-card px-2.5 py-2 outline-none hover:border-stone-300"
       role="option"
       data-issue={view.id}
       data-status={view.status}
+      data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
       aria-selected={selected}
       tabIndex={-1}
       onClick={() => {
@@ -128,10 +152,10 @@ const Card = memo(function Card({ row, selected, transition, snippet, now, onPic
       {snippet && <SnippetLine snippet={snippet} />}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Run view={view.run} />
-        <PullRequest view={view.pullRequest} />
+        <PullRequest view={view.pullRequest} link />
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <Gates view={view.gates} />
+        <GatesOrMergeWait view={view} />
       </div>
       {transition && (
         <TransitionNote
@@ -171,6 +195,7 @@ export function ListView({ groups, selected, transitions, snippets, now, onPick,
                 <ListRow
                   key={row.issue.id}
                   row={row}
+                  status={group.status}
                   selected={row.issue.id === selected}
                   transition={transitions[row.issue.id]}
                   snippet={snippets.get(row.issue.id)}
@@ -246,6 +271,7 @@ export function BoardView({
                     <Card
                       key={row.issue.id}
                       row={row}
+                      status={group.status}
                       selected={row.issue.id === selected}
                       transition={transitions[row.issue.id]}
                       snippet={snippets.get(row.issue.id)}
