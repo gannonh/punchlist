@@ -7,6 +7,7 @@ mod error;
 mod events;
 mod github;
 mod github_api;
+mod inbox;
 mod issues;
 mod jobs;
 mod linear_import;
@@ -134,6 +135,7 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
         .merge(actors::routes())
         .merge(events::routes())
         .merge(github::routes())
+        .merge(inbox::routes())
         .merge(issues::routes())
         .merge(linear_import::routes())
         .merge(projects::routes())
