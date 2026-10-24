@@ -12,8 +12,8 @@ export const inField = (target: EventTarget | null) =>
 const CHORD_MS = 1000
 
 /**
- * `g` then `p` within a second opens the Pull requests page, and `i` the inbox, except while typing or with a dialog
- * or menu open.
+ * `g` then `p` within a second opens the Pull requests page, `g` then `m` the projects screen, and `i` the inbox,
+ * except while typing or with a dialog or menu open.
  */
 function useScreenKeys(prefix: string) {
   const navigate = useNavigate()
@@ -31,6 +31,10 @@ function useScreenKeys(prefix: string) {
         event.preventDefault()
         g = -Infinity
         void navigate({ to: '/w/$prefix/pull-requests', params: { prefix } })
+      } else if (event.key === 'm' && event.timeStamp - g <= CHORD_MS) {
+        event.preventDefault()
+        g = -Infinity
+        void navigate({ to: '/w/$prefix/projects', params: { prefix } })
       } else g = -Infinity
     }
     document.addEventListener('keydown', onKey)
@@ -44,8 +48,8 @@ const NAV =
   'rounded-sm px-0.5 pb-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring aria-[current=page]:font-semibold aria-[current=page]:text-foreground aria-[current=page]:shadow-[inset_0_-2px_0_var(--primary)]'
 
 /**
- * The header of the list, the board, the Pull requests page and the inbox: the workspace menu, its screens, then the
- * screen's own controls.
+ * The header of the list, the board, the Pull requests page, the inbox and the projects screen: the workspace menu,
+ * its screens, then the screen's own controls.
  */
 export function AppHeader({
   workspace,
@@ -55,7 +59,7 @@ export function AppHeader({
   children,
 }: {
   workspace: Workspace
-  current: 'issues' | 'pull-requests' | 'inbox'
+  current: 'issues' | 'pull-requests' | 'inbox' | 'projects'
   /** The open pull requests' count, once read. */
   pullRequests: number | undefined
   /** The inbox's unread count, once read. */
@@ -113,6 +117,14 @@ export function AppHeader({
               {countText(inbox)}
             </span>
           )}
+        </Link>
+        <Link
+          to="/w/$prefix/projects"
+          params={{ prefix }}
+          className={NAV}
+          aria-current={current === 'projects' ? 'page' : undefined}
+        >
+          Projects
         </Link>
       </nav>
       {children}

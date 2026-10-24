@@ -15,6 +15,7 @@ import { issuePrefix, pickWorkspace } from '@/model/workspaces'
 import { InboxScreen } from '@/screens/inbox'
 import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type ListSearch } from '@/screens/issues'
+import { ProjectsScreen } from '@/screens/projects'
 import { PullRequestsScreen } from '@/screens/pull-requests'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
@@ -112,6 +113,14 @@ const oldInbox = createRoute({
   },
 })
 
+const oldProjects = createRoute({
+  getParentRoute: () => root,
+  path: '/projects',
+  beforeLoad: async ({ context }) => {
+    throw redirect({ to: '/w/$prefix/projects', params: { prefix: await toWorkspace(context.queryClient) } })
+  },
+})
+
 // A workspace's screens. A prefix the account is not in opens `/`.
 const workspace = createRoute({
   getParentRoute: () => root,
@@ -173,6 +182,15 @@ const inbox = createRoute({
   },
 })
 
+const projects = createRoute({
+  getParentRoute: () => workspace,
+  path: '/projects',
+  component: function Projects() {
+    const { session, workspace } = projects.useRouteContext()
+    return <ProjectsScreen key={workspace.id} workspace={workspace} me={session.actor.name} />
+  },
+})
+
 // The issue page, in the issue's workspace. A browser whose requests carry a standalone agent's bearer token shows
 // it as that agent, in the agent's workspace, with no workspace menu.
 const issue = createRoute({
@@ -206,7 +224,8 @@ const router = createRouter({
     home,
     oldPullRequests,
     oldInbox,
-    workspace.addChildren([issues, pullRequests, inbox]),
+    oldProjects,
+    workspace.addChildren([issues, pullRequests, inbox, projects]),
     issue,
   ]),
   context: { queryClient },
