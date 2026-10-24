@@ -28,7 +28,7 @@ const MAX_LIMIT: u32 = 100;
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-struct SearchQuery {
+pub(crate) struct SearchQuery {
     /// One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one
     /// space, matched as a substring in any case.
     q: String,
@@ -48,7 +48,7 @@ struct SearchQuery {
         (status = 422, body = ErrorBody, description = "A query under 3 or over 200 characters."),
     )
 )]
-async fn search(
+pub(crate) async fn search(
     State(state): State<AppState>,
     actor: Actor,
     Query(query): Query<SearchQuery>,

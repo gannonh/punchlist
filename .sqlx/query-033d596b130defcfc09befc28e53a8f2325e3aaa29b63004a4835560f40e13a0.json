@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.id, p.status FROM issue c JOIN issue p ON p.id = c.parent_id\n         WHERE c.id = $1 FOR UPDATE OF p",
+  "query": "SELECT id, status FROM issue WHERE id = $1 FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "5fe449734cb01445f5326b80ebc40d29a776edc4627155b3f0a1b95a14fe3d29"
+  "hash": "033d596b130defcfc09befc28e53a8f2325e3aaa29b63004a4835560f40e13a0"
 }

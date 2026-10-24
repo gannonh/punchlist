@@ -17,13 +17,55 @@ pub struct Bootstrap {
 pub struct Bootstrapped {
     pub workspace_id: Uuid,
     pub actor_id: Uuid,
-    /// The person's bearer token. Shown once; only its hash is stored.
+    pub account_id: Uuid,
+    /// The account's bearer token. Shown once; only its hash is stored.
     pub token: String,
 }
 
+/// Creates the workspace, its repository and its person, in a new account named as the
+/// person, with a new token.
 pub async fn bootstrap(pool: &PgPool, input: &Bootstrap) -> anyhow::Result<Bootstrapped> {
     let token = crate::auth::new_token();
     let mut tx = pool.begin().await?;
+    let account_id = sqlx::query_scalar!(
+        "INSERT INTO account (name, token_hash) VALUES ($1, $2) RETURNING id",
+        input.person_name,
+        hash_token(&token),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let (workspace_id, actor_id) = create(&mut tx, input, account_id).await?;
+    tx.commit().await?;
+    Ok(Bootstrapped {
+        workspace_id,
+        actor_id,
+        account_id,
+        token,
+    })
+}
+
+/// `bootstrap --account`: creates the workspace, its repository and its person in an existing
+/// account, whose token reaches it. Answers the workspace and the person.
+pub async fn join(
+    pool: &PgPool,
+    account_id: Uuid,
+    input: &Bootstrap,
+) -> anyhow::Result<(Uuid, Uuid)> {
+    let mut tx = pool.begin().await?;
+    sqlx::query_scalar!("SELECT id FROM account WHERE id = $1", account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no account {account_id}"))?;
+    let created = create(&mut tx, input, account_id).await?;
+    tx.commit().await?;
+    Ok(created)
+}
+
+async fn create(
+    tx: &mut sqlx::PgConnection,
+    input: &Bootstrap,
+    account_id: Uuid,
+) -> anyhow::Result<(Uuid, Uuid)> {
     let workspace_id = sqlx::query_scalar!(
         "INSERT INTO workspace (name, issue_prefix) VALUES ($1, $2) RETURNING id",
         input.workspace_name,
@@ -40,18 +82,13 @@ pub async fn bootstrap(pool: &PgPool, input: &Bootstrap) -> anyhow::Result<Boots
     .execute(&mut *tx)
     .await?;
     let actor_id = sqlx::query_scalar!(
-        "INSERT INTO actor (workspace_id, name, role, token_hash)
+        "INSERT INTO actor (workspace_id, name, role, account_id)
          VALUES ($1, $2, 'person', $3) RETURNING id",
         workspace_id,
         input.person_name,
-        hash_token(&token),
+        account_id,
     )
     .fetch_one(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(Bootstrapped {
-        workspace_id,
-        actor_id,
-        token,
-    })
+    Ok((workspace_id, actor_id))
 }

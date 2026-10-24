@@ -64,7 +64,7 @@ pub(crate) fn person_only(actor: &Actor) -> Result<(), ApiError> {
         (status = 422, body = ErrorBody, description = "An unknown kind or owner, or a name over 100 characters."),
     )
 )]
-async fn create_agent(
+pub(crate) async fn create_agent(
     State(state): State<AppState>,
     actor: Actor,
     Json(request): Json<CreateAgent>,
@@ -153,7 +153,7 @@ async fn create_agent(
         (status = 403, body = ErrorBody, description = "A runner's or a run's agent's token."),
     )
 )]
-async fn list_actors(
+pub(crate) async fn list_actors(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<ActorList>, ApiError> {

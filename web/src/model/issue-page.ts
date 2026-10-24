@@ -215,6 +215,14 @@ export function tokens(input: number | null | undefined, output: number | null |
 }
 
 /**
+ * The cost the agent reported, as the server stored it: no rounding, so no float. Null when it
+ * reported none (Codex), which is not `$0`.
+ */
+export function cost(value: string | null | undefined): string | null {
+  return value === null || value === undefined ? null : `$${value}`
+}
+
+/**
  * The model an attempt ran on, as `pl run list` says it: the model the agent reported, beside
  * what the runner pinned, if anything. `name` is null when there is no model to name, and
  * `note` then stands alone.

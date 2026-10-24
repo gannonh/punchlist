@@ -279,7 +279,7 @@ test('the milestone filter lives in the URL, follows edits, and combines with th
 
   await page.getByLabel('Milestone filter').selectOption({ label: `${name} · M1` })
   await expect.poll(shown).toEqual([a, b])
-  await expect(page).toHaveURL(`/?milestone=${first}`)
+  await expect(page).toHaveURL(`/w/PL?milestone=${first}`)
 
   await page.reload()
   await expect.poll(shown).toEqual([a, b])
@@ -293,16 +293,16 @@ test('the milestone filter lives in the URL, follows edits, and combines with th
   await page.getByLabel('Project filter').selectOption({ label: name })
   await page.getByLabel('Milestone filter').selectOption({ label: 'No milestone' })
   await expect.poll(shown).toEqual([a, d])
-  await expect(page).toHaveURL(`/?project=${project.id}&milestone=none`)
+  await expect(page).toHaveURL(`/w/PL?project=${project.id}&milestone=none`)
   await page.getByLabel('Filter issues').fill('alone')
   await expect.poll(shown).toEqual([d])
 
   await page.getByRole('button', { name: 'Board' }).click()
   await expect.poll(shown).toEqual([d])
-  await expect(page).toHaveURL(`/?layout=board&project=${project.id}&milestone=none`)
+  await expect(page).toHaveURL(`/w/PL?layout=board&project=${project.id}&milestone=none`)
   await page.getByLabel('Filter issues').fill('nothing has this title')
   await page.getByRole('button', { name: 'Clear filters' }).click()
-  await expect(page).toHaveURL('/?layout=board')
+  await expect(page).toHaveURL('/w/PL?layout=board')
 })
 
 test('the label and status filters live in the URL, follow edits, and pick the board\'s columns', async ({
@@ -346,7 +346,7 @@ test('the label and status filters live in the URL, follow edits, and pick the b
   await choose('Label filter', ui)
   await expect.poll(shown).toEqual([b])
   await expect(page.getByLabel('Label filter', { exact: true })).toHaveText(`Labels: ${idea}, ${ui}`)
-  await expect(page).toHaveURL(`/?label=${idea}&label=${ui}`)
+  await expect(page).toHaveURL(`/w/PL?label=${idea}&label=${ui}`)
 
   await ok(await request.patch(`/api/issues/${a}`, { headers: person, data: { labels: [idea, ui] } }))
   await expect.poll(shown).toEqual([a, b])
@@ -357,7 +357,7 @@ test('the label and status filters live in the URL, follow edits, and pick the b
   await expect.poll(shown).toEqual([a, d, e])
   await choose('Status filter', 'Todo')
   await expect.poll(shown).toEqual([d])
-  await expect(page).toHaveURL(`/?label=${ui}&status=todo`)
+  await expect(page).toHaveURL(`/w/PL?label=${ui}&status=todo`)
   await page.reload()
   await expect.poll(shown).toEqual([d])
   await expect(page.getByLabel('Status filter', { exact: true })).toHaveText('Statuses: Todo')
@@ -369,10 +369,10 @@ test('the label and status filters live in the URL, follow edits, and pick the b
   await expect
     .poll(() => page.locator('[data-column-section]').evaluateAll((s) => s.map((c) => c.getAttribute('data-column-section'))))
     .toEqual(['todo', 'start'])
-  await expect(page).toHaveURL(`/?layout=board&label=${ui}&status=todo&status=start`)
+  await expect(page).toHaveURL(`/w/PL?layout=board&label=${ui}&status=todo&status=start`)
   await page.getByLabel('Filter issues').fill('nothing has this title')
   await page.getByRole('button', { name: 'Clear filters' }).click()
-  await expect(page).toHaveURL('/?layout=board')
+  await expect(page).toHaveURL('/w/PL?layout=board')
 })
 
 test('the filter finds bodies and comments with a marked snippet, and Enter opens the matched comment', async ({
@@ -586,5 +586,5 @@ test('Enter opens the issue page, and a comment from its composer shows in the f
   const shown = execFileSync(pl, ['issue', 'show', id], { env: { ...process.env, PUNCHLIST_CONFIG: process.env.E2E_CONFIG } })
   expect(shown.toString()).toContain(text)
   await page.keyboard.press('Escape')
-  await expect(page).toHaveURL(/\/$/)
+  await expect(page).toHaveURL(/\/w\/PL$/)
 })

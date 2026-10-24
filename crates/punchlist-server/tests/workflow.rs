@@ -2151,9 +2151,7 @@ async fn an_unreadable_workspace_does_not_abort_startup_catch_up(pool: PgPool) {
         .await
         .unwrap();
 
-    punchlist_server::catch_up_merges_at_start(&pool)
-        .await
-        .unwrap();
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
     assert_eq!(issue_status(&pool).await, "done");
     assert_eq!(
         event_transitions(&pool).await,
@@ -2165,14 +2163,10 @@ async fn an_unreadable_workspace_does_not_abort_startup_catch_up(pool: PgPool) {
 async fn refused_merge_stays_final_at_start(s: &Setup) {
     let pool = &s.state.pool;
     let before = events_by_kind(pool).await;
-    punchlist_server::catch_up_merges_at_start(pool)
-        .await
-        .unwrap();
+    punchlist_server::catch_up_at_start(pool).await.unwrap();
     assert_eq!(events_by_kind(pool).await, before);
 
-    punchlist_server::catch_up_merges_at_start(pool)
-        .await
-        .unwrap();
+    punchlist_server::catch_up_at_start(pool).await.unwrap();
     assert_eq!(issue_status(pool).await, "merging");
     assert_eq!(events_by_kind(pool).await, before);
 }

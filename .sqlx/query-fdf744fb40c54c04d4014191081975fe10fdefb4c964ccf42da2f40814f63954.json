@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT w.id, w.name, w.issue_prefix, r.owner || '/' || r.name AS \"repository!\"\n           FROM workspace w JOIN repository r ON r.workspace_id = w.id\n           WHERE EXISTS (SELECT 1 FROM actor a WHERE a.workspace_id = w.id\n                         AND (a.account_id = $1 OR a.id = $2))\n           ORDER BY w.created_at, w.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "issue_prefix",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "workspace",
+            "name": "issue_prefix"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "repository!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "fdf744fb40c54c04d4014191081975fe10fdefb4c964ccf42da2f40814f63954"
+}

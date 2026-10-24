@@ -14,7 +14,7 @@ punchlist-client.workspace = true
 punchlist-core.workspace = true
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -10,7 +10,8 @@ import {
   RouterProvider,
 } from '@tanstack/react-router'
 import { Toaster } from '@/components/ui/sonner'
-import { sessionQuery } from '@/lib/queries'
+import { sessionQuery, workspacesQuery } from '@/lib/queries'
+import { issuePrefix, pickWorkspace } from '@/model/workspaces'
 import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type ListSearch } from '@/screens/issues'
 import { PullRequestsScreen } from '@/screens/pull-requests'
@@ -54,8 +55,71 @@ function stringifySearch(search: Record<string, unknown>): string {
   return text ? `?${text}` : ''
 }
 
-const issues = createRoute({
+const signedIn = async (queryClient: QueryClient) => {
+  const session = await queryClient.query(sessionQuery)
+  if (!session) throw redirect({ to: '/sign-in' })
+  return session
+}
+
+// The workspace `/` opens, by prefix. Storage can be refused (a private window, a full quota): then `/` opens the
+// oldest workspace.
+const LAST_WORKSPACE = 'punchlist:workspace'
+const lastWorkspace = () => {
+  try {
+    return localStorage.getItem(LAST_WORKSPACE)
+  } catch {
+    return null
+  }
+}
+const rememberWorkspace = (prefix: string) => {
+  try {
+    localStorage.setItem(LAST_WORKSPACE, prefix)
+  } catch {
+    // `/` opens the oldest workspace instead.
+  }
+}
+
+// `/` and the paths from before workspaces were in the URL open the last workspace used, else the oldest.
+const toWorkspace = async (queryClient: QueryClient) => {
+  await signedIn(queryClient)
+  const prefix = pickWorkspace(await queryClient.query(workspacesQuery), lastWorkspace())
+  if (!prefix) throw new Error('this account is in no workspace')
+  return prefix
+}
+
+const home = createRoute({
   getParentRoute: () => root,
+  path: '/',
+  beforeLoad: async ({ context, search }) => {
+    throw redirect({ to: '/w/$prefix', params: { prefix: await toWorkspace(context.queryClient) }, search })
+  },
+})
+
+const oldPullRequests = createRoute({
+  getParentRoute: () => root,
+  path: '/pull-requests',
+  beforeLoad: async ({ context }) => {
+    throw redirect({ to: '/w/$prefix/pull-requests', params: { prefix: await toWorkspace(context.queryClient) } })
+  },
+})
+
+// A workspace's screens. A prefix the account is not in opens `/`.
+const workspace = createRoute({
+  getParentRoute: () => root,
+  path: '/w/$prefix',
+  beforeLoad: async ({ context, params }) => {
+    const session = await signedIn(context.queryClient)
+    const workspace = (await context.queryClient.query(workspacesQuery)).find(
+      (w) => w.issue_prefix === params.prefix,
+    )
+    if (!workspace) throw redirect({ to: '/' })
+    rememberWorkspace(workspace.issue_prefix)
+    return { session, workspace }
+  },
+})
+
+const issues = createRoute({
+  getParentRoute: () => workspace,
   path: '/',
   validateSearch: (search: Record<string, unknown>): ListSearch => ({
     layout: search.layout === 'board' ? 'board' : undefined,
@@ -64,18 +128,14 @@ const issues = createRoute({
     label: ids(search.label),
     status: ids(search.status),
   }),
-  beforeLoad: async ({ context }) => {
-    const session = await context.queryClient.query(sessionQuery)
-    if (!session) throw redirect({ to: '/sign-in' })
-    return { session }
-  },
   component: function Issues() {
-    const { session } = issues.useRouteContext()
+    const { session, workspace } = issues.useRouteContext()
     const search = issues.useSearch()
     const navigate = issues.useNavigate()
     return (
       <IssuesScreen
-        workspaceId={session.workspace_id}
+        key={workspace.id}
+        workspace={workspace}
         me={session.actor.name}
         search={search}
         onSearch={({ layout, project, milestone, label, status }) =>
@@ -86,38 +146,50 @@ const issues = createRoute({
   },
 })
 
-// The issue page. A browser whose requests carry a standalone agent's bearer token shows it as that agent.
-const issue = createRoute({
-  getParentRoute: () => root,
-  path: '/issues/$id',
-  beforeLoad: async ({ context }) => {
-    const session = await context.queryClient.query(sessionQuery)
-    if (!session) throw redirect({ to: '/sign-in' })
-    return { session }
-  },
-  component: function Issue() {
-    const { session } = issue.useRouteContext()
-    const { id } = issue.useParams()
-    return <IssueScreen key={id} id={id} viewer={session.actor} workspaceId={session.workspace_id} />
+const pullRequests = createRoute({
+  getParentRoute: () => workspace,
+  path: '/pull-requests',
+  component: function PullRequests() {
+    const { session, workspace } = pullRequests.useRouteContext()
+    return <PullRequestsScreen key={workspace.id} workspace={workspace} me={session.actor.name} />
   },
 })
 
-const pullRequests = createRoute({
+// The issue page, in the issue's workspace. A browser whose requests carry a standalone agent's bearer token shows
+// it as that agent, in the agent's workspace, with no workspace menu.
+const issue = createRoute({
   getParentRoute: () => root,
-  path: '/pull-requests',
-  beforeLoad: async ({ context }) => {
-    const session = await context.queryClient.query(sessionQuery)
-    if (!session) throw redirect({ to: '/sign-in' })
-    return { session }
+  path: '/issues/$id',
+  beforeLoad: async ({ context, params }) => {
+    const session = await signedIn(context.queryClient)
+    const workspaces =
+      session.actor.role === 'person' ? await context.queryClient.query(workspacesQuery) : []
+    const workspace = workspaces.find((w) => w.issue_prefix === issuePrefix(params.id))
+    return { session, workspace }
   },
-  component: function PullRequests() {
-    const { session } = pullRequests.useRouteContext()
-    return <PullRequestsScreen workspaceId={session.workspace_id} me={session.actor.name} />
+  component: function Issue() {
+    const { session, workspace } = issue.useRouteContext()
+    const { id } = issue.useParams()
+    return (
+      <IssueScreen
+        key={id}
+        id={id}
+        viewer={session.actor}
+        workspace={workspace}
+        workspaceId={workspace?.id ?? session.workspace_id}
+      />
+    )
   },
 })
 
 const router = createRouter({
-  routeTree: root.addChildren([signIn, issues, issue, pullRequests]),
+  routeTree: root.addChildren([
+    signIn,
+    home,
+    oldPullRequests,
+    workspace.addChildren([issues, pullRequests]),
+    issue,
+  ]),
   context: { queryClient },
   parseSearch,
   stringifySearch,

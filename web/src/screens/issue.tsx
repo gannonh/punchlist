@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Assignee, Labels, LockBadge, PullRequest, StatusDot } from '@/components/atoms'
+import { WorkspaceMenu } from '@/components/workspace-menu'
 import {
   issuePageQueries,
   issuesQuery,
@@ -20,6 +21,7 @@ import {
   useReadFromGithub,
 } from '@/lib/queries'
 import { age, agentName, assigneeView, pullRequestView, type Actor } from '@/model/issues'
+import type { Workspace } from '@/model/workspaces'
 import {
   GATE_EVIDENCE,
   actorMark,
@@ -38,6 +40,7 @@ import {
   specBlocks,
   threadView,
   tokens,
+  cost,
   type ActorMark,
   type AttemptInfo,
   type CheckRun,
@@ -143,7 +146,34 @@ function useRenderMeasure(events: number, attempts: number) {
   })
 }
 
-export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: Actor; workspaceId: string }) {
+/** The link back to the list: the issue's workspace's, or `/` when the viewer has no workspace menu. */
+function ListLink({ workspace, className, children }: { workspace?: Workspace; className: string; children: ReactNode }) {
+  return workspace ? (
+    <Link to="/w/$prefix" params={{ prefix: workspace.issue_prefix }} className={className}>
+      {children}
+    </Link>
+  ) : (
+    <Link to="/" className={className}>
+      {children}
+    </Link>
+  )
+}
+
+/**
+ * `workspace` is the issue's workspace among the person's, with its menu; an agent viewer has none. `workspaceId` is
+ * the workspace whose list and stream the page reads.
+ */
+export function IssueScreen({
+  id,
+  viewer,
+  workspace,
+  workspaceId,
+}: {
+  id: string
+  viewer: Actor
+  workspace: Workspace | undefined
+  workspaceId: string
+}) {
   const person = viewer.role === 'person'
   const q = useMemo(() => issuePageQueries(id), [id])
   const issue = useQuery(q.issue)
@@ -156,7 +186,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
   const reviewThreads = useQuery(q.reviewThreads)
   // The event stream and the list it starts after are the workspace's, which an agent's token cannot read: an
   // agent viewer reads the page again after its own writes only.
-  const list = useQuery({ ...issuesQuery, enabled: person })
+  const list = useQuery({ ...issuesQuery(workspaceId), enabled: person })
   useEventStream(workspaceId, person && list.isSuccess)
   const navigate = useNavigate()
   const now = useNow()
@@ -192,7 +222,10 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
           jump('timeline')
           if (composer.current && !composer.current.disabled) composer.current.focus()
         },
-        Escape: () => void navigate({ to: '/' }),
+        Escape: () =>
+          void (workspace
+            ? navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
+            : navigate({ to: '/' })),
       }
       const action = keys[event.key]
       if (action) {
@@ -204,13 +237,16 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate])
+  }, [navigate, workspace])
 
   const header = (
     <header className="sticky top-0 z-5 flex flex-wrap items-center gap-x-3.5 gap-y-1 border-b bg-background px-3 py-2 sm:px-4 sm:py-2.5">
-      <Link to="/" className="inline-flex items-center gap-1.5 text-lead font-semibold">
-        <ArrowLeft className="size-4" aria-hidden="true" /> Punchlist
-      </Link>
+      <ListLink workspace={workspace} className="inline-flex items-center gap-1.5 text-lead font-semibold">
+        <ArrowLeft className="size-4" aria-hidden="true" />
+        <span className="sr-only">Issues</span>
+        {!workspace && 'Punchlist'}
+      </ListLink>
+      {workspace && <WorkspaceMenu current={workspace} />}
       <span className="ml-auto text-meta text-ink-3" data-viewer={viewer.role}>
         Viewing as {viewer.role === 'agent' ? agentName(viewer.kind) : viewer.name} ({ROLE_WORD[viewer.role]})
       </span>
@@ -248,9 +284,9 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
           <section className="panel head" data-section="head">
             <div className="grid gap-2">
               <div className="flex flex-wrap items-center gap-1.5 text-meta text-ink-3">
-                <Link to="/" className="hover:text-foreground">
+                <ListLink workspace={workspace} className="hover:text-foreground">
                   Issues
-                </Link>
+                </ListLink>
                 <span>›</span>
                 <span className="font-mono">{data.id}</span>
               </div>
@@ -303,7 +339,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
           </div>
 
           <aside className="rail" aria-label="Status, gates and runs">
-            <TransitionsPanel id={id} moves={moves} gates={gates.data} viewer={viewer} />
+            <TransitionsPanel id={id} workspaceId={workspaceId} moves={moves} gates={gates.data} viewer={viewer} />
             <GatesPanel checklist={gates.data} />
             <RunsPanel issueId={id} runs={runs.data ?? []} moves={moves} person={person} now={now} />
             <Panel title="Properties" className="rail-only-wide">
@@ -976,16 +1012,18 @@ const Entry = memo(function Entry({ event, targeted, now }: { event: IssueEvent;
 
 function TransitionsPanel({
   id,
+  workspaceId,
   moves,
   gates,
   viewer,
 }: {
   id: string
+  workspaceId: string
   moves: TransitionList | undefined
   gates: GateChecklist | null | undefined
   viewer: Actor
 }) {
-  const move = useMove(id)
+  const move = useMove(id, workspaceId)
   const views = (moves?.transitions ?? []).flatMap((option) => {
     const view = moveView(option, moves?.viewer_locked ?? false, gates)
     return view ? [{ view, option }] : []
@@ -1210,6 +1248,7 @@ function AttemptCard({
   }, [lines.length])
   const model = modelView(attempt)
   const took = running ? now.getTime() - Date.parse(attempt.started_at) : attempt.duration_ms
+  const spent = cost(attempt.cost_usd)
   return (
     <article
       className="grid gap-2 rounded-md border px-3 py-2.5"
@@ -1255,6 +1294,11 @@ function AttemptCard({
         <span>
           <b className="font-medium text-ink-3">tokens</b> {tokens(attempt.input_tokens, attempt.output_tokens)}
         </span>
+        {spent !== null && (
+          <span>
+            <b className="font-medium text-ink-3">cost</b> {spent}
+          </span>
+        )}
       </div>
       {attempt.failure_reason && <div className="text-meta text-bad wrap-anywhere">{attempt.failure_reason}</div>}
       {latest && lines.length > 0 && (

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO actor (workspace_id, name, role, token_hash)\n         VALUES ($1, $2, 'person', $3) RETURNING id",
+  "query": "SELECT id FROM account WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "actor",
+            "table": "account",
             "name": "id"
           }
         }
@@ -17,14 +17,12 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "2b8dc503bf0d5a6e33d9dc19d6f7bb32cff664624cd6c3dd6e84dcd631ef59b6"
+  "hash": "22c37b23d4f78f2fe4dca0253dd822fe53fddec19018650bb93594dacc9e639a"
 }
