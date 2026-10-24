@@ -1149,8 +1149,8 @@ async fn settle_run(
 /// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
 /// run `RUNS_PER_ENTRY` of the entry, or a run whose agent said it waits on a person
 /// (`wait_for_person`): that issue waits on a person. Nor when the active workflow cannot be
-/// read, which is logged. `get_issue` reads the same three rules, the latest transition, the
-/// limit and the waiting reason, to say so; change them together.
+/// read, which is logged. `get_issue` and the inbox read the same three rules, the latest
+/// transition, the limit (`runs_ended`) and the waiting reason, to say so; change them together.
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the

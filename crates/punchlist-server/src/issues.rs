@@ -1,5 +1,7 @@
 //! `/api/issues`: create, list, show and move issues, and read their timelines.
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -20,7 +22,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
-use crate::events::{events, next_event_seq};
+use crate::events::{events, next_event_seq, record_row_event};
 use crate::github::{
     PUNCHLIST_LOGIN, PullRequestRead, catch_up_merge, github_actor, lock_pull_requests,
     newest_check_runs, refresh_pull_requests, written_since,
@@ -187,20 +189,9 @@ async fn get_issue(
     let mut issue = issue(&mut conn, actor.workspace_id, &id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    // The last run this entry into the status gets has ended, and the issue is still there:
-    // nothing dispatches it again. The same two rules as `queue_redispatch`, the latest
-    // transition and the limit; change them together.
-    let ended = sqlx::query_scalar!(
-        "SELECT d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
-         WHERE d.issue_id = $1 AND d.run_number >= $2 AND r.outcome <> 'running'
-           AND d.transition_id = (SELECT e.transition_id FROM event e
-                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                  ORDER BY e.seq DESC LIMIT 1)",
-        id,
-        RUNS_PER_ENTRY,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let ended = runs_ended(&mut conn, std::slice::from_ref(&id))
+        .await?
+        .remove(&id);
     // A run of the entry said it waits on a person (`wait_for_person`), which
     // `queue_redispatch` reads too: it is the entry's last, since its end dispatches nothing.
     let waiting = sqlx::query!(
@@ -244,6 +235,30 @@ async fn get_issue(
         )
     });
     Ok(Json(issue))
+}
+
+/// The issues in `ids` whose entry into their status has had its last run end, with that
+/// run's number: nothing dispatches them again. The same two rules as `queue_redispatch`, the
+/// latest transition and the limit; change them together. `get_issue` and the inbox read it.
+pub(crate) async fn runs_ended(
+    conn: &mut sqlx::PgConnection,
+    ids: &[String],
+) -> sqlx::Result<HashMap<String, i32>> {
+    let rows = sqlx::query!(
+        "SELECT d.issue_id, d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
+         WHERE d.issue_id = ANY($1) AND d.run_number >= $2 AND r.outcome <> 'running'
+           AND d.transition_id = (SELECT e.transition_id FROM event e
+                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                  ORDER BY e.seq DESC LIMIT 1)",
+        ids,
+        RUNS_PER_ENTRY,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.issue_id, row.run_number))
+        .collect())
 }
 
 /// Move an issue to another status. The workflow's lock, role and gate rules are checked,
@@ -615,12 +630,13 @@ pub(crate) async fn record_transition(
 /// True when one was queued.
 async fn queue_dispatch(
     tx: &mut sqlx::PgConnection,
+    actor: &Actor,
     workflow: &Workflow,
     id: &str,
     to: &str,
     transition_id: Uuid,
 ) -> sqlx::Result<bool> {
-    end_dispatches(tx, id).await?;
+    end_dispatches(tx, actor, id).await?;
     let unlocked = |role| workflow.check_unlocked(to, role).is_ok();
     let Some(dispatch) = workflow
         .dispatch_for(to)
@@ -642,14 +658,18 @@ async fn queue_dispatch(
 /// The issue has left its status, so a dispatch still waiting for it goes. A run waiting for
 /// its next attempt (`settle_run`) was for that status too, so it fails, its last attempt's
 /// reason saying why; else the issue would wait behind a running run that no runner holds.
-pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<()> {
+pub(crate) async fn end_dispatches(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+) -> sqlx::Result<()> {
     sqlx::query!(
         "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
         id
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
+    let ended = sqlx::query!(
         "UPDATE run SET outcome = 'failed', finished_at = now()
          WHERE issue_id = $1 AND outcome = 'running'
            AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = run.id
@@ -658,6 +678,9 @@ pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sql
     )
     .execute(&mut *tx)
     .await?;
+    if ended.rows_affected() > 0 {
+        record_row_event(tx, actor.workspace_id, id, actor.id, "run").await?;
+    }
     Ok(())
 }
 
@@ -750,7 +773,7 @@ pub(crate) async fn write_transition(
         .execute(&mut *tx)
         .await?;
     }
-    let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
+    let dispatched = queue_dispatch(tx, actor, workflow, id, to, transition_id).await?;
     let (seq, created_at) = record_transition_event(tx, actor, id, transition_id).await?;
     if let (DONE | CANCELED, Some(parent)) = (to, &issue.parent) {
         children_done(tx, actor.workspace_id, workflow, parent).await?;

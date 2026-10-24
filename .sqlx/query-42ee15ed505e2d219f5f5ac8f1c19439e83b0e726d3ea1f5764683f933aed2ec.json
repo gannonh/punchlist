@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,\n                  i.parent_id, p.id AS \"project_id?\", p.name AS \"project_name?\",\n                  m.id AS \"milestone_id?\", m.name AS \"milestone_name?\",\n                  a.id AS \"assignee_id?\", a.name AS \"assignee_name?\",\n                  a.role AS \"assignee_role?\", a.kind AS \"assignee_kind?\",\n                  running.agent AS \"running_agent?\", running.started_at AS \"running_since?\",\n                  waiting.agent AS \"queued_agent?\",\n                  last.agent AS \"last_agent?\", last.outcome AS \"last_outcome?\",\n                  last.finished_at AS \"last_finished_at?\", last.reason AS \"last_reason?\",\n                  pr.number AS \"pr_number?\", pr.state AS \"pr_state?\", pr.draft AS \"pr_draft?\",\n                  pr.checks AS \"pr_checks?\", pr.url AS \"pr_url?\",\n                  i.linear_identifier, i.linear_url\n           FROM issue i\n           LEFT JOIN project p ON p.id = i.project_id\n           LEFT JOIN milestone m ON m.id = i.milestone_id\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'\n           LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL\n           LEFT JOIN LATERAL (\n               SELECT r.agent, r.outcome, r.finished_at,\n                      (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id\n                       ORDER BY t.attempt DESC LIMIT 1) AS reason\n               FROM run r WHERE r.issue_id = i.id AND r.status = i.status\n               ORDER BY r.started_at DESC LIMIT 1) last ON true\n           LEFT JOIN LATERAL (\n               SELECT p.number, p.state, p.draft, p.checks, p.url FROM pull_request p\n               WHERE p.issue_id = i.id ORDER BY p.number DESC LIMIT 1) pr ON true\n           WHERE i.workspace_id = $1 AND ($2::text[] IS NULL OR i.id = ANY($2))\n           ORDER BY i.number",
+  "query": "SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,\n                  i.parent_id, p.id AS \"project_id?\", p.name AS \"project_name?\",\n                  m.id AS \"milestone_id?\", m.name AS \"milestone_name?\",\n                  a.id AS \"assignee_id?\", a.name AS \"assignee_name?\",\n                  a.role AS \"assignee_role?\", a.kind AS \"assignee_kind?\",\n                  running.agent AS \"running_agent?\", running.started_at AS \"running_since?\",\n                  waiting.agent AS \"queued_agent?\",\n                  last.id AS \"last_id?\", last.agent AS \"last_agent?\", last.outcome AS \"last_outcome?\",\n                  last.finished_at AS \"last_finished_at?\", last.reason AS \"last_reason?\",\n                  pr.number AS \"pr_number?\", pr.state AS \"pr_state?\", pr.draft AS \"pr_draft?\",\n                  pr.checks AS \"pr_checks?\", pr.url AS \"pr_url?\",\n                  i.linear_identifier, i.linear_url\n           FROM issue i\n           LEFT JOIN project p ON p.id = i.project_id\n           LEFT JOIN milestone m ON m.id = i.milestone_id\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'\n           LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL\n           LEFT JOIN LATERAL (\n               SELECT r.id, r.agent, r.outcome, r.finished_at,\n                      (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id\n                       ORDER BY t.attempt DESC LIMIT 1) AS reason\n               FROM run r WHERE r.issue_id = i.id AND r.status = i.status\n               ORDER BY r.started_at DESC LIMIT 1) last ON true\n           LEFT JOIN LATERAL (\n               SELECT p.number, p.state, p.draft, p.checks, p.url FROM pull_request p\n               WHERE p.issue_id = i.id ORDER BY p.number DESC LIMIT 1) pr ON true\n           WHERE i.workspace_id = $1 AND ($2::text[] IS NULL OR i.id = ANY($2))\n           ORDER BY i.number",
   "describe": {
     "columns": [
       {
@@ -214,6 +214,17 @@
       },
       {
         "ordinal": 19,
+        "name": "last_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
         "name": "last_agent?",
         "type_info": "Text",
         "origin": {
@@ -224,7 +235,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "last_outcome?",
         "type_info": "Text",
         "origin": {
@@ -235,7 +246,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 22,
         "name": "last_finished_at?",
         "type_info": "Timestamptz",
         "origin": {
@@ -246,13 +257,13 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "last_reason?",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 23,
+        "ordinal": 24,
         "name": "pr_number?",
         "type_info": "Int8",
         "origin": {
@@ -263,7 +274,7 @@
         }
       },
       {
-        "ordinal": 24,
+        "ordinal": 25,
         "name": "pr_state?",
         "type_info": "Text",
         "origin": {
@@ -274,7 +285,7 @@
         }
       },
       {
-        "ordinal": 25,
+        "ordinal": 26,
         "name": "pr_draft?",
         "type_info": "Bool",
         "origin": {
@@ -285,7 +296,7 @@
         }
       },
       {
-        "ordinal": 26,
+        "ordinal": 27,
         "name": "pr_checks?",
         "type_info": "Text",
         "origin": {
@@ -296,7 +307,7 @@
         }
       },
       {
-        "ordinal": 27,
+        "ordinal": 28,
         "name": "pr_url?",
         "type_info": "Text",
         "origin": {
@@ -307,7 +318,7 @@
         }
       },
       {
-        "ordinal": 28,
+        "ordinal": 29,
         "name": "linear_identifier",
         "type_info": "Text",
         "origin": {
@@ -318,7 +329,7 @@
         }
       },
       {
-        "ordinal": 29,
+        "ordinal": 30,
         "name": "linear_url",
         "type_info": "Text",
         "origin": {
@@ -365,8 +376,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "ae031f17361ab3d471dea8a3ea9157709c1bef766ec3ca8af3601fa289ca1328"
+  "hash": "42ee15ed505e2d219f5f5ac8f1c19439e83b0e726d3ea1f5764683f933aed2ec"
 }
