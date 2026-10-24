@@ -1522,6 +1522,10 @@ async fn recompute_checks(
     mark_pull_request_change(tx, &issues).await
 }
 
+/// The login of the workspace's `Punchlist` actor, which makes the `children_done` moves. No
+/// GitHub login has brackets, so that actor is never a user's.
+pub(crate) const PUNCHLIST_LOGIN: &str = "[punchlist]";
+
 /// The workspace's actor for a GitHub login, made on first use. With no login it is GitHub
 /// itself, for what nobody is credited with; no GitHub login is empty, so that actor is never
 /// a user's.
@@ -1530,7 +1534,11 @@ pub(crate) async fn github_actor(
     workspace_id: Uuid,
     login: Option<&str>,
 ) -> sqlx::Result<Uuid> {
-    let (name, login) = login.map_or(("GitHub", ""), |login| (login, login));
+    let (name, login) = match login {
+        None => ("GitHub", ""),
+        Some(PUNCHLIST_LOGIN) => ("Punchlist", PUNCHLIST_LOGIN),
+        Some(login) => (login, login),
+    };
     sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $3)
