@@ -285,6 +285,8 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
         [
             "/api/actors",
             "/api/github/webhook",
+            "/api/inbox",
+            "/api/inbox/read",
             "/api/issues",
             "/api/issues/{id}",
             "/api/issues/{id}/comments",
@@ -320,6 +322,8 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/workspaces/{id}/imports",
             "/api/workspaces/{id}/imports/linear",
             "/api/workspaces/{id}/imports/{run}",
+            "/api/workspaces/{id}/inbox",
+            "/api/workspaces/{id}/inbox/read",
             "/api/workspaces/{id}/issues",
             "/api/workspaces/{id}/projects",
             "/api/workspaces/{id}/pull-requests",

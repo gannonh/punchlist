@@ -50,6 +50,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)
+         *     that are unassigned, assigned to the caller or to an agent the caller owns, newest
+         *     `since_seq` first. A person's token.
+         */
+        get: operations["inbox"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inbox/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The caller opened an inbox item: it is read until an event newer than `since_seq` makes
+         *     it again. The larger `since_seq` is kept, so an older one changes nothing. A person's
+         *     token.
+         */
+        post: operations["mark_read"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/issues": {
         parameters: {
             query?: never;
@@ -772,6 +814,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{id}/inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)
+         *     that are unassigned, assigned to the caller or to an agent the caller owns, newest
+         *     `since_seq` first. A person's token.
+         */
+        get: operations["inbox_in_workspace"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{id}/inbox/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The caller opened an inbox item: it is read until an event newer than `since_seq` makes
+         *     it again. The larger `since_seq` is kept, so an older one changes nothing. A person's
+         *     token.
+         */
+        post: operations["mark_read_in_workspace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{id}/issues": {
         parameters: {
             query?: never;
@@ -1439,6 +1523,38 @@ export interface components {
             last_run?: components["schemas"]["ImportRun"] | null;
             totals: components["schemas"]["ImportCounts"];
         };
+        /** @description An inbox item, derived from the issue's state: it leaves when its condition ends. */
+        InboxItem: {
+            issue: components["schemas"]["PullRequestIssue"];
+            /** @enum {string} */
+            kind: "waiting";
+            /**
+             * Format: date-time
+             * @description When the event that put the issue in its status was written.
+             */
+            since: string;
+            /**
+             * Format: int64
+             * @description That event's sequence number: the issue's newest `transition` or `created` event.
+             */
+            since_seq: number;
+            /** @description The caller has not opened the item since `since_seq`. */
+            unread: boolean;
+        };
+        /**
+         * @description The kinds of inbox item, as `POST /api/inbox/read` names them.
+         * @enum {string}
+         */
+        InboxKind: "waiting";
+        /** @description `GET /api/inbox`: what waits on the caller, newest first. */
+        InboxList: {
+            items: components["schemas"]["InboxItem"][];
+            /**
+             * Format: int64
+             * @description How many of `items` are unread.
+             */
+            unread: number;
+        };
         Issue: {
             assignee?: components["schemas"]["Actor"] | null;
             /** @description Markdown. */
@@ -1598,6 +1714,13 @@ export interface components {
              * @description Increases per run, in the order the server received the lines.
              */
             seq: number;
+        };
+        /** @description `POST /api/inbox/read`: the caller opened the item for `issue` up to `since_seq`. */
+        MarkInboxRead: {
+            issue: string;
+            kind: components["schemas"]["InboxKind"];
+            /** Format: int64 */
+            since_seq: number;
         };
         Milestone: {
             /** Format: uuid */
@@ -1770,7 +1893,7 @@ export interface components {
             state: components["schemas"]["PullRequestState"];
             title: string;
         };
-        /** @description The issue a pull request names. */
+        /** @description The issue a pull request or an inbox item names. */
         PullRequestIssue: {
             id: string;
             status: string;
@@ -2316,6 +2439,89 @@ export interface operations {
             };
             /** @description No webhook secret is configured. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    inbox: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    mark_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkInboxRead"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such issue in the workspace. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4320,6 +4526,95 @@ export interface operations {
                 };
             };
             /** @description Not the token's workspace, or no such import in it. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    inbox_in_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A workspace the token is in */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxList"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    mark_read_in_workspace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A workspace the token is in */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MarkInboxRead"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such issue in the workspace. */
             404: {
                 headers: {
                     [name: string]: unknown;

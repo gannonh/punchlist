@@ -29,6 +29,7 @@ import {
   useActors,
   useEditIssue,
   useEventStream,
+  useInbox,
   useIssues,
   useProjects,
   usePullRequests,
@@ -187,6 +188,7 @@ export function IssuesScreen({
   const { transitions, request, dismiss } = useTransitions(workspaceId)
   useEventStream(workspaceId, issues.isSuccess)
   const pullRequests = usePullRequests(workspaceId, issues.isSuccess)
+  const inbox = useInbox(workspaceId, issues.isSuccess)
 
   const [local, setLocal] = useState<Pick<Filter, 'text' | 'who'>>({ text: '', who: '' })
   const layout: Layout = url.layout ?? 'list'
@@ -358,7 +360,7 @@ export function IssuesScreen({
 
   return (
     <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
-      <AppHeader workspace={workspace} current="issues" pullRequests={pullRequests.data?.length}>
+      <AppHeader workspace={workspace} current="issues" pullRequests={pullRequests.data?.length} inbox={inbox.data?.unread}>
         <div className="inline-flex rounded-lg border bg-card p-0.5" role="group" aria-label="Layout">
           {(['list', 'board'] as const).map((key, index) => (
             <button

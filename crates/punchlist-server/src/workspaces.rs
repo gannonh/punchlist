@@ -3,7 +3,7 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::routing::{MethodRouter, get};
+use axum::routing::{MethodRouter, get, post};
 use punchlist_api::{ErrorBody, Workspace};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
@@ -11,7 +11,7 @@ use utoipa_axum::routes;
 
 use crate::auth::Actor;
 use crate::{
-    ApiError, AppState, actors, issues, projects, pull_requests, runners, search, workflow,
+    ApiError, AppState, actors, inbox, issues, projects, pull_requests, runners, search, workflow,
 };
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -21,7 +21,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 /// The workspace-level routes a person calls, each also served at
 /// `/api/workspaces/{id}<route>`. The extractor takes the workspace from that path; the form
 /// without it answers for the account's only workspace.
-fn workspace_routes() -> [(&'static str, MethodRouter<AppState>); 8] {
+fn workspace_routes() -> [(&'static str, MethodRouter<AppState>); 10] {
     [
         (
             "/issues",
@@ -46,6 +46,8 @@ fn workspace_routes() -> [(&'static str, MethodRouter<AppState>); 8] {
             get(pull_requests::unlinked_pull_requests),
         ),
         ("/search", get(search::search)),
+        ("/inbox", get(inbox::inbox)),
+        ("/inbox/read", post(inbox::mark_read)),
     ]
 }
 
