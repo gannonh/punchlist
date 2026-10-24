@@ -541,6 +541,14 @@ async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: 
     assert_eq!(names, ["Gannon", "Orchestrator"]);
     let (status, workflow) = call(&app, &agent, "GET", "/api/workflow", None).await;
     assert_eq!(status, StatusCode::OK, "{workflow}");
+    let (status, workspaces) = call(&app, &agent, "GET", "/api/workspaces", None).await;
+    assert_eq!(status, StatusCode::OK, "{workspaces}");
+    let prefixes: Vec<&str> = (workspaces.as_array().unwrap().iter())
+        .map(|workspace| workspace["issue_prefix"].as_str().unwrap())
+        .collect();
+    assert_eq!(prefixes, ["PL"]);
+    let own_issues = format!("/api/workspaces/{}/issues", a.workspace_id);
+    assert_eq!(status_of(&app, &agent, &own_issues).await, StatusCode::OK);
     let own = format!("/api/workspaces/{}/events?after=0", a.workspace_id);
     assert_eq!(status_of(&app, &agent, &own).await, StatusCode::OK);
     let other = format!("/api/workspaces/{}/events?after=0", b.workspace_id);
