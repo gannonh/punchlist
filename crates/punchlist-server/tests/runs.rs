@@ -1850,6 +1850,94 @@ async fn a_serial_status_runs_one_run_at_a_time_and_other_work_is_claimed(pool: 
     assert!(answered_at - finished_at < Duration::from_secs(2));
 }
 
+/// Ends `issue`'s running run and moves the issue to Done, as a merge's webhook does
+/// (`close_issue_on_pull_request`), which wakes no runner.
+async fn merge_without_a_wake(pool: &PgPool, issue: &str) {
+    sqlx::query(
+        "WITH a AS (UPDATE attempt SET state = 'failed', finished_at = now(),
+                        failure_reason = 'merged'
+                    WHERE issue_id = $1 AND state = 'running'),
+              r AS (UPDATE run SET outcome = 'failed', finished_at = now()
+                    WHERE issue_id = $1 AND outcome = 'running')
+         UPDATE issue SET status = 'done' WHERE id = $1",
+    )
+    .bind(issue)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn a_serial_claim_takes_the_first_waiting_dispatch_whatever_woke_it(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_merging_dispatch(&pool, true).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    for title in ["One", "Two", "Three", "Four"] {
+        create_and_move(&app, &person.token, title, &["todo", "merging"]).await;
+    }
+    create_and_move(&app, &person.token, "Five", &["todo"]).await;
+    let first = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+
+    let waiting = tokio::spawn({
+        let app = app.clone();
+        async move { claim(&app, &r2, 5).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    merge_without_a_wake(&pool, "PL-1").await;
+    // PL-5's dispatch wakes the waiting claim.
+    let (status, body) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/issues/PL-5/transitions",
+        Some(json!({"to": "merging"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let next = waiting.await.unwrap();
+    assert_eq!(claimed_issue(&next), (StatusCode::OK, Some("PL-2")));
+
+    let mut order = vec!["PL-2".to_string()];
+    loop {
+        merge_without_a_wake(&pool, order.last().unwrap()).await;
+        let (status, body) = claim(&app, &r1, 0).await;
+        if status == StatusCode::NO_CONTENT {
+            break;
+        }
+        order.push(body["issue"]["id"].as_str().unwrap().to_string());
+    }
+    assert_eq!(order, ["PL-2", "PL-3", "PL-4", "PL-5"]);
+}
+
+#[sqlx::test]
+async fn a_dispatch_held_back_by_serial_is_claimed_when_the_run_ends_without_a_wake(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_merging_dispatch(&pool, true).await;
+    let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
+    let r2 = register(&app, &person.token, "r2", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Merge one", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Merge two", &["todo", "merging"]).await;
+    let first = claim(&app, &r1, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+
+    let waiting = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let answer = claim(&app, &r2, 5).await;
+            (answer, std::time::Instant::now())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the claim waits behind PL-1's run");
+    let ended_at = std::time::Instant::now();
+    merge_without_a_wake(&pool, "PL-1").await;
+    let (next, answered_at) = waiting.await.unwrap();
+    assert_eq!(claimed_issue(&next), (StatusCode::OK, Some("PL-2")));
+    assert!(answered_at - ended_at < Duration::from_secs(2));
+}
+
 #[sqlx::test]
 async fn a_status_without_serial_runs_its_dispatches_together(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
