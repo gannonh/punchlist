@@ -836,8 +836,14 @@ fn render_runners(runners: &[Runner], now: DateTime<Utc>) -> String {
         .iter()
         .zip(&agents)
         .map(|(r, agents)| {
+            let paused: String = (r.paused.iter())
+                .map(|pause| {
+                    let until = pause.until.format("%Y-%m-%d %H:%M:%S UTC");
+                    format!("  {} paused until {until}", pause.agent)
+                })
+                .collect();
             format!(
-                "{:name_width$}  {:agents_width$}  heartbeat {} ago\n",
+                "{:name_width$}  {:agents_width$}  heartbeat {} ago{paused}\n",
                 r.name,
                 agents,
                 format_age((now - r.last_heartbeat).num_seconds()),
@@ -1235,6 +1241,9 @@ fn render_show(
     if let Some(why) = &issue.waiting_on_person {
         text.push_str(&format!("waiting on a person: {why}\n"));
     }
+    if let Some(wait) = &issue.waiting_for_usage_limit {
+        text.push_str(&format!("{wait}\n"));
+    }
     if !issue.body.is_empty() {
         text.push('\n');
         text.push_str(issue.body.trim_end());
@@ -1528,6 +1537,26 @@ mod tests {
     }
 
     #[test]
+    fn a_runner_shows_each_agent_it_has_paused_with_the_time() {
+        let now: DateTime<Utc> = "2026-10-23T17:15:00Z".parse().unwrap();
+        let runner = Runner {
+            id: "00000000-0000-0000-0000-000000000000".parse().unwrap(),
+            name: "sartre".into(),
+            agents: vec!["claude-code".into(), "codex".into()],
+            registered_at: now,
+            last_heartbeat: now,
+            paused: vec![punchlist_api::AgentPause {
+                agent: "claude-code".into(),
+                until: "2026-10-23T18:20:00Z".parse().unwrap(),
+            }],
+        };
+        assert_eq!(
+            render_runners(&[runner], now),
+            "sartre  claude-code,codex  heartbeat 0s ago  claude-code paused until 2026-10-23 18:20:00 UTC\n"
+        );
+    }
+
+    #[test]
     fn timeline_shows_comments_and_deliveries() {
         let issue = Issue {
             id: "PL-7".into(),
@@ -1543,6 +1572,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
+            waiting_for_usage_limit: None,
             linear: None,
         };
         let mut moved = EventDetail::transition(
@@ -1657,6 +1687,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: None,
+            waiting_for_usage_limit: None,
             linear: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT agent, not_before AS \"not_before!\" FROM dispatch\n           WHERE issue_id = $1 AND run_id IS NULL AND not_before > now()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "agent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "dispatch",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "not_before!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "dispatch",
+            "name": "not_before"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "b1bfbdecb78b1f4fc8da1815070ed7fef7acd2174cd88116b00ddbd5eabcfd2b"
+}

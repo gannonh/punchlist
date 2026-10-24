@@ -946,6 +946,15 @@ export interface components {
         ActorList: {
             actors: components["schemas"]["ActorInfo"][];
         };
+        /**
+         * @description An agent kind a runner claims nothing for until `until`: its last attempt hit the
+         *     agent's usage limit.
+         */
+        AgentPause: {
+            agent: string;
+            /** Format: date-time */
+            until: string;
+        };
         /** @description `POST /api/runs/{id}/log`. */
         AppendLog: {
             /** Format: int32 */
@@ -1298,6 +1307,7 @@ export interface components {
             output_tokens?: number | null;
             /** @description Why the attempt failed. Required when the outcome is `failed`. */
             reason?: string | null;
+            usage_limit?: components["schemas"]["UsageLimit"] | null;
         };
         /**
          * @description `GET /api/issues/{id}/gates`: the gates an issue has to pass for its next gated
@@ -1451,6 +1461,12 @@ export interface components {
             title: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description That the issue's next run waits for its agent's usage limit to reset, and when:
+             *     `waiting for the Claude Code usage limit to reset at 2026-10-23 22:00:00 UTC`. Only
+             *     `GET /api/issues/{id}` fills this.
+             */
+            waiting_for_usage_limit?: string | null;
             /**
              * @description Why the issue waits on a person, when it does: every run this entry into its status
              *     gets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;
@@ -1969,6 +1985,8 @@ export interface components {
             /** Format: date-time */
             last_heartbeat: string;
             name: string;
+            /** @description The agent kinds the runner claims no work for until their usage limit resets. */
+            paused?: components["schemas"]["AgentPause"][];
             /** Format: date-time */
             registered_at: string;
         };
@@ -2100,6 +2118,14 @@ export interface components {
              */
             project?: string | null;
             title?: string;
+        };
+        UsageLimit: {
+            /**
+             * Format: date-time
+             * @description When the limit resets, as the agent reported it; 15 minutes from the finish when
+             *     `None`.
+             */
+            resets_at?: string | null;
         };
         /**
          * @description What `POST /api/issues/{id}/transitions` would answer the caller, without the read of

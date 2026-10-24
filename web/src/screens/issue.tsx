@@ -3,7 +3,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
-import { ArrowLeft, Bot, GitMerge, GitPullRequest, Lock, Paperclip, Server, HardDrive } from 'lucide-react'
+import { ArrowLeft, Bot, Clock, GitMerge, GitPullRequest, Lock, Paperclip, Server, HardDrive } from 'lucide-react'
 import { cn } from 'cn'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -321,7 +321,12 @@ export function IssueScreen({
           </section>
 
           <div className="main">
-            <Notice moves={moves} viewer={viewer} waiting={data.waiting_on_person ?? null} />
+            <Notice
+              moves={moves}
+              viewer={viewer}
+              waiting={data.waiting_on_person ?? null}
+              usageLimit={data.waiting_for_usage_limit ?? null}
+            />
             <SpecPanel body={data.body} />
             <PullRequestPanel pr={pr} issueId={data.id} threads={reviewThreads.data} />
             <ProofPanel id={id} proof={proof.data ?? []} person={person} locked={moves?.viewer_locked ?? false} />
@@ -398,7 +403,17 @@ export function IssueScreen({
   )
 }
 
-function Notice({ moves, viewer, waiting }: { moves: TransitionList | undefined; viewer: Actor; waiting: string | null }) {
+function Notice({
+  moves,
+  viewer,
+  waiting,
+  usageLimit,
+}: {
+  moves: TransitionList | undefined
+  viewer: Actor
+  waiting: string | null
+  usageLimit: string | null
+}) {
   const lock = <Lock className="mt-px size-3.5 flex-none" aria-hidden="true" />
   if (moves?.viewer_locked)
     return (
@@ -427,6 +442,15 @@ function Notice({ moves, viewer, waiting }: { moves: TransitionList | undefined;
         {lock}
         <div>
           <strong className="text-warn">Waiting on a person:</strong> {waiting}.
+        </div>
+      </div>
+    )
+  if (usageLimit)
+    return (
+      <div className="notice border-warn-line bg-warn-soft text-[#7c3a06]" data-notice="usage-limit" role="status">
+        <Clock className="mt-px size-3.5 flex-none" aria-hidden="true" />
+        <div>
+          <strong className="text-warn">Usage limit:</strong> {usageLimit}.
         </div>
       </div>
     )

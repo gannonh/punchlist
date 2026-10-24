@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO runner_pause (runner_id, agent, until)\n             SELECT $1, agent, $3 FROM run WHERE id = $2\n             ON CONFLICT (runner_id, agent) DO UPDATE SET until = excluded.until",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "26148b9f71c0ddd83f1f2ae868ff4b14c6b816ea5d368ec4c6f5ac106f8a100c"
+}

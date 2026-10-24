@@ -433,6 +433,7 @@ mod tests {
             project: None,
             milestone: None,
             waiting_on_person: None,
+            waiting_for_usage_limit: None,
             linear: None,
         }
     }

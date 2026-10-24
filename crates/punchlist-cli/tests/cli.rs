@@ -390,6 +390,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
                 output_tokens: Some(250),
                 cost_usd: Some("0.0453".into()),
                 lost: false,
+                usage_limit: None,
             },
         )
         .await
@@ -1436,6 +1437,7 @@ async fn mcp_says_the_run_waits_on_a_person(pool: PgPool) {
                 output_tokens: None,
                 cost_usd: None,
                 lost: false,
+                usage_limit: None,
             },
         )
         .await

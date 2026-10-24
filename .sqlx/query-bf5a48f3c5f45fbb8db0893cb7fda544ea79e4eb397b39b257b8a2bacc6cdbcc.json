@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT runner_id, agent, until FROM runner_pause\n         WHERE runner_id = ANY($1) AND until > now() ORDER BY agent",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "runner_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "runner_pause",
+            "name": "runner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "agent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "runner_pause",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "runner_pause",
+            "name": "until"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bf5a48f3c5f45fbb8db0893cb7fda544ea79e4eb397b39b257b8a2bacc6cdbcc"
+}

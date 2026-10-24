@@ -3169,6 +3169,23 @@
           }
         }
       },
+      "AgentPause": {
+        "type": "object",
+        "description": "An agent kind a runner claims nothing for until `until`: its last attempt hit the\nagent's usage limit.",
+        "required": [
+          "agent",
+          "until"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "AppendLog": {
         "type": "object",
         "description": "`POST /api/runs/{id}/log`.",
@@ -3988,6 +4005,17 @@
               "null"
             ],
             "description": "Why the attempt failed. Required when the outcome is `failed`."
+          },
+          "usage_limit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UsageLimit",
+                "description": "The agent stopped on its account's usage limit. Only with `failed`. The run does not\ncount toward the runs its entry gets, and the issue's next run, like the runner's\nclaims for that agent, waits for the reset."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -4402,6 +4430,13 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "waiting_for_usage_limit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That the issue's next run waits for its agent's usage limit to reset, and when:\n`waiting for the Claude Code usage limit to reset at 2026-10-23 22:00:00 UTC`. Only\n`GET /api/issues/{id}` fills this."
           },
           "waiting_on_person": {
             "type": [
@@ -5780,6 +5815,13 @@
           "name": {
             "type": "string"
           },
+          "paused": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentPause"
+            },
+            "description": "The agent kinds the runner claims no work for until their usage limit resets."
+          },
           "registered_at": {
             "type": "string",
             "format": "date-time"
@@ -6103,6 +6145,19 @@
           },
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "UsageLimit": {
+        "type": "object",
+        "properties": {
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the limit resets, as the agent reported it; 15 minutes from the finish when\n`None`."
           }
         }
       },

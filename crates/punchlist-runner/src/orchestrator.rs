@@ -374,6 +374,7 @@ async fn release_lost(client: &Client, lease: &Lease) {
         output_tokens: None,
         cost_usd: None,
         lost: true,
+        usage_limit: None,
     };
     match client.finish_run(&run_id, &request).await {
         Ok(_) => tracing::info!(
@@ -555,6 +556,7 @@ async fn run_attempt(
             reason: Some(reason),
             input_tokens: None,
             output_tokens: None,
+            usage_limit: None,
             cost_usd: None,
         })
     };
@@ -678,6 +680,7 @@ async fn run_attempt(
                 reason: Some("runner stopped".into()),
                 input_tokens: None,
                 output_tokens: None,
+                usage_limit: None,
                 cost_usd: None,
             },
             true,
@@ -688,6 +691,15 @@ async fn run_attempt(
         claim.issue.id,
         result.reason.as_deref().unwrap_or("success")
     );
+    if let Some(limit) = &result.usage_limit {
+        let until =
+            (limit.resets_at).map_or("15 minutes from now".to_string(), |at| at.to_string());
+        tracing::warn!(
+            "{} hit its usage limit: the server holds this runner's {} claims until {until}",
+            claim.agent,
+            claim.agent
+        );
+    }
     let request = FinishRun {
         attempt,
         outcome: result.outcome,
@@ -697,6 +709,7 @@ async fn run_attempt(
         output_tokens: result.output_tokens,
         cost_usd: result.cost_usd,
         lost,
+        usage_limit: result.usage_limit,
     };
     finish_with_retry(
         &ctx.client,
@@ -777,6 +790,7 @@ async fn run_agent(
             reason: Some(reason),
             input_tokens: None,
             output_tokens: None,
+            usage_limit: None,
             cost_usd: None,
         })
     };
@@ -927,6 +941,7 @@ mod tests {
             output_tokens: None,
             cost_usd: None,
             lost: false,
+            usage_limit: None,
         }
     }
 
@@ -1136,6 +1151,7 @@ mod tests {
                 project: None,
                 milestone: None,
                 waiting_on_person: None,
+                waiting_for_usage_limit: None,
                 linear: None,
             },
             repository: crate::worktree::tests::repository(),
@@ -1181,6 +1197,7 @@ mod tests {
                         agents: vec!["claude-code".into()],
                         registered_at: now,
                         last_heartbeat: now,
+                        paused: Vec::new(),
                     };
                     let lease = |run_id, issue: &str| Lease {
                         run_id,
