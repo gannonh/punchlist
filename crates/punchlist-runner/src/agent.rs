@@ -239,7 +239,7 @@ fn plain_decimal(number: &str) -> Option<String> {
     };
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digit = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
-    if whole.is_empty() || !digit(whole) || !digit(fraction) || exponent.abs() > 30 {
+    if whole.is_empty() || !digit(whole) || !digit(fraction) || !(-30..=30).contains(&exponent) {
         return None;
     }
     let text = if exponent == 0 {
@@ -1011,6 +1011,7 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
             ("\"0.5\"", None),
             ("null", None),
             ("1e-40", None),
+            ("1e-9223372036854775808", None),
         ];
         for (number, want) in cases {
             assert_eq!(plain_decimal(number).as_deref(), want, "{number}");
