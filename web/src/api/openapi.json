@@ -3621,6 +3621,13 @@
             "type": "string",
             "description": "The branch to work on, `feature/<id>`, or `feature/<id>-<n>` from the issue's second\nlifecycle on."
           },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Codex's reasoning effort from the dispatch rule's `effort`. `None`: the runner's\n`--codex-effort`."
+          },
           "github": {
             "oneOf": [
               {
@@ -3653,6 +3660,13 @@
               "type": "string"
             },
             "description": "The issue's branches with a merged pull request and no open one, sorted. The runner\nreplaces a worktree it still has on one of them. Empty when no earlier branch of the\nissue has merged."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model the attempt runs on: the dispatch rule's `model`, else the runner's flag\nfor the agent. `None`: the agent's own default."
           },
           "next_line": {
             "type": "integer",
@@ -6368,6 +6382,20 @@
               "null"
             ],
             "description": "The agent a runner starts when an issue enters it, such as `claude-code`."
+          },
+          "dispatch_effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Codex reasoning effort its dispatch rule names; `None`: the runner's flag."
+          },
+          "dispatch_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model its dispatch rule names, such as `haiku`; `None`: the runner's flag."
           },
           "key": {
             "type": "string",

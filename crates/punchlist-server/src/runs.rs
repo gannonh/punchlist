@@ -292,8 +292,10 @@ async fn try_claim(
     let leased = sqlx::query!(
         "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at, model)
          VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5),
-                 (SELECT n.models ->> r.agent FROM runner n, run r WHERE n.id = $3 AND r.id = $1))
-         RETURNING lease_expires_at, session_id",
+                 (SELECT coalesce(r.model, n.models ->> r.agent)
+                  FROM runner n, run r WHERE n.id = $3 AND r.id = $1))
+         RETURNING lease_expires_at, session_id, model,
+                   (SELECT effort FROM run WHERE id = $1)",
         run_id,
         id,
         runner.id,
@@ -324,6 +326,8 @@ async fn try_claim(
         prompt,
         agent_token,
         session_id: leased.session_id,
+        model: leased.model,
+        effort: leased.effort,
         next_line: 1,
         github: None,
         github_error: None,
@@ -352,7 +356,7 @@ async fn new_run(
 ) -> Result<(Uuid, String, String, Issue), ApiError> {
     // The status the run is for, the issue in that status, and the prompt of the workflow
     // version that named the agent.
-    let (status, issue, prompt) = if from == START {
+    let (status, issue, prompt, rule) = if from == START {
         let gates = check_move(&mut *tx, workflow, actor, &id, START, IN_PROGRESS).await?;
         let moved = record_transition(
             &mut *tx,
@@ -366,13 +370,16 @@ async fn new_run(
         )
         .await?;
         let prompt = workflow.prompt_for(IN_PROGRESS);
-        (IN_PROGRESS.to_string(), moved.issue, prompt)
+        let rule = workflow.dispatch_for(IN_PROGRESS).cloned();
+        (IN_PROGRESS.to_string(), moved.issue, prompt, rule)
     } else {
         let issue = issue_row(&mut *tx, actor.workspace_id, &id).await?;
         let queued_under = dispatch_workflow(&mut *tx, actor.workspace_id, &id).await?;
         let prompt = queued_under.prompt_for(&from);
-        (from, issue, prompt)
+        let rule = queued_under.dispatch_for(&from).cloned();
+        (from, issue, prompt, rule)
     };
+    let (model, effort) = rule.map_or((None, None), |rule| (rule.model, rule.effort));
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
     // a retry, because nothing has merged on the branch it was given. A run dispatched in a
@@ -386,14 +393,16 @@ async fn new_run(
         branch = format!("{base}-{lifecycle}");
     }
     let run_id = sqlx::query_scalar!(
-        "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt, model, effort)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
         actor.workspace_id,
         id,
         status,
         agent,
         branch,
         prompt,
+        model,
+        effort,
     )
     .fetch_one(&mut *tx)
     .await
@@ -912,7 +921,7 @@ async fn resume_run(
         "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $4)
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
              AND lease_expires_at > now()
-         RETURNING issue_id, lease_expires_at, session_id",
+         RETURNING issue_id, lease_expires_at, session_id, model",
         id,
         request.attempt,
         runner.id,
@@ -923,9 +932,12 @@ async fn resume_run(
     else {
         return Err(stale(id, request.attempt));
     };
-    let run = sqlx::query!("SELECT agent, branch, prompt FROM run WHERE id = $1", id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let run = sqlx::query!(
+        "SELECT agent, branch, prompt, effort FROM run WHERE id = $1",
+        id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
     // `append_log` skips lines numbered at or below the stored maximum.
     let next_line = sqlx::query_scalar!(
         r#"SELECT coalesce(max(line_no), 0) + 1 AS "next!" FROM run_log
@@ -953,6 +965,8 @@ async fn resume_run(
         prompt: run.prompt,
         agent_token,
         session_id: held.session_id,
+        model: held.model,
+        effort: run.effort,
         next_line,
         github: None,
         github_error: None,
