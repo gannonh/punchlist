@@ -741,7 +741,7 @@ pub(crate) async fn run(
         }
         if to != current.status {
             // As any move does, without queuing a dispatch for the new status.
-            end_dispatches(tx, &current.id).await?;
+            end_dispatches(tx, &importer, &current.id).await?;
             let transition = insert_transition(
                 tx,
                 &importer,

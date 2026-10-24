@@ -21,7 +21,20 @@ pub(crate) async fn issue(
     id: &str,
 ) -> sqlx::Result<Option<Issue>> {
     let mut found = load(conn, workspace_id, Some(&[id.to_string()])).await?;
-    Ok(found.pop().map(|(issue, _, _)| issue))
+    Ok(found.pop().map(|loaded| loaded.issue))
+}
+
+/// The workspace's issues in `ids` with their run as the row shows it, and the id of the
+/// latest run in each one's status, which the run summary is derived from.
+pub(crate) async fn issue_runs(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    ids: &[String],
+) -> sqlx::Result<Vec<(Issue, RunSummary, Option<Uuid>)>> {
+    let loaded = load(conn, workspace_id, Some(ids)).await?;
+    Ok((loaded.into_iter())
+        .map(|loaded| (loaded.issue, loaded.run, loaded.last_run))
+        .collect())
 }
 
 /// The rows of the workspace's issues in `ids`, or of all of them, oldest first. The gates
@@ -34,7 +47,13 @@ pub(crate) async fn issue_rows(
     let loaded = load(conn, workspace_id, ids).await?;
     let (workflow, _) = active_workflow(conn, workspace_id).await?;
     let mut rows = Vec::with_capacity(loaded.len());
-    for (issue, run, pull_request) in loaded {
+    for Parsed {
+        issue,
+        run,
+        pull_request,
+        ..
+    } in loaded
+    {
         // ponytail: one gate evaluation, a few queries, per issue whose status has a gated
         // transition, so a first load of N such issues costs N evaluations. Upgrade path:
         // read the evidence of every issue in one set-based query and evaluate in memory.
@@ -83,6 +102,7 @@ struct Loaded {
     running_agent: Option<String>,
     running_since: Option<DateTime<Utc>>,
     queued_agent: Option<String>,
+    last_id: Option<Uuid>,
     last_agent: Option<String>,
     last_outcome: Option<String>,
     last_finished_at: Option<DateTime<Utc>>,
@@ -96,6 +116,14 @@ struct Loaded {
     linear_url: Option<String>,
 }
 
+struct Parsed {
+    issue: Issue,
+    run: RunSummary,
+    /// The latest run in the issue's status.
+    last_run: Option<Uuid>,
+    pull_request: Option<PullRequestSummary>,
+}
+
 /// Each issue with its run and its newest pull request. The run is the running one; else
 /// the dispatch waiting for a runner; else the latest run in the issue's status, when it
 /// failed; else none.
@@ -103,7 +131,7 @@ async fn load(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     ids: Option<&[String]>,
-) -> sqlx::Result<Vec<(Issue, RunSummary, Option<PullRequestSummary>)>> {
+) -> sqlx::Result<Vec<Parsed>> {
     let rows = sqlx::query_as!(
         Loaded,
         r#"SELECT i.id, i.title, i.body, i.status, i.labels, i.created_at, i.updated_at,
@@ -113,7 +141,7 @@ async fn load(
                   a.role AS "assignee_role?", a.kind AS "assignee_kind?",
                   running.agent AS "running_agent?", running.started_at AS "running_since?",
                   waiting.agent AS "queued_agent?",
-                  last.agent AS "last_agent?", last.outcome AS "last_outcome?",
+                  last.id AS "last_id?", last.agent AS "last_agent?", last.outcome AS "last_outcome?",
                   last.finished_at AS "last_finished_at?", last.reason AS "last_reason?",
                   pr.number AS "pr_number?", pr.state AS "pr_state?", pr.draft AS "pr_draft?",
                   pr.checks AS "pr_checks?", pr.url AS "pr_url?",
@@ -125,7 +153,7 @@ async fn load(
            LEFT JOIN run running ON running.issue_id = i.id AND running.outcome = 'running'
            LEFT JOIN dispatch waiting ON waiting.issue_id = i.id AND waiting.run_id IS NULL
            LEFT JOIN LATERAL (
-               SELECT r.agent, r.outcome, r.finished_at,
+               SELECT r.id, r.agent, r.outcome, r.finished_at,
                       (SELECT t.failure_reason FROM attempt t WHERE t.run_id = r.id
                        ORDER BY t.attempt DESC LIMIT 1) AS reason
                FROM run r WHERE r.issue_id = i.id AND r.status = i.status
@@ -143,7 +171,7 @@ async fn load(
     rows.into_iter().map(parse).collect()
 }
 
-fn parse(row: Loaded) -> sqlx::Result<(Issue, RunSummary, Option<PullRequestSummary>)> {
+fn parse(row: Loaded) -> sqlx::Result<Parsed> {
     let corrupt = |what: String| sqlx::Error::Decode(what.into());
     let assignee = match (row.assignee_id, row.assignee_name, row.assignee_role) {
         (Some(id), Some(name), Some(role)) => Some(punchlist_api::Actor {
@@ -207,5 +235,10 @@ fn parse(row: Loaded) -> sqlx::Result<(Issue, RunSummary, Option<PullRequestSumm
         linear: (row.linear_identifier.zip(row.linear_url))
             .map(|(identifier, url)| LinearLink { identifier, url }),
     };
-    Ok((issue, run, pull_request))
+    Ok(Parsed {
+        issue,
+        run,
+        last_run: row.last_id,
+        pull_request,
+    })
 }

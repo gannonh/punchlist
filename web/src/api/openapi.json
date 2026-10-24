@@ -156,7 +156,7 @@
     },
     "/api/inbox": {
       "get": {
-        "summary": "The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)\nthat are unassigned, assigned to the caller or to an agent the caller owns, newest\n`since_seq` first. A person's token.",
+        "summary": "What waits on the caller, newest `since_seq` first: the workspace's issues in a status that\nwaits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller\nor to an agent the caller owns; and the issues whose latest run, by an agent the caller\nowns, ended with nothing to dispatch them again. A person's token.",
         "operationId": "inbox",
         "responses": {
           "200": {
@@ -2647,7 +2647,7 @@
     },
     "/api/workspaces/{id}/inbox": {
       "get": {
-        "summary": "The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)\nthat are unassigned, assigned to the caller or to an agent the caller owns, newest\n`since_seq` first. A person's token.",
+        "summary": "What waits on the caller, newest `since_seq` first: the workspace's issues in a status that\nwaits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller\nor to an agent the caller owns; and the issues whose latest run, by an agent the caller\nowns, ended with nothing to dispatch them again. A person's token.",
         "operationId": "inbox_in_workspace",
         "parameters": [
           {
@@ -4564,6 +4564,70 @@
                 "description": "The caller has not opened the item since `since_seq`."
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "The issue's latest run in its status ended and nothing dispatches it again: the run\nfailed, or it was the entry's last (`limit_reached`). The caller owns the run's agent.",
+            "required": [
+              "issue",
+              "agent",
+              "runs",
+              "last_outcome",
+              "limit_reached",
+              "since",
+              "since_seq",
+              "unread",
+              "kind"
+            ],
+            "properties": {
+              "agent": {
+                "type": "string",
+                "description": "The run's agent kind, such as `claude-code`."
+              },
+              "issue": {
+                "$ref": "#/components/schemas/PullRequestIssue"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "run"
+                ]
+              },
+              "last_outcome": {
+                "$ref": "#/components/schemas/RunOutcome",
+                "description": "`failed` or `succeeded`."
+              },
+              "limit_reached": {
+                "type": "boolean",
+                "description": "The entry's runs are used up: `<runs> runs in <status> ended without moving it`."
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The last attempt's failure reason, when the run failed. Text from outside the team."
+              },
+              "runs": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The run's number in this entry into the status."
+              },
+              "since": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the run's end was recorded."
+              },
+              "since_seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "That event's sequence number: the issue's newest `run` event."
+              },
+              "unread": {
+                "type": "boolean",
+                "description": "The caller has not opened the item since `since_seq`."
+              }
+            }
           }
         ],
         "description": "An inbox item, derived from the issue's state: it leaves when its condition ends."
@@ -4572,7 +4636,8 @@
         "type": "string",
         "description": "The kinds of inbox item, as `POST /api/inbox/read` names them.",
         "enum": [
-          "waiting"
+          "waiting",
+          "run"
         ]
       },
       "InboxList": {
