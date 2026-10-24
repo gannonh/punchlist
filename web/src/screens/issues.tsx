@@ -137,6 +137,7 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
     ['/', 'filter'],
     ['1 2', 'switch layout'],
     ['g p', 'pull requests'],
+    ['g m', 'projects'],
     ['Esc', 'close'],
   ],
   board: [
@@ -149,6 +150,7 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
     ['/', 'filter'],
     ['1 2', 'switch layout'],
     ['g p', 'pull requests'],
+    ['g m', 'projects'],
     ['Esc', 'close'],
   ],
 }
