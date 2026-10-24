@@ -459,6 +459,7 @@ pub(crate) async fn run_codex(
                 reason: Some(format!("cannot start `{}`: {e}", codex_command.display())),
                 input_tokens: None,
                 output_tokens: None,
+                cost_usd: None,
             });
         }
     };
@@ -504,6 +505,7 @@ pub(crate) async fn run_codex(
         reason,
         input_tokens: Some(session.input_tokens.min(i64::MAX as u64) as i64),
         output_tokens: Some(session.output_tokens.min(i64::MAX as u64) as i64),
+        cost_usd: None,
     })
 }
 
@@ -576,6 +578,7 @@ done"#
                 reason: None,
                 input_tokens: Some(RECORDED_INPUT_TOKENS),
                 output_tokens: Some(RECORDED_OUTPUT_TOKENS),
+                cost_usd: None,
             })
         );
 
@@ -798,6 +801,7 @@ done"#;
                 reason: Some("codex turn failed: usage limit reached".into()),
                 input_tokens: Some(300),
                 output_tokens: Some(9),
+                cost_usd: None,
             })
         );
         assert_eq!(lines.len(), 8);

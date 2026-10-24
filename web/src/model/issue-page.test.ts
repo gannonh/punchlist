@@ -14,6 +14,7 @@ import {
   threadView,
   specBlocks,
   tokens,
+  cost,
   duration,
   type GateChecklist,
   type IssueEvent,
@@ -269,6 +270,15 @@ describe('specBlocks and run facts', () => {
       '—',
     ])
     expect([tokens(12_400, 3_100), tokens(800, 20), tokens(null, 5)]).toEqual(['12.4k in · 3.1k out', '800 in · 20 out', '—'])
+  })
+
+  test('a cost reads as stored, and no cost is not $0', () => {
+    expect([cost(null), cost(undefined), cost('0.04530125'), cost('0.1234567890123456789')]).toEqual([
+      null,
+      null,
+      '$0.04530125',
+      '$0.1234567890123456789',
+    ])
   })
 })
 

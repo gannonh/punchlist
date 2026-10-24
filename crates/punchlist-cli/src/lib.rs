@@ -954,6 +954,9 @@ fn run_line(run: &Run) -> String {
     if let (Some(input), Some(output)) = (run.input_tokens, run.output_tokens) {
         text.push_str(&format!("  tokens {input} in / {output} out"));
     }
+    if let Some(cost) = &run.cost_usd {
+        text.push_str(&format!("  cost ${cost}"));
+    }
     if run.outcome == RunOutcome::Failed
         && let Some(reason) = &run.failure_reason
     {
@@ -1796,6 +1799,7 @@ mod tests {
             duration_ms: None,
             input_tokens: None,
             output_tokens: None,
+            cost_usd: None,
             state,
             failure_reason: reason.map(String::from),
             started_at: at("2026-10-16T10:00:00Z"),
@@ -1818,6 +1822,7 @@ mod tests {
             duration_ms: None,
             input_tokens: None,
             output_tokens: None,
+            cost_usd: None,
             log_tail: vec![],
             attempts: vec![
                 attempt(1, "sartre", RunOutcome::Failed, Some("runner restarted")),
@@ -1825,7 +1830,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            render_run_list(&[run]),
+            render_run_list(std::slice::from_ref(&run)),
             "Runs\n\
              \x20 00000000-0000-0000-0000-000000000000  Claude Code  model waiting for the agent, pinned haiku  runner sartre  started 2026-10-16 10:00:00 UTC  duration —  running\n\
              \x20   attempt 1  model claude-haiku-5-5 (pinned haiku)  runner sartre  failed  (runner restarted)\n\
@@ -1848,6 +1853,16 @@ mod tests {
             ]
         );
         assert_eq!(render_run_list(&[]), "Runs\n  No runs yet.\n");
+
+        let mut finished = run.clone();
+        finished.outcome = RunOutcome::Succeeded;
+        finished.input_tokens = Some(1000);
+        finished.output_tokens = Some(250);
+        assert!(run_line(&finished).ends_with("succeeded  tokens 1000 in / 250 out\n"));
+        finished.cost_usd = Some("0.0453".into());
+        assert!(
+            run_line(&finished).ends_with("succeeded  tokens 1000 in / 250 out  cost $0.0453\n")
+        );
     }
 
     #[test]
