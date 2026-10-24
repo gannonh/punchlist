@@ -6,7 +6,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use punchlist_server::{AppState, Bootstrap, Bootstrapped, bootstrap, router, run_jobs_until_idle};
+use punchlist_server::{
+    AppState, Bootstrap, Bootstrapped, GithubClient, bootstrap, router, run_jobs_until_idle,
+};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -605,6 +607,7 @@ async fn a_thread_event_records_the_comment_author_and_body(pool: PgPool) {
             "line": null,
             "comments": said,
             "comments_total": 1,
+            "url": "https://github.com/gannonh/punchlist/pull/12#discussion_r1700001",
         }])
     );
     deliver(&s, "pull_request_review_thread", "d5", THREAD).await;
@@ -613,6 +616,101 @@ async fn a_thread_event_records_the_comment_author_and_body(pool: PgPool) {
 
     let (status, _) = read("POST", "/api/issues/PL-9/pull-requests/refresh").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn the_review_threads_route_answers_the_recorded_open_threads_without_github(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    let token = s.person.token.clone();
+    let threads = |app: Router| {
+        let token = token.clone();
+        async move {
+            let request = Request::builder()
+                .uri("/api/issues/PL-1/review-threads")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+
+    let unresolved = edited(THREAD, |v| v["action"] = json!("unresolved"));
+    deliver(&s, "pull_request_review_thread", "d1", &unresolved).await;
+    // Resolved, and on an open pull request: not listed.
+    let resolved = edited(THREAD, |v| v["thread"]["node_id"] = json!("PRRT_resolved"));
+    deliver(&s, "pull_request_review_thread", "d2", &resolved).await;
+    // Unresolved, but on a closed pull request: not listed.
+    let closed = pull_request(CLOSED, 13, "feature/pl-1-fix-the-thing", "Old", "punchlist");
+    deliver(&s, "pull_request", "d3", &closed).await;
+    let on_closed = edited(&unresolved, |v| {
+        v["thread"]["node_id"] = json!("PRRT_closed");
+        v["pull_request"]["number"] = json!(13);
+    });
+    deliver(&s, "pull_request_review_thread", "d4", &on_closed).await;
+    // An event without comments: recorded with no text and, not being plain, no link.
+    let bare = edited(&unresolved, |v| {
+        v["thread"]["node_id"] = json!("PRRT_bare");
+        v["thread"]["comments"] = json!([]);
+    });
+    deliver(&s, "pull_request_review_thread", "d5", &bare).await;
+    let unsafe_url = edited(&unresolved, |v| {
+        v["thread"]["node_id"] = json!("PRRT_unsafe");
+        v["thread"]["comments"][0]["html_url"] = json!("javascript:alert(1)");
+    });
+    deliver(&s, "pull_request_review_thread", "d6", &unsafe_url).await;
+
+    let said = json!([
+        {"author": "octocat", "body": "Should this return an error?", "cut": false}
+    ]);
+    let expected = json!([
+        {
+            "id": "PRRT_kwDOA1b2c84AbCdE",
+            "pull_request": 12,
+            "path": "src/lib.rs",
+            "line": null,
+            "comments": said,
+            "comments_total": 1,
+            "url": "https://github.com/gannonh/punchlist/pull/12#discussion_r1700001",
+        },
+        {
+            "id": "PRRT_unsafe",
+            "pull_request": 12,
+            "path": "src/lib.rs",
+            "line": null,
+            "comments": said,
+            "comments_total": 1,
+            "url": null,
+        },
+        {
+            "id": "PRRT_bare",
+            "pull_request": 12,
+            "path": null,
+            "line": null,
+            "comments": [],
+            "comments_total": 0,
+            "url": null,
+        },
+    ]);
+    assert_eq!(threads(s.app.clone()).await, expected);
+    // A server with a GitHub App it cannot reach answers the same: the route reads no GitHub.
+    let unreachable = GithubClient::with_token("http://127.0.0.1:9", "token");
+    let with_app = router(s.state.clone().with_github(unreachable));
+    assert_eq!(threads(with_app).await, expected);
+
+    // Resolving the thread drops it from the list.
+    deliver(&s, "pull_request_review_thread", "d7", THREAD).await;
+    let ids: Vec<Value> = (threads(s.app.clone()).await.as_array().unwrap().iter())
+        .map(|thread| thread["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!("PRRT_unsafe"), json!("PRRT_bare")]);
+
+    let (status, body) = get(&s, &s.person.token, "/api/issues/PL-9/review-threads").await;
+    let (_, pull_requests) = get(&s, &s.person.token, "/api/issues/PL-9/pull-requests").await;
+    assert_eq!((status, &body), (StatusCode::NOT_FOUND, &pull_requests));
 }
 
 #[sqlx::test]

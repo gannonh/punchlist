@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO review_thread\n             (node_id, pull_request_id, resolved, path, line, comments, comments_total, url,\n              updated_at)\n         SELECT node_id, $1, resolved, path, line, comments, comments_total, url,\n                clock_timestamp()\n         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[], $6::jsonb[], $7::int[],\n                     $8::text[])\n             AS t (node_id, resolved, path, line, comments, comments_total, url)\n         ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,\n             resolved = EXCLUDED.resolved,\n             updated_at = CASE WHEN (review_thread.pull_request_id, review_thread.resolved,\n                                     review_thread.path, review_thread.line)\n                                    IS DISTINCT FROM\n                                    (EXCLUDED.pull_request_id, EXCLUDED.resolved,\n                                     coalesce(EXCLUDED.path, review_thread.path),\n                                     coalesce(EXCLUDED.line, review_thread.line))\n                               THEN EXCLUDED.updated_at ELSE review_thread.updated_at END,\n             -- An event without its comments does not forget where the thread is, or what\n             -- it says. One with them replaces what was recorded.\n             path = coalesce(EXCLUDED.path, review_thread.path),\n             line = coalesce(EXCLUDED.line, review_thread.line),\n             comments = coalesce(EXCLUDED.comments, review_thread.comments),\n             comments_total = coalesce(EXCLUDED.comments_total, review_thread.comments_total),\n             -- The link goes with the comments it came with, and is NULL when not plain.\n             url = CASE WHEN EXCLUDED.comments IS NULL THEN review_thread.url\n                        ELSE EXCLUDED.url END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "BoolArray",
+        "TextArray",
+        "Int8Array",
+        "JsonbArray",
+        "Int4Array",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f25db5c481ec4603814288ea73fc9414a9b80cc992d18408d84546515bd3c892"
+}

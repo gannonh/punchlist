@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.node_id, p.number, t.path, t.line,\n                  coalesce(t.comments, '[]') AS \"comments!\",\n                  coalesce(t.comments_total, 0) AS \"comments_total!\"\n           FROM review_thread t JOIN pull_request p ON p.id = t.pull_request_id\n           WHERE p.issue_id = $1 AND p.state = 'open' AND NOT t.resolved\n           ORDER BY p.number DESC, t.path, t.line, t.node_id",
+  "query": "SELECT t.node_id, p.number, t.path, t.line, t.url,\n                  coalesce(t.comments, '[]') AS \"comments!\",\n                  coalesce(t.comments_total, 0) AS \"comments_total!\"\n           FROM review_thread t JOIN pull_request p ON p.id = t.pull_request_id\n           WHERE p.issue_id = $1 AND p.state = 'open' AND NOT t.resolved\n           ORDER BY p.number DESC, t.path, t.line, t.node_id",
   "describe": {
     "columns": [
       {
@@ -49,12 +49,23 @@
       },
       {
         "ordinal": 4,
+        "name": "url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "review_thread",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "comments!",
         "type_info": "Jsonb",
         "origin": "Expression"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "comments_total!",
         "type_info": "Int4",
         "origin": "Expression"
@@ -70,9 +81,10 @@
       false,
       true,
       true,
+      true,
       null,
       null
     ]
   },
-  "hash": "5adaa780ebe6df3c7c21e3dec5b8e5e24b0cd9157468a6f5fc76b9bd2aa8ce60"
+  "hash": "41681ec2071d04294aa170943d74a4926d7f05259a3e08b2fac80174bed984f2"
 }

@@ -204,10 +204,31 @@ export interface paths {
          * An issue's pull requests and the unresolved review threads of the open ones, after
          *     reading both from GitHub as a gated request does: a new review thread sends no webhook,
          *     so this is how an agent reads what its reviewers wrote. The thread text is from outside
-         *     the team; only this route returns it. When GitHub cannot be read, or there is no GitHub
-         *     App, `refreshed` is false and the answer is what is recorded.
+         *     the team. When GitHub cannot be read, or there is no GitHub App, `refreshed` is false
+         *     and the answer is what is recorded.
          */
         post: operations["refresh_issue_pull_requests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/issues/{id}/review-threads": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The unresolved review threads of an issue's open pull requests, as last recorded: a thread
+         *     event, a gated request and `get_issue` record them. Reads nothing from GitHub. The thread
+         *     text is from outside the team.
+         */
+        get: operations["issue_review_threads"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1643,6 +1664,11 @@ export interface components {
              * @description The number of the pull request it is on.
              */
             pull_request: number;
+            /**
+             * @description The oldest recorded comment on GitHub; `None` unless it is a plain
+             *     `https://github.com/<owner>/<name>/pull/<number>#discussion_r<id>` URL.
+             */
+            url?: string | null;
         };
         /** @description A review thread on a pull request. */
         ReviewThreadEvidence: {
@@ -2548,6 +2574,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PullRequestsNow"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    issue_review_threads: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Issue id, such as PL-1 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewThread"][];
                 };
             };
             401: {

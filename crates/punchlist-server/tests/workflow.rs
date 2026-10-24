@@ -1183,7 +1183,8 @@ async fn refreshing_an_issues_pull_requests_reads_its_review_threads_from_github
     said["line"] = json!(41);
     // GitHub lists null for a comment it cannot show, and for a deleted author.
     said["comments"] = json!({"totalCount": 12, "nodes": [
-        {"author": {"login": "octocat"}, "body": "Should this return an error?"},
+        {"author": {"login": "octocat"}, "body": "Should this return an error?",
+         "url": "https://github.com/gannonh/punchlist/pull/12#discussion_r1700001"},
         null,
         {"author": null, "body": "x".repeat(2001)},
     ]});
@@ -1202,6 +1203,7 @@ async fn refreshing_an_issues_pull_requests_reads_its_review_threads_from_github
             {"author": "ghost", "body": "x".repeat(2000), "cut": true},
         ],
         "comments_total": 12,
+        "url": "https://github.com/gannonh/punchlist/pull/12#discussion_r1700001",
     }]);
 
     // No event is sent for a new thread, so nothing is recorded until the agent's read asks
