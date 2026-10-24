@@ -18,7 +18,6 @@ import {
   rowView,
   type Group,
   type IssueRow,
-  type RowView,
   type Snippet,
   type StatusInfo,
   type Transition,
@@ -82,14 +81,6 @@ function SnippetLine({ snippet }: { snippet: Snippet }) {
   )
 }
 
-function GatesOrMergeWait({ view }: { view: RowView }) {
-  return view.waitsOnMerge ? (
-    <MergeWait id={view.id} number={view.pullRequest.number} wait={view.waitsOnMerge} />
-  ) : (
-    <Gates view={view.gates} />
-  )
-}
-
 const ListRow = memo(function ListRow({ row, status, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
   const view = rowView(row, now, status)
   return (
@@ -114,7 +105,11 @@ const ListRow = memo(function ListRow({ row, status, selected, transition, snipp
       <span className="meta">
         <Run view={view.run} />
         <PullRequest view={view.pullRequest} link />
-        <GatesOrMergeWait view={view} />
+        {view.waitsOnMerge ? (
+          <MergeWait id={view.id} number={view.pullRequest.number} wait={view.waitsOnMerge} />
+        ) : (
+          <Gates view={view.gates} />
+        )}
       </span>
       {snippet && <SnippetLine snippet={snippet} />}
       {transition && (
@@ -155,7 +150,11 @@ const Card = memo(function Card({ row, status, selected, transition, snippet, no
         <PullRequest view={view.pullRequest} link />
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <GatesOrMergeWait view={view} />
+        {view.waitsOnMerge ? (
+          <MergeWait id={view.id} number={view.pullRequest.number} wait={view.waitsOnMerge} />
+        ) : (
+          <Gates view={view.gates} />
+        )}
       </div>
       {transition && (
         <TransitionNote

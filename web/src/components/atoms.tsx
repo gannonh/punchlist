@@ -1,7 +1,6 @@
-import type { ComponentProps } from 'react'
+import type { ComponentProps, KeyboardEvent, SyntheticEvent } from 'react'
 import {
   Bot,
-  ExternalLink,
   GitMerge,
   GitPullRequest,
   GitPullRequestClosed,
@@ -121,7 +120,7 @@ export function GithubLink({
   number,
   text,
   children,
-  className,
+  className = 'text-meta font-medium text-primary',
   ...props
 }: ComponentProps<'a'> & { url: string; number: number; text: string }) {
   return (
@@ -130,22 +129,21 @@ export function GithubLink({
       target="_blank"
       rel="noopener noreferrer"
       aria-label={`${text}: pull request #${String(number)}`}
-      className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
-        className ?? 'text-meta font-medium text-primary',
-      )}
-      onClick={(event) => {
-        event.stopPropagation()
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') event.stopPropagation()
-      }}
+      className={`external-link inline-flex items-center gap-1 whitespace-nowrap hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${className}`}
+      onClick={stopPropagation}
+      onKeyDown={stopEnter}
       {...props}
     >
       {children ?? text}
-      <ExternalLink className="size-3 flex-none" aria-hidden="true" />
     </a>
   )
+}
+
+const stopPropagation = (event: SyntheticEvent) => {
+  event.stopPropagation()
+}
+const stopEnter = (event: KeyboardEvent) => {
+  if (event.key === 'Enter') event.stopPropagation()
 }
 
 /** `link` makes the chip a link to the pull request on GitHub when it has a plain GitHub URL. */
@@ -170,7 +168,7 @@ export function PullRequest({ view, link = false }: { view: PullRequestView; lin
       title={view.title}
     >
       {link && view.url && view.number !== null ? (
-        <GithubLink url={view.url} number={view.number} text="Open on GitHub" className="gap-1.25" data-pr-link>
+        <GithubLink url={view.url} number={view.number} text="Open on GitHub" className="text-muted-foreground" data-pr-link>
           {chip}
         </GithubLink>
       ) : (
@@ -190,10 +188,9 @@ export function PullRequest({ view, link = false }: { view: PullRequestView; lin
 export function MergeWait({ id, number, wait }: { id: string; number: number | null; wait: WaitsOnMerge }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 text-meta font-medium whitespace-nowrap text-warn"
+      className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-meta font-medium whitespace-nowrap text-warn"
       title={`${id} moves to ${wait.to} when GitHub reports the merge`}
     >
-      <GitMerge className="size-3.25 flex-none" aria-hidden="true" />
       Waits on the merge
       {wait.url && number !== null && <GithubLink url={wait.url} number={number} text="Merge on GitHub" data-merge-link />}
     </span>
