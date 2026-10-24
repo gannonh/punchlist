@@ -1150,13 +1150,60 @@ pub struct OpenPullRequest {
     pub waits_on_merge: bool,
 }
 
-/// The issue a pull request names.
+/// The issue a pull request or an inbox item names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PullRequestIssue {
     pub id: String,
     pub title: String,
     pub status: String,
     pub status_name: String,
+}
+
+/// `GET /api/inbox`: what waits on the caller, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InboxList {
+    pub items: Vec<InboxItem>,
+    /// How many of `items` are unread.
+    pub unread: i64,
+}
+
+/// An inbox item, derived from the issue's state: it leaves when its condition ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InboxItem {
+    /// The issue is in a status only a person moves it on from (`Workflow::person_statuses`).
+    Waiting {
+        issue: PullRequestIssue,
+        /// When the event that put the issue in its status was written.
+        since: DateTime<Utc>,
+        /// That event's sequence number: the issue's newest `transition` or `created` event.
+        since_seq: i64,
+        /// The caller has not opened the item since `since_seq`.
+        unread: bool,
+    },
+}
+
+/// The kinds of inbox item, as `POST /api/inbox/read` names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxKind {
+    Waiting,
+}
+
+impl InboxKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InboxKind::Waiting => "waiting",
+        }
+    }
+}
+
+/// `POST /api/inbox/read`: the caller opened the item for `issue` up to `since_seq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MarkInboxRead {
+    pub issue: String,
+    pub kind: InboxKind,
+    pub since_seq: i64,
 }
 
 /// An unresolved review thread. Its path, authors and bodies are text from outside the team.
