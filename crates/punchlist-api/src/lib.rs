@@ -1184,6 +1184,27 @@ pub enum InboxItem {
         /// The caller has not opened the item since `since_seq`.
         unread: bool,
     },
+    /// The issue's latest run in its status ended and nothing dispatches it again: the run
+    /// failed, or it was the entry's last (`limit_reached`). The caller owns the run's agent.
+    Run {
+        issue: PullRequestIssue,
+        /// The run's agent kind, such as `claude-code`.
+        agent: String,
+        /// The run's number in this entry into the status.
+        runs: i32,
+        /// `failed` or `succeeded`.
+        last_outcome: RunOutcome,
+        /// The last attempt's failure reason, when the run failed. Text from outside the team.
+        reason: Option<String>,
+        /// The entry's runs are used up: `<runs> runs in <status> ended without moving it`.
+        limit_reached: bool,
+        /// When the run's end was recorded.
+        since: DateTime<Utc>,
+        /// That event's sequence number: the issue's newest `run` event.
+        since_seq: i64,
+        /// The caller has not opened the item since `since_seq`.
+        unread: bool,
+    },
 }
 
 /// The kinds of inbox item, as `POST /api/inbox/read` names them.
@@ -1191,12 +1212,14 @@ pub enum InboxItem {
 #[serde(rename_all = "snake_case")]
 pub enum InboxKind {
     Waiting,
+    Run,
 }
 
 impl InboxKind {
     pub fn as_str(self) -> &'static str {
         match self {
             InboxKind::Waiting => "waiting",
+            InboxKind::Run => "run",
         }
     }
 }

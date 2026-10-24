@@ -4,7 +4,8 @@ import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
 import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests, useSignOut } from '@/lib/queries'
-import { ageText, ordered, type InboxItem } from '@/model/inbox'
+import { ageText, ordered, runLines, type InboxItem } from '@/model/inbox'
+import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
 import { useNow } from '@/screens/issues'
 
@@ -17,6 +18,13 @@ function useRenderMeasure(items: number | undefined) {
   })
 }
 
+const KIND = { waiting: 'Waiting on you', run: 'Run needs you' } as const
+
+const KIND_STYLE = {
+  waiting: 'border-warn-line bg-warn-soft text-warn',
+  run: 'border-border bg-bad-soft text-bad',
+} as const
+
 function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item: InboxItem) => void }) {
   const { issue } = item
   return (
@@ -26,7 +34,7 @@ function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item
       data-item={issue.id}
       data-kind={item.kind}
       data-unread={item.unread || undefined}
-      aria-label={`Waiting on you: ${issue.id} ${issue.title}, ${issue.status_name}${item.unread ? ', unread' : ''}`}
+      aria-label={`${KIND[item.kind]}: ${issue.id} ${issue.title}, ${issue.status_name}${item.unread ? ', unread' : ''}`}
       className="grid gap-1.5 border-t px-3 py-2.5 first:border-t-0 hover:bg-secondary focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
       onClick={(event) => {
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return
@@ -40,8 +48,13 @@ function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item
           aria-hidden="true"
         />
         <span className="font-mono">{issue.id}</span>
-        <span className="rounded-full border border-warn-line bg-warn-soft px-2 py-px text-caption font-medium whitespace-nowrap text-warn">
-          Waiting on you
+        <span
+          className={cn(
+            'rounded-full border px-2 py-px text-caption font-medium whitespace-nowrap',
+            KIND_STYLE[item.kind],
+          )}
+        >
+          {KIND[item.kind]}
         </span>
         <span className="inline-flex items-center gap-1.25 whitespace-nowrap text-muted-foreground" data-field="status">
           <StatusDot status={issue.status} />
@@ -52,6 +65,21 @@ function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item
         </span>
       </span>
       <span className={cn('wrap-anywhere', item.unread ? 'font-semibold' : 'font-medium')}>{issue.title}</span>
+      {item.kind === 'run' && (
+        <span className="grid gap-0.5 text-meta wrap-anywhere text-muted-foreground" data-cause>
+          <span>
+            <b className="font-semibold text-bad" data-agent>
+              {agentName(item.agent)}
+            </b>{' '}
+            run on your runner
+          </span>
+          {runLines(item).map((line) => (
+            <span key={line} data-run-line>
+              {line}
+            </span>
+          ))}
+        </span>
+      )}
     </Link>
   )
 }
@@ -119,7 +147,8 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
           )}
         </h1>
         <p className="text-meta text-muted-foreground">
-          Issues in a status only a person moves on. An item leaves when its issue moves on; opening one marks it read.
+          Issues in a status only a person moves on, and issues your agents' runs left with nothing to run again. An
+          item leaves when its issue moves on; opening one marks it read.
         </p>
         {inbox.error ? (
           <p className="p-6 text-center text-bad" role="alert">
@@ -128,22 +157,27 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
         ) : !inbox.data ? (
           <p className="p-6 text-center text-ink-3">Loading the inbox…</p>
         ) : (
-          <section data-section="waiting" aria-labelledby="section-waiting">
-            <h2 id="section-waiting" className="mt-1 mb-1.5 flex items-center gap-2 font-semibold">
-              Waiting on you <span className="font-medium text-ink-3">{items.length}</span>
-            </h2>
-            {items.length === 0 ? (
-              <p className="rounded-lg border border-dashed bg-card px-5 py-7 text-center text-muted-foreground" data-empty>
-                Nothing waits on you.
-              </p>
-            ) : (
-              <div className="overflow-hidden rounded-lg border bg-card">
-                {items.map((item) => (
-                  <Item key={item.issue.id} item={item} now={now} onOpen={open} />
-                ))}
-              </div>
-            )}
-          </section>
+          (['run', 'waiting'] as const).map((kind) => {
+            const its = items.filter((item) => item.kind === kind)
+            return (
+              <section key={kind} data-section={kind} aria-labelledby={`section-${kind}`}>
+                <h2 id={`section-${kind}`} className="mt-1 mb-1.5 flex items-center gap-2 font-semibold">
+                  {KIND[kind]} <span className="font-medium text-ink-3">{its.length}</span>
+                </h2>
+                {its.length === 0 ? (
+                  <p className="rounded-lg border border-dashed bg-card px-5 py-7 text-center text-muted-foreground" data-empty>
+                    {kind === 'run' ? 'No run needs you.' : 'Nothing waits on you.'}
+                  </p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border bg-card">
+                    {its.map((item) => (
+                      <Item key={item.issue.id} item={item} now={now} onOpen={open} />
+                    ))}
+                  </div>
+                )}
+              </section>
+            )
+          })
         )}
       </main>
 

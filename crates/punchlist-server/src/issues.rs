@@ -1,5 +1,7 @@
 //! `/api/issues`: create, list, show and move issues, and read their timelines.
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -187,20 +189,9 @@ async fn get_issue(
     let mut issue = issue(&mut conn, actor.workspace_id, &id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    // The last run this entry into the status gets has ended, and the issue is still there:
-    // nothing dispatches it again. The same two rules as `queue_redispatch`, the latest
-    // transition and the limit; change them together.
-    let ended = sqlx::query_scalar!(
-        "SELECT d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
-         WHERE d.issue_id = $1 AND d.run_number >= $2 AND r.outcome <> 'running'
-           AND d.transition_id = (SELECT e.transition_id FROM event e
-                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                  ORDER BY e.seq DESC LIMIT 1)",
-        id,
-        RUNS_PER_ENTRY,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let ended = runs_ended(&mut conn, std::slice::from_ref(&id))
+        .await?
+        .remove(&id);
     // A run of the entry said it waits on a person (`wait_for_person`), which
     // `queue_redispatch` reads too: it is the entry's last, since its end dispatches nothing.
     let waiting = sqlx::query!(
@@ -244,6 +235,30 @@ async fn get_issue(
         )
     });
     Ok(Json(issue))
+}
+
+/// The issues in `ids` whose entry into their status has had its last run end, with that
+/// run's number: nothing dispatches them again. The same two rules as `queue_redispatch`, the
+/// latest transition and the limit; change them together. `get_issue` and the inbox read it.
+pub(crate) async fn runs_ended(
+    conn: &mut sqlx::PgConnection,
+    ids: &[String],
+) -> sqlx::Result<HashMap<String, i32>> {
+    let rows = sqlx::query!(
+        "SELECT d.issue_id, d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
+         WHERE d.issue_id = ANY($1) AND d.run_number >= $2 AND r.outcome <> 'running'
+           AND d.transition_id = (SELECT e.transition_id FROM event e
+                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                  ORDER BY e.seq DESC LIMIT 1)",
+        ids,
+        RUNS_PER_ENTRY,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.issue_id, row.run_number))
+        .collect())
 }
 
 /// Move an issue to another status. The workflow's lock, role and gate rules are checked,
