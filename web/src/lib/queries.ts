@@ -24,6 +24,7 @@ import {
   workflowStale,
 } from '@/model/issues'
 import { proofType, type GateChecklist } from '@/model/issue-page'
+import type { InboxItem } from '@/model/inbox'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -89,6 +90,17 @@ export const pullRequestsQuery = (workspaceId: string) =>
 // The kinds that can change a row of the Pull requests page or move it between sections.
 const PULL_REQUEST_KINDS: ReadonlySet<string> = new Set(['pull_request', 'transition', 'workflow'])
 
+// What waits on the signed-in person: read again 100 ms after the last event that can add, remove or change an item.
+export const inboxQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['inbox', workspaceId],
+    queryFn: () => call(api.GET('/api/workspaces/{id}/inbox', inWorkspace(workspaceId))),
+    staleTime: Infinity,
+  })
+
+// A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in.
+const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'workflow'])
+
 const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))
 }
@@ -105,9 +117,11 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     if (!ready) return
     let retry: ReturnType<typeof setTimeout> | undefined
     let reread: ReturnType<typeof setTimeout> | undefined
+    let rereadInbox: ReturnType<typeof setTimeout> | undefined
     const issues = issuesQuery(workspaceId).queryKey
     const workflow = workflowQuery(workspaceId).queryKey
     const pullRequests = pullRequestsQuery(workspaceId).queryKey
+    const inbox = inboxQuery(workspaceId).queryKey
     const after = client.getQueryData(issues)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
@@ -120,6 +134,11 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
       if (PULL_REQUEST_KINDS.has(item.event.detail.kind))
         void client.invalidateQueries({ queryKey: pullRequests })
+      // One read per burst of events, as for the workflow below.
+      if (INBOX_KINDS.has(item.event.detail.kind)) {
+        clearTimeout(rereadInbox)
+        rereadInbox = setTimeout(() => void client.invalidateQueries({ queryKey: inbox }), 100)
+      }
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
       if (workflowStale(item, client.getQueryData(workflow)?.statuses)) {
@@ -140,6 +159,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
           client.refetchQueries({ queryKey: issues }),
           client.refetchQueries({ queryKey: workflow }),
           client.invalidateQueries({ queryKey: pullRequests }),
+          client.invalidateQueries({ queryKey: inbox }),
         ]).then(() => {
           setOpened((count) => count + 1)
         })
@@ -148,6 +168,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     return () => {
       clearTimeout(retry)
       clearTimeout(reread)
+      clearTimeout(rereadInbox)
       source.close()
     }
   }, [client, workspaceId, ready, opened])
@@ -314,6 +335,25 @@ export const useProjects = (workspaceId: string) => useQuery(projectsQuery(works
  */
 export const usePullRequests = (workspaceId: string, ready: boolean) =>
   useQuery({ ...pullRequestsQuery(workspaceId), enabled: ready })
+
+/** What waits on the signed-in person, read once `ready`, as `usePullRequests` is. */
+export const useInbox = (workspaceId: string, ready: boolean) =>
+  useQuery({ ...inboxQuery(workspaceId), enabled: ready })
+
+/** Opening an inbox item marks it read up to its event; the inbox is read again after. */
+export function useMarkRead(workspaceId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (item: InboxItem) =>
+      call(
+        api.POST('/api/workspaces/{id}/inbox/read', {
+          ...inWorkspace(workspaceId),
+          body: { issue: item.issue.id, kind: item.kind, since_seq: item.since_seq },
+        }),
+      ),
+    onSettled: () => client.invalidateQueries({ queryKey: inboxQuery(workspaceId).queryKey }),
+  })
+}
 
 /** The filter's text as the server reads it: trimmed, each whitespace run one space. */
 const searchText = (text: string) => text.trim().split(/\s+/).join(' ')

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO inbox_read (actor_id, issue_id, kind, since_seq)\n         SELECT $1, id, $3, $4 FROM issue WHERE id = $2 AND workspace_id = $5\n         ON CONFLICT (actor_id, issue_id, kind)\n         DO UPDATE SET since_seq = greatest(inbox_read.since_seq, EXCLUDED.since_seq)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a4f649c659cc32a2579dc20a56fae1af616bf1b0affcc32d5cd8163fb5c7458"
+}
