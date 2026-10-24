@@ -903,6 +903,10 @@ pub struct FinishRun {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    /// The cost in US dollars the agent reported, as a decimal such as `0.0453`, every digit
+    /// kept. `None` when it reported none.
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     /// The runner lost the attempt before its agent finished, such as when it stopped or
     /// restarted. Only with `failed`. A lost attempt that is not the run's last allowed one
     /// keeps the run running for another attempt.
@@ -937,7 +941,7 @@ pub struct Run {
     pub outcome: RunOutcome,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
-    /// The latest attempt's number, runner, failure reason, duration and tokens.
+    /// The latest attempt's number, runner, failure reason, duration, tokens and cost.
     pub attempt: i32,
     /// The model the latest attempt's runner passed the agent; `None` for the agent's default.
     #[serde(default)]
@@ -950,6 +954,8 @@ pub struct Run {
     pub duration_ms: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     /// The last 20 log lines, oldest first.
     pub log_tail: Vec<LogLine>,
     /// Every attempt, oldest first.
@@ -975,6 +981,10 @@ pub struct AttemptInfo {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    /// The cost in US dollars the agent reported, as a decimal string; `None` when it
+    /// reported none.
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     pub state: RunOutcome,
     pub failure_reason: Option<String>,
     pub started_at: DateTime<Utc>,
