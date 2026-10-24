@@ -12,8 +12,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the workspace's people, agents and runners, oldest first. A person's or a
-         *     standalone agent's token.
+         * List the workspace's people, agents and runners, oldest first. A person's or an agent's
+         *     token.
          */
         get: operations["list_actors"];
         put?: never;
@@ -365,8 +365,7 @@ export interface paths {
         };
         /**
          * A proof file's bytes, with its content type. It is served so that a browser neither
-         *     guesses another type nor runs it. A run's agent's token gets 403: it reaches only its
-         *     run's issue.
+         *     guesses another type nor runs it.
          */
         get: operations["get_proof"];
         put?: never;
@@ -719,8 +718,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the workspace's people, agents and runners, oldest first. A person's or a
-         *     standalone agent's token.
+         * List the workspace's people, agents and runners, oldest first. A person's or an agent's
+         *     token.
          */
         get: operations["list_actors_in_workspace"];
         put?: never;
@@ -2339,7 +2338,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description A runner's or a run's agent's token. */
+            /** @description A runner's token. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4268,7 +4267,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description A runner's or a run's agent's token. */
+            /** @description A runner's token. */
             403: {
                 headers: {
                     [name: string]: unknown;

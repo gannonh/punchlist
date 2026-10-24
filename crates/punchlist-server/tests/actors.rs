@@ -627,7 +627,7 @@ async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: 
     let (_, transitions) = rows_for(&pool, "PL-1").await;
     assert_eq!(transitions, 0);
 
-    // A run's agent still reaches only its run's issue.
+    // A run's agent reaches what it does, in its own workspace alone.
     let id = issue_in(&app, &a.token, &["todo", "start"]).await;
     let (status, claim) = call(
         &app,
@@ -640,24 +640,32 @@ async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: 
     assert_eq!(status, StatusCode::OK, "{claim}");
     let run_agent = claim["agent_token"].as_str().unwrap();
     assert_eq!(id, "PL-2");
-    let (status, _) = call(&app, run_agent, "GET", "/api/issues/PL-2", None).await;
-    assert_eq!(status, StatusCode::OK);
     for uri in [
+        "/api/issues/PL-2",
         "/api/issues/PL-1",
         "/api/issues",
         "/api/projects",
         "/api/session",
     ] {
         let (status, body) = call(&app, run_agent, "GET", uri, None).await;
-        assert_eq!(
-            (status, body["message"].as_str()),
-            (
-                StatusCode::FORBIDDEN,
-                Some("an agent acts only on its run's issue, PL-2")
-            ),
-            "{uri}"
-        );
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
     }
+    assert_eq!(status_of(&app, run_agent, &own).await, StatusCode::OK);
+    assert_eq!(
+        status_of(&app, run_agent, &other).await,
+        StatusCode::NOT_FOUND
+    );
+    let (status, _) = call(&app, run_agent, "GET", "/api/issues/OT-1", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &app,
+        run_agent,
+        "POST",
+        "/api/issues/OT-1/comments",
+        Some(json!({"body": "Mine"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = call(
         &app,
         run_agent,
@@ -666,7 +674,12 @@ async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: 
         Some(json!({"title": "Mine"})),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::CREATED);
+    let workspace = sqlx::query_scalar!("SELECT workspace_id FROM issue WHERE title = 'Mine'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(workspace, a.workspace_id);
 }
 
 /// ADR 0011's migration: each person with a token gets an account holding it, so the token

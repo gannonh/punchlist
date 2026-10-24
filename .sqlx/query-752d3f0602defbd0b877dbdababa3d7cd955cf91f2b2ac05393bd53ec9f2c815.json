@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE issue SET status = 'human_review' WHERE id = 'PL-2'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "752d3f0602defbd0b877dbdababa3d7cd955cf91f2b2ac05393bd53ec9f2c815"
+}
