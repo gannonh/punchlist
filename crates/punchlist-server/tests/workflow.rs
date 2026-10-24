@@ -686,6 +686,10 @@ async fn a_move_while_a_run_waits_for_its_next_attempt_fails_the_run(pool: PgPoo
     .await;
     assert_eq!(status, StatusCode::OK, "{run}");
     assert_eq!(run["outcome"], "running");
+    let before: i64 = sqlx::query_scalar("SELECT max(seq) FROM event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     let (status, agent) = call(
         &s.app,
@@ -711,6 +715,17 @@ async fn a_move_while_a_run_waits_for_its_next_attempt_fails_the_run(pool: PgPoo
     assert_eq!(runs[0]["outcome"], "failed");
     assert!(runs[0]["finished_at"].is_string());
     assert_eq!(runs[0]["failure_reason"], "runner restarted");
+    let run_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM event WHERE issue_id = 'PL-1' AND kind = 'run' AND seq > $1",
+    )
+    .bind(before)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_events, 1,
+        "ending a waiting run publishes its row change"
+    );
     // Agent Review's dispatch is not behind it: a Codex runner claims it.
     let (status, codex) = call(
         &s.app,
@@ -741,6 +756,10 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     let agent = issue_with_a_ready_pull_request(&s).await;
     s.github.lock().unwrap().pulls = vec![pull_request_now(MERGED)];
 
+    let before: i64 = sqlx::query_scalar("SELECT max(seq) FROM event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     deliver(&s, "pull_request", "d-merged", MERGED).await;
     let once = [moved("in_progress", "done", "octocat", Some("d-merged"))];
     assert_eq!(event_transitions(&pool).await, once);
@@ -752,6 +771,17 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     deliver(&s, "pull_request", "d-merged-again", MERGED).await;
     assert_eq!(event_transitions(&pool).await, once);
     assert_eq!(issue_status(&pool).await, "done");
+    let run_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM event WHERE issue_id = 'PL-1' AND kind = 'run' AND seq > $1",
+    )
+    .bind(before)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_events, 1,
+        "ending an active run publishes once, even on redelivery"
+    );
 }
 
 #[sqlx::test]
@@ -1653,6 +1683,30 @@ async fn a_locked_status_refuses_agent_comments(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "locked");
+}
+
+#[sqlx::test]
+async fn only_merging_waits_on_a_merge(pool: PgPool) {
+    let s = setup(&pool).await;
+    let (status, body) = call(&s.app, &s.person.token, "GET", "/api/workflow", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let status = |key: &str, name: &str, dispatch: Value| json!({"key": key, "name": name, "locked_to": [], "dispatch": dispatch, "closed": false});
+    assert_eq!(
+        body["statuses"],
+        json!([
+            status("backlog", "Backlog", Value::Null),
+            status("todo", "Todo", Value::Null),
+            status("start", "Start", Value::Null),
+            status("in_progress", "In Progress", json!("claude-code")),
+            status("agent_review", "Agent Review", json!("codex")),
+            {"key": "human_review", "name": "Human Review", "locked_to": ["agent", "runner"],
+             "dispatch": null, "closed": false},
+            {"key": "merging", "name": "Merging", "locked_to": [], "dispatch": null,
+             "closed": false, "on_merge_to": "Done"},
+            {"key": "done", "name": "Done", "locked_to": [], "dispatch": null, "closed": true},
+            {"key": "canceled", "name": "Canceled", "locked_to": [], "dispatch": null, "closed": true},
+        ])
+    );
 }
 
 async fn workflow_versions(pool: &PgPool) -> i64 {

@@ -58,9 +58,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)
-         *     that are unassigned, assigned to the caller or to an agent the caller owns, newest
-         *     `since_seq` first. A person's token.
+         * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
+         *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
+         *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
+         *     owns, ended with nothing to dispatch them again. A person's token.
          */
         get: operations["inbox"];
         put?: never;
@@ -821,9 +822,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)
-         *     that are unassigned, assigned to the caller or to an agent the caller owns, newest
-         *     `since_seq` first. A person's token.
+         * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
+         *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
+         *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
+         *     owns, ended with nothing to dispatch them again. A person's token.
          */
         get: operations["inbox_in_workspace"];
         put?: never;
@@ -1539,12 +1541,41 @@ export interface components {
             since_seq: number;
             /** @description The caller has not opened the item since `since_seq`. */
             unread: boolean;
+        } | {
+            /** @description The run's agent kind, such as `claude-code`. */
+            agent: string;
+            issue: components["schemas"]["PullRequestIssue"];
+            /** @enum {string} */
+            kind: "run";
+            /** @description `failed` or `succeeded`. */
+            last_outcome: components["schemas"]["RunOutcome"];
+            /** @description The entry's runs are used up: `<runs> runs in <status> ended without moving it`. */
+            limit_reached: boolean;
+            /** @description The last attempt's failure reason, when the run failed. Text from outside the team. */
+            reason?: string | null;
+            /**
+             * Format: int32
+             * @description The run's number in this entry into the status.
+             */
+            runs: number;
+            /**
+             * Format: date-time
+             * @description When the run's end was recorded.
+             */
+            since: string;
+            /**
+             * Format: int64
+             * @description That event's sequence number: the issue's newest `run` event.
+             */
+            since_seq: number;
+            /** @description The caller has not opened the item since `since_seq`. */
+            unread: boolean;
         };
         /**
          * @description The kinds of inbox item, as `POST /api/inbox/read` names them.
          * @enum {string}
          */
-        InboxKind: "waiting";
+        InboxKind: "waiting" | "run";
         /** @description `GET /api/inbox`: what waits on the caller, newest first. */
         InboxList: {
             items: components["schemas"]["InboxItem"][];
@@ -1895,6 +1926,8 @@ export interface components {
         /** @description The issue a pull request or an inbox item names. */
         PullRequestIssue: {
             id: string;
+            /** @description As in `StatusInfo`: the status, as people read it, a merge moves the issue to. */
+            on_merge_to?: string | null;
             status: string;
             status_name: string;
             title: string;
@@ -2185,6 +2218,11 @@ export interface components {
             locked_to: components["schemas"]["Role"][];
             /** @description As people read it, such as `In Progress`. */
             name: string;
+            /**
+             * @description The status, as people read it (`Done`), that a merge of the issue's pull request
+             *     moves an issue in it to; `None` when it does not wait on a merge.
+             */
+            on_merge_to?: string | null;
         };
         /**
          * @description One message of `GET /api/workspaces/{id}/events`: an event and its issue's row as it is

@@ -29,6 +29,11 @@ use crate::workflow::{active_workflow, dispatch_workflow, lock_workspace};
 use crate::{ApiError, AppState};
 
 const MAX_WAIT_SECONDS: u32 = 30;
+/// How often a waiting claim looks again with no wake: a run ended by the merge's webhook or
+/// the lease sweep, or a dispatch past its `not_before`, wakes no runner.
+// ponytail: each waiting claim runs one claim transaction a second. Upgrade path: wake the
+// runners from every place a run ends or a dispatch comes due.
+const CLAIM_RETRY: Duration = Duration::from_secs(1);
 const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
 const LOG_TAIL: i64 = 20;
@@ -61,8 +66,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
 enum Target {
     /// The claimable issue furthest along the workflow that no other claim has locked.
     Any,
-    /// The issue a notification named: it entered Start or a status with a dispatch rule, or
-    /// the run it waited behind ended.
+    /// The same, after a notification named this issue: it entered Start or a status with a
+    /// dispatch rule, or a run of it ended. The claim waits for a claim that holds it, and
+    /// says when another runner took it.
     Issue(String),
 }
 
@@ -119,50 +125,46 @@ async fn select_claimable(
         .filter(|status| workflow.dispatch_for(status).is_some_and(|d| d.serial))
         .collect();
     let order: Vec<&str> = workflow.statuses().iter().map(|s| s.as_str()).collect();
-    let only = match target {
-        Target::Any => None,
-        Target::Issue(id) => {
-            // Waits for a claim that holds the issue, so the selection reads what it left.
-            sqlx::query!(
-                "SELECT FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
-                id,
-                workspace_id,
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
-            Some(id.as_str())
-        }
-    };
+    if let Target::Issue(id) = target {
+        // Waits for a claim that holds the issue, so the selection reads what it left. The
+        // selection still takes the first work in the claim order, which may be another issue.
+        sqlx::query!(
+            "SELECT FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+            id,
+            workspace_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+    }
     // A waiting dispatch is always for the status its issue is in: `queue_dispatch`.
     sqlx::query_as!(
         Claimable,
         r#"SELECT i.id, i.status AS "from", r.id AS "run_id?",
                   CASE WHEN r.id IS NOT NULL THEN r.agent
-                       WHEN i.status = $4 THEN $5 ELSE d.agent END AS "agent!"
+                       WHEN i.status = $3 THEN $4 ELSE d.agent END AS "agent!"
            FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL
            LEFT JOIN run r ON r.issue_id = i.id AND r.outcome = 'running' AND r.status = i.status
                 AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
                                 AND a.state = 'running')
-           WHERE i.workspace_id = $1 AND ($3::text IS NULL OR i.id = $3)
-             AND NOT i.status = ANY($6)
+           WHERE i.workspace_id = $1
+             AND NOT i.status = ANY($5)
              AND CASE WHEN r.id IS NOT NULL THEN r.agent = ANY($2)
-                      WHEN i.status = $4 THEN $5::text IS NOT NULL
+                      WHEN i.status = $3 THEN $4::text IS NOT NULL
                       ELSE d.agent = ANY($2)
                            AND (d.not_before IS NULL OR d.not_before <= now())
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
                                            AND run.outcome = 'running')
                  END
              AND (r.id IS NOT NULL
-                  OR NOT CASE WHEN i.status = $4 THEN $7 ELSE i.status END = ANY($8)
+                  OR NOT CASE WHEN i.status = $3 THEN $6 ELSE i.status END = ANY($7)
                   OR NOT EXISTS (SELECT 1 FROM run s WHERE s.workspace_id = $1
                                  AND s.outcome = 'running'
-                                 AND s.status = CASE WHEN i.status = $4 THEN $7
+                                 AND s.status = CASE WHEN i.status = $3 THEN $6
                                                      ELSE i.status END))
-           ORDER BY array_position($9::text[], i.status) DESC NULLS LAST, i.number
+           ORDER BY array_position($8::text[], i.status) DESC NULLS LAST, i.number
            LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
         workspace_id,
         agents,
-        only,
         START,
         start_agent,
         &locked as &[&str],
@@ -521,14 +523,19 @@ async fn claim(
             Claimed::Nothing => false,
             Claimed::AtLimit => true,
         };
-        let target = match tokio::time::timeout_at(deadline, starts.recv()).await {
-            Err(_) | Ok(Err(RecvError::Closed)) => break,
-            Ok(Ok((workspace_id, _))) if workspace_id != actor.workspace_id => continue,
-            // At the limit a wake may be a run that ended, which frees a slot for any issue,
-            // not only the one the wake names.
-            Ok(Ok(_)) if at_limit => Target::Any,
-            Ok(Ok((_, issue_id))) => Target::Issue(issue_id),
-            Ok(Err(RecvError::Lagged(_))) => Target::Any,
+        let target = tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => break,
+            woken = starts.recv() => match woken {
+                Err(RecvError::Closed) => break,
+                Ok((workspace_id, _)) if workspace_id != actor.workspace_id => continue,
+                // At the limit a wake may be a run that ended, which frees a slot for any
+                // issue, so no other runner took the one the wake names.
+                Ok(_) if at_limit => Target::Any,
+                Ok((_, issue_id)) => Target::Issue(issue_id),
+                Err(RecvError::Lagged(_)) => Target::Any,
+            },
+            () = tokio::time::sleep(CLAIM_RETRY) => Target::Any,
         };
         claimed = try_claim(&state, &actor, &runner, &target).await?;
     }
@@ -865,25 +872,12 @@ async fn finish_run(
         .into_iter()
         .next()
         .ok_or(ApiError::RunNotFound(id))?;
-    // A dispatch that waited for this run to end, the one its end queued, or the run's next
-    // attempt can be claimed now: wake the runners. The claim finds out whether there is one.
+    // A dispatch that waited for this run to end, the one its end queued, the run's next
+    // attempt, or the next dispatch a `serial` rule held back can be claimed now: wake the
+    // runners. The claim finds out whether there is one.
     let _ = state
         .starts
         .send((actor.workspace_id, run.issue_id.clone()));
-    // So can the next dispatch waiting in the run's status, which a `serial` rule held back.
-    let next = sqlx::query_scalar!(
-        "SELECT i.id FROM dispatch d JOIN issue i ON i.id = d.issue_id
-         WHERE i.workspace_id = $1 AND d.run_id IS NULL
-           AND i.status = (SELECT status FROM run WHERE id = $2)
-         ORDER BY i.number LIMIT 1",
-        actor.workspace_id,
-        id,
-    )
-    .fetch_optional(&state.pool)
-    .await?;
-    if let Some(next) = next {
-        let _ = state.starts.send((actor.workspace_id, next));
-    }
     Ok(Json(run))
 }
 
@@ -1155,8 +1149,8 @@ async fn settle_run(
 /// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
 /// run `RUNS_PER_ENTRY` of the entry, or a run whose agent said it waits on a person
 /// (`wait_for_person`): that issue waits on a person. Nor when the active workflow cannot be
-/// read, which is logged. `get_issue` reads the same three rules, the latest transition, the
-/// limit and the waiting reason, to say so; change them together.
+/// read, which is logged. `get_issue` and the inbox read the same three rules, the latest
+/// transition, the limit (`runs_ended`) and the waiting reason, to say so; change them together.
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
@@ -1225,9 +1219,8 @@ async fn queue_redispatch(
 /// Fails every running attempt whose lease has lapsed as lost, and settles its run
 /// (`settle_run`): the run gets its next attempt, or fails and the issue is dispatched again
 /// if it has not moved. Returns how many attempts expired.
-// ponytail: nothing wakes a long-polling runner for the attempt or dispatch this makes
-// claimable, so it is claimed at that runner's next poll, at most `MAX_WAIT_SECONDS` later.
-// Upgrade path: give the sweep `AppState::starts`.
+/// Nothing wakes a waiting claim for the attempt or dispatch this makes claimable: it finds
+/// it at its next look, within `CLAIM_RETRY`.
 pub async fn expire_leases(pool: &PgPool) -> sqlx::Result<u64> {
     let lapsed = sqlx::query!(
         "SELECT a.run_id, a.issue_id, r.workspace_id FROM attempt a JOIN run r ON r.id = a.run_id

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ageText, countText, ordered, type InboxItem } from './inbox'
+import { ageText, countText, ordered, runLines, type InboxItem, type RunItem } from './inbox'
 
 const item = (id: string, status: string, status_name: string, since: string, since_seq: number): InboxItem => ({
   kind: 'waiting',
@@ -31,5 +31,33 @@ describe('ageText', () => {
 describe('countText', () => {
   it('shows the unread count, at most 99+', () => {
     expect([0, 3, 99, 100].map(countText)).toEqual(['0', '3', '99', '99+'])
+  })
+})
+
+const run = (last_outcome: RunItem['last_outcome'], reason: string | null, limit_reached: boolean): RunItem => ({
+  kind: 'run',
+  issue: { id: 'PL-7', title: 'Issue PL-7', status: 'in_progress', status_name: 'In Progress' },
+  agent: 'claude-code',
+  runs: limit_reached ? 3 : 1,
+  last_outcome,
+  reason,
+  limit_reached,
+  since: '2026-10-24T11:00:00Z',
+  since_seq: 9,
+  unread: true,
+})
+
+describe('runLines', () => {
+  it('says the entry ran out of runs, and why the last one failed', () => {
+    expect(runLines(run('succeeded', null, true))).toEqual(['3 runs in In Progress ended without moving it'])
+    expect(runLines(run('failed', 'agent crashed', true))).toEqual([
+      '3 runs in In Progress ended without moving it',
+      'Run failed: agent crashed',
+    ])
+    expect(runLines(run('failed', null, true))).toEqual(['3 runs in In Progress ended without moving it', 'Run failed'])
+  })
+
+  it('says a run failed before the limit', () => {
+    expect(runLines(run('failed', 'lease expired', false))).toEqual(['Run failed: lease expired'])
   })
 })
