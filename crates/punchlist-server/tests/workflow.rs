@@ -4784,3 +4784,106 @@ async fn loading_a_different_workflow_writes_one_event_per_issue_and_nothing_els
     assert_eq!(workflow_versions(&pool).await, 2);
     assert_eq!(workflow_events(&pool).await, [("GitHub".to_string(), 6)]);
 }
+
+/// The issue's waiting dispatch is past its reset, as if the time had come.
+async fn reset_passes(pool: &PgPool) {
+    sqlx::query(
+        "UPDATE dispatch SET not_before = now() - interval '1 second' WHERE run_id IS NULL",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn finish_on(s: &Setup, runner: &str, claim: &Value, finish: Value) {
+    let run = claim["run_id"].as_str().unwrap();
+    let uri = format!("/api/runs/{run}/finish");
+    let (status, body) = call(&s.app, runner, "POST", &uri, Some(finish)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_run_that_hits_the_usage_limit_waits_for_the_reset_and_uses_no_run(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, r1, first) = claimed_by_runner(&s).await;
+    let limited = |resets_at: Value| {
+        json!({"attempt": 1, "outcome": "failed", "reason": "usage limit", "duration_ms": 2600,
+               "usage_limit": {"resets_at": resets_at}})
+    };
+    // Only a failed attempt hits the limit.
+    let uri = format!("/api/runs/{}/finish", first["run_id"].as_str().unwrap());
+    let succeeded =
+        json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1, "usage_limit": {}});
+    let (status, body) = call(&s.app, &r1, "POST", &uri, Some(succeeded)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+    finish_on(&s, &r1, &first, limited(json!("2099-01-01T00:00:00Z"))).await;
+    // The run's own dispatch waits again: no run of the entry is used.
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, true)]);
+    let (status, issue) = call(&s.app, &s.person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        issue["waiting_for_usage_limit"],
+        "waiting for the Claude Code usage limit to reset at 2099-01-01 00:00:00 UTC"
+    );
+    assert_eq!(issue["waiting_on_person"], Value::Null);
+    let (_, runners) = call(&s.app, &s.person.token, "GET", "/api/runners", None).await;
+    assert_eq!(
+        runners["runners"][0]["paused"],
+        json!([{"agent": "claude-code", "until": "2099-01-01T00:00:00Z"}])
+    );
+    // Before the reset no runner claims it, the one that hit the limit or another.
+    let r2 = register(&s, "r2", &["claude-code"]).await;
+    assert_eq!(claim(&s, &r1).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(claim(&s, &r2).await.0, StatusCode::NO_CONTENT);
+
+    // After it the issue is claimed again, on the same branch. The runner that hit the
+    // limit still waits for its own pause.
+    reset_passes(&pool).await;
+    let (_, issue) = call(&s.app, &s.person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(issue["waiting_for_usage_limit"], Value::Null);
+    assert_eq!(claim(&s, &r1).await.0, StatusCode::NO_CONTENT);
+    let (status, second) = claim(&s, &r2).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["branch"], first["branch"]);
+    assert_eq!(second["attempt"], 1);
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, false)]);
+
+    // No reset time reported: the dispatch waits 15 minutes.
+    finish_on(&s, &r2, &second, limited(Value::Null)).await;
+    let wait: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM not_before - now())::float8 FROM dispatch WHERE run_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!((14.0 * 60.0..=15.0 * 60.0).contains(&wait), "{wait}");
+    assert_eq!(dispatches_into(&pool, "in_progress").await, [(1, true)]);
+
+    // A run that fails for another reason is dispatched again at once, as before.
+    reset_passes(&pool).await;
+    let r3 = register(&s, "r3", &["claude-code"]).await;
+    let (status, third) = claim(&s, &r3).await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    let failed = json!({"attempt": 1, "outcome": "failed", "reason": "claude exited with code 1", "duration_ms": 1});
+    finish_on(&s, &r3, &third, failed).await;
+    assert_eq!(
+        dispatches_into(&pool, "in_progress").await,
+        [(1, false), (2, true)]
+    );
+    let (_, issue) = call(&s.app, &s.person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(issue["waiting_for_usage_limit"], Value::Null);
+
+    // While Claude Code is paused on r1, its Codex work is still claimed.
+    let r1 = register(&s, "r1", &["claude-code", "codex"]).await;
+    person_moves(&s, "agent_review").await;
+    let (status, review) = claim(&s, &r1).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["agent"], "codex");
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM run")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 4);
+}

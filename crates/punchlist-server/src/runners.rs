@@ -6,8 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ErrorBody, Heartbeat, HeartbeatReply, HeldAttempt, Lease, RegisterRunner, RegisteredRunner,
-    Repository, Runner, RunnerList,
+    AgentPause, ErrorBody, Heartbeat, HeartbeatReply, HeldAttempt, Lease, RegisterRunner,
+    RegisteredRunner, Repository, Runner, RunnerList,
 };
 use punchlist_core::{Role, unknown_agent_kind};
 use utoipa_axum::router::OpenApiRouter;
@@ -41,6 +41,7 @@ impl From<RunnerRow> for Runner {
             agents: row.agents,
             registered_at: row.registered_at,
             last_heartbeat: row.last_heartbeat,
+            paused: Vec::new(),
         }
     }
 }
@@ -216,9 +217,24 @@ async fn list_runners(
     )
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(RunnerList {
-        runners: rows.into_iter().map(Runner::from).collect(),
-    }))
+    let mut runners: Vec<Runner> = rows.into_iter().map(Runner::from).collect();
+    let ids: Vec<Uuid> = runners.iter().map(|runner| runner.id).collect();
+    for pause in sqlx::query!(
+        "SELECT runner_id, agent, until FROM runner_pause
+         WHERE runner_id = ANY($1) AND until > now() ORDER BY agent",
+        &ids,
+    )
+    .fetch_all(&state.pool)
+    .await?
+    {
+        if let Some(runner) = runners.iter_mut().find(|r| r.id == pause.runner_id) {
+            runner.paused.push(AgentPause {
+                agent: pause.agent,
+                until: pause.until,
+            });
+        }
+    }
+    Ok(Json(RunnerList { runners }))
 }
 
 /// Record a heartbeat and renew the leases of the attempts the body lists as held. A running

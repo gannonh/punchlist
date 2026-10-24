@@ -7,7 +7,8 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use punchlist_api::{Issue, Repository, RunOutcome};
+use chrono::DateTime;
+use punchlist_api::{Issue, Repository, RunOutcome, UsageLimit};
 use punchlist_core::{fenced, is_plain_name, quoted};
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -147,7 +148,12 @@ pub struct AgentResult {
     pub reason: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// The agent stopped on its account's usage limit; the reason is `usage limit`.
+    pub usage_limit: Option<UsageLimit>,
 }
+
+/// The reason of an attempt whose agent stopped on its account's usage limit.
+pub(crate) const USAGE_LIMIT: &str = "usage limit";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentExit {
@@ -159,6 +165,8 @@ pub enum AgentExit {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct ResultLine {
     is_error: bool,
+    /// The session ended on the account's usage limit (`api_error: usage_limit_reached`).
+    usage_limit: bool,
     subtype: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -236,6 +244,7 @@ fn parse_result_line(line: &str) -> Option<ResultLine> {
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        usage_limit: value.get("api_error").and_then(Value::as_str) == Some("usage_limit_reached"),
         subtype: value
             .get("subtype")
             .and_then(Value::as_str)
@@ -245,7 +254,39 @@ fn parse_result_line(line: &str) -> Option<ResultLine> {
     })
 }
 
-fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult {
+/// Claude Code's `rate_limit_event` that refused the session, with when its limit resets.
+fn rejected_rate_limit(line: &str) -> Option<UsageLimit> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let info = &value["rate_limit_info"];
+    (value["type"] == "rate_limit_event" && info["status"] == "rejected").then(|| UsageLimit {
+        resets_at: info["resetsAt"]
+            .as_i64()
+            .and_then(|at| DateTime::from_timestamp(at, 0)),
+    })
+}
+
+/// What the runner reads from Claude Code's output: the last `result` line, and the last
+/// rate limit that refused the session.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Stream {
+    result: Option<ResultLine>,
+    rejected: Option<UsageLimit>,
+}
+
+impl Stream {
+    fn read(&mut self, line: &str) {
+        if let Some(result) = parse_result_line(line) {
+            self.result = Some(result);
+        } else if let Some(rejected) = rejected_rate_limit(line) {
+            self.rejected = Some(rejected);
+        }
+    }
+}
+
+/// A failed session stopped on the usage limit when its result or a rate limit event says
+/// so: then the reason is `usage limit`, with the reset time when the event gave one.
+fn outcome_of(exit_code: Option<i32>, stream: Stream) -> AgentResult {
+    let Stream { result, rejected } = stream;
     let (input_tokens, output_tokens) = result
         .as_ref()
         .map(|r| (r.input_tokens, r.output_tokens))
@@ -260,15 +301,23 @@ fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult
         (Some(code), _) => Some(format!("claude exited with code {code}")),
         (None, _) => Some("claude was killed by a signal".to_string()),
     };
+    let limited = result.as_ref().is_some_and(|r| r.usage_limit) || rejected.is_some();
+    let usage_limit =
+        (reason.is_some() && limited).then(|| rejected.unwrap_or(UsageLimit { resets_at: None }));
     AgentResult {
         outcome: if reason.is_none() {
             RunOutcome::Succeeded
         } else {
             RunOutcome::Failed
         },
-        reason,
+        reason: if usage_limit.is_some() {
+            Some(USAGE_LIMIT.to_string())
+        } else {
+            reason
+        },
         input_tokens,
         output_tokens,
+        usage_limit,
     }
 }
 
@@ -295,6 +344,7 @@ pub async fn run_claude(
             reason: Some(reason),
             input_tokens: None,
             output_tokens: None,
+            usage_limit: None,
         })
     };
     let mut command = Command::new(claude_command);
@@ -330,14 +380,12 @@ pub async fn run_claude(
     let stdout_lines = lines.clone();
     let mut stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
-        let mut result = None;
+        let mut stream = Stream::default();
         while let Ok(Some(line)) = read_record(&mut reader, MAX_RECORD_BYTES).await {
-            if let Some(parsed) = parse_result_line(&line) {
-                result = Some(parsed);
-            }
+            stream.read(&line);
             let _ = stdout_lines.send(line).await;
         }
-        result
+        stream
     });
     let stderr = child.stderr.take().expect("stderr is piped");
     let mut stderr_task = tokio::spawn(async move {
@@ -363,7 +411,7 @@ pub async fn run_claude(
     // takes them: the result line may be among the last. Only a stop cuts this short.
     let drained = tokio::select! {
         drained = async {
-            let result = (&mut stdout_task).await.ok().flatten();
+            let result = (&mut stdout_task).await.unwrap_or_default();
             let _ = (&mut stderr_task).await;
             result
         } => Some(drained),
@@ -667,6 +715,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: None,
                 input_tokens: Some(5),
                 output_tokens: Some(7),
+                usage_limit: None,
             })
         );
         assert_eq!(drain.await.unwrap(), 31);
@@ -688,6 +737,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             project: None,
             milestone: None,
             waiting_on_person: None,
+            waiting_for_usage_limit: None,
             linear: None,
         }
     }
@@ -788,6 +838,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: None,
                 input_tokens: Some(330),
                 output_tokens: Some(42),
+                usage_limit: None,
             })
         );
         let nonce = lines
@@ -878,9 +929,81 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: Some("claude exited with code 1".into()),
                 input_tokens: None,
                 output_tokens: None,
+                usage_limit: None,
             })
         );
         assert_eq!(lines, ["stderr: oops"]);
+    }
+
+    /// Claude Code's last three lines in a session the usage limit stopped, recorded on
+    /// 2026-10-23: the `rate_limit_event` that refused it, a synthetic assistant message and
+    /// the result.
+    const USAGE_LIMIT_LINES: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude/usage_limit.jsonl"
+    ));
+
+    #[tokio::test]
+    async fn a_session_the_usage_limit_stopped_fails_with_usage_limit_and_its_reset() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude/usage_limit.jsonl"
+        );
+        let (exit, lines) = run_fake(&format!("cat {fixture}\nexit 1"), "prompt").await;
+        assert_eq!(
+            exit,
+            AgentExit::Finished(AgentResult {
+                outcome: RunOutcome::Failed,
+                reason: Some("usage limit".into()),
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                usage_limit: Some(UsageLimit {
+                    resets_at: DateTime::from_timestamp(1_792_779_600, 0),
+                }),
+            })
+        );
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn only_a_failed_session_that_names_the_limit_hit_it() {
+        let stream = |lines: &[&str]| {
+            let mut stream = Stream::default();
+            lines.iter().for_each(|line| stream.read(line));
+            stream
+        };
+        let fixture: Vec<&str> = USAGE_LIMIT_LINES.lines().collect();
+        let (rejected, result) = (fixture[0], fixture[2]);
+        let limit = |exit, lines: &[&str]| outcome_of(exit, stream(lines)).usage_limit;
+        // The result names the limit without a rate limit event: no reset time.
+        assert_eq!(
+            limit(Some(1), &[result]),
+            Some(UsageLimit { resets_at: None })
+        );
+        assert_eq!(
+            outcome_of(Some(1), stream(&[result])).reason.as_deref(),
+            Some("usage limit")
+        );
+        // A refused rate limit with an ordinary failure still is the limit.
+        assert_eq!(
+            limit(Some(1), &[rejected]),
+            Some(UsageLimit {
+                resets_at: DateTime::from_timestamp(1_792_779_600, 0)
+            })
+        );
+        let allowed = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1792779600}}"#;
+        let ordinary = r#"{"type":"result","subtype":"success","is_error":true,"api_error":"overloaded_error","usage":{}}"#;
+        let succeeded = r#"{"type":"result","subtype":"success","is_error":false,"usage":{}}"#;
+        assert_eq!(limit(Some(1), &[allowed, ordinary]), None);
+        assert_eq!(limit(Some(1), &[]), None);
+        assert_eq!(
+            outcome_of(Some(1), stream(&[allowed, ordinary]))
+                .reason
+                .as_deref(),
+            Some("claude exited with code 1")
+        );
+        // A session that went on and succeeded did not stop on it.
+        assert_eq!(limit(Some(0), &[rejected, succeeded]), None);
     }
 
     #[tokio::test]
@@ -894,6 +1017,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: Some("claude reported an error (error_max_turns)".into()),
                 input_tokens: Some(1),
                 output_tokens: Some(2),
+                usage_limit: None,
             })
         );
     }

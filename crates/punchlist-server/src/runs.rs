@@ -42,6 +42,9 @@ pub(crate) const RUNS_PER_ENTRY: i32 = 3;
 // ponytail: one limit for every run of every workspace. Upgrade path: a `[dispatch]` field
 // in the workflow file, beside `RUNS_PER_ENTRY`'s.
 pub(crate) const ATTEMPTS_PER_RUN: i32 = 2;
+/// How long an issue whose run hit its agent's usage limit, and the runner's claims for that
+/// agent, wait when the agent did not say when the limit resets.
+const USAGE_LIMIT_WAIT: chrono::TimeDelta = chrono::TimeDelta::minutes(15);
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
@@ -78,9 +81,10 @@ struct Claimable {
     run_id: Option<Uuid>,
 }
 
-/// Selects what the runner can claim and locks its issue row: an issue no other claim has
-/// locked that is in Start, when the runner can run the agent In Progress dispatches, or whose
-/// dispatch waits in the status it entered, names an agent the runner can run, and is not
+/// Selects what a runner that can run `agents` can claim and locks its issue row: an issue no
+/// other claim has locked that is in Start, when the runner can run the agent In Progress
+/// dispatches, or whose dispatch waits in the status it entered, names an agent the runner can
+/// run, is past its `not_before` (a run that hit the usage limit set it), and is not
 /// behind a run of the issue that is still running (one run works on an issue at a time;
 /// `finish_run` wakes the runners when that run ends), or whose running run for the status it
 /// is in has no running attempt and an agent the runner can run: its attempt was lost
@@ -94,14 +98,14 @@ async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     workflow: &Workflow,
-    runner: &RunnerRow,
+    agents: &[String],
     target: &Target,
 ) -> sqlx::Result<Option<Claimable>> {
     // The agent a claim from Start runs, if this runner can run it.
     let start_agent = workflow
         .dispatch_for(IN_PROGRESS)
         .map(|dispatch| dispatch.agent.as_str())
-        .filter(|agent| runner.agents.iter().any(|a| a == agent));
+        .filter(|agent| agents.iter().any(|a| a == agent));
     let locked: Vec<&str> = workflow
         .locks()
         .iter()
@@ -144,6 +148,7 @@ async fn select_claimable(
              AND CASE WHEN r.id IS NOT NULL THEN r.agent = ANY($2)
                       WHEN i.status = $4 THEN $5::text IS NOT NULL
                       ELSE d.agent = ANY($2)
+                           AND (d.not_before IS NULL OR d.not_before <= now())
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
                                            AND run.outcome = 'running')
                  END
@@ -156,7 +161,7 @@ async fn select_claimable(
            ORDER BY array_position($9::text[], i.status) DESC NULLS LAST, i.number
            LIMIT 1 FOR UPDATE OF i SKIP LOCKED"#,
         workspace_id,
-        &runner.agents,
+        agents,
         only,
         START,
         start_agent,
@@ -207,8 +212,19 @@ async fn try_claim(
             return Ok(Claimed::AtLimit);
         }
     }
+    // An agent kind whose usage limit the runner hit is claimed again once it resets.
+    let paused = sqlx::query_scalar!(
+        "SELECT agent FROM runner_pause WHERE runner_id = $1 AND until > now()",
+        runner.id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let agents: Vec<String> = (runner.agents.iter())
+        .filter(|agent| !paused.contains(agent))
+        .cloned()
+        .collect();
     let claimable =
-        select_claimable(&mut tx, actor.workspace_id, &workflow, runner, target).await?;
+        select_claimable(&mut tx, actor.workspace_id, &workflow, &agents, target).await?;
     let Some(Claimable {
         id,
         from,
@@ -744,6 +760,16 @@ async fn finish_run(
                 "only a failed attempt can be lost".into(),
             ));
         }
+        RunOutcome::Succeeded if request.usage_limit.is_some() => {
+            return Err(ApiError::Invalid(
+                "only a failed attempt can hit the usage limit".into(),
+            ));
+        }
+        _ if request.lost && request.usage_limit.is_some() => {
+            return Err(ApiError::Invalid(
+                "a lost attempt did not hit the usage limit".into(),
+            ));
+        }
         _ => {}
     }
     if request.duration_ms < 0
@@ -792,7 +818,35 @@ async fn finish_run(
         return Err(stale(id, request.attempt));
     }
     let lost = request.lost.then_some(request.attempt);
-    settle_run(&mut tx, actor.workspace_id, id, request.outcome, lost).await?;
+    // A reset in the past, or none reported, would have the issue claimed into the same
+    // limit at once: it waits `USAGE_LIMIT_WAIT` instead.
+    let resets_at = request.usage_limit.map(|limit| {
+        let now = Utc::now();
+        (limit.resets_at)
+            .filter(|at| *at > now)
+            .unwrap_or(now + USAGE_LIMIT_WAIT)
+    });
+    if let Some(until) = resets_at {
+        sqlx::query!(
+            "INSERT INTO runner_pause (runner_id, agent, until)
+             SELECT $1, agent, $3 FROM run WHERE id = $2
+             ON CONFLICT (runner_id, agent) DO UPDATE SET until = excluded.until",
+            runner.id,
+            id,
+            until,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    settle_run(
+        &mut tx,
+        actor.workspace_id,
+        id,
+        request.outcome,
+        lost,
+        resets_at,
+    )
+    .await?;
     record_row_event(&mut tx, actor.workspace_id, &issue_id, actor.id, "run").await?;
     tx.commit().await?;
     let run = load_runs(&state.pool, &actor, None, Some(id))
@@ -1038,13 +1092,15 @@ async fn wait_for_person(
 /// run (`queue_dispatch`). A kept run has no running attempt, so `select_claimable` offers
 /// its next one; its agent actor gets a token nobody holds, so the lost attempt's agent can
 /// do nothing. The caller holds the workspace's lock, then the issue's, and has just ended
-/// the attempt. `finish_run` and `expire_lease` both decide here.
+/// the attempt. `finish_run` and `expire_lease` both decide here. An attempt that hit its
+/// agent's usage limit ends the run, with `resets_at` for `queue_redispatch`.
 async fn settle_run(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     run_id: Uuid,
     outcome: RunOutcome,
     lost: Option<i32>,
+    resets_at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
     if lost.is_some_and(|attempt| attempt < ATTEMPTS_PER_RUN) {
         let run = sqlx::query!(
@@ -1076,7 +1132,7 @@ async fn settle_run(
     )
     .execute(&mut *tx)
     .await?;
-    queue_redispatch(tx, workspace_id, run_id).await
+    queue_redispatch(tx, workspace_id, run_id, resets_at).await
 }
 
 /// Dispatch again. The caller has just ended the run in this transaction, whatever the
@@ -1091,12 +1147,17 @@ async fn settle_run(
 /// read, which is logged. `get_issue` reads the same three rules, the latest transition, the
 /// limit and the waiting reason, to say so; change them together.
 ///
+/// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
+/// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
+/// next run has the same number.
+///
 /// Once per run: an attempt leaves `running` once, under its row lock, so one transaction
 /// gets here; and `dispatch` is unique on the transition and the run number.
 async fn queue_redispatch(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     run_id: Uuid,
+    resets_at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
     let run = sqlx::query!(
         "SELECT status, waiting_reason FROM run WHERE id = $1",
@@ -1119,6 +1180,20 @@ async fn queue_redispatch(
     };
     let unlocked = |role| active.check_unlocked(&status, role).is_ok();
     if active.dispatch_for(&status).is_none() || !unlocked(Role::Agent) || !unlocked(Role::Runner) {
+        return Ok(());
+    }
+    if let Some(resets_at) = resets_at {
+        sqlx::query!(
+            "UPDATE dispatch d SET run_id = NULL, not_before = $2
+             WHERE d.run_id = $1
+               AND d.transition_id = (SELECT e.transition_id FROM event e
+                                      WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                      ORDER BY e.seq DESC LIMIT 1)",
+            run_id,
+            resets_at,
+        )
+        .execute(&mut *tx)
+        .await?;
         return Ok(());
     }
     sqlx::query!(
@@ -1204,6 +1279,7 @@ async fn expire_lease(
         run_id,
         RunOutcome::Failed,
         Some(failed.attempt),
+        None,
     )
     .await?;
     record_row_event(&mut tx, workspace_id, issue_id, failed.actor_id, "run").await?;

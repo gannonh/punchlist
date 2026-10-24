@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE dispatch d SET run_id = NULL, not_before = $2\n             WHERE d.run_id = $1\n               AND d.transition_id = (SELECT e.transition_id FROM event e\n                                      WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                      ORDER BY e.seq DESC LIMIT 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ec4b0c44d0cdc2584db95d9b5ed8ee6d9820c44d0e14eed10faad976dca4771f"
+}

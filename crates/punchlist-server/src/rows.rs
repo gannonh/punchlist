@@ -203,6 +203,7 @@ fn parse(row: Loaded) -> sqlx::Result<(Issue, RunSummary, Option<PullRequestSumm
         created_at: row.created_at,
         updated_at: row.updated_at,
         waiting_on_person: None,
+        waiting_for_usage_limit: None,
         linear: (row.linear_identifier.zip(row.linear_url))
             .map(|(identifier, url)| LinearLink { identifier, url }),
     };

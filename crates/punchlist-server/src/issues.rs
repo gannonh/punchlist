@@ -227,6 +227,22 @@ async fn get_issue(
             )
         }),
     };
+    // A run of the entry hit its agent's usage limit and gave its dispatch back to wait for
+    // the reset (`queue_redispatch`).
+    let limited = sqlx::query!(
+        r#"SELECT agent, not_before AS "not_before!" FROM dispatch
+           WHERE issue_id = $1 AND run_id IS NULL AND not_before > now()"#,
+        id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    issue.waiting_for_usage_limit = limited.map(|limited| {
+        format!(
+            "waiting for the {} usage limit to reset at {}",
+            agent_display_name(&limited.agent),
+            limited.not_before.format("%Y-%m-%d %H:%M:%S UTC")
+        )
+    });
     Ok(Json(issue))
 }
 

@@ -55,6 +55,11 @@ pub struct Issue {
     /// every other response that carries an issue leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on_person: Option<String>,
+    /// That the issue's next run waits for its agent's usage limit to reset, and when:
+    /// `waiting for the Claude Code usage limit to reset at 2026-10-23 22:00:00 UTC`. Only
+    /// `GET /api/issues/{id}` fills this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_usage_limit: Option<String>,
     /// The Linear issue it was imported from; `None` for an issue made in Punchlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear: Option<LinearLink>,
@@ -608,6 +613,17 @@ pub struct Runner {
     pub agents: Vec<String>,
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
+    /// The agent kinds the runner claims no work for until their usage limit resets.
+    #[serde(default)]
+    pub paused: Vec<AgentPause>,
+}
+
+/// An agent kind a runner claims nothing for until `until`: its last attempt hit the
+/// agent's usage limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AgentPause {
+    pub agent: String,
+    pub until: DateTime<Utc>,
 }
 
 /// The response to `POST /api/runners`.
@@ -908,6 +924,19 @@ pub struct FinishRun {
     /// keeps the run running for another attempt.
     #[serde(default)]
     pub lost: bool,
+    /// The agent stopped on its account's usage limit. Only with `failed`. The run does not
+    /// count toward the runs its entry gets, and the issue's next run, like the runner's
+    /// claims for that agent, waits for the reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_limit: Option<UsageLimit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UsageLimit {
+    /// When the limit resets, as the agent reported it; 15 minutes from the finish when
+    /// `None`.
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

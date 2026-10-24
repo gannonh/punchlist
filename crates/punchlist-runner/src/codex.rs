@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use punchlist_api::{Claim, RunOutcome};
+use chrono::DateTime;
+use punchlist_api::{Claim, RunOutcome, UsageLimit};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -29,7 +30,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, kill_group, read_record,
+    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, USAGE_LIMIT, kill_group, read_record,
 };
 
 const INITIALIZE_ID: u64 = 1;
@@ -191,9 +192,46 @@ struct Session {
     lines: mpsc::Sender<String>,
     input_tokens: u64,
     output_tokens: u64,
+    /// The account's latest rate limits had a window at 100%: when the last of them resets.
+    full: Option<UsageLimit>,
+    /// An error from Codex named the usage limit.
+    limit_named: bool,
 }
 
 impl Session {
+    /// Notes what a message from Codex says about the account's usage limit: the windows of
+    /// `account/rateLimits/updated`, and an error naming the limit (`usageLimitExceeded`).
+    fn observe(&mut self, payload: &Value) {
+        match payload.get("method").and_then(Value::as_str) {
+            Some("account/rateLimits/updated") => {
+                let full: Vec<&Value> = ["primary", "secondary"]
+                    .iter()
+                    .filter_map(|window| payload.pointer(&format!("/params/rateLimits/{window}")))
+                    .filter(|window| window["usedPercent"].as_f64().is_some_and(|p| p >= 100.0))
+                    .collect();
+                self.full = (!full.is_empty()).then(|| UsageLimit {
+                    resets_at: (full.iter().filter_map(|w| w["resetsAt"].as_i64()).max())
+                        .and_then(|at| DateTime::from_timestamp(at, 0)),
+                });
+            }
+            Some("error" | "turn/completed") => {
+                let error = (payload.pointer("/params/error"))
+                    .or_else(|| payload.pointer("/params/turn/error"));
+                if let Some(error) = error {
+                    let message = error["message"].as_str().unwrap_or_default();
+                    self.limit_named |= error["codexErrorInfo"] == "usageLimitExceeded"
+                        || message.to_ascii_lowercase().contains("usage limit");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The usage limit a failed turn stopped on, if it did.
+    fn usage_limit(&self) -> Option<UsageLimit> {
+        (self.full.clone()).or_else(|| self.limit_named.then_some(UsageLimit { resets_at: None }))
+    }
+
     /// JSON-encode `message`, append a newline, and write to subprocess stdin.
     async fn send(&mut self, message: &Value) -> Result<(), String> {
         let line = format!("{message}\n");
@@ -234,6 +272,7 @@ impl Session {
                 let _ = self.lines.send(text).await;
             }
             if let Some(payload) = payload {
+                self.observe(&payload);
                 return Ok(Some(payload));
             }
         }
@@ -459,6 +498,7 @@ pub(crate) async fn run_codex(
                 reason: Some(format!("cannot start `{}`: {e}", codex_command.display())),
                 input_tokens: None,
                 output_tokens: None,
+                usage_limit: None,
             });
         }
     };
@@ -477,6 +517,8 @@ pub(crate) async fn run_codex(
         lines,
         input_tokens: 0,
         output_tokens: 0,
+        full: None,
+        limit_named: false,
     };
 
     let turn = tokio::select! {
@@ -494,7 +536,11 @@ pub(crate) async fn run_codex(
     let Some(turn) = turn else {
         return AgentExit::Stopped;
     };
-    let reason = turn.err();
+    let usage_limit = turn.is_err().then(|| session.usage_limit()).flatten();
+    let reason = match turn {
+        Err(_) if usage_limit.is_some() => Some(USAGE_LIMIT.to_string()),
+        turn => turn.err(),
+    };
     AgentExit::Finished(AgentResult {
         outcome: if reason.is_none() {
             RunOutcome::Succeeded
@@ -504,6 +550,7 @@ pub(crate) async fn run_codex(
         reason,
         input_tokens: Some(session.input_tokens.min(i64::MAX as u64) as i64),
         output_tokens: Some(session.output_tokens.min(i64::MAX as u64) as i64),
+        usage_limit,
     })
 }
 
@@ -576,6 +623,7 @@ done"#
                 reason: None,
                 input_tokens: Some(RECORDED_INPUT_TOKENS),
                 output_tokens: Some(RECORDED_OUTPUT_TOKENS),
+                usage_limit: None,
             })
         );
 
@@ -787,7 +835,7 @@ done"#
       echo 'not json'
       echo '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":120,"outputTokens":7}}}}'
       echo '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":300,"outputTokens":9}}}}'
-      echo '{"method":"turn/completed","params":{"turn":{"id":"u1","status":"failed","error":{"message":"usage limit reached"}}}}' ;;
+      echo '{"method":"turn/completed","params":{"turn":{"id":"u1","status":"failed","error":{"message":"model is not available"}}}}' ;;
   esac
 done"#;
         let (exit, lines, _temp) = run_fake(script).await;
@@ -795,13 +843,63 @@ done"#;
             exit,
             AgentExit::Finished(AgentResult {
                 outcome: RunOutcome::Failed,
-                reason: Some("codex turn failed: usage limit reached".into()),
+                reason: Some("codex turn failed: model is not available".into()),
                 input_tokens: Some(300),
                 output_tokens: Some(9),
+                usage_limit: None,
             })
         );
         assert_eq!(lines.len(), 8);
         assert_eq!(lines[4], "not json");
+    }
+
+    /// A turn that fails with the account's rate limits at `percent`, in the shape Codex
+    /// 0.162.1 sent them on 2026-10-23, then `turn`'s error.
+    fn limited_turn(percent: u32, error: &str) -> String {
+        format!(
+            r#"while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{{"id":1,"result":{{}}}}' ;;
+    *'"method":"skills/list"'*) echo '{{"id":4,"result":{{"data":[]}}}}' ;;
+    *'"method":"thread/start"'*) echo '{{"id":2,"result":{{"thread":{{"id":"t1"}}}}}}' ;;
+    *'"method":"turn/start"'*)
+      echo '{{"id":3,"result":{{"turn":{{"id":"u1"}}}}}}'
+      echo '{{"method":"account/rateLimits/updated","params":{{"rateLimits":{{"limitId":"codex","primary":{{"usedPercent":{percent},"windowDurationMins":300,"resetsAt":1792799255}},"secondary":{{"usedPercent":2,"windowDurationMins":10080,"resetsAt":1793386055}},"planType":"plus"}}}}}}'
+      echo '{{"method":"turn/completed","params":{{"turn":{{"id":"u1","status":"failed","error":{error}}}}}}}' ;;
+  esac
+done"#
+        )
+    }
+
+    #[tokio::test]
+    async fn a_turn_at_the_usage_limit_fails_with_usage_limit_and_its_reset() {
+        let reason = |exit: &AgentExit| match exit {
+            AgentExit::Finished(result) => (result.reason.clone(), result.usage_limit.clone()),
+            AgentExit::Stopped => panic!("stopped"),
+        };
+        let at_limit = Some(UsageLimit {
+            resets_at: DateTime::from_timestamp(1_792_799_255, 0),
+        });
+        let error = r#"{"message":"something went wrong"}"#;
+        let (exit, _, _temp) = run_fake(&limited_turn(100, error)).await;
+        assert_eq!(reason(&exit), (Some("usage limit".into()), at_limit));
+
+        let named =
+            r#"{"message":"You have hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}"#;
+        let (exit, _, _temp) = run_fake(&limited_turn(12, named)).await;
+        assert_eq!(
+            reason(&exit),
+            (
+                Some("usage limit".into()),
+                Some(UsageLimit { resets_at: None })
+            )
+        );
+
+        let (exit, _, _temp) = run_fake(&limited_turn(12, error)).await;
+        assert_eq!(
+            reason(&exit),
+            (Some("codex turn failed: something went wrong".into()), None)
+        );
     }
 
     #[tokio::test]
