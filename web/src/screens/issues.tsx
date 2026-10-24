@@ -9,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { AppHeader, inField } from '@/components/app-header'
+import type { Workspace } from '@/model/workspaces'
 import { BoardView, ListView } from '@/components/issue-views'
 import { IssueSheet } from '@/components/issue-sheet'
 import { NewIssue } from '@/components/new-issue'
@@ -165,26 +166,27 @@ export function useNow(): Date {
 }
 
 export function IssuesScreen({
-  workspaceId,
+  workspace,
   me,
   search: url,
   onSearch,
 }: {
-  workspaceId: string
+  workspace: Workspace
   me: string
   search: ListSearch
   onSearch: (search: ListSearch) => void
 }) {
-  const issues = useIssues()
-  const workflow = useWorkflow()
-  const actors = useActors()
-  const projects = useProjects()
-  const edit = useEditIssue()
+  const workspaceId = workspace.id
+  const issues = useIssues(workspaceId)
+  const workflow = useWorkflow(workspaceId)
+  const actors = useActors(workspaceId)
+  const projects = useProjects(workspaceId)
+  const edit = useEditIssue(workspaceId)
   const signOut = useSignOut()
   const navigate = useNavigate()
-  const { transitions, request, dismiss } = useTransitions()
+  const { transitions, request, dismiss } = useTransitions(workspaceId)
   useEventStream(workspaceId, issues.isSuccess)
-  const pullRequests = usePullRequests(issues.isSuccess)
+  const pullRequests = usePullRequests(workspaceId, issues.isSuccess)
 
   const [local, setLocal] = useState<Pick<Filter, 'text' | 'who'>>({ text: '', who: '' })
   const layout: Layout = url.layout ?? 'list'
@@ -218,7 +220,7 @@ export function IssuesScreen({
   const closed = useMemo(() => statuses.filter((status) => status.closed), [statuses])
   // Chosen statuses replace `hide Done and Canceled`, so choosing Done shows Done issues.
   const hiding = hideClosed && filter.statuses.length === 0
-  const searched = useSearch(local.text)
+  const searched = useSearch(workspaceId, local.text)
   const hitIds = useMemo(() => searched?.hits.map((hit) => hit.issue_id) ?? [], [searched])
   const snippets = useMemo(
     () => new Map(searched?.hits.flatMap((hit) => (hit.snippet ? [[hit.issue_id, hit.snippet] as const] : []))),
@@ -356,7 +358,7 @@ export function IssuesScreen({
 
   return (
     <div className="flex min-h-screen flex-col" data-last-seq={issues.data?.lastSeq}>
-      <AppHeader current="issues" pullRequests={pullRequests.data?.length}>
+      <AppHeader workspace={workspace} current="issues" pullRequests={pullRequests.data?.length}>
         <div className="inline-flex rounded-lg border bg-card p-0.5" role="group" aria-label="Layout">
           {(['list', 'board'] as const).map((key, index) => (
             <button
@@ -605,6 +607,7 @@ export function IssuesScreen({
       )}
 
       <IssueSheet
+        workspaceId={workspaceId}
         row={sheetRow}
         status={statusByKey(sheetRow?.issue.status)}
         statuses={statuses}
@@ -626,6 +629,7 @@ export function IssuesScreen({
       />
 
       <NewIssue
+        workspaceId={workspaceId}
         open={creating}
         onOpenChange={setCreating}
         onCreated={(id) => {
