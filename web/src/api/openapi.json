@@ -2025,7 +2025,7 @@
     },
     "/api/session": {
       "get": {
-        "summary": "Who the request is signed in as, by its bearer token or its session cookie.",
+        "summary": "Who the request is signed in as, by its bearer token or its session cookie. A person's\naccount shows its person in the oldest of its workspaces.",
         "operationId": "show_session",
         "responses": {
           "200": {
@@ -2049,7 +2049,7 @@
         }
       },
       "post": {
-        "summary": "Sign in with a person's token: the answer sets the session cookie to it.",
+        "summary": "Sign in with a person's token: the answer sets the session cookie to it, which reaches every\nworkspace of the person's account (ADR 0011).",
         "operationId": "sign_in",
         "requestBody": {
           "content": {
@@ -2152,6 +2152,149 @@
         "security": [
           {}
         ]
+      }
+    },
+    "/api/workspaces": {
+      "get": {
+        "summary": "The workspaces the token's account belongs to, oldest first. An agent's or runner's token\nanswers its own workspace.",
+        "operationId": "list_workspaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Workspace"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/actors": {
+      "get": {
+        "summary": "List the workspace's people, agents and runners, oldest first. A person's or a\nstandalone agent's token.",
+        "operationId": "list_actors_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActorList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A runner's or a run's agent's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Mint an agent actor with its own token and no run. Its token reaches the workspace's\nissues, creating and listing them and the event stream, projects, the workflow, actors and\nproof files, and nothing else. Person token.",
+        "operationId": "create_agent_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAgent"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown kind or owner, or a name over 100 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/workspaces/{id}/events": {
@@ -2417,10 +2560,527 @@
           }
         }
       }
+    },
+    "/api/workspaces/{id}/issues": {
+      "get": {
+        "summary": "List the workspace's issues, oldest first, each with its run, newest pull request and\nnext gated transition's gates.",
+        "operationId": "list_issues_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create an issue in the workflow's first status, and its `created` event.",
+        "operationId": "create_issue_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIssue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueWritten"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The title is empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/projects": {
+      "get": {
+        "summary": "List the workspace's projects, oldest first, each with its milestones, oldest first.",
+        "operationId": "list_projects_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create a project in the workspace.",
+        "operationId": "create_project_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An empty or long name, or one the workspace already has.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/pull-requests": {
+      "get": {
+        "summary": "The workspace repository's open and draft pull requests, newest number first, each with\nthe issue it names and whether that issue waits on its merge. Reads no GitHub. People\nonly.",
+        "operationId": "open_pull_requests_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OpenPullRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/pull-requests/unlinked": {
+      "get": {
+        "summary": "The workspace repository's pull requests that name no issue, newest number first.",
+        "operationId": "unlinked_pull_requests_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PullRequest"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/runners": {
+      "get": {
+        "summary": "List the workspace's runners, oldest first.",
+        "operationId": "list_runners_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Register a runner. Needs a person's token. Creates the runner's own actor. A name this\nperson already registered in the workspace re-adopts the newest such runner instead: the\nsame id and actor, the request's agents, and a new token, so the old one stops working.\nThat is how a restarted runner keeps the attempts it holds (`GET /api/runners/{id}/leases`),\nand why two runners started with one name cannot both run.",
+        "operationId": "register_runner_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRunner"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Registered, or re-adopted with a new token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisteredRunner"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/search": {
+      "get": {
+        "summary": "Search the workspace's issues: their id, title, body and comments. A person's token.",
+        "operationId": "search_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "One literal phrase, 3 to 200 characters once trimmed and its whitespace runs made one\nspace, matched as a substring in any case.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The most hits to answer: 50 by default, at most 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A query under 3 or over 200 characters.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/workflow": {
+      "get": {
+        "summary": "The workspace's active workflow: its version, the commit it came from, its statuses and\nthe last push that was refused.",
+        "operationId": "show_workflow_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "Account": {
+        "type": "object",
+        "description": "The identity above a person's actors, one per workspace they belong to (ADR 0011).",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "Actor": {
         "type": "object",
         "required": [
@@ -2595,6 +3255,13 @@
           "attempt": {
             "type": "integer",
             "format": "int32"
+          },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cost in US dollars the agent reported, as a decimal string; `None` when it\nreported none."
           },
           "duration_ms": {
             "type": [
@@ -3264,6 +3931,13 @@
             "type": "string",
             "description": "Such as `PL-7`."
           },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issue's labels, which `proof_attached` reads for the kinds of proof they need."
+          },
           "proof": {
             "type": "array",
             "items": {
@@ -3292,6 +3966,13 @@
           "attempt": {
             "type": "integer",
             "format": "int32"
+          },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cost in US dollars the agent reported, as a decimal such as `0.0453`, every digit\nkept. `None` when it reported none."
           },
           "duration_ms": {
             "type": "integer",
@@ -4397,13 +5078,17 @@
         "type": "object",
         "description": "A proof record attached to the issue.",
         "required": [
-          "attempt"
+          "attempt",
+          "kind"
         ],
         "properties": {
           "attempt": {
             "type": "integer",
             "format": "int32",
             "description": "The issue's attempt when it was uploaded."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProofKind"
           }
         }
       },
@@ -4890,7 +5575,7 @@
           "attempt": {
             "type": "integer",
             "format": "int32",
-            "description": "The latest attempt's number, runner, failure reason, duration and tokens."
+            "description": "The latest attempt's number, runner, failure reason, duration, tokens and cost."
           },
           "attempts": {
             "type": "array",
@@ -4901,6 +5586,12 @@
           },
           "branch": {
             "type": "string"
+          },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "duration_ms": {
             "type": [
@@ -5225,12 +5916,23 @@
       },
       "Session": {
         "type": "object",
-        "description": "Who a request is signed in as.",
+        "description": "Who a request is signed in as: for a person, their account and its person actor in the\nworkspace the request names, else in the account's oldest workspace.",
         "required": [
           "actor",
           "workspace_id"
         ],
         "properties": {
+          "account": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Account",
+                "description": "The account a person's token authenticates (ADR 0011). Agents and runners have none,\nand an older server sends none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "actor": {
             "$ref": "#/components/schemas/Actor"
           },
@@ -5604,6 +6306,33 @@
           "reason": {
             "type": "string",
             "description": "Why, as logged: the line and key, or the statuses still in use."
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "description": "One of `GET /api/workspaces`: a workspace the account belongs to.",
+        "required": [
+          "id",
+          "name",
+          "issue_prefix",
+          "repository"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "issue_prefix": {
+            "type": "string",
+            "description": "Its issues' ids are this and a number: `PL` gives PL-1."
+          },
+          "name": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string",
+            "description": "The workspace's GitHub repository, as `owner/name`."
           }
         }
       }

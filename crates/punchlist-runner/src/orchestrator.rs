@@ -372,6 +372,7 @@ async fn release_lost(client: &Client, lease: &Lease) {
         duration_ms: 0,
         input_tokens: None,
         output_tokens: None,
+        cost_usd: None,
         lost: true,
         usage_limit: None,
     };
@@ -556,6 +557,7 @@ async fn run_attempt(
             input_tokens: None,
             output_tokens: None,
             usage_limit: None,
+            cost_usd: None,
         })
     };
     // The run acts on GitHub as the workspace's App when the server minted it a token; a
@@ -679,6 +681,7 @@ async fn run_attempt(
                 input_tokens: None,
                 output_tokens: None,
                 usage_limit: None,
+                cost_usd: None,
             },
             true,
         ),
@@ -704,6 +707,7 @@ async fn run_attempt(
         duration_ms: start.elapsed().as_millis().min(i64::MAX as u128) as i64,
         input_tokens: result.input_tokens,
         output_tokens: result.output_tokens,
+        cost_usd: result.cost_usd,
         lost,
         usage_limit: result.usage_limit,
     };
@@ -787,6 +791,7 @@ async fn run_agent(
             input_tokens: None,
             output_tokens: None,
             usage_limit: None,
+            cost_usd: None,
         })
     };
     let marker = &ctx.runner_id;
@@ -934,6 +939,7 @@ mod tests {
             duration_ms: 1,
             input_tokens: None,
             output_tokens: None,
+            cost_usd: None,
             lost: false,
             usage_limit: None,
         }
@@ -1222,6 +1228,7 @@ mod tests {
                         duration_ms: None,
                         input_tokens: None,
                         output_tokens: None,
+                        cost_usd: None,
                         log_tail: vec![],
                         attempts: vec![],
                     };
@@ -1428,7 +1435,7 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
                     lost.as_str(),
                     &serde_json::json!({"attempt": 1, "outcome": "failed",
                         "reason": "runner restarted", "lost": true, "duration_ms": 0,
-                        "input_tokens": null, "output_tokens": null})
+                        "input_tokens": null, "output_tokens": null, "cost_usd": null})
                 ),
             ]
         );

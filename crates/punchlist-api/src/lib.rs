@@ -6,8 +6,8 @@
 
 use chrono::{DateTime, Utc};
 pub use punchlist_core::{
-    CheckRunEvidence, Evidence, GateResult, ProofEvidence, PullRequestEvidence, PullRequestState,
-    ReviewThreadEvidence, Role,
+    CheckRunEvidence, Evidence, GateResult, ProofEvidence, ProofKind, PullRequestEvidence,
+    PullRequestState, ReviewThreadEvidence, Role,
 };
 use punchlist_core::{display_name, is_plain_name};
 use serde::{Deserialize, Serialize};
@@ -245,11 +245,34 @@ pub struct SignIn {
     pub token: String,
 }
 
-/// Who a request is signed in as.
+/// Who a request is signed in as: for a person, their account and its person actor in the
+/// workspace the request names, else in the account's oldest workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Session {
     pub actor: Actor,
     pub workspace_id: Uuid,
+    /// The account a person's token authenticates (ADR 0011). Agents and runners have none,
+    /// and an older server sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
+}
+
+/// The identity above a person's actors, one per workspace they belong to (ADR 0011).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Account {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// One of `GET /api/workspaces`: a workspace the account belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Workspace {
+    pub id: Uuid,
+    pub name: String,
+    /// Its issues' ids are this and a number: `PL` gives PL-1.
+    pub issue_prefix: String,
+    /// The workspace's GitHub repository, as `owner/name`.
+    pub repository: String,
 }
 
 /// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
@@ -919,6 +942,10 @@ pub struct FinishRun {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    /// The cost in US dollars the agent reported, as a decimal such as `0.0453`, every digit
+    /// kept. `None` when it reported none.
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     /// The runner lost the attempt before its agent finished, such as when it stopped or
     /// restarted. Only with `failed`. A lost attempt that is not the run's last allowed one
     /// keeps the run running for another attempt.
@@ -966,7 +993,7 @@ pub struct Run {
     pub outcome: RunOutcome,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
-    /// The latest attempt's number, runner, failure reason, duration and tokens.
+    /// The latest attempt's number, runner, failure reason, duration, tokens and cost.
     pub attempt: i32,
     /// The model the latest attempt's runner passed the agent; `None` for the agent's default.
     #[serde(default)]
@@ -979,6 +1006,8 @@ pub struct Run {
     pub duration_ms: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     /// The last 20 log lines, oldest first.
     pub log_tail: Vec<LogLine>,
     /// Every attempt, oldest first.
@@ -1004,6 +1033,10 @@ pub struct AttemptInfo {
     pub input_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
+    /// The cost in US dollars the agent reported, as a decimal string; `None` when it
+    /// reported none.
+    #[serde(default)]
+    pub cost_usd: Option<String>,
     pub state: RunOutcome,
     pub failure_reason: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -1226,31 +1259,6 @@ pub struct CreateComment {
 pub struct WaitForPerson {
     /// What the person must do, 1 to 500 characters.
     pub reason: String,
-}
-
-/// What a proof file shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProofKind {
-    Image,
-    Video,
-    Report,
-}
-
-impl ProofKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProofKind::Image => "image",
-            ProofKind::Video => "video",
-            ProofKind::Report => "report",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<ProofKind> {
-        [ProofKind::Image, ProofKind::Video, ProofKind::Report]
-            .into_iter()
-            .find(|kind| kind.as_str() == s)
-    }
 }
 
 /// The files proof can be: extension, content type and kind. The server accepts only these

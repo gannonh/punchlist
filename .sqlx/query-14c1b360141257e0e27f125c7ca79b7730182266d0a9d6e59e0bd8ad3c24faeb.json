@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id AS \"id!\" FROM issue p\n           WHERE p.workspace_id = $1 AND EXISTS (SELECT 1 FROM issue c WHERE c.parent_id = p.id)\n           ORDER BY p.number",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "14c1b360141257e0e27f125c7ca79b7730182266d0a9d6e59e0bd8ad3c24faeb"
+}

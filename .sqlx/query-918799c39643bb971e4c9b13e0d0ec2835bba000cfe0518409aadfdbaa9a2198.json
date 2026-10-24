@@ -1,16 +1,16 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT attempt FROM proof WHERE issue_id = $1",
+  "query": "SELECT workspace_id FROM issue WHERE id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "attempt",
-        "type_info": "Int4",
+        "name": "workspace_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "proof",
-            "name": "attempt"
+            "table": "issue",
+            "name": "workspace_id"
           }
         }
       }
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "f3fec3224e261664cf888ae09fad76807ae5b4e9f3a9fa5071fb4a9865f3e80f"
+  "hash": "918799c39643bb971e4c9b13e0d0ec2835bba000cfe0518409aadfdbaa9a2198"
 }

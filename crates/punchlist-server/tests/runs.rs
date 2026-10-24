@@ -610,6 +610,34 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         let (status, _) = call(&app, &r1.token, "POST", &finish_uri, Some(bad)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
+    for cost in [
+        "-1",
+        "1e3",
+        "NaN",
+        "abc",
+        "",
+        "1.",
+        ".5",
+        " 1",
+        &"1".repeat(31),
+    ] {
+        let (status, body) = call(
+            &app,
+            &r1.token,
+            "POST",
+            &finish_uri,
+            Some(json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1, "cost_usd": cost})),
+        )
+        .await;
+        assert_eq!(
+            (status, body["message"].as_str()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Some("cost_usd must be a decimal such as 0.0453")
+            ),
+            "{cost:?}"
+        );
+    }
     let (status, run) = call(
         &app,
         &r1.token,
@@ -617,7 +645,8 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
         &finish_uri,
         Some(
             json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 4200,
-                    "input_tokens": 1000, "output_tokens": 250}),
+                    "input_tokens": 1000, "output_tokens": 250,
+                    "cost_usd": "0.1234567890123456789"}),
         ),
     )
     .await;
@@ -626,6 +655,9 @@ async fn logs_are_numbered_finish_records_the_outcome_and_stale_attempts_are_ref
     assert_eq!(run["duration_ms"], 4200);
     assert_eq!(run["input_tokens"], 1000);
     assert_eq!(run["output_tokens"], 250);
+    let (_, runs) = call(&app, &person.token, "GET", "/api/issues/PL-1/runs", None).await;
+    assert_eq!(runs[0]["cost_usd"], "0.1234567890123456789");
+    assert_eq!(runs[0]["attempts"][0]["cost_usd"], "0.1234567890123456789");
 
     // After finish, the attempt is stale.
     let (status, body) = call(
@@ -1601,6 +1633,11 @@ async fn a_claim_at_max_concurrent_gets_nothing_until_an_attempt_finishes(pool: 
     move_to_agent_review(&app, &pool, &first).await;
     let (status, run) = finish(&app, &r1, first["run_id"].as_str().unwrap(), succeeded()).await;
     assert_eq!(status, StatusCode::OK, "{run}");
+    // A finish without a cost records none.
+    assert_eq!(
+        (&run["cost_usd"], &run["attempts"][0]["cost_usd"]),
+        (&Value::Null, &Value::Null)
+    );
     let (status, second) = claim(&app, &r2, 0).await;
     assert_eq!(
         (status, second["issue"]["id"].as_str()),

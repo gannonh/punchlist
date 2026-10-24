@@ -23,7 +23,7 @@ use crate::events::mark_pull_request_change;
 use crate::github_api::{
     CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
 };
-use crate::issues::{check_gates, record_comment, record_refusal, write_transition};
+use crate::issues::{check_gates, children_done, record_comment, record_refusal, write_transition};
 use crate::workflow::{active_workflow, lock_workspace, queue_workflow_load};
 use crate::{ApiError, AppState};
 
@@ -1618,17 +1618,21 @@ pub(crate) async fn catch_up_merge(
     close_issue_on_pull_request(tx, workspace_id, closed, None, None, issue_id).await
 }
 
-/// `catch_up_merge` for every issue, once per `serve`: an issue that entered such a status
-/// before the catch-up existed, or whose merge was recorded while no server ran it, moves on
-/// without re-entering the status. An issue it moved is no longer in that status, so a second
-/// start writes nothing.
-pub async fn catch_up_merges_at_start(pool: &sqlx::PgPool) -> Result<(), ApiError> {
+/// `catch_up_merge` and `children_done` for every issue, once per `serve`: an issue that
+/// entered a status waiting on a merge before the catch-up existed, or whose merge was recorded
+/// while no server ran it, moves on without re-entering the status, and so does a parent whose
+/// children were all closed before `children_done` existed. An issue either moved is no longer
+/// in that status, so a second start writes nothing.
+pub async fn catch_up_at_start(pool: &sqlx::PgPool) -> Result<(), ApiError> {
     let workspaces = sqlx::query_scalar!("SELECT id FROM workspace ORDER BY created_at")
         .fetch_all(pool)
         .await?;
     for workspace_id in workspaces {
         if let Err(error) = catch_up_workspace_merges(pool, workspace_id).await {
             tracing::error!(%workspace_id, %error, "could not catch up merged pull requests at start");
+        }
+        if let Err(error) = catch_up_workspace_children_done(pool, workspace_id).await {
+            tracing::error!(%workspace_id, %error, "could not catch up parents whose children are done at start");
         }
     }
     Ok(())
@@ -1651,6 +1655,30 @@ async fn catch_up_workspace_merges(
     .await?;
     for issue in issues {
         catch_up_merge(&mut tx, workspace_id, &workflow, &issue.id, &issue.status).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// `children_done` for every parent in the workspace, in its own transaction. Its move checks
+/// the parent's own parent, so a tree closes whatever order its parents come in.
+async fn catch_up_workspace_children_done(
+    pool: &sqlx::PgPool,
+    workspace_id: Uuid,
+) -> Result<(), ApiError> {
+    let mut tx = pool.begin().await?;
+    lock_workspace(&mut tx, workspace_id).await?;
+    let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
+    let parents = sqlx::query_scalar!(
+        r#"SELECT p.id AS "id!" FROM issue p
+           WHERE p.workspace_id = $1 AND EXISTS (SELECT 1 FROM issue c WHERE c.parent_id = p.id)
+           ORDER BY p.number"#,
+        workspace_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    for parent in parents {
+        children_done(&mut tx, workspace_id, &workflow, &parent).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1700,6 +1728,7 @@ async fn close_issue_on_pull_request(
         role: Role::Github,
         kind: None,
         token_hash: None,
+        account: None,
     };
     let checked = check_gates(
         tx,

@@ -1119,9 +1119,7 @@ async fn an_issue_in_merging_with_its_pull_request_merged_moves_to_done_at_start
     force_status(&pool, &waiting, "merging").await;
     force_status(&pool, &open, "merging").await;
 
-    punchlist_server::catch_up_merges_at_start(&pool)
-        .await
-        .unwrap();
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
     assert_eq!(status(&pool, &waiting).await, "done");
     assert_eq!(status(&pool, &open).await, "merging");
     assert_eq!(
@@ -1130,9 +1128,7 @@ async fn an_issue_in_merging_with_its_pull_request_merged_moves_to_done_at_start
     );
 
     // A second start writes nothing.
-    punchlist_server::catch_up_merges_at_start(&pool)
-        .await
-        .unwrap();
+    punchlist_server::catch_up_at_start(&pool).await.unwrap();
     assert_eq!(count(&pool, "transition").await, 1);
 }
 

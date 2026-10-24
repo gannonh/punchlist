@@ -499,6 +499,7 @@ pub(crate) async fn run_codex(
                 input_tokens: None,
                 output_tokens: None,
                 usage_limit: None,
+                cost_usd: None,
             });
         }
     };
@@ -551,6 +552,7 @@ pub(crate) async fn run_codex(
         input_tokens: Some(session.input_tokens.min(i64::MAX as u64) as i64),
         output_tokens: Some(session.output_tokens.min(i64::MAX as u64) as i64),
         usage_limit,
+        cost_usd: None,
     })
 }
 
@@ -624,6 +626,7 @@ done"#
                 input_tokens: Some(RECORDED_INPUT_TOKENS),
                 output_tokens: Some(RECORDED_OUTPUT_TOKENS),
                 usage_limit: None,
+                cost_usd: None,
             })
         );
 
@@ -847,6 +850,7 @@ done"#;
                 input_tokens: Some(300),
                 output_tokens: Some(9),
                 usage_limit: None,
+                cost_usd: None,
             })
         );
         assert_eq!(lines.len(), 8);

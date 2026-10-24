@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state, a.model,\n                a.reported_model, a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,\n                a.output_tokens\n         FROM attempt a JOIN runner n ON n.id = a.runner_id\n         WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
+  "query": "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state, a.model,\n                a.reported_model, a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,\n                a.output_tokens, a.cost_usd::text AS cost_usd\n         FROM attempt a JOIN runner n ON n.id = a.runner_id\n         WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
   "describe": {
     "columns": [
       {
@@ -145,6 +145,12 @@
             "name": "output_tokens"
           }
         }
+      },
+      {
+        "ordinal": 13,
+        "name": "cost_usd",
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -165,8 +171,9 @@
       true,
       true,
       true,
-      true
+      true,
+      null
     ]
   },
-  "hash": "ca932c42e0641b39b4e2726f2efdd2f8e0b3eca0a7c18a34497a39c1e61597d6"
+  "hash": "f7f88c6380dc777ed717e97a339e2a92f643eaa9d6ea6a34c8b34074ce9520dc"
 }

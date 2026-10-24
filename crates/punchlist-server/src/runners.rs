@@ -99,7 +99,7 @@ async fn own_runner(state: &AppState, actor: &Actor, id: Uuid) -> Result<RunnerR
         (status = 422, body = ErrorBody),
     )
 )]
-async fn register_runner(
+pub(crate) async fn register_runner(
     State(state): State<AppState>,
     actor: Actor,
     Json(request): Json<RegisterRunner>,
@@ -205,7 +205,7 @@ async fn register_runner(
     path = "/api/runners",
     responses((status = 200, body = RunnerList), (status = 401, body = ErrorBody))
 )]
-async fn list_runners(
+pub(crate) async fn list_runners(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<RunnerList>, ApiError> {

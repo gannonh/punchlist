@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use toml::Spanned;
 
 use crate::agent::unknown_agent_kind;
-use crate::gate::{Gate, RequiredCheck};
+use crate::gate::{Gate, GateSettings, ProofKind, RequiredCheck};
 
 const DEFAULT_WORKFLOW_TOML: &str = include_str!("default/workflow.toml");
 const DEFAULT_PROMPTS: [(&str, &str); 3] = [
@@ -192,8 +192,8 @@ pub struct Workflow {
     dispatch: Vec<Dispatch>,
     /// `[dispatch] max_concurrent`: the most attempts that run at once in the workspace.
     max_concurrent: Option<u32>,
-    /// The checks `ci_green` requires, from `[gate.ci_green]`. Empty when the file has none.
-    required_checks: Vec<RequiredCheck>,
+    /// `[gate]`: what `ci_green` and `proof_attached` need. Empty when the file has none.
+    gates: GateSettings,
     /// `[import.linear.states]`: a Linear state's name and the status it imports into.
     linear_states: Vec<(String, Status)>,
     prompts: BTreeMap<String, String>,
@@ -254,6 +254,8 @@ pub enum Problem {
         "a required check is a check's name, or `{{ name = \"…\", app = \"…\" }}` with the slug of the GitHub App that produces it; a name or slug is matched exactly, so it cannot be empty or start or end with a space"
     )]
     BadRequiredCheck,
+    #[error("unknown proof kind `{0}`; kinds are {kinds}", kinds = proof_kind_names())]
+    UnknownProofKind(String),
     #[error("the dispatch rule names no agent")]
     NoAgent,
     #[error("{}", unknown_agent_kind(.0).unwrap_or_default())]
@@ -280,6 +282,10 @@ pub enum Problem {
     BadPromptPath(String),
     #[error("prompt file `.punchlist/{0}` does not exist")]
     MissingPrompt(String),
+}
+
+fn proof_kind_names() -> String {
+    ProofKind::ALL.map(ProofKind::as_str).join(", ")
 }
 
 fn gate_names() -> String {
@@ -648,6 +654,20 @@ impl Workflow {
             required_checks.push(RequiredCheck { name, app });
         }
 
+        let mut kinds_by_label = BTreeMap::new();
+        for (label, kinds) in raw.gate.proof_attached.kinds_by_label {
+            let mut parsed = Vec::new();
+            for (i, kind) in kinds.into_inner().into_iter().enumerate() {
+                let Some(known) = ProofKind::parse(kind.get_ref()) else {
+                    let key = format!("gate.proof_attached.kinds_by_label.{label}[{i}]");
+                    let problem = Problem::UnknownProofKind(kind.get_ref().clone());
+                    return Err(errors.at(kind.span(), key, problem));
+                };
+                parsed.push(known);
+            }
+            kinds_by_label.insert(label, parsed);
+        }
+
         let mut linear_states = Vec::new();
         for (name, status) in raw.import.linear.states {
             let key = format!("import.linear.states.{name}");
@@ -663,7 +683,10 @@ impl Workflow {
             locks,
             dispatch,
             max_concurrent,
-            required_checks,
+            gates: GateSettings {
+                required_checks,
+                kinds_by_label,
+            },
             linear_states,
             prompts: BTreeMap::new(),
         };
@@ -785,7 +808,12 @@ impl Workflow {
     /// must have produced it. Empty for a file with no `[gate.ci_green]`, as every version
     /// stored before the table existed is.
     pub fn required_checks(&self) -> &[RequiredCheck] {
-        &self.required_checks
+        &self.gates.required_checks
+    }
+
+    /// `[gate]`: what the gates that take settings read, for `Gate::evaluate`.
+    pub fn gate_settings(&self) -> &GateSettings {
+        &self.gates
     }
 
     /// The most attempts that may run at once in the workspace; `None` for no limit.
@@ -1003,6 +1031,19 @@ struct RawLinearImport {
 struct RawGates {
     #[serde(default)]
     ci_green: RawCiGreen,
+    #[serde(default)]
+    proof_attached: RawProofAttached,
+}
+
+/// What `proof_attached` needs beyond one proof record from the issue's current attempt.
+#[derive(Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawProofAttached {
+    /// A label and the proof kinds an issue carrying it needs from its current attempt, at
+    /// least one of each, such as `{ ui = ["image", "video"] }`.
+    #[serde(default)]
+    #[schemars(with = "BTreeMap<String, Vec<ProofKind>>")]
+    kinds_by_label: BTreeMap<String, Spanned<Vec<Spanned<String>>>>,
 }
 
 /// What `ci_green` needs beyond every check run on the head commit passing.
@@ -1795,6 +1836,51 @@ mod tests {
         let (line, _, problem) = error(&runnable("[gate.ci_green]\nrequire = [\"ok\"]"));
         assert_eq!(line, Some(3));
         assert!(matches!(problem, Problem::Toml(m) if m.starts_with("unknown field `require`")));
+    }
+
+    #[test]
+    fn kinds_by_label_parse_and_an_unknown_kind_names_its_line_and_key() {
+        let with = |table: &str| runnable(&format!("[gate.proof_attached]\n{table}"));
+        let workflow =
+            Workflow::from_toml(&with("kinds_by_label = { ui = [\"image\", \"video\"] }")).unwrap();
+        assert_eq!(
+            workflow.gate_settings().kinds_by_label,
+            BTreeMap::from([("ui".into(), vec![ProofKind::Image, ProofKind::Video])])
+        );
+        assert_eq!(
+            default_workflow().gate_settings().kinds_by_label,
+            BTreeMap::new()
+        );
+        assert_eq!(
+            Workflow::from_toml(&with("kinds_by_label = { ui = [\"gif\"] }"))
+                .unwrap_err()
+                .to_string(),
+            "line 3, `gate.proof_attached.kinds_by_label.ui[0]`: unknown proof kind `gif`; kinds are image, video, report"
+        );
+        assert_eq!(
+            Workflow::from_toml(&with("kinds_by_label.ui = [\"image\",\n \"screenshot\"]"))
+                .unwrap_err()
+                .to_string(),
+            "line 4, `gate.proof_attached.kinds_by_label.ui[1]`: unknown proof kind `screenshot`; kinds are image, video, report"
+        );
+    }
+
+    #[test]
+    fn the_schema_lists_kinds_by_label() {
+        let schema = serde_json::to_value(workflow_schema()).unwrap();
+        let resolve = |node: &serde_json::Value| match node["$ref"].as_str() {
+            Some(name) => schema["$defs"][name.trim_start_matches("#/$defs/")].clone(),
+            None => node.clone(),
+        };
+        let gates = resolve(&schema["properties"]["gate"]);
+        let proof = resolve(&gates["properties"]["proof_attached"]);
+        let table = &proof["properties"]["kinds_by_label"];
+        assert_eq!(table["type"], "object");
+        let kind = resolve(&table["additionalProperties"]["items"]);
+        assert_eq!(
+            kind["enum"],
+            serde_json::json!(["image", "video", "report"])
+        );
     }
 
     #[test]

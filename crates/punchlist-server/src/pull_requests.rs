@@ -252,7 +252,7 @@ async fn recorded(
     path = "/api/pull-requests/unlinked",
     responses((status = 200, body = Vec<PullRequest>), (status = 401, body = ErrorBody))
 )]
-async fn unlinked_pull_requests(
+pub(crate) async fn unlinked_pull_requests(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<Vec<PullRequest>>, ApiError> {
@@ -288,7 +288,7 @@ async fn unlinked_pull_requests(
         (status = 403, body = ErrorBody, description = "Not a person's token."),
     )
 )]
-async fn open_pull_requests(
+pub(crate) async fn open_pull_requests(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<Vec<OpenPullRequest>>, ApiError> {

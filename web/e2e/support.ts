@@ -64,5 +64,5 @@ export async function signIn(page: Page) {
   await expect(page).toHaveURL(/\/sign-in$/)
   await page.getByLabel('Token').fill(personToken())
   await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page).toHaveURL(/\/$/)
+  await expect(page).toHaveURL(/\/w\/PL$/)
 }

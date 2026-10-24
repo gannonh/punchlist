@@ -38,46 +38,65 @@ export const sessionQuery = queryOptions({
   staleTime: Infinity,
 })
 
-export const workflowQuery = queryOptions({
-  queryKey: ['workflow'],
-  queryFn: () => call(api.GET('/api/workflow')),
+/** The workspaces the signed-in account belongs to, oldest first (ADR 0011). */
+export const workspacesQuery = queryOptions({
+  queryKey: ['workspaces'],
+  queryFn: () => call(api.GET('/api/workspaces')),
   staleTime: 60_000,
 })
 
-export const actorsQuery = queryOptions({
-  queryKey: ['actors'],
-  queryFn: async () => (await call(api.GET('/api/actors'))).actors,
-  staleTime: 60_000,
-})
+// Each workspace's reads are keyed by its id and call its `/api/workspaces/{id}/` routes, so switching shows the
+// other workspace's cache and never mixes their rows.
+const inWorkspace = (id: string) => ({ params: { path: { id } } })
+
+export const workflowQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['workflow', workspaceId],
+    queryFn: () => call(api.GET('/api/workspaces/{id}/workflow', inWorkspace(workspaceId))),
+    staleTime: 60_000,
+  })
+
+export const actorsQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['actors', workspaceId],
+    queryFn: async () => (await call(api.GET('/api/workspaces/{id}/actors', inWorkspace(workspaceId)))).actors,
+    staleTime: 60_000,
+  })
 
 // Read again each time the sheet opens, so a project made with `pl` meanwhile is there to pick.
-export const projectsQuery = queryOptions({
-  queryKey: ['projects'],
-  queryFn: async () => (await call(api.GET('/api/projects'))).projects,
-})
+export const projectsQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['projects', workspaceId],
+    queryFn: async () => (await call(api.GET('/api/workspaces/{id}/projects', inWorkspace(workspaceId)))).projects,
+  })
 
 // The stream keeps the list current, so it never goes stale on its own.
-export const issuesQuery = queryOptions({
-  queryKey: ['issues'],
-  queryFn: async () => fromList(await call(api.GET('/api/issues'))),
-  staleTime: Infinity,
-})
+export const issuesQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['issues', workspaceId],
+    queryFn: async () => fromList(await call(api.GET('/api/workspaces/{id}/issues', inWorkspace(workspaceId)))),
+    staleTime: Infinity,
+  })
 
 // Read again on a `pull_request`, `transition` or `workflow` event, and after the stream reopens.
-export const pullRequestsQuery = queryOptions({
-  queryKey: ['pull-requests'],
-  queryFn: () => call(api.GET('/api/pull-requests')),
-  staleTime: Infinity,
-})
+export const pullRequestsQuery = (workspaceId: string) =>
+  queryOptions({
+    queryKey: ['pull-requests', workspaceId],
+    queryFn: () => call(api.GET('/api/workspaces/{id}/pull-requests', inWorkspace(workspaceId))),
+    staleTime: Infinity,
+  })
 
 // The kinds that can change a row of the Pull requests page or move it between sections.
 const PULL_REQUEST_KINDS: ReadonlySet<string> = new Set(['pull_request', 'transition', 'workflow'])
 
-const setIssues = (client: QueryClient, change: (cache: IssueCache) => IssueCache) => {
-  client.setQueryData(issuesQuery.queryKey, (cache) => (cache ? change(cache) : cache))
+const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
+  client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))
 }
 
-/** Opens `GET /api/workspaces/{id}/events` once the list is loaded, after the list's last sequence. */
+/**
+ * Opens `GET /api/workspaces/{id}/events` once the workspace's list is loaded, after the list's last sequence. A
+ * new workspace closes the old one's stream and opens its own.
+ */
 export function useEventStream(workspaceId: string, ready: boolean): void {
   const client = useQueryClient()
   const [opened, setOpened] = useState(0)
@@ -86,23 +105,26 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     if (!ready) return
     let retry: ReturnType<typeof setTimeout> | undefined
     let reread: ReturnType<typeof setTimeout> | undefined
-    const after = client.getQueryData(issuesQuery.queryKey)?.lastSeq ?? 0
+    const issues = issuesQuery(workspaceId).queryKey
+    const workflow = workflowQuery(workspaceId).queryKey
+    const pullRequests = pullRequestsQuery(workspaceId).queryKey
+    const after = client.getQueryData(issues)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
     const source = new EventSource(`/api/workspaces/${workspaceId}/events?after=${String(after)}`)
     source.addEventListener('issue', (message) => {
       const item = JSON.parse((message as MessageEvent<string>).data) as StreamItem
       failures.current = 0
-      setIssues(client, (cache) => applyStream(cache, item))
+      setIssues(client, workspaceId, (cache) => applyStream(cache, item))
       // An open issue page reads its issue again: its timeline, runs, proof, gates and moves.
       void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
       if (PULL_REQUEST_KINDS.has(item.event.detail.kind))
-        void client.invalidateQueries({ queryKey: pullRequestsQuery.queryKey })
+        void client.invalidateQueries({ queryKey: pullRequests })
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
-      if (workflowStale(item, client.getQueryData(workflowQuery.queryKey)?.statuses)) {
+      if (workflowStale(item, client.getQueryData(workflow)?.statuses)) {
         clearTimeout(reread)
-        reread = setTimeout(() => void client.invalidateQueries({ queryKey: workflowQuery.queryKey }), 100)
+        reread = setTimeout(() => void client.invalidateQueries({ queryKey: workflow }), 100)
       }
     })
     // An HTTP error closes it for good, such as a proxy's 502 while the server restarts or a 401 once the session
@@ -115,9 +137,9 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       retry = setTimeout(() => {
         void Promise.allSettled([
           client.refetchQueries({ queryKey: sessionQuery.queryKey }),
-          client.refetchQueries({ queryKey: issuesQuery.queryKey }),
-          client.refetchQueries({ queryKey: workflowQuery.queryKey }),
-          client.invalidateQueries({ queryKey: pullRequestsQuery.queryKey }),
+          client.refetchQueries({ queryKey: issues }),
+          client.refetchQueries({ queryKey: workflow }),
+          client.invalidateQueries({ queryKey: pullRequests }),
         ]).then(() => {
           setOpened((count) => count + 1)
         })
@@ -152,12 +174,13 @@ export function useSignOut() {
   })
 }
 
-export function useCreateIssue() {
+export function useCreateIssue(workspaceId: string) {
   const client = useQueryClient()
   return useMutation({
-    mutationFn: (body: { title: string; body: string }) => call(api.POST('/api/issues', { body })),
+    mutationFn: (body: { title: string; body: string }) =>
+      call(api.POST('/api/workspaces/{id}/issues', { ...inWorkspace(workspaceId), body })),
     onSuccess: (written) => {
-      setIssues(client, (cache) => applyWrite(cache, written))
+      setIssues(client, workspaceId, (cache) => applyWrite(cache, written))
     },
     onError: (error) => {
       toast.error(error instanceof ApiError ? refusalText(error.body) : String(error))
@@ -179,7 +202,7 @@ export interface Edit {
   milestone?: MilestoneRef | null
 }
 
-export function useEditIssue() {
+export function useEditIssue(workspaceId: string) {
   const client = useQueryClient()
   return useMutation({
     // Requests go one at a time in the order they were made, each shown at once: a milestone chosen while its
@@ -200,8 +223,8 @@ export function useEditIssue() {
     onMutate: async (
       edit,
     ): Promise<{ edited: IssueRow['issue']; seq: number } | undefined> => {
-      await client.cancelQueries({ queryKey: issuesQuery.queryKey })
-      const cache = client.getQueryData(issuesQuery.queryKey)
+      await client.cancelQueries({ queryKey: issuesQuery(workspaceId).queryKey })
+      const cache = client.getQueryData(issuesQuery(workspaceId).queryKey)
       const before = cache?.rows.find((row) => row.issue.id === edit.id)?.issue
       if (!cache || !before) return undefined
       const edited: IssueRow['issue'] = {
@@ -220,7 +243,7 @@ export function useEditIssue() {
         ...(edit.project !== undefined && { project: edit.project }),
         ...(edit.milestone !== undefined && { milestone: edit.milestone }),
       }
-      setIssues(client, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
+      setIssues(client, workspaceId, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
       return { edited, seq: cache.rowSeq[edit.id] ?? -1 }
     },
     onError: (error, edit, context) => {
@@ -228,18 +251,18 @@ export function useEditIssue() {
         const fields = (['title', 'labels', 'assignee', 'parent', 'project', 'milestone'] as const).filter(
           (field) => edit[field] !== undefined,
         )
-        setIssues(client, (cache) => revertEdit(cache, context.edited, fields, context.seq))
+        setIssues(client, workspaceId, (cache) => revertEdit(cache, context.edited, fields, context.seq))
       }
       toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
     onSuccess: (written) => {
-      setIssues(client, (cache) => applyWrite(cache, written))
+      setIssues(client, workspaceId, (cache) => applyWrite(cache, written))
     },
   })
 }
 
 /** Transitions are not optimistic: the row shows the request as pending, then settles or shows the refusal. */
-export function useTransitions() {
+export function useTransitions(workspaceId: string) {
   const client = useQueryClient()
   const [transitions, setTransitions] = useState<Transitions>({})
   const set = useCallback((id: string, next: Transitions[string] | undefined) => {
@@ -256,7 +279,7 @@ export function useTransitions() {
         const moved = await call(
           api.POST('/api/issues/{id}/transitions', { params: { path: { id } }, body: { to: to.key } }),
         )
-        setIssues(client, (cache) => applyMove(cache, moved))
+        setIssues(client, workspaceId, (cache) => applyMove(cache, moved))
         set(id, undefined)
         if (moved.warning) toast.warning(moved.warning)
         return true
@@ -266,7 +289,7 @@ export function useTransitions() {
         return false
       }
     },
-    [client, set],
+    [client, set, workspaceId],
   )
 
   const dismiss = useCallback(
@@ -279,16 +302,18 @@ export function useTransitions() {
   return { transitions, request, dismiss }
 }
 
-export const useIssues = () => useQuery(issuesQuery)
-export const useWorkflow = () => useQuery(workflowQuery)
-export const useActors = () => useQuery(actorsQuery)
-export const useProjects = () => useQuery(projectsQuery)
+export const useWorkspaces = () => useQuery(workspacesQuery)
+export const useIssues = (workspaceId: string) => useQuery(issuesQuery(workspaceId))
+export const useWorkflow = (workspaceId: string) => useQuery(workflowQuery(workspaceId))
+export const useActors = (workspaceId: string) => useQuery(actorsQuery(workspaceId))
+export const useProjects = (workspaceId: string) => useQuery(projectsQuery(workspaceId))
 /**
  * The workspace's open pull requests, read once `ready`: after `GET /api/issues` has succeeded, so the header's
  * count never delays the list, and the stream, opened after the list's last event, reads them again on any later
  * change.
  */
-export const usePullRequests = (ready: boolean) => useQuery({ ...pullRequestsQuery, enabled: ready })
+export const usePullRequests = (workspaceId: string, ready: boolean) =>
+  useQuery({ ...pullRequestsQuery(workspaceId), enabled: ready })
 
 /** The filter's text as the server reads it: trimmed, each whitespace run one space. */
 const searchText = (text: string) => text.trim().split(/\s+/).join(' ')
@@ -300,7 +325,7 @@ const searchable = (q: string) => Array.from(q).length >= 3 && Array.from(q).len
  * the next answer loads it keeps the last one; under 3 characters it is `undefined` at once. Each text is its own
  * query, so an earlier answer never replaces a later one.
  */
-export function useSearch(text: string): SearchResults | undefined {
+export function useSearch(workspaceId: string, text: string): SearchResults | undefined {
   const q = searchText(text)
   const [debounced, setDebounced] = useState(q)
   useEffect(() => {
@@ -312,8 +337,14 @@ export function useSearch(text: string): SearchResults | undefined {
     }
   }, [q])
   const search = useQuery({
-    queryKey: ['search', debounced],
-    queryFn: ({ signal }) => call(api.GET('/api/search', { params: { query: { q: debounced } }, signal })),
+    queryKey: ['search', workspaceId, debounced],
+    queryFn: ({ signal }) =>
+      call(
+        api.GET('/api/workspaces/{id}/search', {
+          params: { path: { id: workspaceId }, query: { q: debounced } },
+          signal,
+        }),
+      ),
     enabled: searchable(debounced),
     // Not across an emptied filter: hits from before it was cleared would show for the next text's first 150 ms.
     placeholderData: (previous) => (searchable(q) ? previous : undefined),
@@ -432,13 +463,13 @@ export function useReadFromGithub(id: string) {
 }
 
 /** A move requested from the issue page. Not optimistic: the page reads the issue again once it settles. */
-export function useMove(id: string) {
+export function useMove(id: string, workspaceId: string) {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (to: StatusInfo) =>
       call(api.POST('/api/issues/{id}/transitions', { ...path(id), body: { to: to.key } })),
     onSuccess: (moved) => {
-      setIssues(client, (cache) => applyMove(cache, moved))
+      setIssues(client, workspaceId, (cache) => applyMove(cache, moved))
       if (moved.warning) toast.warning(moved.warning)
     },
     onError: (error, to) => {

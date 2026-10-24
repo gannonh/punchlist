@@ -1,27 +1,27 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.id, p.status FROM issue c JOIN issue p ON p.id = c.parent_id\n         WHERE c.id = $1 FOR UPDATE OF p",
+  "query": "SELECT attempt, kind FROM proof WHERE issue_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
-        "type_info": "Text",
+        "name": "attempt",
+        "type_info": "Int4",
         "origin": {
           "Table": {
-            "table": "issue",
-            "name": "id"
+            "table": "proof",
+            "name": "attempt"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "status",
+        "name": "kind",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "issue",
-            "name": "status"
+            "table": "proof",
+            "name": "kind"
           }
         }
       }
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "5fe449734cb01445f5326b80ebc40d29a776edc4627155b3f0a1b95a14fe3d29"
+  "hash": "0db8db9d0db15c7b29ee15be4a085ab902f2995d20a7127c03deccafabeea290"
 }

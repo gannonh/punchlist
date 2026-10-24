@@ -660,3 +660,84 @@ async fn a_standalone_agent_files_lists_and_watches_its_workspaces_issues(pool: 
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+/// ADR 0011's migration: each person with a token gets an account holding it, so the token
+/// still signs in and reaches its workspace; a tokenless imported person gets none, and an
+/// agent's token stays its own and in its workspace.
+#[sqlx::test(migrations = false)]
+async fn the_account_migration_keeps_each_token_working(pool: PgPool) {
+    punchlist_server::MIGRATOR
+        .run_to(20261101000000, &pool)
+        .await
+        .unwrap();
+    let workspaces: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "INSERT INTO workspace (name, issue_prefix) VALUES ('Punchlist', 'PL'), ('Other', 'OT')
+         RETURNING id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let person: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO actor (workspace_id, name, role, token_hash) VALUES ($1, 'Gannon', 'person', $2)
+         RETURNING id",
+    )
+    .bind(workspaces[0])
+    .bind(punchlist_server::hash_token("plt_person"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO actor (workspace_id, name, role, linear_id) VALUES ($1, 'Gannon Hall', 'person', 'u1')",
+    )
+    .bind(workspaces[0])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO actor (workspace_id, name, role, token_hash, kind, owner_id)
+         VALUES ($1, 'Codex', 'agent', $2, 'codex', $3)",
+    )
+    .bind(workspaces[0])
+    .bind(punchlist_server::hash_token("plt_agent"))
+    .bind(person)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO issue (id, workspace_id, number, title, status, created_by)
+         VALUES ('OT-1', $1, 1, 'Theirs', 'backlog', $2)",
+    )
+    .bind(workspaces[1])
+    .bind(person)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    punchlist_server::MIGRATOR.run(&pool).await.unwrap();
+
+    let accounts: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT acc.name, a.token_hash FROM account acc JOIN actor a ON a.account_id = acc.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(accounts, [("Gannon".to_string(), None)]);
+    let app = router(AppState::new(pool.clone()));
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"token": "plt_person"}).to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (status, session) = call(&app, "plt_person", "GET", "/api/session", None).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(session["actor"]["id"], json!(person));
+    let (status, list) = call(&app, "plt_person", "GET", "/api/issues", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let (status, _) = call(&app, "plt_agent", "GET", "/api/issues", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(&app, "plt_agent", "GET", "/api/issues/OT-1", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

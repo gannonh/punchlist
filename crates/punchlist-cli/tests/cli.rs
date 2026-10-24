@@ -388,6 +388,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
                 duration_ms: 83_000,
                 input_tokens: Some(1000),
                 output_tokens: Some(250),
+                cost_usd: Some("0.0453".into()),
                 lost: false,
                 usage_limit: None,
             },
@@ -419,7 +420,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
           [time]  r1 (runner)  Start → In Progress
 
         Runs
-          [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out
+          [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out  cost $0.0453
             cloning
             editing
             [200 x]
@@ -1434,6 +1435,7 @@ async fn mcp_says_the_run_waits_on_a_person(pool: PgPool) {
                 duration_ms: 1,
                 input_tokens: None,
                 output_tokens: None,
+                cost_usd: None,
                 lost: false,
                 usage_limit: None,
             },

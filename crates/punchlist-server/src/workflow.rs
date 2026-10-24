@@ -363,7 +363,7 @@ pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
     path = "/api/workflow",
     responses((status = 200, body = WorkflowInfo), (status = 401, body = ErrorBody))
 )]
-async fn show_workflow(
+pub(crate) async fn show_workflow(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<WorkflowInfo>, ApiError> {

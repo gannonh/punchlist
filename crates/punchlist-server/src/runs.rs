@@ -780,6 +780,15 @@ async fn finish_run(
             "duration and token counts cannot be negative".into(),
         ));
     }
+    if request
+        .cost_usd
+        .as_deref()
+        .is_some_and(|c| !plain_decimal(c))
+    {
+        return Err(ApiError::Invalid(
+            "cost_usd must be a decimal such as 0.0453".into(),
+        ));
+    }
     ensure_run(&state.pool, &actor, id).await?;
     let failure_reason = match request.outcome {
         RunOutcome::Failed => reason,
@@ -799,7 +808,8 @@ async fn finish_run(
     .await?;
     let updated = sqlx::query_scalar!(
         "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,
-                duration_ms = $6, input_tokens = $7, output_tokens = $8
+                duration_ms = $6, input_tokens = $7, output_tokens = $8,
+                cost_usd = $9::text::numeric
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
              AND lease_expires_at > now()
          RETURNING id",
@@ -811,6 +821,7 @@ async fn finish_run(
         request.duration_ms,
         request.input_tokens,
         request.output_tokens,
+        request.cost_usd,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -1304,6 +1315,18 @@ struct RunRow {
     duration_ms: Option<i64>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cost_usd: Option<String>,
+}
+
+/// `[0-9]+` with an optional `.[0-9]+`, at most 30 characters: no sign, exponent, `NaN` or
+/// spaces, so Postgres stores the digits as they are.
+fn plain_decimal(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    text.len() <= 30
+        && match text.split_once('.') {
+            Some((whole, fraction)) => digits(whole) && digits(fraction),
+            None => digits(text),
+        }
 }
 
 struct LogRow {
@@ -1337,7 +1360,7 @@ async fn load_runs(
         r#"SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,
                   a.attempt AS "attempt!", a.model, a.reported_model, a.runner_id AS "runner_id!",
                   n.name AS "runner_name!", a.failure_reason, a.duration_ms,
-                  a.input_tokens, a.output_tokens
+                  a.input_tokens, a.output_tokens, a.cost_usd::text AS cost_usd
            FROM run r
            JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id
                          ORDER BY attempt DESC LIMIT 1) a ON true
@@ -1357,7 +1380,7 @@ async fn load_runs(
     for row in sqlx::query!(
         "SELECT a.run_id, a.attempt, a.runner_id, n.name AS runner_name, a.state, a.model,
                 a.reported_model, a.failure_reason, a.started_at, a.finished_at, a.duration_ms, a.input_tokens,
-                a.output_tokens
+                a.output_tokens, a.cost_usd::text AS cost_usd
          FROM attempt a JOIN runner n ON n.id = a.runner_id
          WHERE a.run_id = ANY($1) ORDER BY a.run_id, a.attempt",
         &run_ids,
@@ -1376,6 +1399,7 @@ async fn load_runs(
             duration_ms: row.duration_ms,
             input_tokens: row.input_tokens,
             output_tokens: row.output_tokens,
+            cost_usd: row.cost_usd,
             state: parse_outcome(&row.state)?,
             failure_reason: row.failure_reason,
             started_at: row.started_at,
@@ -1415,6 +1439,7 @@ async fn load_runs(
             duration_ms: row.duration_ms,
             input_tokens: row.input_tokens,
             output_tokens: row.output_tokens,
+            cost_usd: row.cost_usd,
             log_tail: tail.into_iter().map(LogLine::from).collect(),
             attempts: attempts.remove(&row.id).unwrap_or_default(),
         });
