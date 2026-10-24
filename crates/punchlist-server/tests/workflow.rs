@@ -461,6 +461,7 @@ async fn a_failing_gate_refuses_and_writes_no_transition(pool: PgPool) {
                 "issue_id": "PL-1",
                 "attempt": 1,
                 "proof": [],
+                "labels": [],
                 "pull_requests": [{
                     "number": 12,
                     "title": "Fix the thing",
@@ -3281,11 +3282,16 @@ async fn issue_in_agent_review(s: &Setup) -> String {
 
 /// A screenshot attached to PL-1 as proof.
 async fn attach_proof(s: &Setup, token: &str) {
+    attach_file(s, token, "shot.png", "image/png").await;
+}
+
+/// A file attached to PL-1 as proof.
+async fn attach_file(s: &Setup, token: &str, filename: &str, content_type: &str) {
     let boundary = "punchlist-test-boundary";
     let body = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nList at 1280×800\r\n\
-         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot.png\"\r\n\
-         Content-Type: image/png\r\n\r\npng\r\n--{boundary}--\r\n"
+         --{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+         Content-Type: {content_type}\r\n\r\nbytes\r\n--{boundary}--\r\n"
     );
     let request = Request::builder()
         .method("POST")
@@ -3399,6 +3405,64 @@ async fn a_check_run_no_delivery_reported_is_judged_and_a_same_named_pass_does_n
     let (status, body) = request_human_review(&s, &codex).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["code"], "github_unreadable");
+}
+
+#[sqlx::test]
+async fn an_issue_labeled_ui_needs_an_image_and_a_video_before_human_review(pool: PgPool) {
+    let s = setup(&pool).await;
+    let kinds = "\n[gate.proof_attached]\nkinds_by_label = { ui = [\"image\", \"video\"] }\n";
+    let codex = issue_in_agent_review_with_no_proof(&s).await;
+    put_workflow(&s, "b", PRD_WORKFLOW.to_string() + kinds);
+    deliver(&s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(&pool).await, 1);
+    let (status, body) = call(
+        &s.app,
+        &s.person.token,
+        "PATCH",
+        "/api/issues/PL-1",
+        Some(json!({"labels": ["ui"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    deliver(&s, "check_run", "c-passed", &edited(CHECK_RUN, |_| {})).await;
+    s.github.lock().unwrap().pulls = vec![ready_with_merge_state("clean")];
+
+    attach_file(&s, &codex, "checks.md", "text/markdown").await;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["gate"], "proof_attached");
+    assert_eq!(
+        body["reason"],
+        "PL-1 is labeled ui and has no image or video from attempt 1 (has 1 report)"
+    );
+    assert_eq!(issue_status(&pool).await, "agent_review");
+
+    attach_file(&s, &codex, "list.png", "image/png").await;
+    attach_file(&s, &codex, "flow.mp4", "video/mp4").await;
+    let (status, body) = request_human_review(&s, &codex).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["issue"]["status"], "human_review");
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT g.gate, g.result, g.reason FROM transition_gate g
+         JOIN transition t ON t.id = g.transition_id
+         WHERE t.issue_id = 'PL-1' AND t.to_status = 'human_review' ORDER BY g.position",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.last().unwrap(),
+        &(
+            "proof_attached".to_string(),
+            "pass".to_string(),
+            "3 proof records are attached for attempt 1".to_string()
+        )
+    );
+    assert_eq!(rows.len(), 4);
+    assert!(
+        rows.iter().all(|(_, result, _)| result == "pass"),
+        "{rows:?}"
+    );
 }
 
 #[sqlx::test]

@@ -3247,6 +3247,13 @@
             "type": "string",
             "description": "Such as `PL-7`."
           },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issue's labels, which `proof_attached` reads for the kinds of proof they need."
+          },
           "proof": {
             "type": "array",
             "items": {
@@ -4362,13 +4369,17 @@
         "type": "object",
         "description": "A proof record attached to the issue.",
         "required": [
-          "attempt"
+          "attempt",
+          "kind"
         ],
         "properties": {
           "attempt": {
             "type": "integer",
             "format": "int32",
             "description": "The issue's attempt when it was uploaded."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ProofKind"
           }
         }
       },

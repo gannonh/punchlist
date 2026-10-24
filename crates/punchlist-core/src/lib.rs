@@ -13,8 +13,8 @@ pub use agent::{
     unknown_agent_kind,
 };
 pub use gate::{
-    CheckRunEvidence, Evidence, Gate, GateResult, ProofEvidence, PullRequestEvidence,
-    PullRequestState, RequiredCheck, ReviewThreadEvidence,
+    CheckRunEvidence, Evidence, Gate, GateResult, GateSettings, ProofEvidence, ProofKind,
+    PullRequestEvidence, PullRequestState, RequiredCheck, ReviewThreadEvidence,
 };
 pub use link::linked_issue_id;
 pub use workflow::{
