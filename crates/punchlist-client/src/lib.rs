@@ -8,7 +8,7 @@ use punchlist_api::{
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
     Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
-    UpdateIssue, WaitForPerson, WorkflowInfo, proof_type_by_extension,
+    UpdateIssue, WaitForPerson, WorkflowInfo, Workspace, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -42,6 +42,9 @@ pub struct Client {
     http: reqwest::Client,
     base_url: Url,
     token: String,
+    /// The workspace the workspace-level routes name, under `/api/workspaces/{id}/`. `None`:
+    /// the routes without it, which answer for the token's only workspace.
+    workspace: Option<String>,
 }
 
 impl Client {
@@ -57,15 +60,29 @@ impl Client {
                 .build()?,
             base_url,
             token: token.to_string(),
+            workspace: None,
         })
     }
 
+    /// This client with the workspace-level calls sent to that workspace's routes.
+    pub fn in_workspace(mut self, workspace_id: &str) -> Client {
+        self.workspace = Some(workspace_id.to_string());
+        self
+    }
+
+    /// The workspaces the token's account belongs to, oldest first.
+    pub async fn workspaces(&self) -> Result<Vec<Workspace>, ClientError> {
+        self.send::<(), _>(Method::GET, &["workspaces"], None).await
+    }
+
     pub async fn create_issue(&self, request: &CreateIssue) -> Result<IssueWritten, ClientError> {
-        self.send(Method::POST, &["issues"], Some(request)).await
+        self.send(Method::POST, &self.at(&["issues"]), Some(request))
+            .await
     }
 
     pub async fn list_issues(&self) -> Result<IssueList, ClientError> {
-        self.send::<(), _>(Method::GET, &["issues"], None).await
+        self.send::<(), _>(Method::GET, &self.at(&["issues"]), None)
+            .await
     }
 
     pub async fn get_issue(&self, id: &str) -> Result<Issue, ClientError> {
@@ -109,11 +126,13 @@ impl Client {
     }
 
     pub async fn list_projects(&self) -> Result<ProjectList, ClientError> {
-        self.send::<(), _>(Method::GET, &["projects"], None).await
+        self.send::<(), _>(Method::GET, &self.at(&["projects"]), None)
+            .await
     }
 
     pub async fn create_project(&self, request: &CreateProject) -> Result<Project, ClientError> {
-        self.send(Method::POST, &["projects"], Some(request)).await
+        self.send(Method::POST, &self.at(&["projects"]), Some(request))
+            .await
     }
 
     pub async fn create_milestone(
@@ -191,7 +210,8 @@ impl Client {
 
     /// The workspace's active workflow.
     pub async fn workflow(&self) -> Result<WorkflowInfo, ClientError> {
-        self.send::<(), _>(Method::GET, &["workflow"], None).await
+        self.send::<(), _>(Method::GET, &self.at(&["workflow"]), None)
+            .await
     }
 
     pub async fn issue_events(&self, id: &str) -> Result<Vec<Event>, ClientError> {
@@ -231,14 +251,14 @@ impl Client {
     /// The open and draft pull requests of the workspace's repository, newest number first.
     /// A person's token.
     pub async fn pull_requests(&self) -> Result<Vec<OpenPullRequest>, ClientError> {
-        self.send::<(), _>(Method::GET, &["pull-requests"], None)
+        self.send::<(), _>(Method::GET, &self.at(&["pull-requests"]), None)
             .await
     }
 
     /// The pull requests that name no issue, newest number first.
     pub async fn unlinked_pull_requests(&self) -> Result<Vec<PullRequest>, ClientError> {
-        self.send::<(), _>(Method::GET, &["pull-requests", "unlinked"], None)
-            .await
+        let path = self.at(&["pull-requests", "unlinked"]);
+        self.send::<(), _>(Method::GET, &path, None).await
     }
 
     /// Registers a runner, or re-adopts the one this person registered under the same name.
@@ -248,21 +268,25 @@ impl Client {
         &self,
         request: &RegisterRunner,
     ) -> Result<RegisteredRunner, ClientError> {
-        self.send(Method::POST, &["runners"], Some(request)).await
+        self.send(Method::POST, &self.at(&["runners"]), Some(request))
+            .await
     }
 
     pub async fn list_runners(&self) -> Result<RunnerList, ClientError> {
-        self.send::<(), _>(Method::GET, &["runners"], None).await
+        self.send::<(), _>(Method::GET, &self.at(&["runners"]), None)
+            .await
     }
 
     /// Mints an agent actor with its own token. Person token; the token is in the response
     /// only.
     pub async fn create_agent(&self, request: &CreateAgent) -> Result<CreatedAgent, ClientError> {
-        self.send(Method::POST, &["actors"], Some(request)).await
+        self.send(Method::POST, &self.at(&["actors"]), Some(request))
+            .await
     }
 
     pub async fn list_actors(&self) -> Result<ActorList, ClientError> {
-        self.send::<(), _>(Method::GET, &["actors"], None).await
+        self.send::<(), _>(Method::GET, &self.at(&["actors"]), None)
+            .await
     }
 
     /// Records a heartbeat and renews the leases of the attempts in `heartbeat.held`. The
@@ -350,7 +374,9 @@ impl Client {
 
     /// The workspace's issues whose id, title, body or comments contain `q`, in any case.
     pub async fn search(&self, q: &str, limit: Option<u32>) -> Result<SearchResults, ClientError> {
-        let mut request = self.builder(Method::GET, &["search"])?.query(&[("q", q)]);
+        let mut request = self
+            .builder(Method::GET, &self.at(&["search"]))?
+            .query(&[("q", q)]);
         if let Some(limit) = limit {
             request = request.query(&[("limit", limit)]);
         }
@@ -397,6 +423,17 @@ impl Client {
             request = request.json(body);
         }
         Self::respond(request).await
+    }
+
+    /// A workspace-level route's path, under `workspaces/{id}/` when the client names one.
+    fn at<'a>(&'a self, path: &[&'a str]) -> Vec<&'a str> {
+        match &self.workspace {
+            Some(id) => ["workspaces", id.as_str()]
+                .into_iter()
+                .chain(path.iter().copied())
+                .collect(),
+            None => path.to_vec(),
+        }
     }
 
     /// A request to `/api/<path>` with the token.

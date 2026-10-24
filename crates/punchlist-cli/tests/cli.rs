@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use punchlist_api::{AppendLog, FinishRun, RegisterRunner, RunOutcome};
 use punchlist_client::{Client, ClientError};
-use punchlist_server::{AppState, Bootstrap, ProofStore, bootstrap, router};
+use punchlist_server::{AppState, Bootstrap, ProofStore, bootstrap, join, router};
 use sqlx::PgPool;
 
 struct Pl {
     config: PathBuf,
     url: String,
     token: String,
+    account_id: sqlx::types::Uuid,
     dir: tempfile::TempDir,
 }
 
@@ -57,6 +58,7 @@ impl Pl {
             config,
             url: format!("http://{addr}"),
             token: person.token,
+            account_id: person.account_id,
             dir,
         }
     }
@@ -1682,4 +1684,126 @@ async fn search_prints_hits_and_snippets_without_control_characters(pool: PgPool
     let refused = pl.run(&["search", "ci"]).await;
     assert_eq!((refused.code, refused.stdout.as_str()), (1, ""));
     insta::assert_snapshot!(refused.stderr, @"error: search needs at least 3 characters (422 Unprocessable Entity)");
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn one_config_reaches_each_workspace_of_the_account(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let one = pl
+        .run(&["issue", "create", "--title", "In Punchlist"])
+        .await;
+    assert_eq!(
+        (one.code, one.stdout.as_str()),
+        (0, "PL-1\n"),
+        "{}",
+        one.stderr
+    );
+    let alone = pl.run(&["issue", "list"]).await;
+    assert_eq!(
+        (alone.code, alone.stdout.as_str()),
+        (0, "PL-1  Backlog  In Punchlist\n")
+    );
+
+    let groundwork = Bootstrap {
+        workspace_name: "Groundwork".into(),
+        issue_prefix: "GW".into(),
+        repository_owner: "gannonh".into(),
+        repository_name: "groundwork".into(),
+        person_name: "Gannon".into(),
+    };
+    join(&pool, pl.account_id, &groundwork).await.unwrap();
+    let gw = pl
+        .run(&[
+            "--workspace",
+            "GW",
+            "issue",
+            "create",
+            "--title",
+            "In Groundwork",
+        ])
+        .await;
+    assert_eq!(
+        (gw.code, gw.stdout.as_str()),
+        (0, "GW-1\n"),
+        "{}",
+        gw.stderr
+    );
+
+    let flag = pl.run(&["--workspace", "GW", "issue", "list"]).await;
+    assert_eq!(
+        (flag.code, flag.stdout.as_str()),
+        (0, "GW-1  Backlog  In Groundwork\n")
+    );
+    let after = pl.run(&["issue", "list", "--workspace", "pl"]).await;
+    assert_eq!(
+        (after.code, after.stdout.as_str()),
+        (0, "PL-1  Backlog  In Punchlist\n")
+    );
+    let env = pl
+        .run_with(&["issue", "list"], &[("PUNCHLIST_WORKSPACE", "GW")])
+        .await;
+    assert_eq!(
+        (env.code, env.stdout.as_str()),
+        (0, "GW-1  Backlog  In Groundwork\n")
+    );
+    let none = pl.run(&["issue", "list"]).await;
+    assert_eq!(
+        (none.code, none.stdout.as_str(), none.stderr.as_str()),
+        (1, "", "error: name a workspace with --workspace: GW, PL\n")
+    );
+    let unknown = pl.run(&["--workspace", "XX", "issue", "list"]).await;
+    assert_eq!(
+        (unknown.code, unknown.stderr.as_str()),
+        (1, "error: no workspace XX in your account: GW, PL\n")
+    );
+    let listed = pl.run(&["workspace", "list"]).await;
+    assert_eq!(
+        (listed.code, listed.stdout.as_str()),
+        (
+            0,
+            "  PL  Punchlist   gannonh/punchlist\n  GW  Groundwork  gannonh/groundwork\n"
+        )
+    );
+
+    // Issue commands take the workspace from the id.
+    let moved = pl.run(&["issue", "move", "GW-1", "todo"]).await;
+    assert_eq!(
+        (moved.code, moved.stdout.as_str()),
+        (0, "GW-1  Backlog → Todo\n"),
+        "{}",
+        moved.stderr
+    );
+    let shown = pl.run(&["issue", "show", "GW-1"]).await;
+    assert!(
+        shown
+            .stdout
+            .starts_with("GW-1  In Groundwork\nStatus: Todo\n"),
+        "{}",
+        shown.stdout
+    );
+    let same = sqlx::query_scalar!(
+        r#"SELECT a.workspace_id = i.workspace_id AS "same!" FROM transition t
+           JOIN actor a ON a.id = t.actor_id JOIN issue i ON i.id = t.issue_id
+           WHERE t.issue_id = 'GW-1'"#
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(same);
+
+    // The config's key names it when the flag and the variable do not.
+    let config = std::fs::read_to_string(&pl.config).unwrap();
+    std::fs::write(&pl.config, format!("{config}workspace = \"GW\"\n")).unwrap();
+    let keyed = pl.run(&["issue", "list"]).await;
+    assert_eq!(
+        (keyed.code, keyed.stdout.as_str()),
+        (0, "GW-1  Todo  In Groundwork\n")
+    );
+    let listed = pl.run(&["workspace", "list"]).await;
+    assert_eq!(
+        listed.stdout,
+        "  PL  Punchlist   gannonh/punchlist\n* GW  Groundwork  gannonh/groundwork\n"
+    );
+    let flag = pl.run(&["--workspace", "PL", "issue", "list"]).await;
+    assert_eq!(flag.stdout, "PL-1  Backlog  In Punchlist\n");
 }

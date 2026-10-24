@@ -154,6 +154,90 @@
         ]
       }
     },
+    "/api/inbox": {
+      "get": {
+        "summary": "The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)\nthat are unassigned, assigned to the caller or to an agent the caller owns, newest\n`since_seq` first. A person's token.",
+        "operationId": "inbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/inbox/read": {
+      "post": {
+        "summary": "The caller opened an inbox item: it is read until an event newer than `since_seq` makes\nit again. The larger `since_seq` is kept, so an older one changes nothing. A person's\ntoken.",
+        "operationId": "mark_read",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkInboxRead"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such issue in the workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/issues": {
       "get": {
         "summary": "List the workspace's issues, oldest first, each with its run, newest pull request and\nnext gated transition's gates.",
@@ -2561,6 +2645,114 @@
         }
       }
     },
+    "/api/workspaces/{id}/inbox": {
+      "get": {
+        "summary": "The workspace's issues in a status that waits on a person (`Workflow::person_statuses`)\nthat are unassigned, assigned to the caller or to an agent the caller owns, newest\n`since_seq` first. A person's token.",
+        "operationId": "inbox_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxList"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/inbox/read": {
+      "post": {
+        "summary": "The caller opened an inbox item: it is read until an event newer than `since_seq` makes\nit again. The larger `since_seq` is kept, so an older one changes nothing. A person's\ntoken.",
+        "operationId": "mark_read_in_workspace",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A workspace the token is in",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkInboxRead"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such issue in the workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/workspaces/{id}/issues": {
       "get": {
         "summary": "List the workspace's issues, oldest first, each with its run, newest pull request and\nnext gated transition's gates.",
@@ -4335,6 +4527,75 @@
           }
         }
       },
+      "InboxItem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The issue is in a status only a person moves it on from (`Workflow::person_statuses`).",
+            "required": [
+              "issue",
+              "since",
+              "since_seq",
+              "unread",
+              "kind"
+            ],
+            "properties": {
+              "issue": {
+                "$ref": "#/components/schemas/PullRequestIssue"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "waiting"
+                ]
+              },
+              "since": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When the event that put the issue in its status was written."
+              },
+              "since_seq": {
+                "type": "integer",
+                "format": "int64",
+                "description": "That event's sequence number: the issue's newest `transition` or `created` event."
+              },
+              "unread": {
+                "type": "boolean",
+                "description": "The caller has not opened the item since `since_seq`."
+              }
+            }
+          }
+        ],
+        "description": "An inbox item, derived from the issue's state: it leaves when its condition ends."
+      },
+      "InboxKind": {
+        "type": "string",
+        "description": "The kinds of inbox item, as `POST /api/inbox/read` names them.",
+        "enum": [
+          "waiting"
+        ]
+      },
+      "InboxList": {
+        "type": "object",
+        "description": "`GET /api/inbox`: what waits on the caller, newest first.",
+        "required": [
+          "items",
+          "unread"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InboxItem"
+            }
+          },
+          "unread": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of `items` are unread."
+          }
+        }
+      },
       "Issue": {
         "type": "object",
         "required": [
@@ -4820,6 +5081,27 @@
           }
         }
       },
+      "MarkInboxRead": {
+        "type": "object",
+        "description": "`POST /api/inbox/read`: the caller opened the item for `issue` up to `since_seq`.",
+        "required": [
+          "issue",
+          "kind",
+          "since_seq"
+        ],
+        "properties": {
+          "issue": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InboxKind"
+          },
+          "since_seq": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Milestone": {
         "type": "object",
         "required": [
@@ -5241,7 +5523,7 @@
       },
       "PullRequestIssue": {
         "type": "object",
-        "description": "The issue a pull request names.",
+        "description": "The issue a pull request or an inbox item names.",
         "required": [
           "id",
           "title",

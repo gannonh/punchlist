@@ -4,7 +4,7 @@ import { GitMerge } from 'lucide-react'
 import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
 import { GithubLink, StatusDot } from '@/components/atoms'
-import { useEventStream, useIssues, usePullRequests, useSignOut } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, usePullRequests, useSignOut } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
@@ -108,6 +108,7 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
   const issues = useIssues(workspace.id)
   useEventStream(workspace.id, issues.isSuccess)
   const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
+  const inbox = useInbox(workspace.id, issues.isSuccess)
   const signOut = useSignOut()
   const navigate = useNavigate()
   const grouped = useMemo(() => sections(pullRequests.data ?? []), [pullRequests.data])
@@ -134,7 +135,7 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
 
   return (
     <div className="flex min-h-screen flex-col">
-      <AppHeader workspace={workspace} current="pull-requests" pullRequests={pullRequests.data?.length}>
+      <AppHeader workspace={workspace} current="pull-requests" pullRequests={pullRequests.data?.length} inbox={inbox.data?.unread}>
         <button
           type="button"
           className="ml-auto cursor-pointer text-meta text-ink-3 hover:text-foreground"

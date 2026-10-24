@@ -12,6 +12,7 @@ import {
 import { Toaster } from '@/components/ui/sonner'
 import { sessionQuery, workspacesQuery } from '@/lib/queries'
 import { issuePrefix, pickWorkspace } from '@/model/workspaces'
+import { InboxScreen } from '@/screens/inbox'
 import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type ListSearch } from '@/screens/issues'
 import { PullRequestsScreen } from '@/screens/pull-requests'
@@ -103,6 +104,14 @@ const oldPullRequests = createRoute({
   },
 })
 
+const oldInbox = createRoute({
+  getParentRoute: () => root,
+  path: '/inbox',
+  beforeLoad: async ({ context }) => {
+    throw redirect({ to: '/w/$prefix/inbox', params: { prefix: await toWorkspace(context.queryClient) } })
+  },
+})
+
 // A workspace's screens. A prefix the account is not in opens `/`.
 const workspace = createRoute({
   getParentRoute: () => root,
@@ -155,6 +164,15 @@ const pullRequests = createRoute({
   },
 })
 
+const inbox = createRoute({
+  getParentRoute: () => workspace,
+  path: '/inbox',
+  component: function Inbox() {
+    const { session, workspace } = inbox.useRouteContext()
+    return <InboxScreen key={workspace.id} workspace={workspace} me={session.actor.name} />
+  },
+})
+
 // The issue page, in the issue's workspace. A browser whose requests carry a standalone agent's bearer token shows
 // it as that agent, in the agent's workspace, with no workspace menu.
 const issue = createRoute({
@@ -187,7 +205,8 @@ const router = createRouter({
     signIn,
     home,
     oldPullRequests,
-    workspace.addChildren([issues, pullRequests]),
+    oldInbox,
+    workspace.addChildren([issues, pullRequests, inbox]),
     issue,
   ]),
   context: { queryClient },

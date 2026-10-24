@@ -1,0 +1,75 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.title, i.status,\n                  coalesce(e.seq, 0) AS \"since_seq!\",\n                  coalesce(e.created_at, i.created_at) AS \"since!\",\n                  (r.since_seq IS NULL OR r.since_seq < coalesce(e.seq, 0)) AS \"unread!\"\n           FROM issue i\n           LEFT JOIN actor a ON a.id = i.assignee_id\n           LEFT JOIN LATERAL (\n               SELECT seq, created_at FROM event\n               WHERE issue_id = i.id AND kind IN ('transition', 'created')\n               ORDER BY seq DESC LIMIT 1\n           ) e ON true\n           LEFT JOIN inbox_read r\n                  ON r.actor_id = $2 AND r.issue_id = i.id AND r.kind = 'waiting'\n           WHERE i.workspace_id = $1 AND i.status = ANY($3)\n             AND (i.assignee_id IS NULL OR i.assignee_id = $2 OR a.owner_id = $2)\n           ORDER BY 4 DESC, i.number DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "since_seq!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "since!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "unread!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "11d8db63b34acbb2df88cac426cc887b92f782983c1b50c3e5038cced209ade0"
+}

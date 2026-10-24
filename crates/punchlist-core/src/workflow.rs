@@ -935,6 +935,22 @@ impl Workflow {
             .filter(move |t| t.on.is_none() && t.from.iter().any(|f| f.0 == from))
     }
 
+    /// The statuses an issue waits on a person in, in the workflow's order: not the first
+    /// (a parking lot), no agent dispatched there, and at least one requestable transition
+    /// out, each of which a person can make and one at least only a person can make.
+    pub fn person_statuses(&self) -> Vec<&str> {
+        let person_only = |t: &Transition| t.by == [Role::Person];
+        (self.statuses.iter().skip(1))
+            .map(Status::as_str)
+            .filter(|&status| {
+                let out: Vec<&Transition> = self.requestable(status).collect();
+                self.dispatch_for(status).is_none()
+                    && out.iter().all(|t| t.by.contains(&Role::Person))
+                    && out.iter().any(|t| person_only(t))
+            })
+            .collect()
+    }
+
     /// The transition an event makes from `from`, such as `merging → done` on `pr_merged`.
     /// `None` when the workflow has no transition on that event from that status: the event
     /// is recorded as evidence and the issue stays where it is.
@@ -1986,6 +2002,75 @@ mod tests {
 
     #[test]
     fn punchlists_own_workflow_loads() {
+        let workflow = punchlists_own(include_str!("../../../.punchlist/workflow.toml"));
+        assert_eq!(workflow.statuses().len(), 9);
+        assert_eq!(workflow.prompts().len(), 4);
+        let merging = workflow.dispatch_for("merging").unwrap();
+        assert_eq!(
+            (merging.agent.as_str(), merging.prompt.as_deref()),
+            ("claude-code", Some("prompts/merging.md"))
+        );
+    }
+
+    #[test]
+    fn person_statuses_are_those_only_a_person_moves_on() {
+        let own = include_str!("../../../.punchlist/workflow.toml");
+        assert_eq!(
+            default_workflow().person_statuses(),
+            ["todo", "human_review", "merging"]
+        );
+        assert_eq!(
+            punchlists_own(own).person_statuses(),
+            ["todo", "human_review"]
+        );
+        let shared = "from = \"human_review\"\nto = \"merging\"\nby = [\"person\"]";
+        assert!(own.contains(shared));
+        let agent_too = own.replace(
+            shared,
+            "from = \"human_review\"\nto = \"merging\"\nby = [\"person\", \"agent\"]",
+        );
+        assert_eq!(punchlists_own(&agent_too).person_statuses(), ["todo"]);
+
+        let workflow = Workflow::from_toml(
+            r#"
+version = 1
+statuses = ["new", "ready", "start", "in_progress", "review", "done"]
+
+[[transition]]
+from = "new"
+to = "ready"
+by = ["person"]
+
+[[transition]]
+from = "ready"
+to = "start"
+by = ["person"]
+
+[[transition]]
+from = "start"
+to = "in_progress"
+by = ["runner"]
+
+[[transition]]
+from = "in_progress"
+to = "review"
+by = ["person"]
+
+[[transition]]
+from = "review"
+to = "done"
+on = "pr_merged"
+
+[dispatch.status.in_progress]
+agent = "claude-code"
+"#,
+        )
+        .unwrap();
+        // `in_progress` has an agent dispatched; `review` moves only on an event.
+        assert_eq!(workflow.person_statuses(), ["ready"]);
+    }
+
+    fn punchlists_own(text: &str) -> Workflow {
         let prompts = [
             (
                 "prompts/system.md",
@@ -2005,18 +2090,7 @@ mod tests {
             ),
         ]
         .map(|(path, text)| (path.to_string(), text.to_string()));
-        let workflow = Workflow::from_files(
-            include_str!("../../../.punchlist/workflow.toml"),
-            prompts.into_iter().collect(),
-        )
-        .unwrap();
-        assert_eq!(workflow.statuses().len(), 9);
-        assert_eq!(workflow.prompts().len(), 4);
-        let merging = workflow.dispatch_for("merging").unwrap();
-        assert_eq!(
-            (merging.agent.as_str(), merging.prompt.as_deref()),
-            ("claude-code", Some("prompts/merging.md"))
-        );
+        Workflow::from_files(text, prompts.into_iter().collect()).unwrap()
     }
 
     #[test]
