@@ -13,7 +13,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
 | GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only. Runs act on GitHub as it: their pushes, pull requests, comments, thread replies and merges show as `punchlist-sartre[bot]`. It needs Contents and Pull requests: Read and write, Checks: Read |
 | Workspace | `Punchlist` (prefix `PL`, `gannonh/punchlist`) |
-| `pl` config | `~/.config/punchlist/punchlist.toml` (Gannon), `~/.config/punchlist/orchestrator.toml` (the orchestrator) |
+| `pl` config | `~/.config/punchlist/config.toml` (Gannon's account; `pl --workspace PL` names the workspace), `~/.config/punchlist/orchestrator.toml` (the orchestrator) |
 
 Start or update it:
 
@@ -37,8 +37,10 @@ The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 The workspace has one runner, in the pane `runner` of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runner again after a reboot:
 
 ```sh
-PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl runner start --name sartre-punchlist --agents claude-code,codex
+pl --workspace PL runner start --name sartre-punchlist --agents claude-code,codex
 ```
+
+A runner serves the one workspace it starts in. Groundwork gets a second process in a pane of its own, from the same config and state directory: `pl --workspace GW runner start --name sartre-groundwork --agents claude-code,codex`.
 
 The runner needs no `gh` login: each run gets an installation token of the App from the server, for `gannonh/punchlist` alone, and its agent sees no other GitHub credential. A run whose claim says the App cannot write the repository fails with that reason; accept the App's new permissions on the installation (GitHub, Settings, Applications, `punchlist-sartre`, Review request).
 
@@ -58,7 +60,7 @@ Two people work the instance: Gannon, and one long-lived Claude Code session, th
 The orchestrator acts in Punchlist as itself, the agent `Orchestrator`, so the timeline shows its issues, edits and comments as `Orchestrator (agent, claude-code)`, not as Gannon. It runs `pl` with `PUNCHLIST_CONFIG=~/.config/punchlist/orchestrator.toml`, which holds that agent's token. Its token creates, lists, edits and comments on issues, and reads the event stream, projects, the workflow, actors and proof files. It can move an issue to Todo or Canceled, and cannot make Gannon's moves (`todo → start`, `human_review → merging`), act in a status locked to agents, create projects or milestones, mint actors, or register runners. Mint the agent once, as Gannon:
 
 ```sh
-PUNCHLIST_CONFIG=~/.config/punchlist/punchlist.toml pl actor create --agent --kind claude-code --name Orchestrator
+pl --workspace PL actor create --agent --kind claude-code --name Orchestrator
 # Prints the agent's token once. Write it into the orchestrator's config:
 printf 'server_url = "http://127.0.0.1:7880"\ntoken = "%s"\n' '<token>' > ~/.config/punchlist/orchestrator.toml
 chmod 600 ~/.config/punchlist/orchestrator.toml

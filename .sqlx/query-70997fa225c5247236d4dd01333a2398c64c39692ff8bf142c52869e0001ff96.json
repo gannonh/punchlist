@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.workspace_id = i.workspace_id AS \"same!\" FROM transition t\n           JOIN actor a ON a.id = t.actor_id JOIN issue i ON i.id = t.issue_id\n           WHERE t.issue_id = 'GW-1'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "same!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "70997fa225c5247236d4dd01333a2398c64c39692ff8bf142c52869e0001ff96"
+}

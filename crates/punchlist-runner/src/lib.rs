@@ -14,6 +14,9 @@ pub struct RunnerConfig {
     pub server_url: String,
     /// A person's token, used once to register. The runner gets its own token back.
     pub token: String,
+    /// The workspace the runner registers in and serves, by id. `None`: the token's only
+    /// workspace.
+    pub workspace: Option<String>,
     /// The name people read in `pl runner list`.
     pub name: String,
     /// Agent keys this runner can start, reported when it registers: `claude-code`, `codex`.

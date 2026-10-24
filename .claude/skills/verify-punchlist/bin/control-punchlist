@@ -150,8 +150,8 @@ cmd_doctor() {
   if [ "$listen" = "listening on $SERVER_URL" ]; then echo "ok   our server logged: $listen"; else echo "FAIL server log does not show $SERVER_URL (got: ${listen:-nothing})"; ok=1; fi
   local code; code="$(curl -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/openapi.json" || true)"
   if [ "$code" = 200 ]; then echo "ok   $SERVER_URL/api/openapi.json answers 200"; else echo "FAIL openapi.json answered ${code:-nothing}"; ok=1; fi
-  code="$(curl_auth -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/issues" || true)"
-  if [ "$code" = 200 ]; then echo "ok   the run's token is accepted"; else echo "FAIL GET /api/issues with the run's token answered ${code:-nothing}"; ok=1; fi
+  code="$(curl_auth -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/session" || true)"
+  if [ "$code" = 200 ]; then echo "ok   the run's token is accepted"; else echo "FAIL GET /api/session with the run's token answered ${code:-nothing}"; ok=1; fi
   if psql "$DATABASE_URL" -tAc "SELECT 1" >/dev/null 2>&1; then echo "ok   database $DB reachable"; else echo "FAIL database $DB unreachable"; ok=1; fi
   echo "     pl $("$REPO/target/debug/pl" --version | cut -d' ' -f2), git $(git -C "$REPO" rev-parse --short HEAD)"
   return $ok

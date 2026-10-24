@@ -15,7 +15,7 @@ use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
     Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    WorkflowInfo, gate_lines,
+    WorkflowInfo, Workspace, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -27,12 +27,21 @@ pub struct Cli {
     #[arg(long, env = "PUNCHLIST_CONFIG", global = true)]
     pub config: Option<PathBuf>,
 
+    /// The workspace of the workspace-level commands, by prefix (`PL`) or id; else the
+    /// config's `workspace`, else your account's only workspace. Issue commands take it from
+    /// the issue id.
+    #[arg(long, env = "PUNCHLIST_WORKSPACE", global = true)]
+    pub workspace: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// List the workspaces of your account.
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Work with issues.
     #[command(subcommand)]
     Issue(IssueCommand),
@@ -90,16 +99,15 @@ pub enum ImportCommand {
         /// The project's name in that team.
         #[arg(long)]
         project: String,
-        /// The workspace to import into: its id, which must be your token's.
-        #[arg(long)]
-        workspace: String,
     },
     /// Print what the workspace has from Linear, and the last import with its notes or error.
-    Status {
-        /// Default: your token's workspace.
-        #[arg(long)]
-        workspace: Option<String>,
-    },
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Print each workspace's prefix, name and repository, with `*` on the one `pl` uses.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -333,6 +341,8 @@ pub enum IssueCommand {
 pub struct Config {
     pub server_url: String,
     pub token: String,
+    /// The workspace `pl` uses when `--workspace` and `PUNCHLIST_WORKSPACE` name none.
+    pub workspace: Option<String>,
     #[serde(default)]
     pub runner: RunnerSection,
 }
@@ -384,7 +394,35 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
     };
     let config = Config::load(&path)?;
     let client = Client::new(&config.server_url, &config.token)?;
+    let named = cli.workspace.or_else(|| config.workspace.clone());
+    let workspace = match &cli.command {
+        Command::Workspace(WorkspaceCommand::List) => {
+            let workspaces = client.workspaces().await?;
+            let chosen = match pick_workspace(&workspaces, named.as_deref()) {
+                Ok(chosen) => Some(chosen),
+                Err(error) if named.is_some() => return Err(error),
+                Err(_) => None,
+            };
+            write!(out, "{}", render_workspaces(&workspaces, chosen))?;
+            return Ok(());
+        }
+        command if workspace_level(command) => {
+            let workspaces = client.workspaces().await?;
+            Some(
+                pick_workspace(&workspaces, named.as_deref())?
+                    .id
+                    .to_string(),
+            )
+        }
+        _ => None,
+    };
+    let client = match &workspace {
+        Some(id) => client.in_workspace(id),
+        None => client,
+    };
+    let workspace = || workspace.as_deref().expect("a workspace-level command");
     match cli.command {
+        Command::Workspace(_) => unreachable!("handled above"),
         Command::Issue(command) => issue(&client, command, out).await,
         Command::Actor(ActorCommand::Create {
             agent: _,
@@ -425,8 +463,9 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             if flags.worktree_root.is_some() {
                 eprintln!("--worktree-root is deprecated; use --state-dir");
             }
-            let (runner, move_from) =
+            let (mut runner, move_from) =
                 runner_config(&config, *flags, home.as_deref(), &hostname(), Path::exists);
+            runner.workspace = Some(workspace().to_string());
             if let Some(from) = move_from {
                 let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
                     .map(PathBuf::from)
@@ -498,17 +537,11 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             )?;
             Ok(())
         }
-        Command::Import(ImportCommand::Linear {
-            team,
-            project,
-            workspace,
-        }) => import_linear(&client, &team, &project, &workspace, out).await,
-        Command::Import(ImportCommand::Status { workspace }) => {
-            let workspace = match workspace {
-                Some(workspace) => workspace,
-                None => client.session().await?.workspace_id.to_string(),
-            };
-            let status = client.import_status(&workspace).await?;
+        Command::Import(ImportCommand::Linear { team, project }) => {
+            import_linear(&client, &team, &project, workspace(), out).await
+        }
+        Command::Import(ImportCommand::Status) => {
+            let status = client.import_status(workspace()).await?;
             write!(out, "{}", render_import_status(&status))?;
             Ok(())
         }
@@ -538,6 +571,66 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Whether the command acts on a workspace rather than on an issue or a run, so `pl` names
+/// the workspace in its routes.
+fn workspace_level(command: &Command) -> bool {
+    match command {
+        Command::Issue(command) => {
+            matches!(command, IssueCommand::Create { .. } | IssueCommand::List)
+        }
+        Command::Actor(_)
+        | Command::Runner(_)
+        | Command::PullRequest(_)
+        | Command::Project(_)
+        | Command::Milestone(_)
+        | Command::Workflow(_)
+        | Command::Import(_)
+        | Command::Search { .. } => true,
+        Command::Workspace(_) | Command::Run(_) | Command::Proof(_) | Command::Mcp(_) => false,
+    }
+}
+
+/// The workspace `named` by prefix (any case) or id, else the account's only one.
+fn pick_workspace<'a>(
+    workspaces: &'a [Workspace],
+    named: Option<&str>,
+) -> anyhow::Result<&'a Workspace> {
+    let prefixes = || {
+        let mut prefixes: Vec<&str> = workspaces.iter().map(|w| w.issue_prefix.as_str()).collect();
+        prefixes.sort_unstable();
+        prefixes.join(", ")
+    };
+    match (named, workspaces) {
+        (Some(named), _) => (workspaces.iter())
+            .find(|w| w.issue_prefix.eq_ignore_ascii_case(named) || w.id.to_string() == named)
+            .ok_or_else(|| anyhow::anyhow!("no workspace {named} in your account: {}", prefixes())),
+        (None, [only]) => Ok(only),
+        (None, _) => anyhow::bail!("name a workspace with --workspace: {}", prefixes()),
+    }
+}
+
+/// `pl workspace list`: prefix, name and repository, `*` on the one `pl` uses.
+fn render_workspaces(workspaces: &[Workspace], chosen: Option<&Workspace>) -> String {
+    let prefix_width = workspaces
+        .iter()
+        .map(|w| w.issue_prefix.len())
+        .max()
+        .unwrap_or(0);
+    let name_width = workspaces.iter().map(|w| w.name.len()).max().unwrap_or(0);
+    workspaces
+        .iter()
+        .map(|w| {
+            format!(
+                "{} {:prefix_width$}  {:name_width$}  {}\n",
+                if chosen == Some(w) { '*' } else { ' ' },
+                w.issue_prefix,
+                w.name,
+                w.repository
+            )
+        })
+        .collect()
 }
 
 /// How long `pl import linear` waits for the server's job.
@@ -735,6 +828,7 @@ pub fn runner_config(
     let runner = punchlist_runner::RunnerConfig {
         server_url: config.server_url.clone(),
         token: config.token.clone(),
+        workspace: None,
         name: flags
             .name
             .or_else(|| table.name.clone())
@@ -1126,7 +1220,14 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
     if edit.project.is_none() && edit.milestone.is_none() {
         return Ok(request);
     }
-    let projects = client.list_projects().await?.projects;
+    // The projects of the issue's workspace.
+    let prefix = id.rsplit_once('-').map_or(id, |(prefix, _)| prefix);
+    let workspaces = client.workspaces().await?;
+    let projects = match pick_workspace(&workspaces, Some(prefix)) {
+        Ok(workspace) => client.clone().in_workspace(&workspace.id.to_string()),
+        Err(_) => client.clone(),
+    };
+    let projects = projects.list_projects().await?.projects;
     let project = match &edit.project {
         Some(name) => {
             let project = find_project(&projects, name)?;
@@ -1910,6 +2011,54 @@ mod tests {
         assert_eq!(parsed.runner.max_concurrent, Some(2));
         assert_eq!(config("").unwrap().runner, RunnerSection::default());
         assert!(config("[runner]\nbogus = 1\n").is_err());
+    }
+
+    #[test]
+    fn config_names_a_workspace_and_rejects_unknown_keys() {
+        assert_eq!(
+            config("workspace = \"GW\"\n").unwrap().workspace.as_deref(),
+            Some("GW")
+        );
+        assert_eq!(config("").unwrap().workspace, None);
+        let unknown = config("workspaces = \"GW\"\n").unwrap_err().to_string();
+        assert!(unknown.contains("unknown field `workspaces`"), "{unknown}");
+    }
+
+    #[test]
+    fn picks_and_lists_workspaces() {
+        let workspace = |prefix: &str, name: &str, repository: &str| Workspace {
+            id: format!(
+                "00000000-0000-0000-0000-0000000000{:x}",
+                prefix.as_bytes()[0]
+            )
+            .parse()
+            .unwrap(),
+            name: name.into(),
+            issue_prefix: prefix.into(),
+            repository: repository.into(),
+        };
+        let both = [
+            workspace("GW", "Groundwork", "gannonh/groundwork"),
+            workspace("PL", "Punchlist", "gannonh/punchlist"),
+        ];
+        let pick = |named| pick_workspace(&both, named).map(|w| w.issue_prefix.as_str());
+        assert_eq!(pick(Some("GW")).unwrap(), "GW");
+        assert_eq!(pick(Some("pl")).unwrap(), "PL");
+        let id = both[1].id.to_string();
+        assert_eq!(pick(Some(id.as_str())).unwrap(), "PL");
+        assert_eq!(
+            pick(None).unwrap_err().to_string(),
+            "name a workspace with --workspace: GW, PL"
+        );
+        assert_eq!(
+            pick(Some("XX")).unwrap_err().to_string(),
+            "no workspace XX in your account: GW, PL"
+        );
+        assert_eq!(pick_workspace(&both[1..], None).unwrap().issue_prefix, "PL");
+        assert_eq!(
+            render_workspaces(&both, Some(&both[0])),
+            "* GW  Groundwork  gannonh/groundwork\n  PL  Punchlist   gannonh/punchlist\n"
+        );
     }
 
     #[test]
