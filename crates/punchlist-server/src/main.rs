@@ -1,7 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
-    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, catch_up_merges_at_start,
+    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, catch_up_at_start,
     expire_leases, join, openapi, queue_workflow_load, queue_workflow_loads_at_start, router,
     warn_invalid_workflows, with_web_app, work_jobs, write_pull_request_events,
 };
@@ -186,9 +186,9 @@ async fn main() -> anyhow::Result<()> {
                     "no GitHub App credentials; the workflow cannot load from the repository"
                 ),
             }
-            catch_up_merges_at_start(&state.pool)
+            catch_up_at_start(&state.pool)
                 .await
-                .context("move the issues whose pull request merged")?;
+                .context("move the issues whose pull request merged or whose children are done")?;
             tokio::spawn(work_jobs(state.clone()));
             let app = with_web_app(router(state), &web_dir).layer(TraceLayer::new_for_http());
             let listener = tokio::net::TcpListener::bind(&bind)

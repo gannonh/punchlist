@@ -3239,6 +3239,13 @@
             "type": "integer",
             "format": "int32"
           },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cost in US dollars the agent reported, as a decimal string; `None` when it\nreported none."
+          },
           "duration_ms": {
             "type": [
               "integer",
@@ -3935,6 +3942,13 @@
           "attempt": {
             "type": "integer",
             "format": "int32"
+          },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cost in US dollars the agent reported, as a decimal such as `0.0453`, every digit\nkept. `None` when it reported none."
           },
           "duration_ms": {
             "type": "integer",
@@ -5515,7 +5529,7 @@
           "attempt": {
             "type": "integer",
             "format": "int32",
-            "description": "The latest attempt's number, runner, failure reason, duration and tokens."
+            "description": "The latest attempt's number, runner, failure reason, duration, tokens and cost."
           },
           "attempts": {
             "type": "array",
@@ -5526,6 +5540,12 @@
           },
           "branch": {
             "type": "string"
+          },
+          "cost_usd": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "duration_ms": {
             "type": [

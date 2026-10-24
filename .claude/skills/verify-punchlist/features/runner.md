@@ -13,7 +13,7 @@
 - `claim-taken` is what a second runner gets when it raced for the same issue: its log says `claim taken: PL-<n> was claimed by runner <name>`, and no second `attempt` row exists.
 - `worktree` is a checkout under the runner's `--state-dir` (`worktrees/<owner>/<name>/<issue>`) on the issue's branch.
 - `log` streams the agent's stdout (stream-json lines) and stderr (`stderr: ` prefix) to `run_log`. Each line carries its per-attempt `line_no`, so a resent batch is stored once.
-- `finish` records `succeeded` or `failed`, `duration_ms`, `input_tokens` and `output_tokens`.
+- `finish` records `succeeded` or `failed`, `duration_ms`, `input_tokens`, `output_tokens` and `cost_usd`: Claude Code's `total_cost_usd` from its `result` line, digit for digit (`SELECT cost_usd::text FROM attempt`), `NULL` for Codex and for an attempt with no `result` line. Any `cost_usd` but `[0-9]+(\.[0-9]+)?` up to 30 characters answers 422 `cost_usd must be a decimal such as 0.0453`.
 - `lease-expiry` fails an attempt whose runner stopped heartbeating with `lease expired: runner <name> stopped sending heartbeats`.
 - `dispatch-on-entry` writes one `dispatch` row per transition into a status with a dispatch rule (`agent`, and the `transition_id` whose `to_status` it is for); the issue's next transition deletes one still unclaimed, and the claim sets its `run_id`. The claim from Start writes and claims its own row in one transaction.
 - `dispatch-again` queues one more `dispatch` row when a run ends (`finish` with either outcome, or `lease-expiry`) and its issue has made no transition since the one that dispatched the run: same `transition_id` and `agent`, `run_number` one higher, written in the transaction that ends the run. It applies to every dispatch, so to the Claude Code run in In Progress too. A run that moved its issue, or whose issue a person or a GitHub event moved, queues nothing. Nor does a run that ends in a status the active workflow now locks to agents or runners, or no longer gives a dispatch rule. The limit is 3 runs per transition (`RUNS_PER_ENTRY` in `runs.rs`); a new transition into the status starts at `run_number` 1.
@@ -22,7 +22,7 @@
 
 ## How to get to it (user POV)
 
-- `pl run list <id>` lists each run's attempts with runner, outcome and reason.
+- `pl run list <id>` lists each run's attempts with runner, outcome and reason; the run's line ends `tokens N in / M out  cost $<value>` when the latest attempt reported a cost.
 - `pl runner start [--name N] [--state-dir DIR] [--agents claude-code,codex] [--model M] [--codex-model M] [--codex-effort E] [--codex-command PATH] [--max-concurrent K]`, `pl runner list`.
 - `pl issue move <id> start`, then `pl issue show <id>` and `pl run log <run-id>`.
 - `POST /api/runners`, `POST /api/runners/{id}/heartbeat`, `POST /api/runs/claim`, `POST /api/runs/{id}/log`, `POST /api/runs/{id}/finish`, `GET /api/issues/{id}/runs`, `GET /api/runs/{id}/log`.

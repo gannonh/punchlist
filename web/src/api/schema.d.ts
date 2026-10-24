@@ -974,6 +974,11 @@ export interface components {
         AttemptInfo: {
             /** Format: int32 */
             attempt: number;
+            /**
+             * @description The cost in US dollars the agent reported, as a decimal string; `None` when it
+             *     reported none.
+             */
+            cost_usd?: string | null;
             /** Format: int64 */
             duration_ms?: number | null;
             failure_reason?: string | null;
@@ -1271,6 +1276,11 @@ export interface components {
         FinishRun: {
             /** Format: int32 */
             attempt: number;
+            /**
+             * @description The cost in US dollars the agent reported, as a decimal such as `0.0453`, every digit
+             *     kept. `None` when it reported none.
+             */
+            cost_usd?: string | null;
             /** Format: int64 */
             duration_ms: number;
             /** Format: int64 */
@@ -1888,12 +1898,13 @@ export interface components {
             agent_name: string;
             /**
              * Format: int32
-             * @description The latest attempt's number, runner, failure reason, duration and tokens.
+             * @description The latest attempt's number, runner, failure reason, duration, tokens and cost.
              */
             attempt: number;
             /** @description Every attempt, oldest first. */
             attempts?: components["schemas"]["AttemptInfo"][];
             branch: string;
+            cost_usd?: string | null;
             /** Format: int64 */
             duration_ms?: number | null;
             failure_reason?: string | null;
