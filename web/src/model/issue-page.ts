@@ -249,6 +249,10 @@ export function plainPullRequestUrl(number: number, url: string): string | null 
   return parts && plain(parts[1]) && plain(parts[2]) && parts[3] === String(number) ? url : null
 }
 
+/** The pull request panel's notice for an issue that waits on the merge, as `waitsOnMerge` decides. */
+export const mergeNotice = (id: string, to: string, mergeState: string): string =>
+  `Waits on the merge. ${id} moves to ${to} when GitHub reports it.${mergeState === 'dirty' ? ' The pull request has conflicts.' : ''}`
+
 /** A review comment's URL when it is a plain `https://github.com/<owner>/<repo>/pull/<number>#discussion_r<digits>`. */
 export function plainThreadUrl(pullRequest: number, url: string | null | undefined): string | null {
   const parts = /^(.*)#discussion_r(\d+)$/.exec(url ?? '')

@@ -11,7 +11,7 @@ use punchlist_api::{
     ChecksState, ErrorBody, OpenPullRequest, PullRequest, PullRequestIssue, PullRequestState,
     PullRequestsNow, ReviewThread, plain_pull_request_url,
 };
-use punchlist_core::display_name;
+use punchlist_core::{Status, display_name};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -316,14 +316,13 @@ pub(crate) async fn open_pull_requests(
                         id,
                         title,
                         status_name: display_name(&status),
+                        on_merge_to: workflow.on_merge_to(&status).map(Status::display_name),
                         status,
                     }),
                     _ => None,
                 };
-                let waits_on_merge = !row.draft
-                    && issue.as_ref().is_some_and(|issue| {
-                        workflow.transition_on(&issue.status, "pr_merged").is_some()
-                    });
+                let waits_on_merge =
+                    !row.draft && issue.as_ref().is_some_and(|issue| issue.on_merge_to.is_some());
                 OpenPullRequest {
                     url: plain_pull_request_url(row.number, &row.url).map(str::to_string),
                     number: row.number,

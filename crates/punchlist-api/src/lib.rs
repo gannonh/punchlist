@@ -1157,6 +1157,9 @@ pub struct PullRequestIssue {
     pub title: String,
     pub status: String,
     pub status_name: String,
+    /// As in `StatusInfo`: the status, as people read it, a merge moves the issue to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_merge_to: Option<String>,
 }
 
 /// An unresolved review thread. Its path, authors and bodies are text from outside the team.
@@ -1354,6 +1357,10 @@ pub struct StatusInfo {
     pub dispatch: Option<String>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
+    /// The status, as people read it (`Done`), that a merge of the issue's pull request
+    /// moves an issue in it to; `None` when it does not wait on a merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_merge_to: Option<String>,
 }
 
 /// A pushed `workflow.toml` the server refused to load.

@@ -943,6 +943,12 @@ impl Workflow {
             .iter()
             .find(|t| t.on.as_deref() == Some(event) && t.from.iter().any(|f| f.0 == from))
     }
+
+    /// The status a merge of the issue's pull request moves an issue in `from` to, such as
+    /// `merging → done`. `Some` is the one rule for whether an issue in `from` waits on a merge.
+    pub fn on_merge_to(&self, from: &str) -> Option<&Status> {
+        self.transition_on(from, "pr_merged").map(|t| &t.to)
+    }
 }
 
 /// A plain relative path with no `..`, so a prompt cannot name a file outside `.punchlist/`.
@@ -1678,6 +1684,22 @@ mod tests {
                 Problem::BadPromptPath("../secrets".into())
             )
         );
+    }
+
+    #[test]
+    fn only_a_status_with_a_pr_merged_transition_waits_on_a_merge() {
+        let workflow = Workflow::from_toml(PRD_TEMPLATE).unwrap();
+        assert_eq!(
+            workflow.on_merge_to("merging").map(Status::as_str),
+            Some("done")
+        );
+        assert_eq!(workflow.on_merge_to("human_review"), None);
+        let by_person = Workflow::from_toml(&edited(
+            "to = \"done\"\non = \"pr_merged\"",
+            "to = \"done\"\nby = [\"person\"]",
+        ))
+        .unwrap();
+        assert_eq!(by_person.on_merge_to("merging"), None);
     }
 
     /// `PRD_TEMPLATE` with `from` replaced by `to`; fails if the template no longer has `from`.

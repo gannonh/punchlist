@@ -353,6 +353,7 @@ pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
             .dispatch_for(status.as_str())
             .map(|d| d.agent.clone()),
         closed: !(workflow.transitions().iter()).any(|transition| transition.from.contains(status)),
+        on_merge_to: workflow.on_merge_to(status.as_str()).map(Status::display_name),
     }
 }
 
