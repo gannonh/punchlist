@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
-use crate::events::mark_pull_request_change;
+use crate::events::{mark_pull_request_change, record_row_event};
 use crate::github_api::{
     CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
 };
@@ -1796,13 +1796,16 @@ async fn close_issue_on_pull_request(
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
+    let ended = sqlx::query!(
         "UPDATE run SET outcome = 'failed', finished_at = now()
          WHERE issue_id = $1 AND outcome = 'running'",
         issue_id,
     )
     .execute(&mut *tx)
     .await?;
+    if ended.rows_affected() > 0 {
+        record_row_event(tx, actor.workspace_id, issue_id, actor.id, "run").await?;
+    }
     if transition.require.iter().any(|r| r == "comment") {
         let by = closed_by.map_or_else(String::new, |login| format!(" by @{login}"));
         let body = format!("Pull request #{} was {how}{by}.\n\n{}", pr.number, pr.url);

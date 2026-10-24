@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
-use crate::events::{events, next_event_seq};
+use crate::events::{events, next_event_seq, record_row_event};
 use crate::github::{
     PUNCHLIST_LOGIN, PullRequestRead, catch_up_merge, github_actor, lock_pull_requests,
     newest_check_runs, refresh_pull_requests, written_since,
@@ -630,12 +630,13 @@ pub(crate) async fn record_transition(
 /// True when one was queued.
 async fn queue_dispatch(
     tx: &mut sqlx::PgConnection,
+    actor: &Actor,
     workflow: &Workflow,
     id: &str,
     to: &str,
     transition_id: Uuid,
 ) -> sqlx::Result<bool> {
-    end_dispatches(tx, id).await?;
+    end_dispatches(tx, actor, id).await?;
     let unlocked = |role| workflow.check_unlocked(to, role).is_ok();
     let Some(dispatch) = workflow
         .dispatch_for(to)
@@ -657,14 +658,18 @@ async fn queue_dispatch(
 /// The issue has left its status, so a dispatch still waiting for it goes. A run waiting for
 /// its next attempt (`settle_run`) was for that status too, so it fails, its last attempt's
 /// reason saying why; else the issue would wait behind a running run that no runner holds.
-pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sqlx::Result<()> {
+pub(crate) async fn end_dispatches(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+) -> sqlx::Result<()> {
     sqlx::query!(
         "DELETE FROM dispatch WHERE issue_id = $1 AND run_id IS NULL",
         id
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query!(
+    let ended = sqlx::query!(
         "UPDATE run SET outcome = 'failed', finished_at = now()
          WHERE issue_id = $1 AND outcome = 'running'
            AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = run.id
@@ -673,6 +678,9 @@ pub(crate) async fn end_dispatches(tx: &mut sqlx::PgConnection, id: &str) -> sql
     )
     .execute(&mut *tx)
     .await?;
+    if ended.rows_affected() > 0 {
+        record_row_event(tx, actor.workspace_id, id, actor.id, "run").await?;
+    }
     Ok(())
 }
 
@@ -765,7 +773,7 @@ pub(crate) async fn write_transition(
         .execute(&mut *tx)
         .await?;
     }
-    let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
+    let dispatched = queue_dispatch(tx, actor, workflow, id, to, transition_id).await?;
     let (seq, created_at) = record_transition_event(tx, actor, id, transition_id).await?;
     if let (DONE | CANCELED, Some(parent)) = (to, &issue.parent) {
         children_done(tx, actor.workspace_id, workflow, parent).await?;
