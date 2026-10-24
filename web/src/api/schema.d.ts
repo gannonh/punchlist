@@ -1267,6 +1267,8 @@ export interface components {
             closed_pull_request?: number | null;
             /** @description Such as `PL-7`. */
             issue_id: string;
+            /** @description The issue's labels, which `proof_attached` reads for the kinds of proof they need. */
+            labels?: string[];
             /** @description The proof attached to the issue, from every attempt. */
             proof?: components["schemas"]["ProofEvidence"][];
             /** @description The pull requests linked to the issue, open or not. */
@@ -1683,6 +1685,7 @@ export interface components {
              * @description The issue's attempt when it was uploaded.
              */
             attempt: number;
+            kind: components["schemas"]["ProofKind"];
         };
         /**
          * @description What a proof file shows.

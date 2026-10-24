@@ -67,6 +67,11 @@ prompt = "prompts/agent_review.md"
 # [gate.ci_green]
 # required = ["test", { name = "deploy", app = "vercel" }]
 
+# `proof_attached` passes with one proof record from the issue's current attempt. To need
+# kinds of proof (image, video, report) for an issue with a label, name them by the label:
+# [gate.proof_attached]
+# kinds_by_label = { ui = ["image", "video"] }
+
 # `pl import linear` puts each Linear issue in the status named like its Linear state, else in
 # the status for the state's type (backlog, unstarted → todo, started → in_progress,
 # completed → done, canceled → canceled). A state that maps to no status, such as Triage, stops

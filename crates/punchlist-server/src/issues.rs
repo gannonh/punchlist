@@ -10,9 +10,9 @@ use punchlist_api::{
     IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
 };
 use punchlist_core::{
-    CANCELED, DONE, Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence,
-    PullRequestState, Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow,
-    agent_display_name, display_name,
+    CANCELED, DONE, Evidence, GateResult, IN_PROGRESS, ProofEvidence, ProofKind,
+    PullRequestEvidence, PullRequestState, Refusal, ReviewThreadEvidence, Role, START, Transition,
+    Workflow, agent_display_name, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -478,7 +478,7 @@ pub(crate) async fn evaluate_gates(
 ) -> sqlx::Result<(Evidence, Vec<GateResult>)> {
     let evidence = evidence(tx, id, closed_pull_request).await?;
     let gates = (transition.gates.iter())
-        .map(|gate| gate.evaluate(&evidence, workflow.required_checks()))
+        .map(|gate| gate.evaluate(&evidence, workflow.gate_settings()))
         .collect();
     Ok((evidence, gates))
 }
@@ -547,19 +547,29 @@ async fn evidence(
             review_threads,
         });
     }
-    let proof = sqlx::query_as!(
-        ProofEvidence,
-        "SELECT attempt FROM proof WHERE issue_id = $1",
-        id
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let mut proof = Vec::new();
+    for row in sqlx::query!("SELECT attempt, kind FROM proof WHERE issue_id = $1", id)
+        .fetch_all(&mut *tx)
+        .await?
+    {
+        let kind = ProofKind::parse(&row.kind).ok_or_else(|| {
+            sqlx::Error::Decode(format!("unknown proof kind `{}`", row.kind).into())
+        })?;
+        proof.push(ProofEvidence {
+            attempt: row.attempt,
+            kind,
+        });
+    }
+    let labels = sqlx::query_scalar!("SELECT labels FROM issue WHERE id = $1", id)
+        .fetch_one(&mut *tx)
+        .await?;
     Ok(Evidence {
         issue_id: id.to_string(),
         pull_requests,
         closed_pull_request,
         attempt: current_attempt(tx, id).await?,
         proof,
+        labels,
     })
 }
 

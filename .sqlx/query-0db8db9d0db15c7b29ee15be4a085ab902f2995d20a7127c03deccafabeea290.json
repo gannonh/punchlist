@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT attempt FROM proof WHERE issue_id = $1",
+  "query": "SELECT attempt, kind FROM proof WHERE issue_id = $1",
   "describe": {
     "columns": [
       {
@@ -13,6 +13,17 @@
             "name": "attempt"
           }
         }
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "proof",
+            "name": "kind"
+          }
+        }
       }
     ],
     "parameters": {
@@ -21,8 +32,9 @@
       ]
     },
     "nullable": [
+      false,
       false
     ]
   },
-  "hash": "f3fec3224e261664cf888ae09fad76807ae5b4e9f3a9fa5071fb4a9865f3e80f"
+  "hash": "0db8db9d0db15c7b29ee15be4a085ab902f2995d20a7127c03deccafabeea290"
 }

@@ -6,8 +6,8 @@
 
 use chrono::{DateTime, Utc};
 pub use punchlist_core::{
-    CheckRunEvidence, Evidence, GateResult, ProofEvidence, PullRequestEvidence, PullRequestState,
-    ReviewThreadEvidence, Role,
+    CheckRunEvidence, Evidence, GateResult, ProofEvidence, ProofKind, PullRequestEvidence,
+    PullRequestState, ReviewThreadEvidence, Role,
 };
 use punchlist_core::{display_name, is_plain_name};
 use serde::{Deserialize, Serialize};
@@ -1230,31 +1230,6 @@ pub struct CreateComment {
 pub struct WaitForPerson {
     /// What the person must do, 1 to 500 characters.
     pub reason: String,
-}
-
-/// What a proof file shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ProofKind {
-    Image,
-    Video,
-    Report,
-}
-
-impl ProofKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProofKind::Image => "image",
-            ProofKind::Video => "video",
-            ProofKind::Report => "report",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<ProofKind> {
-        [ProofKind::Image, ProofKind::Video, ProofKind::Report]
-            .into_iter()
-            .find(|kind| kind.as_str() == s)
-    }
 }
 
 /// The files proof can be: extension, content type and kind. The server accepts only these
