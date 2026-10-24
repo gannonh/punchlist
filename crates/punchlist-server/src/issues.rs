@@ -51,7 +51,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         (status = 422, body = ErrorBody, description = "The title is empty."),
     )
 )]
-async fn create_issue(
+pub(crate) async fn create_issue(
     State(state): State<AppState>,
     actor: Actor,
     Json(request): Json<CreateIssue>,
@@ -144,7 +144,7 @@ pub(crate) async fn record_event(
     path = "/api/issues",
     responses((status = 200, body = IssueList), (status = 401, body = ErrorBody))
 )]
-async fn list_issues(
+pub(crate) async fn list_issues(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<IssueList>, ApiError> {
@@ -791,6 +791,7 @@ pub(crate) async fn children_done(
         role: Role::Github,
         kind: None,
         token_hash: None,
+        account: None,
     };
     let checked = check_gates(
         tx,

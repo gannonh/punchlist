@@ -5,6 +5,7 @@ import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
 import { useEventStream, useIssues, usePullRequests, useSignOut } from '@/lib/queries'
+import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
   mergeTone,
@@ -118,10 +119,10 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
   )
 }
 
-export function PullRequestsScreen({ workspaceId, me }: { workspaceId: string; me: string }) {
-  const issues = useIssues()
-  useEventStream(workspaceId, issues.isSuccess)
-  const pullRequests = usePullRequests(issues.isSuccess)
+export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me: string }) {
+  const issues = useIssues(workspace.id)
+  useEventStream(workspace.id, issues.isSuccess)
+  const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
   const signOut = useSignOut()
   const navigate = useNavigate()
   const grouped = useMemo(() => sections(pullRequests.data ?? []), [pullRequests.data])
@@ -132,13 +133,13 @@ export function PullRequestsScreen({ workspaceId, me }: { workspaceId: string; m
       if (event.key !== 'Escape' || inField(event.target)) return
       if (document.querySelector('[role="dialog"], [role="menu"]')) return
       event.preventDefault()
-      void navigate({ to: '/' })
+      void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate])
+  }, [navigate, workspace.issue_prefix])
 
   const open = (pr: OpenPullRequest) => {
     if (pr.issue) void navigate({ to: '/issues/$id', params: { id: pr.issue.id } })
@@ -148,7 +149,7 @@ export function PullRequestsScreen({ workspaceId, me }: { workspaceId: string; m
 
   return (
     <div className="flex min-h-screen flex-col">
-      <AppHeader current="pull-requests" pullRequests={pullRequests.data?.length}>
+      <AppHeader workspace={workspace} current="pull-requests" pullRequests={pullRequests.data?.length}>
         <button
           type="button"
           className="ml-auto cursor-pointer text-meta text-ink-3 hover:text-foreground"

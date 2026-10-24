@@ -39,7 +39,7 @@ fn parse_name<'a>(raw: &'a str, what: &str) -> Result<&'a str, ApiError> {
     path = "/api/projects",
     responses((status = 200, body = ProjectList), (status = 401, body = ErrorBody))
 )]
-async fn list_projects(
+pub(crate) async fn list_projects(
     State(state): State<AppState>,
     actor: Actor,
 ) -> Result<Json<ProjectList>, ApiError> {
@@ -87,7 +87,7 @@ async fn list_projects(
         (status = 422, body = ErrorBody, description = "An empty or long name, or one the workspace already has."),
     )
 )]
-async fn create_project(
+pub(crate) async fn create_project(
     State(state): State<AppState>,
     actor: Actor,
     Json(request): Json<CreateProject>,

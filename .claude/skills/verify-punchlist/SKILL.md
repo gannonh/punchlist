@@ -96,7 +96,7 @@ RUN=$(PUNCHLIST_VERIFY_HOST=$(tailscale ip -4) $C up)   # reachable from the Mac
 URL=$($C sign-in-url "$RUN")                           # a page that signs the browser in as the run's person
 ```
 
-`sign-in-url` writes a page with a random name into the run's web directory and prints its URL. The page posts the person's token to `/api/session` and goes to `/`; the token never appears in the URL or the transcript. The page is removed after 2 minutes, so get one per browser.
+`sign-in-url` writes a page with a random name into the run's web directory and prints its URL. The page posts the person's token to `/api/session` and goes to `/`, which opens the person's last workspace, `/w/<prefix>`; the token never appears in the URL or the transcript. The page is removed after 2 minutes, so get one per browser.
 
 Drive it one of two ways:
 

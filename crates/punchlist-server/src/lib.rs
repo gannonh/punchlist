@@ -19,6 +19,7 @@ mod runs;
 mod search;
 mod session;
 mod workflow;
+mod workspaces;
 
 use auth::BearerAuth;
 use axum::http::StatusCode;
@@ -30,7 +31,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 
 pub use auth::hash_token;
-pub use bootstrap::{Bootstrap, Bootstrapped, bootstrap};
+pub use bootstrap::{Bootstrap, Bootstrapped, bootstrap, join};
 pub use error::ApiError;
 pub use events::write_pull_request_events;
 pub use github::catch_up_at_start;
@@ -143,20 +144,26 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
         .merge(search::routes())
         .merge(session::routes())
         .merge(workflow::routes())
+        .merge(workspaces::routes())
 }
 
 /// The API router, which also serves the OpenAPI document built from its routes at
 /// `/api/openapi.json`.
 pub fn router(state: AppState) -> Router {
-    let (router, api) = api_routes(state.proof.max_bytes)
+    let (router, api) = routes_and_document(state.proof.max_bytes);
+    router
         .with_state(state)
-        .split_for_parts();
-    router.route("/api/openapi.json", get(move || async move { Json(api) }))
+        .route("/api/openapi.json", get(move || async move { Json(api) }))
 }
 
 /// The OpenAPI document, built from the routes without a database.
 pub fn openapi() -> utoipa::openapi::OpenApi {
-    api_routes(0).split_for_parts().1
+    routes_and_document(0).1
+}
+
+fn routes_and_document(proof_max_bytes: u64) -> (Router<AppState>, utoipa::openapi::OpenApi) {
+    let (router, mut api) = api_routes(proof_max_bytes).split_for_parts();
+    (workspaces::with_workspace_routes(router, &mut api), api)
 }
 
 /// `router` serving the web app's build in `dir` too: its files at `/`, and its

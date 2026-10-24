@@ -72,6 +72,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 export function IssueSheet({
+  workspaceId,
   row,
   status,
   statuses,
@@ -83,6 +84,7 @@ export function IssueSheet({
   onMove,
   onDismiss,
 }: {
+  workspaceId: string
   row: IssueRow | undefined
   status: StatusInfo | undefined
   statuses: readonly StatusInfo[]
@@ -107,7 +109,7 @@ export function IssueSheet({
           <SheetBody
             row={row}
             view={rowView(row, now)}
-            {...{ status, statuses, assignable, transition, now, onEdit, onMove, onDismiss }}
+            {...{ workspaceId, status, statuses, assignable, transition, now, onEdit, onMove, onDismiss }}
           />
         )}
       </SheetContent>
@@ -116,6 +118,7 @@ export function IssueSheet({
 }
 
 function SheetBody({
+  workspaceId,
   row,
   view,
   status,
@@ -127,6 +130,7 @@ function SheetBody({
   onMove,
   onDismiss,
 }: {
+  workspaceId: string
   row: IssueRow
   view: RowView
   status: StatusInfo | undefined
@@ -139,8 +143,8 @@ function SheetBody({
   onDismiss: () => void
 }) {
   const { issue } = row
-  const projects = useProjects().data ?? []
-  const parentTitle = useIssues().data?.rows.find((other) => other.issue.id === issue.parent)?.issue.title
+  const projects = useProjects(workspaceId).data ?? []
+  const parentTitle = useIssues(workspaceId).data?.rows.find((other) => other.issue.id === issue.parent)?.issue.title
   const milestones = projects.find((project) => project.id === issue.project?.id)?.milestones ?? []
   const passWhen = milestones.find((milestone) => milestone.id === issue.milestone?.id)?.pass_when
   return (

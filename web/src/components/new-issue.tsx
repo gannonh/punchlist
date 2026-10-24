@@ -5,15 +5,17 @@ import { Input } from '@/components/ui/input'
 import { useCreateIssue } from '@/lib/queries'
 
 export function NewIssue({
+  workspaceId,
   open,
   onOpenChange,
   onCreated,
 }: {
+  workspaceId: string
   open: boolean
   onOpenChange: (open: boolean) => void
   onCreated: (id: string) => void
 }) {
-  const create = useCreateIssue()
+  const create = useCreateIssue(workspaceId)
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   return (

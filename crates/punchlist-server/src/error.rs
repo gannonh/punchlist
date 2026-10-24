@@ -45,6 +45,9 @@ pub enum ApiError {
     ImportNotFound(i64),
     #[error("workspace {0} not found")]
     WorkspaceNotFound(Uuid),
+    /// A person's request without a workspace in its path, from an account in several.
+    #[error("this account is in several workspaces ({0}); name one with /api/workspaces/{{id}}/")]
+    WorkspaceNotNamed(String),
     #[error("{0}")]
     ClaimTaken(String),
     #[error("{0}")]
@@ -88,6 +91,7 @@ impl ApiError {
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
+            ApiError::WorkspaceNotNamed(_) => StatusCode::BAD_REQUEST,
             ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) => StatusCode::CONFLICT,
             ApiError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
@@ -111,6 +115,7 @@ impl ApiError {
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
+            ApiError::WorkspaceNotNamed(_) => "workspace_not_named",
             ApiError::ClaimTaken(_) => "claim_taken",
             ApiError::StaleAttempt(_) => "stale_attempt",
             ApiError::Invalid(_) => "invalid",
