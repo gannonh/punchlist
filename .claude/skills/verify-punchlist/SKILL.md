@@ -15,6 +15,19 @@ Everything here runs from the repository root on sartre.
 - **Live-check models:** Claude Code runs in live checks use the `haiku` alias (`--model haiku`), which tracks the newest Haiku and is Haiku 5.5 (`claude-haiku-5-5`) on the Anthropic API; on Bedrock, Vertex, Foundry and Claude Platform on AWS it is still Haiku 4.5, and it needs Claude Code 2.1.293 or later. A run's log shows the model it resolved to (`"model":"claude-haiku-5-5"`); a live check on a Haiku older than 5.5 does not count. Codex runs use GPT-6 Luna, `gpt-6-luna` (`-m gpt-6-luna`), which OpenAI documents without an alias, so it is the model's own slug; not the older `gpt-5.6-luna`. Use no other model for a live check. Make a live model call only inside a named live check. `$C runner` passes both: `--model haiku --codex-model gpt-6-luna`. A Codex run's log shows the model its thread started with (`"model":"gpt-6-luna"` in the `thread/started` line).
 - **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Fixture webhook deliveries need no secret from 1Password: `up` generates a random webhook secret per run. Real GitHub deliveries need the GitHub App's secret, and loading `.punchlist/` from the sandbox needs its private key, so start those runs under `with-env $C up`.
 
+## Sandbox GitHub
+
+A run's own `gh` and git act as the workspace's GitHub App with a token for `gannonh/punchlist` alone, so they cannot see the sandbox: `gh pr list --repo gannonh/punchlist-sandbox` answers `Could not resolve to a Repository`. Every command on the sandbox's GitHub goes through `control-punchlist` under `with-env`, which mints an installation token of the sandbox App (`punchlist-gannonh`, id 5254938) for `gannonh/punchlist-sandbox` alone:
+
+```sh
+with-env $C gh pr list --repo gannonh/punchlist-sandbox        # gh with GH_TOKEN set to the sandbox token
+with-env $C gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<id>"}) { thread { isResolved } } }'
+with-env $C git clone https://github.com/gannonh/punchlist-sandbox.git /tmp/sandbox-$RUN
+with-env $C git -C /tmp/sandbox-$RUN push -u origin <branch>   # the token is git's credential for the sandbox's URL only
+```
+
+`with-env` picks the 1Password Environment by the current repository, so run these from this checkout's root and point git at a sandbox clone with `-C`; from inside the clone `with-env` answers `no Environment for 'punchlist-sandbox'`. The token lasts an hour and is cached in `/tmp/punchlist-verify/sandbox-token.json` (0600); a call mints a new one when it has under 10 minutes left. Nothing prints it except `with-env $C sandbox-token`, so never run that into evidence. The token cannot write to `gannonh/punchlist` (a write answers 403; the repository is public, so reads answer as they would for anyone). `with-env bin/check-sandbox-token` checks all of this.
+
 ## Launch
 
 `bin/control-punchlist up [RUN_ID]` starts an isolated instance and prints its run id on stdout:

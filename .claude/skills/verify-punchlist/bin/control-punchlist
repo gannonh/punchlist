@@ -15,6 +15,9 @@
 #   control-punchlist runner-signal RUN_ID NAME SIG send SIG (KILL, STOP, CONT) to that runner's process group
 #   control-punchlist sign-in-url RUN_ID  print a URL that signs a browser in as the run's person, for 2 minutes
 #   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
+#   control-punchlist sandbox-token       print an installation token for the sandbox alone (under with-env)
+#   control-punchlist gh ARGS...          run `gh ARGS...` with that token as GH_TOKEN
+#   control-punchlist git ARGS...         run `git ARGS...` with that token as the sandbox's credential
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../../.." && pwd)"
@@ -351,6 +354,31 @@ cmd_down() {
   echo "stopped $RUN_ID; evidence kept in $EVIDENCE" >&2
 }
 
+# A run's own `gh` and git reach only the workspace's repository (gannonh/punchlist), so sandbox
+# commands use the sandbox App's token, scoped to the sandbox alone and never printed.
+sandbox_token() { "$(dirname "$0")/github-app" sandbox-token; }
+
+cmd_gh() {
+  local t; t="$(sandbox_token)"
+  GH_TOKEN="$t" exec gh "$@"
+}
+
+cmd_git() {
+  local t url n="${GIT_CONFIG_COUNT:-0}" cfg=()
+  t="$(sandbox_token)"
+  # Appended after any helper the environment or a config file names: the empty value clears
+  # them, then the token is the only credential for the sandbox's URLs.
+  # shellcheck disable=SC2016
+  for url in https://github.com/$SANDBOX_REPOSITORY https://github.com/$SANDBOX_REPOSITORY.git; do
+    cfg+=("GIT_CONFIG_KEY_$n=credential.$url.helper" "GIT_CONFIG_VALUE_$n=")
+    n=$((n + 1))
+    cfg+=("GIT_CONFIG_KEY_$n=credential.$url.helper"
+      'GIT_CONFIG_VALUE_'"$n"'=!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$PUNCHLIST_SANDBOX_TOKEN"; }; f')
+    n=$((n + 1))
+  done
+  PUNCHLIST_SANDBOX_TOKEN="$t" exec env "${cfg[@]}" GIT_CONFIG_COUNT="$n" git "$@"
+}
+
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
@@ -366,5 +394,8 @@ case "${1:-}" in
   runner-signal) shift; cmd_runner_signal "$@" ;;
   sign-in-url) shift; cmd_sign_in_url "$@" ;;
   down) shift; cmd_down "$@" ;;
-  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  sandbox-token) sandbox_token ;;
+  gh) shift; cmd_gh "$@" ;;
+  git) shift; cmd_git "$@" ;;
+  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
