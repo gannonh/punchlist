@@ -321,8 +321,10 @@ pub(crate) async fn open_pull_requests(
                     }),
                     _ => None,
                 };
-                let waits_on_merge =
-                    !row.draft && issue.as_ref().is_some_and(|issue| issue.on_merge_to.is_some());
+                let waits_on_merge = !row.draft
+                    && issue
+                        .as_ref()
+                        .is_some_and(|issue| issue.on_merge_to.is_some());
                 OpenPullRequest {
                     url: plain_pull_request_url(row.number, &row.url).map(str::to_string),
                     number: row.number,
