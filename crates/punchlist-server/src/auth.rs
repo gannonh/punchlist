@@ -139,10 +139,10 @@ async fn named_workspace(
     Ok(Named::Row(row))
 }
 
-fn mismatch(actor: Uuid, actor_workspace: Uuid, issue_workspace: Uuid, issue: &str) -> ApiError {
+/// `by` names the token's account, or its actor and the actor's workspace.
+fn mismatch(by: String, issue_workspace: Uuid, issue: &str) -> ApiError {
     tracing::warn!(
-        %actor,
-        %actor_workspace,
+        by,
         %issue_workspace,
         issue,
         "workspace mismatch: refused a request for another workspace's issue"
@@ -196,12 +196,8 @@ impl FromRequestParts<AppState> for Actor {
             let actor = match named {
                 Named::Workspace(id) => member(id).ok_or(ApiError::WorkspaceNotFound(id))?,
                 Named::Issue(Some(id)) => member(id).ok_or_else(|| {
-                    mismatch(
-                        oldest.account_id,
-                        oldest.workspace_id,
-                        id,
-                        issue_id.unwrap_or_default(),
-                    )
+                    let by = format!("account {}", oldest.account_id);
+                    mismatch(by, id, issue_id.unwrap_or_default())
                 })?,
                 Named::Row(Some(id)) => member(id).unwrap_or(oldest),
                 Named::Issue(None) | Named::Row(None) => oldest,
@@ -269,12 +265,8 @@ impl FromRequestParts<AppState> for Actor {
                 return Err(ApiError::WorkspaceNotFound(id));
             }
             Named::Issue(Some(id)) if id != row.workspace_id => {
-                return Err(mismatch(
-                    row.id,
-                    row.workspace_id,
-                    id,
-                    issue_id.unwrap_or_default(),
-                ));
+                let by = format!("actor {} of workspace {}", row.id, row.workspace_id);
+                return Err(mismatch(by, id, issue_id.unwrap_or_default()));
             }
             _ => {}
         }
