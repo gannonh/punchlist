@@ -1,5 +1,6 @@
 //! The Claude Code adapter: builds the prompt, runs `claude` in the worktree, streams its
-//! output as log lines and reads the final `result` line for the outcome and token counts.
+//! output as log lines and reads the final `result` line for the outcome, token counts and
+//! cost.
 //! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
 use std::ffi::OsString;
@@ -9,7 +10,9 @@ use std::time::Duration;
 
 use punchlist_api::{Issue, Repository, RunOutcome};
 use punchlist_core::{fenced, is_plain_name, quoted};
+use serde::Deserialize;
 use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
@@ -147,6 +150,12 @@ pub struct AgentResult {
     pub reason: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// The cost in US dollars the agent reported, as plain decimal digits. `None` when it
+    /// reported none: Codex, or an attempt that ended without a `result` line.
+    // ponytail: a resumed attempt's tokens and cost cover the `claude --resume` process
+    // only, not the one before the restart. Upgrade: keep a running total per attempt, which
+    // needs the agent to report during the run.
+    pub cost_usd: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +171,7 @@ struct ResultLine {
     subtype: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
+    cost_usd: Option<String>,
 }
 
 /// The most of one output record the runner keeps. The rest of a longer record, up to its
@@ -212,6 +222,58 @@ pub(crate) async fn read_record<R: AsyncBufRead + Unpin>(
     Ok(Some(text))
 }
 
+/// The cost as the agent wrote it, so no digit goes through an `f64`.
+#[derive(Deserialize)]
+struct Cost<'a> {
+    #[serde(borrow, default)]
+    total_cost_usd: Option<&'a RawValue>,
+}
+
+/// A JSON number as plain decimal digits, such as `0.0000001` for `1e-7`, the exponent form
+/// JavaScript prints a small number in; other numbers keep their text. `None` for a negative
+/// number, anything not a number, or more than the 30 characters the server takes.
+fn plain_decimal(number: &str) -> Option<String> {
+    let (mantissa, exponent) = match number.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (number, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digit = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if whole.is_empty() || !digit(whole) || !digit(fraction) || exponent.abs() > 30 {
+        return None;
+    }
+    let text = if exponent == 0 {
+        mantissa.to_string()
+    } else {
+        let digits = format!("{whole}{fraction}");
+        let point = whole.len() as i64 + exponent;
+        let (int, frac) = if point <= 0 {
+            (
+                "0".to_string(),
+                format!("{}{digits}", "0".repeat(-point as usize)),
+            )
+        } else if point as usize >= digits.len() {
+            (
+                format!("{digits}{}", "0".repeat(point as usize - digits.len())),
+                String::new(),
+            )
+        } else {
+            let (int, frac) = digits.split_at(point as usize);
+            (int.to_string(), frac.to_string())
+        };
+        let int = match int.trim_start_matches('0') {
+            "" => "0",
+            int => int,
+        };
+        if frac.is_empty() {
+            int.to_string()
+        } else {
+            format!("{int}.{frac}")
+        }
+    };
+    (text.len() <= 30).then_some(text)
+}
+
 fn parse_result_line(line: &str) -> Option<ResultLine> {
     let value: Value = serde_json::from_str(line).ok()?;
     if value.get("type")?.as_str()? != "result" {
@@ -242,14 +304,18 @@ fn parse_result_line(line: &str) -> Option<ResultLine> {
             .map(String::from),
         input_tokens: input,
         output_tokens: count("output_tokens"),
+        cost_usd: serde_json::from_str::<Cost>(line)
+            .ok()
+            .and_then(|cost| cost.total_cost_usd)
+            .and_then(|raw| plain_decimal(raw.get())),
     })
 }
 
 fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult {
-    let (input_tokens, output_tokens) = result
+    let (input_tokens, output_tokens, cost_usd) = result
         .as_ref()
-        .map(|r| (r.input_tokens, r.output_tokens))
-        .unwrap_or((None, None));
+        .map(|r| (r.input_tokens, r.output_tokens, r.cost_usd.clone()))
+        .unwrap_or((None, None, None));
     let reason = match (exit_code, &result) {
         (Some(0), Some(r)) if !r.is_error => None,
         (Some(0), Some(r)) => Some(format!(
@@ -269,6 +335,7 @@ fn outcome_of(exit_code: Option<i32>, result: Option<ResultLine>) -> AgentResult
         reason,
         input_tokens,
         output_tokens,
+        cost_usd,
     }
 }
 
@@ -295,6 +362,7 @@ pub async fn run_claude(
             reason: Some(reason),
             input_tokens: None,
             output_tokens: None,
+            cost_usd: None,
         })
     };
     let mut command = Command::new(claude_command);
@@ -667,6 +735,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: None,
                 input_tokens: Some(5),
                 output_tokens: Some(7),
+                cost_usd: None,
             })
         );
         assert_eq!(drain.await.unwrap(), 31);
@@ -788,6 +857,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: None,
                 input_tokens: Some(330),
                 output_tokens: Some(42),
+                cost_usd: None,
             })
         );
         let nonce = lines
@@ -878,6 +948,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: Some("claude exited with code 1".into()),
                 input_tokens: None,
                 output_tokens: None,
+                cost_usd: None,
             })
         );
         assert_eq!(lines, ["stderr: oops"]);
@@ -885,7 +956,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
 
     #[tokio::test]
     async fn an_error_result_fails_with_its_subtype() {
-        let script = r#"echo '{"type":"result","subtype":"error_max_turns","is_error":true,"usage":{"input_tokens":1,"output_tokens":2}}'"#;
+        let script = r#"echo '{"type":"result","subtype":"error_max_turns","is_error":true,"total_cost_usd":0.25,"usage":{"input_tokens":1,"output_tokens":2}}'"#;
         let (exit, _) = run_fake(script, "prompt").await;
         assert_eq!(
             exit,
@@ -894,8 +965,56 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 reason: Some("claude reported an error (error_max_turns)".into()),
                 input_tokens: Some(1),
                 output_tokens: Some(2),
+                cost_usd: Some("0.25".into()),
             })
         );
+    }
+
+    async fn cost_of(script: &str) -> Option<String> {
+        match run_fake(script, "prompt").await.0 {
+            AgentExit::Finished(result) => result.cost_usd,
+            AgentExit::Stopped => panic!("not stopped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cost_is_the_result_lines_digits() {
+        // An f64 would make it 0.12345678901234568.
+        let exact =
+            r#"echo '{"type":"result","is_error":false,"total_cost_usd":0.1234567890123456789}'"#;
+        assert_eq!(
+            cost_of(exact).await.as_deref(),
+            Some("0.1234567890123456789")
+        );
+        let small = r#"echo '{"type":"result","is_error":false,"total_cost_usd":1e-7}'"#;
+        assert_eq!(cost_of(small).await.as_deref(), Some("0.0000001"));
+        let none = r#"echo '{"type":"result","is_error":false,"usage":{"input_tokens":1}}'"#;
+        assert_eq!(cost_of(none).await, None);
+        let killed = r#"echo '{"type":"assistant"}'
+kill -KILL $$
+echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
+        assert_eq!(cost_of(killed).await, None);
+    }
+
+    #[test]
+    fn plain_decimal_writes_out_exponents_and_refuses_the_rest() {
+        let cases = [
+            ("0.04530125", Some("0.04530125")),
+            ("1.50", Some("1.50")),
+            ("0", Some("0")),
+            ("1e-7", Some("0.0000001")),
+            ("1.5E-7", Some("0.00000015")),
+            ("1.23e+2", Some("123")),
+            ("1e3", Some("1000")),
+            ("0.05e1", Some("0.5")),
+            ("-1", None),
+            ("\"0.5\"", None),
+            ("null", None),
+            ("1e-40", None),
+        ];
+        for (number, want) in cases {
+            assert_eq!(plain_decimal(number).as_deref(), want, "{number}");
+        }
     }
 
     #[tokio::test]

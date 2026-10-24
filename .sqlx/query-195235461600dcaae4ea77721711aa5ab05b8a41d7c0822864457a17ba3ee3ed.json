@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,\n                  a.attempt AS \"attempt!\", a.model, a.reported_model, a.runner_id AS \"runner_id!\",\n                  n.name AS \"runner_name!\", a.failure_reason, a.duration_ms,\n                  a.input_tokens, a.output_tokens\n           FROM run r\n           JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id\n                         ORDER BY attempt DESC LIMIT 1) a ON true\n           JOIN runner n ON n.id = a.runner_id\n           WHERE r.workspace_id = $1\n             AND ($2::text IS NULL OR r.issue_id = $2)\n             AND ($3::uuid IS NULL OR r.id = $3)\n           ORDER BY r.started_at DESC, r.id",
+  "query": "SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,\n                  a.attempt AS \"attempt!\", a.model, a.reported_model, a.runner_id AS \"runner_id!\",\n                  n.name AS \"runner_name!\", a.failure_reason, a.duration_ms,\n                  a.input_tokens, a.output_tokens, a.cost_usd::text AS cost_usd\n           FROM run r\n           JOIN LATERAL (SELECT * FROM attempt WHERE run_id = r.id\n                         ORDER BY attempt DESC LIMIT 1) a ON true\n           JOIN runner n ON n.id = a.runner_id\n           WHERE r.workspace_id = $1\n             AND ($2::text IS NULL OR r.issue_id = $2)\n             AND ($3::uuid IS NULL OR r.id = $3)\n           ORDER BY r.started_at DESC, r.id",
   "describe": {
     "columns": [
       {
@@ -178,6 +178,12 @@
             "name": "output_tokens"
           }
         }
+      },
+      {
+        "ordinal": 16,
+        "name": "cost_usd",
+        "type_info": "Text",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -203,8 +209,9 @@
       true,
       true,
       true,
-      true
+      true,
+      null
     ]
   },
-  "hash": "aa82cdcbaceec7644b66e8a972e397883dfdda58d91cc1b4208fb005756e369f"
+  "hash": "195235461600dcaae4ea77721711aa5ab05b8a41d7c0822864457a17ba3ee3ed"
 }

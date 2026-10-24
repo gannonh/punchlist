@@ -38,6 +38,7 @@ import {
   specBlocks,
   threadView,
   tokens,
+  cost,
   type ActorMark,
   type AttemptInfo,
   type CheckRun,
@@ -1210,6 +1211,7 @@ function AttemptCard({
   }, [lines.length])
   const model = modelView(attempt)
   const took = running ? now.getTime() - Date.parse(attempt.started_at) : attempt.duration_ms
+  const spent = cost(attempt.cost_usd)
   return (
     <article
       className="grid gap-2 rounded-md border px-3 py-2.5"
@@ -1255,6 +1257,11 @@ function AttemptCard({
         <span>
           <b className="font-medium text-ink-3">tokens</b> {tokens(attempt.input_tokens, attempt.output_tokens)}
         </span>
+        {spent !== null && (
+          <span>
+            <b className="font-medium text-ink-3">cost</b> {spent}
+          </span>
+        )}
       </div>
       {attempt.failure_reason && <div className="text-meta text-bad wrap-anywhere">{attempt.failure_reason}</div>}
       {latest && lines.length > 0 && (
