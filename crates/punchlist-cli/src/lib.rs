@@ -1863,6 +1863,7 @@ mod tests {
                     locked_to: Vec::new(),
                     dispatch: None,
                     closed: false,
+                    on_merge_to: None,
                 })
                 .to_vec(),
             refused: None,

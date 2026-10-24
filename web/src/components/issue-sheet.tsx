@@ -275,13 +275,7 @@ function SheetBody({
           <Run view={view.run} detail />
         </Field>
         <Field label="Pull request">
-          {view.pullRequest.url ? (
-            <a href={view.pullRequest.url} target="_blank" rel="noreferrer" className="hover:underline">
-              <PullRequest view={view.pullRequest} />
-            </a>
-          ) : (
-            <PullRequest view={view.pullRequest} />
-          )}
+          <PullRequest view={view.pullRequest} link />
         </Field>
         <Field label="Gates">
           <Gates view={view.gates} />

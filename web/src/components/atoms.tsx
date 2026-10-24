@@ -1,3 +1,4 @@
+import type { ComponentProps, KeyboardEvent, SyntheticEvent } from 'react'
 import {
   Bot,
   GitMerge,
@@ -9,7 +10,15 @@ import {
   X,
 } from 'lucide-react'
 import { cn } from 'cn'
-import type { AssigneeView, GateView, PullRequestView, RunView, StatusInfo, Transition } from '@/model/issues'
+import type {
+  AssigneeView,
+  GateView,
+  PullRequestView,
+  RunView,
+  StatusInfo,
+  Transition,
+  WaitsOnMerge,
+} from '@/model/issues'
 import { peopleOnly } from '@/model/issues'
 
 export function StatusDot({ status }: { status: string }) {
@@ -102,7 +111,43 @@ const PR_ICON = {
 const PR_COLOR = { draft: 'text-zinc-500', open: 'text-ok', merged: 'text-agent', closed: 'text-bad' } as const
 const CHECK_COLOR = { passing: 'bg-ok', failing: 'bg-bad', pending: 'bg-warn' } as const
 
-export function PullRequest({ view }: { view: PullRequestView }) {
+/**
+ * A link out to a pull request on GitHub, in a new tab. A click or `Enter` on it stays on the link: it does not pick
+ * the row it is in or reach the page's keys.
+ */
+export function GithubLink({
+  url,
+  number,
+  text,
+  children,
+  className = 'text-meta font-medium text-primary',
+  ...props
+}: ComponentProps<'a'> & { url: string; number: number; text: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`${text}: pull request #${String(number)}`}
+      className={`external-link inline-flex items-center gap-1 whitespace-nowrap hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${className}`}
+      onClick={stopPropagation}
+      onKeyDown={stopEnter}
+      {...props}
+    >
+      {children ?? text}
+    </a>
+  )
+}
+
+const stopPropagation = (event: SyntheticEvent) => {
+  event.stopPropagation()
+}
+const stopEnter = (event: KeyboardEvent) => {
+  if (event.key === 'Enter') event.stopPropagation()
+}
+
+/** `link` makes the chip a link to the pull request on GitHub when it has a plain GitHub URL. */
+export function PullRequest({ view, link = false }: { view: PullRequestView; link?: boolean }) {
   if (view.state === 'none')
     return (
       <span className="truncate text-meta whitespace-nowrap text-ink-3" data-pr="none">
@@ -110,20 +155,44 @@ export function PullRequest({ view }: { view: PullRequestView }) {
       </span>
     )
   const Icon = PR_ICON[view.state]
+  const chip = (
+    <>
+      <Icon className={cn('size-3.25 flex-none', PR_COLOR[view.state])} aria-hidden="true" />
+      {view.label}
+    </>
+  )
   return (
     <span
       className="inline-flex items-center gap-1.25 truncate text-meta whitespace-nowrap text-muted-foreground"
       data-pr={view.state}
       title={view.title}
     >
-      <Icon className={cn('size-3.25 flex-none', PR_COLOR[view.state])} aria-hidden="true" />
-      {view.label}
+      {link && view.url && view.number !== null ? (
+        <GithubLink url={view.url} number={view.number} text="Open on GitHub" className="text-muted-foreground" data-pr-link>
+          {chip}
+        </GithubLink>
+      ) : (
+        chip
+      )}
       {view.checks !== 'none' && (
         <i
           className={cn('inline-block size-1.75 rounded-full', CHECK_COLOR[view.checks])}
           aria-label={`checks ${view.checks}`}
         />
       )}
+    </span>
+  )
+}
+
+/** In place of a row's gate summary: nothing gates the move, the merge on GitHub makes it. */
+export function MergeWait({ id, number, wait }: { id: string; number: number | null; wait: WaitsOnMerge }) {
+  return (
+    <span
+      className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-meta font-medium whitespace-nowrap text-warn"
+      title={`${id} moves to ${wait.to} when GitHub reports the merge`}
+    >
+      Waits on the merge
+      {wait.url && number !== null && <GithubLink url={wait.url} number={number} text="Merge on GitHub" data-merge-link />}
     </span>
   )
 }

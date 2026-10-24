@@ -41,6 +41,7 @@ export interface RunView {
 
 export interface PullRequestView {
   state: 'none' | Schemas['PullRequestStatus']
+  number: number | null
   label: string
   checks: ChecksState
   url: string | null
@@ -64,6 +65,14 @@ export interface RowView {
   run: RunView
   pullRequest: PullRequestView
   gates: GateView
+  waitsOnMerge: WaitsOnMerge | null
+}
+
+/** An issue whose status moves on a merge, with an open pull request: nothing is left but the merge on GitHub. */
+export interface WaitsOnMerge {
+  /** The status the merge moves the issue to, as people read it. */
+  to: string
+  url: string | null
 }
 
 const initials = (name: string): string =>
@@ -107,10 +116,22 @@ export function runView(run: IssueRow['run'], now: Date): RunView {
 }
 
 export function pullRequestView(pr: IssueRow['pull_request']): PullRequestView {
-  if (!pr) return { state: 'none', label: 'no PR', checks: 'none', url: null, title: 'no pull request' }
+  if (!pr) return { state: 'none', number: null, label: 'no PR', checks: 'none', url: null, title: 'no pull request' }
   const label = `#${String(pr.number)} ${pr.state}`
   const checks = pr.checks === 'none' ? '' : `, checks ${pr.checks}`
-  return { state: pr.state, label, checks: pr.checks, url: pr.url ?? null, title: `PR ${label}${checks}` }
+  return {
+    state: pr.state,
+    number: pr.number,
+    label,
+    checks: pr.checks,
+    url: pr.url ?? null,
+    title: `PR ${label}${checks}`,
+  }
+}
+
+/** A draft, merged or closed pull request, or none, leaves nothing waiting on GitHub. */
+export function waitsOnMerge(pr: PullRequestView, status: StatusInfo | undefined): WaitsOnMerge | null {
+  return status?.on_merge_to && pr.state === 'open' ? { to: status.on_merge_to, url: pr.url } : null
 }
 
 export function gateView(gates: IssueRow['gates']): GateView {
@@ -125,8 +146,10 @@ export function gateView(gates: IssueRow['gates']): GateView {
   }
 }
 
-export function rowView(row: IssueRow, now: Date): RowView {
+/** `status` is the issue's status in the active workflow, unknown while the workflow loads. */
+export function rowView(row: IssueRow, now: Date, status?: StatusInfo): RowView {
   const { issue } = row
+  const pullRequest = pullRequestView(row.pull_request)
   return {
     id: issue.id,
     title: issue.title,
@@ -135,8 +158,9 @@ export function rowView(row: IssueRow, now: Date): RowView {
     labels: issue.labels ?? [],
     assignee: assigneeView(issue.assignee),
     run: runView(row.run, now),
-    pullRequest: pullRequestView(row.pull_request),
+    pullRequest,
     gates: gateView(row.gates),
+    waitsOnMerge: waitsOnMerge(pullRequest, status),
   }
 }
 
