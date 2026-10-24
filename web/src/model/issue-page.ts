@@ -10,6 +10,7 @@ export type AttemptInfo = Schemas['AttemptInfo']
 export type Proof = Schemas['Proof']
 export type PullRequest = Schemas['PullRequest']
 export type CheckRun = Schemas['CheckRunEvidence']
+export type ReviewThread = Schemas['ReviewThread']
 export type GateChecklist = Schemas['GateChecklist']
 export type GateResult = Schemas['GateResult']
 export type TransitionList = Schemas['TransitionList']
@@ -238,6 +239,35 @@ export function plainPullRequestUrl(number: number, url: string): string | null 
   const parts = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url)
   const plain = (part: string | undefined) => part !== undefined && part !== '.' && part !== '..'
   return parts && plain(parts[1]) && plain(parts[2]) && parts[3] === String(number) ? url : null
+}
+
+/** A review comment's URL when it is a plain `https://github.com/<owner>/<repo>/pull/<number>#discussion_r<digits>`. */
+export function plainThreadUrl(pullRequest: number, url: string | null | undefined): string | null {
+  const parts = /^(.*)#discussion_r(\d+)$/.exec(url ?? '')
+  return parts?.[1] !== undefined && plainPullRequestUrl(pullRequest, parts[1]) ? parts[0] : null
+}
+
+export interface ThreadView {
+  /** `path:line`, the path alone without a line, or `no file`. */
+  place: string
+  /** `last 10 of 14 comments` when the thread has more than are recorded. */
+  note: string | null
+  comments: { author: string; body: string; cut: boolean }[]
+  /** No comment is recorded, such as for a thread an event without comments brought. */
+  unread: boolean
+  url: string | null
+}
+
+/** What a review thread shows. Its path, authors and bodies are text from outside the team: render them as text. */
+export function threadView(thread: ReviewThread): ThreadView {
+  const { path, line, comments, comments_total: total } = thread
+  return {
+    place: path == null ? 'no file' : line == null ? path : `${path}:${String(line)}`,
+    note: total > comments.length ? `last ${String(comments.length)} of ${String(total)} comments` : null,
+    comments: comments.map(({ author, body, cut }) => ({ author, body, cut: cut ?? false })),
+    unread: comments.length === 0,
+    url: plainThreadUrl(thread.pull_request, thread.url),
+  }
 }
 
 /** The content type the server takes for each proof extension (`PROOF_TYPES` in `punchlist-api`). */

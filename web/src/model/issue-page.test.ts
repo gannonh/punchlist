@@ -9,7 +9,9 @@ import {
   modelView,
   moveView,
   plainPullRequestUrl,
+  plainThreadUrl,
   proofType,
+  threadView,
   specBlocks,
   tokens,
   duration,
@@ -203,6 +205,51 @@ describe('specBlocks and run facts', () => {
       plainPullRequestUrl(7, 'https://github.com.evil.example/a/b/pull/7'),
       plainPullRequestUrl(7, 'https://github.com/../b/pull/7'),
     ]).toEqual(['https://github.com/gannonh/punchlist/pull/7', null, null, null, null])
+  })
+
+  test('a review thread links only to its plain GitHub discussion URL', () => {
+    const url = 'https://github.com/gannonh/punchlist/pull/12#discussion_r1700001'
+    expect([
+      plainThreadUrl(12, url),
+      plainThreadUrl(13, url),
+      plainThreadUrl(12, 'javascript:alert(1)//https://github.com/a/b/pull/12#discussion_r1'),
+      plainThreadUrl(12, 'https://github.com.evil.example/a/b/pull/12#discussion_r1'),
+      plainThreadUrl(12, 'https://github.com/a/b/pull/12#discussion_rabc'),
+      plainThreadUrl(12, 'https://github.com/a/b/pull/12'),
+      plainThreadUrl(12, null),
+    ]).toEqual([url, null, null, null, null, null, null])
+  })
+
+  test('a review thread shows its place, how many comments it has and which are cut', () => {
+    const comment = { author: 'octocat', body: 'Should this return an error?' }
+    const thread = {
+      id: 'PRRT_1',
+      pull_request: 12,
+      path: 'src/lib.rs',
+      line: 41,
+      comments: [{ ...comment, cut: true }, ...Array.from({ length: 9 }, () => comment)],
+      comments_total: 14,
+      url: 'https://github.com/gannonh/punchlist/pull/12#discussion_r1700001',
+    }
+    const view = threadView(thread)
+    expect([view.place, view.note, view.unread, view.url, view.comments[0], view.comments[1]]).toEqual([
+      'src/lib.rs:41',
+      'last 10 of 14 comments',
+      false,
+      'https://github.com/gannonh/punchlist/pull/12#discussion_r1700001',
+      { ...comment, cut: true },
+      { ...comment, cut: false },
+    ])
+    expect(threadView({ ...thread, comments_total: 10 }).note).toBe(null)
+    expect(threadView({ ...thread, path: null }).place).toBe('no file')
+    expect(threadView({ ...thread, line: null }).place).toBe('src/lib.rs')
+    expect(threadView({ ...thread, comments: [], comments_total: 0, url: 'javascript:alert(1)' })).toEqual({
+      place: 'src/lib.rs:41',
+      note: null,
+      comments: [],
+      unread: true,
+      url: null,
+    })
   })
 
   test("proof takes the server's type from its extension", () => {

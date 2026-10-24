@@ -17,6 +17,7 @@ import {
   useComment,
   useEventStream,
   useMove,
+  useReadFromGithub,
 } from '@/lib/queries'
 import { age, agentName, assigneeView, pullRequestView, type Actor } from '@/model/issues'
 import {
@@ -35,6 +36,7 @@ import {
   plainPullRequestUrl,
   PROOF_TYPES,
   specBlocks,
+  threadView,
   tokens,
   type ActorMark,
   type AttemptInfo,
@@ -45,6 +47,7 @@ import {
   type LogLine,
   type Proof,
   type PullRequest as PullRequestInfo,
+  type ReviewThread,
   type Run,
   type TransitionList,
 } from '@/model/issue-page'
@@ -150,6 +153,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
   const gates = useQuery(q.gates)
   const transitions = useQuery(q.transitions)
   const pullRequests = useQuery(q.pullRequests)
+  const reviewThreads = useQuery(q.reviewThreads)
   // The event stream and the list it starts after are the workspace's, which an agent's token cannot read: an
   // agent viewer reads the page again after its own writes only.
   const list = useQuery({ ...issuesQuery, enabled: person })
@@ -283,7 +287,7 @@ export function IssueScreen({ id, viewer, workspaceId }: { id: string; viewer: A
           <div className="main">
             <Notice moves={moves} viewer={viewer} waiting={data.waiting_on_person ?? null} />
             <SpecPanel body={data.body} />
-            <PullRequestPanel pr={pr} issueId={data.id} />
+            <PullRequestPanel pr={pr} issueId={data.id} threads={reviewThreads.data} />
             <ProofPanel id={id} proof={proof.data ?? []} person={person} locked={moves?.viewer_locked ?? false} />
             <ActivityPanel
               id={id}
@@ -462,7 +466,15 @@ const CHECK_STATE = (run: CheckRun) =>
       ? 'passing'
       : 'failing'
 
-function PullRequestPanel({ pr, issueId }: { pr: PullRequestInfo | undefined; issueId: string }) {
+function PullRequestPanel({
+  pr,
+  issueId,
+  threads,
+}: {
+  pr: PullRequestInfo | undefined
+  issueId: string
+  threads: ReviewThread[] | undefined
+}) {
   if (!pr)
     return (
       <Panel id="pr" title="Pull request">
@@ -519,11 +531,76 @@ function PullRequestPanel({ pr, issueId }: { pr: PullRequestInfo | undefined; is
             </table>
           )}
         </div>
-        <div id="threads" className="scroll-mt-20 text-meta">
-          <div className="subhead">Review threads · {pr.open_threads} open</div>
-        </div>
+        <ReviewThreads issueId={issueId} threads={threads} fallback={pr.open_threads} />
       </div>
     </Panel>
+  )
+}
+
+/** The open review threads of the issue's open pull requests, as recorded. Their text is GitHub users': plain text only. */
+function ReviewThreads({
+  issueId,
+  threads,
+  fallback,
+}: {
+  issueId: string
+  threads: ReviewThread[] | undefined
+  fallback: number
+}) {
+  const read = useReadFromGithub(issueId)
+  return (
+    <div id="threads" className="scroll-mt-20 text-meta">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="subhead">Review threads · {threads?.length ?? fallback} open</div>
+        <Button
+          variant="outline"
+          size="xs"
+          className="ml-auto"
+          disabled={read.isPending}
+          onClick={() => {
+            read.mutate()
+          }}
+        >
+          {read.isPending ? 'Reading…' : 'Read from GitHub'}
+        </Button>
+      </div>
+      {!read.isPending && read.data?.refreshed === false && (
+        <div className="mb-1.5 text-warn" role="status">
+          GitHub could not be read. Showing what is recorded.
+        </div>
+      )}
+      {threads?.length === 0 ? (
+        <div className="text-ink-3">No open review threads.</div>
+      ) : (
+        <div className="grid gap-1.5">
+          {threads?.map((thread) => {
+            const view = threadView(thread)
+            return (
+              <div key={thread.id} data-thread={thread.id} className="grid gap-0.5 border-l-3 border-l-bad pl-2">
+                <div className="flex flex-wrap gap-x-2 text-caption text-ink-3">
+                  <span className="font-semibold text-bad">open</span>
+                  <span>#{thread.pull_request}</span>
+                  <span className="font-mono wrap-anywhere">{view.place}</span>
+                </div>
+                {view.unread && <div className="text-ink-3">Text not read yet</div>}
+                {view.note && <div className="text-caption text-ink-3">{view.note}</div>}
+                {view.comments.map((comment, index) => (
+                  <div key={index} data-thread-comment className="whitespace-pre-wrap wrap-anywhere">
+                    <span className="font-semibold">{comment.author}</span> {comment.body}
+                    {comment.cut && <span className="text-ink-3"> … cut, longer on GitHub</span>}
+                  </div>
+                ))}
+                {view.url && (
+                  <a href={view.url} target="_blank" rel="noreferrer" className="text-caption hover:underline">
+                    View on GitHub
+                  </a>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 

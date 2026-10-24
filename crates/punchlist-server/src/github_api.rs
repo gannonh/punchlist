@@ -129,6 +129,9 @@ pub(crate) struct ThreadCommentNode {
     #[serde(default)]
     pub author: Option<Account>,
     pub body: CommentBody,
+    /// The comment on GitHub, as GitHub sent it.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// A comment's text, at most `MAX_BODY_CHARS` characters of it.
@@ -177,7 +180,7 @@ fn review_threads_query() -> String {
     reviewThreads(first: 100, after: $after) {{
       nodes {{
         id isResolved path line originalLine
-        comments(last: {MAX_COMMENTS}) {{ totalCount nodes {{ author {{ login }} body }} }}
+        comments(last: {MAX_COMMENTS}) {{ totalCount nodes {{ author {{ login }} body url }} }}
       }}
       pageInfo {{ hasNextPage endCursor }}
     }}

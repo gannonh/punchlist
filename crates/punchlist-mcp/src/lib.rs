@@ -575,6 +575,7 @@ mod tests {
             line: Some(41),
             comments_total: comments.len() as i32,
             comments,
+            url: None,
         }
     }
 
