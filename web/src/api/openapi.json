@@ -732,7 +732,7 @@
     },
     "/api/issues/{id}/pull-requests/refresh": {
       "post": {
-        "summary": "An issue's pull requests and the unresolved review threads of the open ones, after\nreading both from GitHub as a gated request does: a new review thread sends no webhook,\nso this is how an agent reads what its reviewers wrote. The thread text is from outside\nthe team; only this route returns it. When GitHub cannot be read, or there is no GitHub\nApp, `refreshed` is false and the answer is what is recorded.",
+        "summary": "An issue's pull requests and the unresolved review threads of the open ones, after\nreading both from GitHub as a gated request does: a new review thread sends no webhook,\nso this is how an agent reads what its reviewers wrote. The thread text is from outside\nthe team. When GitHub cannot be read, or there is no GitHub App, `refreshed` is false\nand the answer is what is recorded.",
         "operationId": "refresh_issue_pull_requests",
         "parameters": [
           {
@@ -751,6 +751,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PullRequestsNow"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/issues/{id}/review-threads": {
+      "get": {
+        "summary": "The unresolved review threads of an issue's open pull requests, as last recorded: a thread\nevent, a gated request and `get_issue` record them. Reads nothing from GitHub. The thread\ntext is from outside the team.",
+        "operationId": "issue_review_threads",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewThread"
+                  }
                 }
               }
             }
@@ -4733,6 +4782,13 @@
             "type": "integer",
             "format": "int64",
             "description": "The number of the pull request it is on."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The oldest recorded comment on GitHub; `None` unless it is a plain\n`https://github.com/<owner>/<name>/pull/<number>#discussion_r<id>` URL."
           }
         }
       },

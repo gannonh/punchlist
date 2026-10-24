@@ -357,6 +357,11 @@ export const issuePageQueries = (id: string) => ({
     queryKey: [...issueKey(id), 'pull-requests'],
     queryFn: () => call(api.GET('/api/issues/{id}/pull-requests', path(id))),
   }),
+  // As recorded: reads no GitHub, so the stream's invalidation can read it again on every event.
+  reviewThreads: queryOptions({
+    queryKey: [...issueKey(id), 'review-threads'],
+    queryFn: () => call(api.GET('/api/issues/{id}/review-threads', path(id))),
+  }),
 })
 
 /**
@@ -407,6 +412,21 @@ export function useAttachProof(id: string) {
     onSuccess: () => client.invalidateQueries({ queryKey: issueKey(id) }),
     onError: (error) => {
       toast.error(`The file was not attached. ${refusal(error)}`)
+    },
+  })
+}
+
+/**
+ * `Read from GitHub`: the server reads the issue's pull requests and review threads from GitHub, since a new thread
+ * sends no event, then the page reads them again. `refreshed` is false when GitHub could not be read.
+ */
+export function useReadFromGithub(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => call(api.POST('/api/issues/{id}/pull-requests/refresh', path(id))),
+    onSuccess: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+    onError: (error) => {
+      toast.error(`GitHub was not read. ${refusal(error)}`)
     },
   })
 }

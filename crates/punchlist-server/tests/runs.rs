@@ -1529,15 +1529,21 @@ async fn set_max_concurrent(pool: &PgPool, max: Option<u32>) {
     let built_in = punchlist_core::default_workflow();
     let limit = max.map_or(String::new(), |max| format!("max_concurrent = {max}"));
     let text = built_in.source().replace("max_concurrent = 5", &limit);
+    activate(pool, &format!("max-{max:?}"), &text).await;
+}
+
+/// Makes `text`, with the built-in workflow's prompts, the workspace's active version, as a
+/// load would.
+async fn activate(pool: &PgPool, hash: &str, text: &str) {
     sqlx::query(
         "WITH v AS (
             INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
             SELECT id, $1, $1, $2, $3 FROM workspace RETURNING id)
          UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
     )
-    .bind(format!("max-{max:?}"))
+    .bind(hash)
     .bind(text)
-    .bind(serde_json::to_value(built_in.prompts()).unwrap())
+    .bind(serde_json::to_value(punchlist_core::default_workflow().prompts()).unwrap())
     .execute(pool)
     .await
     .unwrap();
@@ -1640,10 +1646,11 @@ async fn a_waiting_claim_at_max_concurrent_gets_the_slot_a_finish_frees(pool: Pg
 #[sqlx::test]
 async fn a_lost_attempt_holds_no_slot_and_its_next_attempt_waits_for_one(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
-    set_max_concurrent(&pool, Some(1)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
-    create_and_move(&app, &person.token, "Later", &["todo"]).await;
+    create_and_move(&app, &person.token, "Holder", &["todo", "start"]).await;
     create_and_move(&app, &person.token, "Lost", &["todo", "start"]).await;
+    let (_, holder) = claim(&app, &r1, 0).await;
+    assert_eq!(holder["issue"]["id"], "PL-1");
     let (_, lost_claim) = claim(&app, &r1, 0).await;
     assert_eq!(lost_claim["issue"]["id"], "PL-2");
     let (status, run) = finish(&app, &r1, lost_claim["run_id"].as_str().unwrap(), lost(1)).await;
@@ -1652,21 +1659,8 @@ async fn a_lost_attempt_holds_no_slot_and_its_next_attempt_waits_for_one(pool: P
         (StatusCode::OK, Some("running"))
     );
 
-    // The run waiting for its next attempt runs no agent, so PL-1 gets the slot.
-    let (status, _) = call(
-        &app,
-        &person.token,
-        "POST",
-        "/api/issues/PL-1/transitions",
-        Some(json!({"to": "start"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, holder) = claim(&app, &r1, 0).await;
-    assert_eq!(
-        (status, holder["issue"]["id"].as_str()),
-        (StatusCode::OK, Some("PL-1"))
-    );
+    // PL-1's attempt holds the one slot, so PL-2's next attempt waits for it.
+    set_max_concurrent(&pool, Some(1)).await;
     let (status, _) = claim(&app, &r1, 0).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM attempt WHERE issue_id = 'PL-2'")
@@ -1674,6 +1668,20 @@ async fn a_lost_attempt_holds_no_slot_and_its_next_attempt_waits_for_one(pool: P
         .await
         .unwrap();
     assert_eq!(attempts, 1);
+
+    // The lost attempt holds no slot, so PL-1's end frees the one PL-2's next attempt takes.
+    move_to_agent_review(&app, &pool, &holder).await;
+    let (status, _) = finish(&app, &r1, holder["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, next) = claim(&app, &r1, 0).await;
+    assert_eq!(
+        (
+            status,
+            next["issue"]["id"].as_str(),
+            next["attempt"].as_i64()
+        ),
+        (StatusCode::OK, Some("PL-2"), Some(2))
+    );
 }
 
 #[sqlx::test]
@@ -1749,18 +1757,7 @@ async fn set_merging_dispatch(pool: &PgPool, serial: bool) {
          [dispatch.status.merging]\nagent = \"claude-code\"\nserial = {serial}\n",
         built_in.source()
     );
-    sqlx::query(
-        "WITH v AS (
-            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
-            SELECT id, $1, $1, $2, $3 FROM workspace RETURNING id)
-         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
-    )
-    .bind(format!("serial-{serial}"))
-    .bind(text)
-    .bind(serde_json::to_value(built_in.prompts()).unwrap())
-    .execute(pool)
-    .await
-    .unwrap();
+    activate(pool, &format!("serial-{serial}"), &text).await;
 }
 
 fn claimed_issue(answer: &(StatusCode, Value)) -> (StatusCode, Option<&str>) {
@@ -1828,4 +1825,70 @@ async fn a_status_without_serial_runs_its_dispatches_together(pool: PgPool) {
     assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
     let second = claim(&app, &r1, 0).await;
     assert_eq!(claimed_issue(&second), (StatusCode::OK, Some("PL-2")));
+}
+
+/// Makes the built-in workflow, with `statuses` and a person's moves from Todo to Agent Review
+/// and to Merging, which dispatches Claude Code, the workspace's active version.
+async fn set_claim_order_workflow(pool: &PgPool, statuses: &str) {
+    let source = punchlist_core::default_workflow().source();
+    let start = source.find("statuses = [").unwrap();
+    let end = start + source[start..].find(']').unwrap() + 1;
+    let text = format!(
+        "{}statuses = {statuses}{}\n[[transition]]\nfrom = \"todo\"\nto = \"agent_review\"\n\
+         by = [\"person\"]\n[[transition]]\nfrom = \"todo\"\nto = \"merging\"\n\
+         by = [\"person\"]\n[dispatch.status.merging]\nagent = \"claude-code\"\n",
+        &source[..start],
+        &source[end..],
+    );
+    activate(pool, statuses, &text).await;
+}
+
+/// Claims until nothing is left and answers the issues in the order they were claimed.
+async fn claim_all(app: &Router, runner: &Reg) -> Vec<String> {
+    let mut claimed = Vec::new();
+    loop {
+        let (status, body) = claim(app, runner, 0).await;
+        if status == StatusCode::NO_CONTENT {
+            return claimed;
+        }
+        assert_eq!(status, StatusCode::OK, "{body}");
+        claimed.push(body["issue"]["id"].as_str().unwrap().to_string());
+    }
+}
+
+#[sqlx::test]
+async fn claims_take_the_status_furthest_along_the_workflow_first(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_claim_order_workflow(
+        &pool,
+        r#"["backlog", "todo", "start", "in_progress", "agent_review", "human_review",
+            "merging", "done", "canceled"]"#,
+    )
+    .await;
+    let runner = register(&app, &person.token, "r1", &["claude-code", "codex"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Review", &["todo", "agent_review"]).await;
+    create_and_move(&app, &person.token, "Merge", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Build later", &["todo", "start"]).await;
+
+    assert_eq!(
+        claim_all(&app, &runner).await,
+        ["PL-3", "PL-2", "PL-1", "PL-4"]
+    );
+}
+
+#[sqlx::test]
+async fn a_workflow_that_lists_its_statuses_in_another_order_claims_in_that_order(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_claim_order_workflow(
+        &pool,
+        r#"["backlog", "todo", "start", "in_progress", "human_review", "merging",
+            "agent_review", "done", "canceled"]"#,
+    )
+    .await;
+    let runner = register(&app, &person.token, "r1", &["claude-code", "codex"]).await;
+    create_and_move(&app, &person.token, "Merge", &["todo", "merging"]).await;
+    create_and_move(&app, &person.token, "Review", &["todo", "agent_review"]).await;
+
+    assert_eq!(claim_all(&app, &runner).await, ["PL-2", "PL-1"]);
 }
