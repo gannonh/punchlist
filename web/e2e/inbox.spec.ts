@@ -46,6 +46,7 @@ test('the header counts what waits on the person live, and opening an item reads
   await expect(item).toContainText('Waits on a person')
   await expect(item).toContainText('Todo')
   await expect(item.locator('[data-age]')).toHaveText(/^\d+[smhd] ago$/)
+  await expect(page.locator('header [aria-current=page]')).toHaveText(/^Inbox/)
 
   await item.focus()
   await page.keyboard.press('Enter')

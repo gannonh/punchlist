@@ -71,6 +71,8 @@ export function AppHeader({
         <Link
           to="/w/$prefix"
           params={{ prefix }}
+          // Not active on the workspace's other screens, which are under its path.
+          activeOptions={{ exact: true }}
           className={NAV}
           aria-current={current === 'issues' ? 'page' : undefined}
         >
