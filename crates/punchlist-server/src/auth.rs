@@ -22,6 +22,9 @@ pub struct Actor {
     pub kind: Option<String>,
     /// The hash of the token the request came with; none for an actor acting without one.
     pub token_hash: Option<String>,
+    /// The account a person's token authenticates; the actor is its person in the workspace
+    /// the request names (ADR 0011). Agents and runners have none.
+    pub account: Option<punchlist_api::Account>,
 }
 
 impl From<&Actor> for punchlist_api::Actor {
@@ -70,6 +73,83 @@ pub fn hash_token(token: &str) -> String {
         .collect()
 }
 
+/// The workspace a request names by its path (ADR 0011).
+enum Named {
+    /// No workspace: a person's account must be in exactly one.
+    Nothing,
+    /// `/api/workspaces/{id}/...`. A workspace the token is not in is 404; an id that is not
+    /// a UUID is nil, which no token is in.
+    Workspace(Uuid),
+    /// `/api/issues/{id}/...`: the issue's workspace, none when there is no such issue (the
+    /// handler's 404). Another workspace's issue is 403.
+    Issue(Option<Uuid>),
+    /// The row behind `/api/runs/{id}`, `/api/proof/{id}` or `/api/projects/{id}/milestones`,
+    /// none when there is no such row. Its handler refuses a row of another workspace.
+    Row(Option<Uuid>),
+}
+
+async fn named_workspace(
+    pool: &sqlx::PgPool,
+    path: &str,
+    issue_id: Option<&str>,
+) -> Result<Named, ApiError> {
+    if let Some(issue_id) = issue_id {
+        let workspace =
+            sqlx::query_scalar!("SELECT workspace_id FROM issue WHERE id = $1", issue_id)
+                .fetch_optional(pool)
+                .await?;
+        return Ok(Named::Issue(workspace));
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    let uuid = |id: &str| Uuid::parse_str(id).ok();
+    let row = match segments.as_slice() {
+        ["", "api", "workspaces", id, ..] => {
+            return Ok(Named::Workspace(uuid(id).unwrap_or_default()));
+        }
+        ["", "api", "runs", id, ..] if *id != "claim" => match uuid(id) {
+            Some(id) => {
+                sqlx::query_scalar!("SELECT workspace_id FROM run WHERE id = $1", id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => None,
+        },
+        ["", "api", "proof", id] => match uuid(id) {
+            Some(id) => {
+                sqlx::query_scalar!(
+                    "SELECT i.workspace_id FROM proof p JOIN issue i ON i.id = p.issue_id
+                     WHERE p.id = $1",
+                    id
+                )
+                .fetch_optional(pool)
+                .await?
+            }
+            None => None,
+        },
+        ["", "api", "projects", id, "milestones"] => match uuid(id) {
+            Some(id) => {
+                sqlx::query_scalar!("SELECT workspace_id FROM project WHERE id = $1", id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => None,
+        },
+        _ => return Ok(Named::Nothing),
+    };
+    Ok(Named::Row(row))
+}
+
+fn mismatch(actor: Uuid, actor_workspace: Uuid, issue_workspace: Uuid, issue: &str) -> ApiError {
+    tracing::warn!(
+        %actor,
+        %actor_workspace,
+        %issue_workspace,
+        issue,
+        "workspace mismatch: refused a request for another workspace's issue"
+    );
+    ApiError::Forbidden(format!("issue {issue} is in another workspace"))
+}
+
 impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
@@ -86,25 +166,81 @@ impl FromRequestParts<AppState> for Actor {
                 true,
             ),
         };
+        let path = parts.uri.path();
         // The issue a path names: `/api/issues/<id>` and below. Decoded as the route's `Path`
         // decodes it, so `PL%2D1` is checked as the `PL-1` the handler acts on.
-        let issue_id = parts
-            .uri
-            .path()
+        let issue_id = path
             .strip_prefix("/api/issues/")
             .and_then(|rest| rest.split('/').next())
             .and_then(|id| percent_decode_str(id).decode_utf8().ok())
             .filter(|id| !id.is_empty());
         let issue_id = issue_id.as_deref();
+        let named = named_workspace(&state.pool, path, issue_id).await?;
         let token_hash = hash_token(token);
+        // A person's token is their account's: the actor is the account's person in the
+        // workspace the request names, oldest workspace first.
+        let memberships = sqlx::query!(
+            r#"SELECT acc.id AS account_id, acc.name AS account_name, a.id, a.workspace_id,
+                      a.name, w.issue_prefix
+               FROM account acc
+               JOIN actor a ON a.account_id = acc.id
+               JOIN workspace w ON w.id = a.workspace_id
+               WHERE acc.token_hash = $1
+               ORDER BY w.created_at, w.id"#,
+            token_hash,
+        )
+        .fetch_all(&state.pool)
+        .await?;
+        if let Some(oldest) = memberships.first() {
+            let member = |workspace| memberships.iter().find(|m| m.workspace_id == workspace);
+            let actor = match named {
+                Named::Workspace(id) => member(id).ok_or(ApiError::WorkspaceNotFound(id))?,
+                Named::Issue(Some(id)) => member(id).ok_or_else(|| {
+                    mismatch(
+                        oldest.account_id,
+                        oldest.workspace_id,
+                        id,
+                        issue_id.unwrap_or_default(),
+                    )
+                })?,
+                Named::Row(Some(id)) => member(id).unwrap_or(oldest),
+                Named::Issue(None) | Named::Row(None) => oldest,
+                // Who is signed in, and where they belong, needs no workspace.
+                Named::Nothing
+                    if memberships.len() == 1
+                        || path == "/api/session"
+                        || path == "/api/workspaces" =>
+                {
+                    oldest
+                }
+                Named::Nothing => {
+                    let mut prefixes: Vec<&str> = memberships
+                        .iter()
+                        .map(|m| m.issue_prefix.as_str())
+                        .collect();
+                    prefixes.sort_unstable();
+                    return Err(ApiError::WorkspaceNotNamed(prefixes.join(", ")));
+                }
+            };
+            return Ok(Actor {
+                id: actor.id,
+                workspace_id: actor.workspace_id,
+                name: actor.name.clone(),
+                role: Role::Person,
+                kind: None,
+                token_hash: Some(token_hash),
+                account: Some(punchlist_api::Account {
+                    id: actor.account_id,
+                    name: actor.account_name.clone(),
+                }),
+            });
+        }
         let row = sqlx::query!(
             r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
-                      r.issue_id AS "issue_id?", r.outcome AS "outcome?",
-                      (SELECT workspace_id FROM issue WHERE id = $2) AS "issue_workspace_id?"
+                      r.issue_id AS "issue_id?", r.outcome AS "outcome?"
                FROM actor a LEFT JOIN run r ON r.id = a.run_id
                WHERE a.token_hash = $1"#,
             token_hash,
-            issue_id,
         )
         .fetch_optional(&state.pool)
         .await?
@@ -117,8 +253,7 @@ impl FromRequestParts<AppState> for Actor {
         // A run's agent says its own run waits on a person, which that route refuses once the
         // run has ended.
         let own_waiting = parts.method == Method::POST
-            && (row.run_id)
-                .is_some_and(|run| parts.uri.path() == format!("/api/runs/{run}/waiting"));
+            && (row.run_id).is_some_and(|run| path == format!("/api/runs/{run}/waiting"));
         // A run's agent's token works only while its run is running, but for that route.
         if role == Role::Agent
             && row.run_id.is_some()
@@ -127,22 +262,21 @@ impl FromRequestParts<AppState> for Actor {
         {
             return Err(ApiError::Unauthorized);
         }
-        // No token reaches another workspace's issue. An issue that does not exist anywhere
-        // is the handler's 404.
-        if let Some(issue_workspace_id) = row.issue_workspace_id
-            && issue_workspace_id != row.workspace_id
-        {
-            tracing::warn!(
-                actor = %row.id,
-                actor_workspace = %row.workspace_id,
-                issue_workspace = %issue_workspace_id,
-                issue = issue_id.unwrap_or_default(),
-                "workspace mismatch: refused a request for another workspace's issue"
-            );
-            return Err(ApiError::Forbidden(format!(
-                "issue {} is in another workspace",
-                issue_id.unwrap_or_default()
-            )));
+        // No token reaches another workspace. An issue that does not exist anywhere is the
+        // handler's 404.
+        match named {
+            Named::Workspace(id) if id != row.workspace_id => {
+                return Err(ApiError::WorkspaceNotFound(id));
+            }
+            Named::Issue(Some(id)) if id != row.workspace_id => {
+                return Err(mismatch(
+                    row.id,
+                    row.workspace_id,
+                    id,
+                    issue_id.unwrap_or_default(),
+                ));
+            }
+            _ => {}
         }
         // A run's agent reaches only its run's issue, `/api/issues/<id>` and below, and its
         // run's waiting route. A standalone agent reaches any issue of its workspace, and the
@@ -158,10 +292,7 @@ impl FromRequestParts<AppState> for Actor {
                         own.unwrap_or("none")
                     )));
                 }
-                (None, _)
-                    if issue_id.is_none()
-                        && !standalone_agent_route(&parts.method, parts.uri.path()) =>
-                {
+                (None, _) if issue_id.is_none() && !standalone_agent_route(&parts.method, path) => {
                     return Err(ApiError::Forbidden(
                         "an agent acts only on the workspace's issues".into(),
                     ));
@@ -176,6 +307,7 @@ impl FromRequestParts<AppState> for Actor {
             name: row.name,
             kind: row.kind,
             token_hash: Some(token_hash),
+            account: None,
         })
     }
 }
@@ -183,16 +315,19 @@ impl FromRequestParts<AppState> for Actor {
 /// The routes outside `/api/issues/<id>` a standalone agent's token reaches. Each handler
 /// keeps it to the token's workspace.
 fn standalone_agent_route(method: &Method, path: &str) -> bool {
-    let segments: Vec<&str> = path.split('/').collect();
+    let route = (crate::workspaces::workspace_route(path))
+        .or_else(|| path.strip_prefix("/api"))
+        .unwrap_or(path);
+    let segments: Vec<&str> = route.split('/').collect();
     matches!(
         (method.as_str(), segments.as_slice()),
-        ("GET" | "POST", ["", "api", "issues"])
-            | ("GET", ["", "api", "workspaces", _, "events"])
-            | ("GET", ["", "api", "projects"])
-            | ("GET", ["", "api", "workflow"])
-            | ("GET", ["", "api", "actors"])
-            | ("GET", ["", "api", "proof", _])
-            | ("GET", ["", "api", "session"])
+        ("GET" | "POST", ["", "issues"])
+            | ("GET", ["", "workspaces", _, "events"])
+            | ("GET", ["", "projects"])
+            | ("GET", ["", "workflow"])
+            | ("GET", ["", "actors"])
+            | ("GET", ["", "proof", _])
+            | ("GET", ["", "session"])
     )
 }
 

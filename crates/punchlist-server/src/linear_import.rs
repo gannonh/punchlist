@@ -337,6 +337,7 @@ fn acting(id: Uuid, workspace_id: Uuid, name: String, role: Role) -> Actor {
         role,
         kind: None,
         token_hash: None,
+        account: None,
     }
 }
 

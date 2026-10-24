@@ -764,6 +764,7 @@ async fn a_person_signs_in_and_the_cookie_alone_authenticates(pool: PgPool) {
     let expected = json!({
         "actor": {"id": person.actor_id, "name": "Gannon", "role": "person"},
         "workspace_id": person.workspace_id,
+        "account": {"id": person.account_id, "name": "Gannon"},
     });
     assert_eq!(session, expected);
     let (_, headers, _) = send(&app, sign_in(&person.token, true)).await;

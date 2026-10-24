@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
     AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, catch_up_merges_at_start,
-    expire_leases, openapi, queue_workflow_load, queue_workflow_loads_at_start, router,
+    expire_leases, join, openapi, queue_workflow_load, queue_workflow_loads_at_start, router,
     warn_invalid_workflows, with_web_app, work_jobs, write_pull_request_events,
 };
 use sqlx::postgres::PgPoolOptions;
@@ -63,7 +63,9 @@ enum Command {
     },
     /// Print the OpenAPI document as JSON. Needs no database.
     Openapi,
-    /// Create a workspace, its repository and one person, and print the person's token.
+    /// Create a workspace, its repository and one person, and print the person's token. With
+    /// `--account` the person joins that account, whose token reaches the workspace, and no
+    /// token is printed.
     Bootstrap {
         /// Workspace name.
         #[arg(long, default_value = "Punchlist")]
@@ -80,6 +82,9 @@ enum Command {
         /// Server URL to print in the `pl` config.
         #[arg(long, default_value = "http://127.0.0.1:7878")]
         server_url: String,
+        /// An existing account (`GET /api/session` answers its id) the person joins.
+        #[arg(long)]
+        account: Option<uuid::Uuid>,
     },
 }
 
@@ -203,29 +208,41 @@ async fn main() -> anyhow::Result<()> {
             repository,
             person,
             server_url,
+            account,
         } => {
             let (owner, name) = repository
                 .split_once('/')
                 .context("--repository must be owner/name")?;
-            let done = bootstrap(
-                &pool,
-                &Bootstrap {
-                    workspace_name: workspace,
-                    issue_prefix: prefix,
-                    repository_owner: owner.to_string(),
-                    repository_name: name.to_string(),
-                    person_name: person,
-                },
-            )
-            .await?;
+            let input = Bootstrap {
+                workspace_name: workspace,
+                issue_prefix: prefix,
+                repository_owner: owner.to_string(),
+                repository_name: name.to_string(),
+                person_name: person,
+            };
+            let (workspace_id, token) = match account {
+                Some(account) => {
+                    let (workspace_id, actor_id) = join(&pool, account, &input).await?;
+                    eprintln!(
+                        "Created workspace {workspace_id} and person {actor_id} in account {account}; its token reaches the workspace."
+                    );
+                    (workspace_id, None)
+                }
+                None => {
+                    let done = bootstrap(&pool, &input).await?;
+                    eprintln!(
+                        "Created workspace {} and person {}. Save this as ~/.config/punchlist/config.toml; the token is not shown again.",
+                        done.workspace_id, done.actor_id
+                    );
+                    (done.workspace_id, Some(done.token))
+                }
+            };
             // The server loads the repository's workflow when it runs the job.
-            let key = format!("workflow_load:bootstrap:{}", done.workspace_id);
-            queue_workflow_load(&mut *pool.acquire().await?, done.workspace_id, &key).await?;
-            eprintln!(
-                "Created workspace {} and person {}. Save this as ~/.config/punchlist/config.toml; the token is not shown again.",
-                done.workspace_id, done.actor_id
-            );
-            println!("server_url = \"{server_url}\"\ntoken = \"{}\"", done.token);
+            let key = format!("workflow_load:bootstrap:{workspace_id}");
+            queue_workflow_load(&mut *pool.acquire().await?, workspace_id, &key).await?;
+            if let Some(token) = token {
+                println!("server_url = \"{server_url}\"\ntoken = \"{token}\"");
+            }
         }
         Command::Openapi => unreachable!("answered before connecting"),
     }

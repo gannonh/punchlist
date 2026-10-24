@@ -240,11 +240,34 @@ pub struct SignIn {
     pub token: String,
 }
 
-/// Who a request is signed in as.
+/// Who a request is signed in as: for a person, their account and its person actor in the
+/// workspace the request names, else in the account's oldest workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Session {
     pub actor: Actor,
     pub workspace_id: Uuid,
+    /// The account a person's token authenticates (ADR 0011). Agents and runners have none,
+    /// and an older server sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
+}
+
+/// The identity above a person's actors, one per workspace they belong to (ADR 0011).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Account {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// One of `GET /api/workspaces`: a workspace the account belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Workspace {
+    pub id: Uuid,
+    pub name: String,
+    /// Its issues' ids are this and a number: `PL` gives PL-1.
+    pub issue_prefix: String,
+    /// The workspace's GitHub repository, as `owner/name`.
+    pub repository: String,
 }
 
 /// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
