@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT bool_and(status IN ($2, $3)) AND bool_or(status = $2) AS \"done!\"\n           FROM issue WHERE parent_id = $1",
+  "query": "SELECT COALESCE(bool_and(status IN ($2, $3)) AND bool_or(status = $2), false) AS \"done!\"\n           FROM issue WHERE parent_id = $1",
   "describe": {
     "columns": [
       {
@@ -21,5 +21,5 @@
       null
     ]
   },
-  "hash": "4bcdb642dc7a93be4da92f590417d06d403e4d6aa6462ff9a61f78ec97d40cf6"
+  "hash": "ebbc991d885968899600442f2bce95c8b5df765a86d29eaa19c7411a11d1f3cc"
 }
