@@ -35,8 +35,13 @@ pub const SYSTEM_PROMPT: &str = "prompts/system.md";
 pub const START: &str = "start";
 pub const IN_PROGRESS: &str = "in_progress";
 
-/// The events a transition's `on` may name; the server makes each from a GitHub delivery.
-const EVENTS: [&str; 2] = ["pr_merged", "pr_closed_unmerged"];
+/// A parent's `children_done` comes when every child is in one of these, and one is `DONE`.
+pub const DONE: &str = "done";
+pub const CANCELED: &str = "canceled";
+
+/// The events a transition's `on` may name: the server makes the first two from a GitHub
+/// delivery, and `children_done` when a child's move leaves its parent's children all done.
+const EVENTS: [&str; 3] = ["pr_merged", "pr_closed_unmerged", "children_done"];
 /// What a transition's `require` may ask a move to carry.
 const REQUIREMENTS: [&str; 1] = ["comment"];
 /// The app that owns a required check named without one: GitHub Actions' slug.
@@ -70,8 +75,9 @@ pub enum Role {
     Person,
     Agent,
     Runner,
-    /// GitHub, through a webhook event. Makes only the transitions whose `on` names a
-    /// GitHub event; its actors are named after the GitHub user who caused the event.
+    /// GitHub, through a webhook event, or Punchlist itself on `children_done`. Makes only
+    /// the transitions whose `on` names an event; its actors are named after the GitHub user
+    /// who caused the event.
     Github,
 }
 
@@ -1113,6 +1119,7 @@ enum RoleName {
 enum EventName {
     PrMerged,
     PrClosedUnmerged,
+    ChildrenDone,
 }
 
 #[allow(dead_code)]
@@ -1544,6 +1551,24 @@ mod tests {
             )
         );
         assert_eq!(
+            Workflow::from_toml(&runnable(
+                "[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"children_dun\""
+            ))
+            .unwrap_err()
+            .to_string(),
+            "line 5, `transition[0].on`: unknown event `children_dun`; events are pr_merged, pr_closed_unmerged, children_done"
+        );
+        let workflow = Workflow::from_toml(&runnable(
+            "[[transition]]\nfrom = \"a\"\nto = \"b\"\non = \"children_done\"",
+        ))
+        .unwrap();
+        assert_eq!(
+            workflow
+                .transition_on("a", "children_done")
+                .map(|t| t.to.as_str()),
+            Some("b")
+        );
+        assert_eq!(
             transition("by = [\"person\"]\nrequire = [\"evidence\"]"),
             (
                 Some(6),
@@ -1941,6 +1966,10 @@ mod tests {
                 "{gate} in the schema"
             );
         }
+        assert_eq!(
+            schema["$defs"]["EventName"]["enum"],
+            serde_json::json!(EVENTS)
+        );
         assert_eq!(schema["title"], "Punchlist workflow");
         let kinds = AGENT_KINDS.map(|kind| format!("`{kind}`"));
         let (last, rest) = kinds.split_last().unwrap();

@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use punchlist_api::{ErrorBody, ReviewComment};
+use punchlist_api::{ErrorBody, ReviewComment, plain_review_thread_url};
 use punchlist_core::{CheckRunEvidence, GITHUB_ACTIONS, Refusal, Role, Workflow, linked_issue_id};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -195,6 +195,8 @@ pub(crate) struct ThreadComment {
     pub user: Option<Account>,
     #[serde(default)]
     pub body: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -572,6 +574,7 @@ pub(crate) async fn process(
                     let comments = newest.iter().map(|comment| ThreadCommentNode {
                         author: comment.user.clone(),
                         body: CommentBody::cut(&comment.body),
+                        url: comment.html_url.clone(),
                     });
                     let thread = GithubThread {
                         id: event.thread.node_id.clone(),
@@ -858,13 +861,19 @@ async fn record_review_threads(
             ),
         })
         .unzip();
+    let urls: Vec<Option<String>> = (threads.iter())
+        .map(|t| t.comments.nodes.first()?.url.as_deref())
+        .map(|url| url.and_then(plain_review_thread_url).map(str::to_string))
+        .collect();
     sqlx::query!(
         "INSERT INTO review_thread
-             (node_id, pull_request_id, resolved, path, line, comments, comments_total,
+             (node_id, pull_request_id, resolved, path, line, comments, comments_total, url,
               updated_at)
-         SELECT node_id, $1, resolved, path, line, comments, comments_total, clock_timestamp()
-         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[], $6::jsonb[], $7::int[])
-             AS t (node_id, resolved, path, line, comments, comments_total)
+         SELECT node_id, $1, resolved, path, line, comments, comments_total, url,
+                clock_timestamp()
+         FROM UNNEST($2::text[], $3::boolean[], $4::text[], $5::bigint[], $6::jsonb[], $7::int[],
+                     $8::text[])
+             AS t (node_id, resolved, path, line, comments, comments_total, url)
          ON CONFLICT (node_id) DO UPDATE SET pull_request_id = EXCLUDED.pull_request_id,
              resolved = EXCLUDED.resolved,
              updated_at = CASE WHEN (review_thread.pull_request_id, review_thread.resolved,
@@ -879,7 +888,10 @@ async fn record_review_threads(
              path = coalesce(EXCLUDED.path, review_thread.path),
              line = coalesce(EXCLUDED.line, review_thread.line),
              comments = coalesce(EXCLUDED.comments, review_thread.comments),
-             comments_total = coalesce(EXCLUDED.comments_total, review_thread.comments_total)",
+             comments_total = coalesce(EXCLUDED.comments_total, review_thread.comments_total),
+             -- The link goes with the comments it came with, and is NULL when not plain.
+             url = CASE WHEN EXCLUDED.comments IS NULL THEN review_thread.url
+                        ELSE EXCLUDED.url END",
         pull_request_id,
         &ids,
         &resolved,
@@ -887,6 +899,7 @@ async fn record_review_threads(
         &lines as &[Option<i64>],
         &comments as &[Option<serde_json::Value>],
         &totals as &[Option<i32>],
+        &urls as &[Option<String>],
     )
     .execute(&mut *tx)
     .await?;
@@ -1509,6 +1522,10 @@ async fn recompute_checks(
     mark_pull_request_change(tx, &issues).await
 }
 
+/// The login of the workspace's `Punchlist` actor, which makes the `children_done` moves. No
+/// GitHub login has brackets, so that actor is never a user's.
+pub(crate) const PUNCHLIST_LOGIN: &str = "[punchlist]";
+
 /// The workspace's actor for a GitHub login, made on first use. With no login it is GitHub
 /// itself, for what nobody is credited with; no GitHub login is empty, so that actor is never
 /// a user's.
@@ -1517,7 +1534,11 @@ pub(crate) async fn github_actor(
     workspace_id: Uuid,
     login: Option<&str>,
 ) -> sqlx::Result<Uuid> {
-    let (name, login) = login.map_or(("GitHub", ""), |login| (login, login));
+    let (name, login) = match login {
+        None => ("GitHub", ""),
+        Some(PUNCHLIST_LOGIN) => ("Punchlist", PUNCHLIST_LOGIN),
+        Some(login) => (login, login),
+    };
     sqlx::query_scalar!(
         "INSERT INTO actor (workspace_id, name, role, github_login)
          VALUES ($1, $2, 'github', $3)
@@ -1847,6 +1868,10 @@ mod tests {
         };
         assert_eq!(e.action, "resolved");
         assert_eq!(e.thread.node_id, "PRRT_kwDOA1b2c84AbCdE");
+        assert_eq!(
+            e.thread.comments[0].html_url.as_deref(),
+            Some("https://github.com/gannonh/punchlist/pull/12#discussion_r1700001")
+        );
     }
 
     #[test]

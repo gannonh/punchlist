@@ -10,9 +10,9 @@ use punchlist_api::{
     IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
 };
 use punchlist_core::{
-    Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence, PullRequestState,
-    Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow, agent_display_name,
-    display_name,
+    CANCELED, DONE, Evidence, GateResult, IN_PROGRESS, ProofEvidence, PullRequestEvidence,
+    PullRequestState, Refusal, ReviewThreadEvidence, Role, START, Transition, Workflow,
+    agent_display_name, display_name,
 };
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -22,8 +22,8 @@ use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::events::{events, next_event_seq};
 use crate::github::{
-    PullRequestRead, catch_up_merge, lock_pull_requests, newest_check_runs, refresh_pull_requests,
-    written_since,
+    PUNCHLIST_LOGIN, PullRequestRead, catch_up_merge, github_actor, lock_pull_requests,
+    newest_check_runs, refresh_pull_requests, written_since,
 };
 use crate::rows::{issue, issue_rows};
 use crate::runs::RUNS_PER_ENTRY;
@@ -726,6 +726,9 @@ pub(crate) async fn write_transition(
     }
     let dispatched = queue_dispatch(tx, workflow, id, to, transition_id).await?;
     let (seq, created_at) = record_transition_event(tx, actor, id, transition_id).await?;
+    if to == DONE || to == CANCELED {
+        children_done(tx, actor.workspace_id, workflow, id).await?;
+    }
     let mut detail = EventDetail::transition(from, to.to_string(), workflow_version.to_string());
     if let EventDetail::Transition {
         delivery_id: detail_delivery,
@@ -746,6 +749,80 @@ pub(crate) async fn write_transition(
         warning: None,
     };
     Ok((moved, transition_id, dispatched))
+}
+
+/// The `children_done` event: once a child's move to `DONE` or `CANCELED` leaves every child
+/// of its parent in one of the two, one at least `DONE`, the parent takes its transition on
+/// the event from its status, if the workflow has one and its gates pass, as the workspace's
+/// `Punchlist` actor, in the child's transaction. `write_transition` then checks the parent's
+/// own parent. The parent's row is locked before its children are read, so of two children
+/// closing at once the second sees the first's status.
+async fn children_done(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+    child: &str,
+) -> Result<(), ApiError> {
+    let Some(parent) = sqlx::query!(
+        "SELECT p.id, p.status FROM issue c JOIN issue p ON p.id = c.parent_id
+         WHERE c.id = $1 FOR UPDATE OF p",
+        child,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(());
+    };
+    let Some(transition) = workflow.transition_on(&parent.status, "children_done") else {
+        return Ok(());
+    };
+    let done = sqlx::query_scalar!(
+        r#"SELECT bool_and(status IN ($2, $3)) AND bool_or(status = $2) AS "done!"
+           FROM issue WHERE parent_id = $1"#,
+        parent.id,
+        DONE,
+        CANCELED,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if !done {
+        return Ok(());
+    }
+    let actor = Actor {
+        id: github_actor(tx, workspace_id, Some(PUNCHLIST_LOGIN)).await?,
+        workspace_id,
+        name: "Punchlist".to_string(),
+        role: Role::Github,
+        kind: None,
+        token_hash: None,
+    };
+    let checked = check_gates(
+        tx,
+        workflow,
+        transition,
+        &actor.name,
+        &parent.id,
+        &parent.status,
+        None,
+    );
+    let gates = match checked.await {
+        Ok(gates) => gates,
+        Err(ApiError::GateFailed(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let to = transition.to.as_str();
+    Box::pin(write_transition(
+        tx,
+        &actor,
+        &parent.id,
+        parent.status,
+        to,
+        None,
+        workflow,
+        &gates,
+    ))
+    .await?;
+    Ok(())
 }
 
 /// An issue's timeline, oldest first.

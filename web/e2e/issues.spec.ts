@@ -491,6 +491,50 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   await context.close()
 })
 
+test('an unresolved review thread shows on the open issue page as text with its link, and goes when resolved', async ({
+  page,
+  request,
+}) => {
+  const { row: created } = await ok<{ row: { issue: { id: string } } }>(
+    await request.post('/api/issues', { headers: bearer(personToken()), data: { title: 'Has a reviewer', body: '' } }),
+  )
+  const id = created.issue.id
+  const number = 500 + Number(id.split('-')[1])
+  await deliverPullRequest(request, id, 'opened', { number, sha: randomUUID().replaceAll('-', '').padEnd(40, '0') })
+  await recorded(request, id, (pulls) => pulls.length === 1)
+  const url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(number)}#discussion_r1700001`
+  const thread = (action: 'resolved' | 'unresolved') => {
+    const payload = fixture('pull_request_review_thread_resolved') as {
+      action: string
+      repository: { name: string }
+      thread: { node_id: string; comments: { body: string; html_url: string }[] }
+      pull_request: { number: number }
+    }
+    payload.action = action
+    payload.thread.node_id = `PRRT_${id}`
+    Object.assign(payload.thread.comments[0] ?? {}, { body: '<b>bold</b> stays text', html_url: url })
+    payload.pull_request.number = number
+    return payload
+  }
+  await signIn(page)
+  await page.goto(`/issues/${id}`)
+  await expect(page.locator('#threads')).toContainText('No open review threads.')
+
+  await deliver(request, 'pull_request_review_thread', thread('unresolved'))
+  const shown = page.locator('[data-thread]')
+  await expect(shown).toHaveCount(1)
+  await expect(shown).toHaveAttribute('data-thread', `PRRT_${id}`)
+  await expect(shown).toContainText(`open#${String(number)}src/lib.rs`)
+  await expect(shown).toContainText('octocat <b>bold</b> stays text')
+  await expect(shown.locator('b')).toHaveCount(0)
+  await expect(shown.getByRole('link', { name: 'View on GitHub' })).toHaveAttribute('href', url)
+  await expect(page.locator('#threads .subhead')).toHaveText('Review threads · 1 open')
+
+  await deliver(request, 'pull_request_review_thread', thread('resolved'))
+  await expect(shown).toHaveCount(0)
+  await expect(page.locator('#threads')).toContainText('No open review threads.')
+})
+
 test('a screenshot uploaded from the issue page is the person\'s proof and shows its thumbnail', async ({
   page,
   request,
