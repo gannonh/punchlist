@@ -1896,6 +1896,8 @@ export interface components {
         /** @description The issue a pull request or an inbox item names. */
         PullRequestIssue: {
             id: string;
+            /** @description As in `StatusInfo`: the status, as people read it, a merge moves the issue to. */
+            on_merge_to?: string | null;
             status: string;
             status_name: string;
             title: string;
@@ -2186,6 +2188,11 @@ export interface components {
             locked_to: components["schemas"]["Role"][];
             /** @description As people read it, such as `In Progress`. */
             name: string;
+            /**
+             * @description The status, as people read it (`Done`), that a merge of the issue's pull request
+             *     moves an issue in it to; `None` when it does not wait on a merge.
+             */
+            on_merge_to?: string | null;
         };
         /**
          * @description One message of `GET /api/workspaces/{id}/events`: an event and its issue's row as it is

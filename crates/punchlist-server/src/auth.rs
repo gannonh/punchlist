@@ -320,6 +320,7 @@ fn standalone_agent_route(method: &Method, path: &str) -> bool {
             | ("GET", ["", "actors"])
             | ("GET", ["", "proof", _])
             | ("GET", ["", "session"])
+            | ("GET", ["", "workspaces"])
     )
 }
 

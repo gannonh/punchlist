@@ -100,6 +100,25 @@ describe('rowView', () => {
     })
     expect(rowView(row('PL-3'), now).pullRequest.label).toBe('no PR')
   })
+
+  test('an issue in Merging with an open pull request waits on the merge', () => {
+    const merging: StatusInfo = { key: 'merging', name: 'Merging', locked_to: [], closed: false, on_merge_to: 'Done' }
+    const url = 'https://github.com/gannonh/punchlist/pull/7'
+    const wait = (pr: Partial<NonNullable<IssueRow['pull_request']>> | null, status = merging) =>
+      rowView(
+        row('PL-3', { status: status.key }, {
+          pull_request: pr && { number: 7, state: 'open', checks: 'passing', url, ...pr },
+        }),
+        now,
+        status,
+      ).waitsOnMerge
+    expect(wait({})).toEqual({ to: 'Done', url })
+    expect(wait({ state: 'draft' })).toBeNull()
+    expect(wait({ state: 'merged' })).toBeNull()
+    expect(wait(null)).toBeNull()
+    expect(wait({ url: null })).toEqual({ to: 'Done', url: null })
+    expect(wait({}, statuses[2] as StatusInfo)).toBeNull()
+  })
 })
 
 describe('refusalText', () => {

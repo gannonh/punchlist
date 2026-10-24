@@ -8,7 +8,7 @@ import { cn } from 'cn'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import { Assignee, Labels, LockBadge, PullRequest, StatusDot } from '@/components/atoms'
+import { Assignee, GithubLink, Labels, LockBadge, PullRequest, StatusDot } from '@/components/atoms'
 import { WorkspaceMenu } from '@/components/workspace-menu'
 import {
   issuePageQueries,
@@ -20,7 +20,7 @@ import {
   useMove,
   useReadFromGithub,
 } from '@/lib/queries'
-import { age, agentName, assigneeView, pullRequestView, type Actor } from '@/model/issues'
+import { age, agentName, assigneeView, pullRequestView, waitsOnMerge, type Actor, type WaitsOnMerge } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
 import {
   GATE_EVIDENCE,
@@ -35,6 +35,7 @@ import {
   mediaStep,
   modelView,
   moveView,
+  mergeNotice,
   plainPullRequestUrl,
   PROOF_TYPES,
   specBlocks,
@@ -328,7 +329,12 @@ export function IssueScreen({
               usageLimit={data.waiting_for_usage_limit ?? null}
             />
             <SpecPanel body={data.body} />
-            <PullRequestPanel pr={pr} issueId={data.id} threads={reviewThreads.data} />
+            <PullRequestPanel
+              pr={pr}
+              issueId={data.id}
+              threads={reviewThreads.data}
+              wait={waitsOnMerge(prView, status)}
+            />
             <ProofPanel id={id} proof={proof.data ?? []} person={person} locked={moves?.viewer_locked ?? false} />
             <ActivityPanel
               id={id}
@@ -530,10 +536,12 @@ function PullRequestPanel({
   pr,
   issueId,
   threads,
+  wait,
 }: {
   pr: PullRequestInfo | undefined
   issueId: string
   threads: ReviewThread[] | undefined
+  wait: WaitsOnMerge | null
 }) {
   if (!pr)
     return (
@@ -546,11 +554,37 @@ function PullRequestPanel({
   const url = plainPullRequestUrl(pr.number, pr.url)
   const name = `#${String(pr.number)} ${pr.title}`
   return (
-    <Panel id="pr" title="Pull request" right={<span className="text-ink-3">#{pr.number} {word}</span>}>
+    <Panel
+      id="pr"
+      title="Pull request"
+      right={
+        <span className="inline-flex items-center gap-2.5">
+          {url && <GithubLink url={url} number={pr.number} text="Open on GitHub" data-open-on-github />}
+          <span className="text-ink-3">
+            #{pr.number} {word}
+          </span>
+        </span>
+      }
+    >
       <div className="grid gap-2.5">
+        {wait && (
+          <div
+            className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-md border border-warn-line bg-warn-soft px-2.5 py-1.5 text-meta"
+            data-waits-on-merge
+          >
+            <GitMerge className="size-3.5 flex-none text-warn" aria-hidden="true" />
+            <span className="flex-[1_1_200px]">{mergeNotice(issueId, wait.to, pr.merge_state)}</span>
+            {wait.url && <GithubLink url={wait.url} number={pr.number} text="Merge on GitHub" data-merge-link />}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {url ? (
-            <a href={url} target="_blank" rel="noreferrer" className="text-body font-semibold hover:underline wrap-anywhere">
+            <a
+              href={url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-body font-semibold hover:underline wrap-anywhere"
+            >
               {name}
             </a>
           ) : (

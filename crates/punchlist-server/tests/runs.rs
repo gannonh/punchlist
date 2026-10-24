@@ -7,7 +7,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use punchlist_server::{AppState, Bootstrap, Bootstrapped, bootstrap, expire_leases, router};
+use punchlist_server::{AppState, Bootstrap, Bootstrapped, bootstrap, expire_leases, join, router};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -132,6 +132,83 @@ async fn assert_one_attempt_and_winner(pool: &PgPool, winner: &str) {
     assert_eq!(last.name, winner);
     assert_eq!(last.role, "runner");
     assert_eq!(last.to_status, "in_progress");
+}
+
+#[sqlx::test]
+async fn a_runner_in_each_workspace_of_one_account_claims_only_its_own(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let groundwork = Bootstrap {
+        workspace_name: "Groundwork".into(),
+        issue_prefix: "GW".into(),
+        repository_owner: "gannonh".into(),
+        repository_name: "groundwork".into(),
+        person_name: "Gannon".into(),
+    };
+    let (gw, _) = join(&pool, person.account_id, &groundwork).await.unwrap();
+    let workspaces = [("PL", person.workspace_id), ("GW", gw)];
+    let mut runners = Vec::new();
+    for (prefix, workspace) in workspaces {
+        let (status, body) = call(
+            &app,
+            &person.token,
+            "POST",
+            &format!("/api/workspaces/{workspace}/runners"),
+            Some(json!({"name": format!("r-{prefix}"), "agents": ["claude-code"]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        runners.push(Reg {
+            id: body["runner"]["id"].as_str().unwrap().to_string(),
+            token: body["token"].as_str().unwrap().to_string(),
+        });
+    }
+    let start = |workspace: uuid::Uuid| {
+        let app = app.clone();
+        let token = person.token.clone();
+        async move {
+            let uri = format!("/api/workspaces/{workspace}/issues");
+            let body = json!({"title": "Work", "body": ""});
+            let (status, issue) = call(&app, &token, "POST", &uri, Some(body)).await;
+            assert_eq!(status, StatusCode::CREATED, "{issue}");
+            let id = issue["row"]["issue"]["id"].as_str().unwrap().to_string();
+            for to in ["todo", "start"] {
+                let uri = format!("/api/issues/{id}/transitions");
+                let (status, _) = call(&app, &token, "POST", &uri, Some(json!({"to": to}))).await;
+                assert_eq!(status, StatusCode::OK);
+            }
+        }
+    };
+
+    // Only PL-1 is started: the GW runner finds nothing.
+    start(person.workspace_id).await;
+    let (status, body) = claim(&app, &runners[1], 0).await;
+    assert_eq!((status, body), (StatusCode::NO_CONTENT, Value::Null));
+    start(gw).await;
+    let (status, body) = claim(&app, &runners[1], 0).await;
+    assert_eq!(
+        (status, &body["issue"]["id"]),
+        (StatusCode::OK, &json!("GW-1"))
+    );
+    let (status, body) = claim(&app, &runners[0], 0).await;
+    assert_eq!(
+        (status, &body["issue"]["id"]),
+        (StatusCode::OK, &json!("PL-1"))
+    );
+    let rows = sqlx::query!(
+        "SELECT a.issue_id, rn.name FROM attempt a JOIN runner rn ON rn.id = a.runner_id
+         ORDER BY a.issue_id"
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let rows: Vec<(String, String)> = rows.into_iter().map(|r| (r.issue_id, r.name)).collect();
+    assert_eq!(
+        rows,
+        [
+            ("GW-1".to_string(), "r-GW".to_string()),
+            ("PL-1".to_string(), "r-PL".to_string())
+        ]
+    );
 }
 
 #[sqlx::test]

@@ -138,7 +138,11 @@ pub(crate) async fn run_with_worktrees(
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))?;
     }
-    let registered = Client::new(&config.server_url, &config.token)?
+    let mut person = Client::new(&config.server_url, &config.token)?;
+    if let Some(workspace) = &config.workspace {
+        person = person.in_workspace(workspace);
+    }
+    let registered = person
         .register_runner(&RegisterRunner {
             name: config.name.clone(),
             agents: config.agents.clone(),
@@ -1288,6 +1292,7 @@ mod tests {
         RunnerConfig {
             server_url,
             token: "person-token".into(),
+            workspace: None,
             name: "sartre".into(),
             agents: vec!["claude-code".into()],
             state_dir,

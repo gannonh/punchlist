@@ -5,6 +5,7 @@ import {
   feedEntries,
   gateSummary,
   logView,
+  mergeNotice,
   mediaStep,
   modelView,
   moveView,
@@ -383,5 +384,14 @@ describe('modelView', () => {
     expect(view('haiku', null)).toEqual({ name: null, note: 'waiting for the agent, pinned haiku' })
     expect(view(null, null, 'succeeded')).toEqual({ name: null, note: 'agent default' })
     expect(view('haiku', null, 'succeeded')).toEqual({ name: 'haiku', note: 'pinned' })
+  })
+})
+
+describe('mergeNotice', () => {
+  test('says what the merge does, and names conflicts', () => {
+    expect(mergeNotice('PL-3', 'Done', 'clean')).toBe('Waits on the merge. PL-3 moves to Done when GitHub reports it.')
+    expect(mergeNotice('PL-3', 'Done', 'dirty')).toBe(
+      'Waits on the merge. PL-3 moves to Done when GitHub reports it. The pull request has conflicts.',
+    )
   })
 })

@@ -242,6 +242,11 @@ async fn an_agent_token_stays_in_its_workspace(pool: PgPool) {
     let (status, list) = call(&s.app, auth, "GET", &uri, None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(ids(&list), ["PL-1"]);
-    let (status, _) = call(&s.app, auth, "GET", "/api/workspaces", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    // `pl` resolves the workspace through this list: the agent's own only.
+    let (status, workspaces) = call(&s.app, auth, "GET", "/api/workspaces", None).await;
+    assert_eq!(status, StatusCode::OK, "{workspaces}");
+    let prefixes: Vec<&str> = (workspaces.as_array().unwrap().iter())
+        .map(|workspace| workspace["issue_prefix"].as_str().unwrap())
+        .collect();
+    assert_eq!(prefixes, ["PL"]);
 }

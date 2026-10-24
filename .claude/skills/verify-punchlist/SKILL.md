@@ -62,7 +62,7 @@ Run this first, and again whenever anything looks off:
 $C doctor "$RUN"
 ```
 
-It is read-only and checks that the run's process group is alive, the server log shows the run's own URL, `/api/openapi.json` answers 200, the run's token is accepted by `GET /api/issues`, and the run's database answers. It prints the `pl` version and the git commit. Any `FAIL` line means do not drive this instance: run `down` and `up` again.
+It is read-only and checks that the run's process group is alive, the server log shows the run's own URL, `/api/openapi.json` answers 200, the run's token is accepted by `GET /api/session` (which needs no workspace, so it answers for an account in several), and the run's database answers. It prints the `pl` version and the git commit. Any `FAIL` line means do not drive this instance: run `down` and `up` again.
 
 ## Drive
 

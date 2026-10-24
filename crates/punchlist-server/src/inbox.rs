@@ -5,7 +5,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use punchlist_api::{ErrorBody, InboxItem, InboxList, MarkInboxRead, PullRequestIssue};
-use punchlist_core::display_name;
+use punchlist_core::{Status, display_name};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -74,6 +74,7 @@ pub(crate) async fn inbox(
                 id: row.id,
                 title: row.title,
                 status_name: display_name(&row.status),
+                on_merge_to: workflow.on_merge_to(&row.status).map(Status::display_name),
                 status: row.status,
             },
             since: row.since,
