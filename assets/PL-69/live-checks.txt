@@ -1,0 +1,47 @@
+PL-69 live checks, branch feature/pl-69 at fc9b08c, 2026-10-24T21:02:09Z
+
+== 1. main vs branch (DOM and /api/workflow)
+{"run":"pl69-main","mergeLink":null,"pl1ChipHasA":false,"pl1PrLink":null,"on_merge_to":[]}
+{"run":"pl69-b3","mergeLink":"https://github.com/gannonh/punchlist-sandbox/pull/14","pl1ChipHasA":true,"pl1PrLink":"https://github.com/gannonh/punchlist-sandbox/pull/7","on_merge_to":["merging"]}
+
+== 2. API
+$ curl /api/workflow | jq map(select(.on_merge_to))
+[{"key":"merging","on_merge_to":"Done"}]
+$ curl /api/issues/PL-3/transitions | jq .status.on_merge_to
+"Done"
+$ curl /api/issues/PL-1/transitions | jq .status.on_merge_to
+null
+$ curl /api/pull-requests | jq [number, waits_on_merge, issue.on_merge_to]
+[{"number":15,"waits_on_merge":true,"on_merge_to":"Done"},{"number":14,"waits_on_merge":true,"on_merge_to":"Done"},{"number":8,"waits_on_merge":false,"on_merge_to":null},{"number":7,"waits_on_merge":false,"on_merge_to":null}]
+
+== 3-8. list, board, chip link, issue page, live events, plain URLs only
+PASS  3. list: PL-3 waits on the merge with a Merge on GitHub link, no gates  {"waits":true,"merge":{"text":"Merge on GitHub","href":"https://github.com/gannonh/punchlist-sandbox/pull/14","target":"_blank","rel":"noopener noreferrer"},"gates":null}
+PASS  3. list: PL-1 has no notice and keeps its gates  {"waits":false,"gates":"3 of 3 gates pass","chip":"https://github.com/gannonh/punchlist-sandbox/pull/7"}
+PASS  3. list at 390x844 has no horizontal scroll  [390,390]
+PASS  4. board: PL-3 waits on the merge with a Merge on GitHub link, no gates  {"waits":true,"merge":{"text":"Merge on GitHub","href":"https://github.com/gannonh/punchlist-sandbox/pull/14","target":"_blank","rel":"noopener noreferrer"},"gates":null}
+PASS  4. board: PL-1 has no notice and keeps its gates  {"waits":false,"gates":"3 of 3 gates pass","chip":"https://github.com/gannonh/punchlist-sandbox/pull/7"}
+PASS  4. board at 390x844 has no horizontal scroll  [390,390]
+PASS  5. PL-1 chip links to #7 with its label  {"href":"https://github.com/gannonh/punchlist-sandbox/pull/7","label":"Open on GitHub: pull request #7"}
+PASS  5. click opens GitHub in a popup, leaves the selection, opens no sheet, stays on the list  {"before":"true","popup":"https://github.com/gannonh/punchlist-sandbox/pull/7","selected":"true","dialogs":0,"path":"/w/PL"}
+PASS  5. Enter on the focused link opens a popup and stays on the list  {"popup":"https://github.com/gannonh/punchlist-sandbox/pull/7","path":"/w/PL"}
+PASS  5. Enter on the selected row opens /issues/PL-1  "/issues/PL-1"
+PASS  6. /issues/PL-1 has Open on GitHub to #7 and no notice  {"href":"https://github.com/gannonh/punchlist-sandbox/pull/7","target":"_blank","rel":"noopener noreferrer","notice":false,"title":"noopener noreferrer"}
+PASS  6. /issues/PL-3 notice with Merge on GitHub to #14, no conflicts  {"text":"Waits on the merge. PL-3 moves to Done when GitHub reports it.Merge on GitHub","link":{"text":"Merge on GitHub","href":"https://github.com/gannonh/punchlist-sandbox/pull/14"}}
+PASS  6. dirty adds the conflicts sentence  {"notice":"Waits on the merge. PL-3 moves to Done when GitHub reports it. The pull request has conflicts.Merge on GitHub","sql":"dirty"}
+PASS  7. converted_to_draft removes both within 2 s, chip reads #14 draft  {"ms":365,"chip":"#14 draft","draft":"t"}
+PASS  7. ready_for_review brings both back within 2 s  {"ms":521,"chip":"#14 open"}
+PASS  7. merged: PL-3 leaves Merging and the notice goes within 2 s; status done  {"ms":367,"status":"done"}
+PASS  8. javascript:alert(1): no chip link, PL-4 waits without a merge link, no issue-page links  {"rows":[{"id":"PL-1","link":false,"chip":"#7 open","waits":false,"merge":false},{"id":"PL-4","link":false,"chip":"#15 open","waits":true,"merge":false}],"pages":[{"open":false,"noticeLink":false,"notice":false},{"open":false,"noticeLink":false,"notice":true}]}
+PASS  8. https://github.com.evil.example/a/b/pull/7: no chip link, PL-4 waits without a merge link, no issue-page links  {"rows":[{"id":"PL-1","link":false,"chip":"#7 open","waits":false,"merge":false},{"id":"PL-4","link":false,"chip":"#15 open","waits":true,"merge":false}],"pages":[{"open":false,"noticeLink":false,"notice":false},{"open":false,"noticeLink":false,"notice":true}]}
+ALL PASS
+
+== 9. workflow decides (sandbox push, then restore; last line is the restored file's sha256, original 4fa930e9...)
+PASS  9. without the pr_merged rule no row waits within 2 s of the load, on_merge_to count 0, #15 leaves waits-on-merge  {"ok":true,"ms":106,"commit":"bf4ed520e83e847caa15d47e80b9f5d6204863a9","on_merge_to":0,"job":"done"}
+PASS  9. the original file brings the notice back  {"ok":true,"ms":210,"commit":"ea83a0d4ccd334d87f2e4f0cb7aa74bb2ae07251","on_merge_to":[{"key":"merging","name":"Merging","locked_to":[],"dispatch":null,"closed":false,"on_merge_to":"Done"}]}
+4fa930e9fca28bd4f111eda64fee504cbc6733b12e88f5daf5794e97f09f3d73  -
+
+== 10. render budget (first 500-row list pl:render, 102 Merging rows with open PRs, 20 loads each after 1 warm-up, alternating) and GET /api/issues bytes
+main {"samples":[17,17.3,15,15.2,15.4,15.8,16.5,16.2,14.9,16.3,16.7,16.4,15.7,15,15.1,15.2,15.5,15.7,16.8,16.2],"median":15.8,"waitsOnMergeRows":0,"issuesBytes":171876}
+branch {"samples":[15.9,16.4,16.2,20.4,16.7,15.9,15.9,17,16.6,17.7,20.3,17.9,16.9,15.7,16.6,16.7,16.5,16.4,16.8,16.5],"median":16.6,"waitsOnMergeRows":102,"issuesBytes":171876}
+branch/main median 1.051; PASS (within 10 %)
+GET /api/issues bytes main 171876, branch 171876: PASS
