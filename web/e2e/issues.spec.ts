@@ -491,6 +491,59 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   await context.close()
 })
 
+test('an issue in Merging waits on the merge, and its pull request links open GitHub without opening the issue', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a merge')
+  const head = { number: 400 + Number(id.split('-')[1]), sha: randomUUID().replaceAll('-', '').padEnd(40, '0') }
+  const url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(head.number)}`
+  await deliverPullRequest(request, id, 'opened', head)
+  await deliverPullRequest(request, id, 'ready_for_review', head)
+  await recorded(request, id, (pulls) => pulls.some((pull) => !pull.draft))
+  const agent = await ok<{ token: string }>(await request.post('/api/actors', { headers: person, data: { kind: 'codex' } }))
+  await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'agent_review' } }))
+  await ok(
+    await request.post(`/api/runs/${claim.run_id}/finish`, {
+      headers: bearer(runner),
+      data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+    }),
+  )
+  await deliverCheck(request, id, head, 'success')
+  await recorded(request, id, (pulls) => pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e')))
+  await ok(
+    await request.post(`/api/issues/${id}/proof`, {
+      headers: bearer(agent.token),
+      multipart: { title: 'Screenshot', file: { name: 'shot.png', mimeType: 'image/png', buffer: PNG } },
+    }),
+  )
+  await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'human_review' } }))
+  await ok(await request.post(`/api/issues/${id}/transitions`, { headers: person, data: { to: 'merging' } }))
+
+  await signIn(page)
+  const merging = row(page, id)
+  await expect(merging).toHaveAttribute('data-waits-on-merge', '')
+  await expect(merging).toContainText('Waits on the merge')
+  await expect(merging).not.toContainText('no gates')
+  await expect(merging.locator('[data-merge-link]')).toHaveAttribute('href', url)
+  const chip = merging.locator('a[data-pr-link]')
+  await expect(chip).toHaveAttribute('aria-label', `Open on GitHub: pull request #${String(head.number)}`)
+  const selected = await merging.getAttribute('aria-selected')
+  const popup = page.waitForEvent('popup')
+  await chip.click()
+  expect((await popup).url()).toContain(`/pull/${String(head.number)}`)
+  await expect(merging).toHaveAttribute('aria-selected', selected ?? 'false')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/w\/PL$/)
+
+  await page.goto(`/issues/${id}`)
+  await expect(page.locator('#pr [data-open-on-github]')).toHaveAttribute('href', url)
+  const notice = page.locator('#pr [data-waits-on-merge]')
+  await expect(notice).toContainText(`Waits on the merge. ${id} moves to Done when GitHub reports it.`)
+  await expect(notice.getByRole('link', { name: /Merge on GitHub/ })).toHaveAttribute('href', url)
+})
+
 test('an unresolved review thread shows on the open issue page as text with its link, and goes when resolved', async ({
   page,
   request,

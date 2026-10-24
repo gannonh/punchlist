@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { ExternalLink, GitMerge } from 'lucide-react'
+import { GitMerge } from 'lucide-react'
 import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
-import { StatusDot } from '@/components/atoms'
+import { GithubLink, StatusDot } from '@/components/atoms'
 import { useEventStream, useInbox, useIssues, usePullRequests, useSignOut } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
@@ -32,23 +32,8 @@ function useRenderMeasure(rows: number | undefined) {
   })
 }
 
-function GithubLink({ pr, text }: { pr: OpenPullRequest; text: string }) {
-  if (!pr.url) return null
-  return (
-    <a
-      href={pr.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={`${text}: pull request #${String(pr.number)}`}
-      className="inline-flex items-center gap-1 text-meta font-medium whitespace-nowrap text-primary hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-      onKeyDown={(event) => {
-        event.stopPropagation()
-      }}
-    >
-      {text}
-      <ExternalLink className="size-3 flex-none" aria-hidden="true" />
-    </a>
-  )
+function PrLink({ pr, text }: { pr: OpenPullRequest; text: string }) {
+  return pr.url ? <GithubLink url={pr.url} number={pr.number} text={text} /> : null
 }
 
 function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest) => void }) {
@@ -101,7 +86,7 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
         {mergeLabel(pr.merge_state)}
       </span>
       <span>
-        <GithubLink pr={pr} text="Open on GitHub" />
+        <PrLink pr={pr} text="Open on GitHub" />
       </span>
       {pr.waits_on_merge && (
         <div
@@ -112,7 +97,7 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
           <span className="flex-[1_1_200px]">
             <b className="text-warn">Waits on a merge on GitHub.</b> {waitNotice(pr)}
           </span>
-          <GithubLink pr={pr} text="Merge on GitHub" />
+          <PrLink pr={pr} text="Merge on GitHub" />
         </div>
       )}
     </div>
