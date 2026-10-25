@@ -15,7 +15,7 @@ use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
     Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    WorkflowInfo, Workspace, gate_lines,
+    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -164,6 +164,13 @@ pub enum ProjectCommand {
     Create { name: String },
     /// List the workspace's projects, each with its milestones and their PASS when text.
     List,
+    /// Rename a project.
+    Edit {
+        name: String,
+        /// The project's new name.
+        #[arg(long = "name", value_name = "NEW")]
+        new_name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -178,6 +185,27 @@ pub enum MilestoneCommand {
         #[arg(long, default_value = "")]
         pass_when: String,
     },
+    /// Rename a milestone or set its PASS when text, which a later Linear import keeps.
+    Edit {
+        name: String,
+        /// The project's name.
+        #[arg(long)]
+        project: String,
+        #[command(flatten)]
+        edit: MilestoneEdit,
+    },
+}
+
+/// What `pl milestone edit` sets: at least one of these.
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct MilestoneEdit {
+    /// The milestone's new name.
+    #[arg(long = "name", value_name = "NEW")]
+    pub new_name: Option<String>,
+    /// What must be true for the milestone to pass; `""` clears it.
+    #[arg(long)]
+    pub pass_when: Option<String>,
 }
 
 /// What `pl issue edit` sets or clears: at least one of these.
@@ -530,6 +558,41 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::Project(ProjectCommand::List) => {
             let projects = client.list_projects().await?.projects;
             write!(out, "{}", render_projects(&projects))?;
+            Ok(())
+        }
+        Command::Project(ProjectCommand::Edit { name, new_name }) => {
+            let projects = client.list_projects().await?.projects;
+            let id = find_project(&projects, &name)?.id.to_string();
+            let request = UpdateProject {
+                name: Some(new_name),
+            };
+            let project = client.update_project(&id, &request).await?;
+            writeln!(out, "Updated project {}.", project.name)?;
+            Ok(())
+        }
+        Command::Milestone(MilestoneCommand::Edit {
+            name,
+            project,
+            edit,
+        }) => {
+            let projects = client.list_projects().await?.projects;
+            let project = find_project(&projects, &project)?;
+            let milestone = (project.milestones.iter())
+                .find(|milestone| milestone.name == name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("project {} has no milestone named {name}", project.name)
+                })?;
+            let request = UpdateMilestone {
+                name: edit.new_name,
+                pass_when: edit.pass_when,
+            };
+            let (project_id, milestone_id) = (project.id.to_string(), milestone.id.to_string());
+            let milestone = (client.update_milestone(&project_id, &milestone_id, &request)).await?;
+            writeln!(
+                out,
+                "Updated milestone {} in {}.",
+                milestone.name, project.name
+            )?;
             Ok(())
         }
         Command::Milestone(MilestoneCommand::Create {
@@ -1351,7 +1414,8 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
             | EventDetail::Run
             | EventDetail::PullRequest
             | EventDetail::Proof
-            | EventDetail::Workflow => None,
+            | EventDetail::Workflow
+            | EventDetail::Project => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -1468,7 +1532,8 @@ fn render_show(
             EventDetail::Run
             | EventDetail::PullRequest
             | EventDetail::Proof
-            | EventDetail::Workflow => {}
+            | EventDetail::Workflow
+            | EventDetail::Project => {}
         }
     }
     text

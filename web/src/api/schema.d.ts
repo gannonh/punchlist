@@ -340,6 +340,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Rename a project. Each of its issues gets a `project` event. Person token. */
+        patch: operations["update_project"];
+        trace?: never;
+    };
     "/api/projects/{id}/milestones": {
         parameters: {
             query?: never;
@@ -355,6 +372,26 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{id}/milestones/{milestone_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Rename a milestone or set its `pass_when`, which a later Linear import then keeps. A rename
+         *     gives each of its issues a `project` event. Person token.
+         */
+        patch: operations["update_milestone"];
         trace?: never;
     };
     "/api/proof/{id}": {
@@ -1355,6 +1392,9 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "workflow";
+        } | {
+            /** @enum {string} */
+            kind: "project";
         };
         /** @description What the gates read for one issue. */
         Evidence: {
@@ -2307,6 +2347,24 @@ export interface components {
              */
             project?: string | null;
             title?: string;
+        };
+        /** @description `PATCH /api/projects/{id}/milestones/{milestone_id}`: at least one of the two. */
+        UpdateMilestone: {
+            /** @description Trimmed, 1 to 100 characters, unique in the project. */
+            name?: string | null;
+            /**
+             * @description What must be true for the milestone to pass; empty clears it. A later Linear import keeps
+             *     it.
+             */
+            pass_when?: string | null;
+        };
+        /** @description `PATCH /api/projects/{id}`. */
+        UpdateProject: {
+            /**
+             * @description Trimmed, 1 to 100 characters, unique in the workspace. Required; a request without it
+             *     is refused as changing nothing.
+             */
+            name?: string | null;
         };
         UsageLimit: {
             /**
@@ -3347,6 +3405,65 @@ export interface operations {
             };
         };
     };
+    update_project: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The project's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateProject"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Project"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No name, an empty or long one, or one the workspace already has. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     create_milestone: {
         parameters: {
             query?: never;
@@ -3388,6 +3505,67 @@ export interface operations {
                 };
             };
             /** @description An empty or long name, or one the project already has. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_milestone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The project's id */
+                id: string;
+                /** @description The milestone's id, in that project */
+                milestone_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateMilestone"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Milestone"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Nothing to change, an empty or long name, or one the project already has. */
             422: {
                 headers: {
                     [name: string]: unknown;

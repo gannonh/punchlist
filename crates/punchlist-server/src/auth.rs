@@ -83,7 +83,7 @@ enum Named {
     /// `/api/issues/{id}/...`: the issue's workspace, none when there is no such issue (the
     /// handler's 404). Another workspace's issue is 403.
     Issue(Option<Uuid>),
-    /// The row behind `/api/runs/{id}`, `/api/proof/{id}` or `/api/projects/{id}/milestones`,
+    /// The row behind `/api/runs/{id}`, `/api/proof/{id}` or `/api/projects/{id}` and below,
     /// none when there is no such row. Its handler refuses a row of another workspace.
     Row(Option<Uuid>),
 }
@@ -126,7 +126,7 @@ async fn named_workspace(
             }
             None => None,
         },
-        ["", "api", "projects", id, "milestones"] => match uuid(id) {
+        ["", "api", "projects", id, ..] => match uuid(id) {
             Some(id) => {
                 sqlx::query_scalar!("SELECT workspace_id FROM project WHERE id = $1", id)
                     .fetch_optional(pool)

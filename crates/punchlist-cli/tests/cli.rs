@@ -2062,3 +2062,113 @@ async fn one_config_reaches_each_workspace_of_the_account(pool: PgPool) {
     let flag = pl.run(&["--workspace", "PL", "issue", "list"]).await;
     assert_eq!(flag.stdout, "PL-1  Backlog  In Punchlist\n");
 }
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn projects_and_milestones_are_edited(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Slice"]).await;
+    for args in [
+        &["project", "create", "Punchlist"][..],
+        &[
+            "milestone",
+            "create",
+            "Gate 1",
+            "--project",
+            "Punchlist",
+            "--pass-when",
+            "Old",
+        ],
+        &[
+            "issue",
+            "edit",
+            "PL-1",
+            "--project",
+            "Punchlist",
+            "--milestone",
+            "Gate 1",
+        ],
+    ] {
+        let done = pl.run(args).await;
+        assert_eq!(done.code, 0, "{args:?}: {}", done.stderr);
+    }
+    let milestone = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 1",
+            "--project",
+            "Punchlist",
+            "--pass-when",
+            "New text",
+        ])
+        .await;
+    assert_eq!(
+        (milestone.code, milestone.stdout.as_str()),
+        (0, "Updated milestone Gate 1 in Punchlist.\n")
+    );
+    let project = pl
+        .run(&["project", "edit", "Punchlist", "--name", "Docs"])
+        .await;
+    assert_eq!(
+        (project.code, project.stdout.as_str()),
+        (0, "Updated project Docs.\n")
+    );
+    let renamed = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 1",
+            "--project",
+            "Docs",
+            "--name",
+            "Gate 2",
+            "--pass-when",
+            "",
+        ])
+        .await;
+    assert_eq!(renamed.stdout, "Updated milestone Gate 2 in Docs.\n");
+    let list = pl.run(&["project", "list"]).await;
+    assert_eq!(list.stdout, "Docs\n  Gate 2\n");
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout.contains("Project: Docs\nMilestone: Gate 2\n"),
+        "{}",
+        show.stdout
+    );
+
+    let nothing = pl
+        .run(&["milestone", "edit", "Gate 2", "--project", "Docs"])
+        .await;
+    assert_eq!(nothing.code, 2, "{}", nothing.stderr);
+    assert!(
+        nothing
+            .stderr
+            .contains("the following required arguments were not provided"),
+        "{}",
+        nothing.stderr
+    );
+    let unknown = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 9",
+            "--project",
+            "Docs",
+            "--name",
+            "x",
+        ])
+        .await;
+    assert_eq!(
+        (unknown.code, unknown.stderr.as_str()),
+        (1, "error: project Docs has no milestone named Gate 9\n")
+    );
+    let long = "x".repeat(101);
+    let refused = pl.run(&["project", "edit", "Docs", "--name", &long]).await;
+    assert_eq!(
+        (refused.code, refused.stderr.as_str()),
+        (
+            1,
+            "error: a project name is at most 100 characters (422 Unprocessable Entity)\n"
+        )
+    );
+}
