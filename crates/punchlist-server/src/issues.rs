@@ -28,7 +28,7 @@ use crate::github::{
     newest_check_runs, refresh_pull_requests, written_since,
 };
 use crate::rows::{issue, issue_rows};
-use crate::runs::RUNS_PER_ENTRY;
+use crate::runs::{RUNS_PER_ENTRY, why_unclaimed};
 use crate::workflow::{active_workflow, lock_workspace, status_info, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -234,6 +234,18 @@ async fn get_issue(
             limited.not_before.format("%Y-%m-%d %H:%M:%S UTC")
         )
     });
+    // Nothing is queued while the issue waits on a person.
+    if issue.waiting_on_person.is_none() {
+        let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+        issue.waiting_to_run = why_unclaimed(
+            &mut conn,
+            actor.workspace_id,
+            &workflow,
+            &issue,
+            state.lease,
+        )
+        .await?;
+    }
     Ok(Json(issue))
 }
 

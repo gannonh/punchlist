@@ -144,6 +144,7 @@ async fn create_show_move_and_refuse(pool: PgPool) {
         insta::assert_snapshot!(show.stdout, @r"
         PL-1  First
         Status: Start
+        waiting: no runner can run claude-code
 
         Body
 
@@ -402,6 +403,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         insta::assert_snapshot!(show.stdout.replace(&long, "[200 x]"), @r"
         PL-1  Do it
         Status: In Progress
+        waiting: a runner has not claimed it yet
 
         Pull requests
           None linked.

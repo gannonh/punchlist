@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT coalesce(\n                 (SELECT r.agent FROM run r WHERE r.issue_id = $1 AND r.outcome = 'running'\n                    AND r.status = $2\n                    AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id\n                                    AND a.state = 'running')),\n                 (SELECT d.agent FROM dispatch d WHERE d.issue_id = $1 AND d.run_id IS NULL\n                    AND (d.not_before IS NULL OR d.not_before <= now())\n                    AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = $1\n                                    AND run.outcome = 'running')))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coalesce",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "eb946e1d67a35daa41a163f56e8354121768068f10f47a7565205fb2ccd2243b"
+}

@@ -1,0 +1,41 @@
+{"run_id":"1792950584-185018810","line":144,"new":{"module_name":"cli","snapshot_name":"create_show_move_and_refuse-2","metadata":{"source":"crates/punchlist-cli/tests/cli.rs","assertion_line":144,"expression":"show.stdout"},"snapshot":"PL-1  First\nStatus: Start\nwaiting: no runner can run claude-code\n\nBody\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n\nRuns\n  No runs yet."},"old":{"module_name":"cli","metadata":{},"snapshot":"PL-1  First\nStatus: Start\n\nBody\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n\nRuns\n  No runs yet."}}
+{"run_id":"1792950584-185018810","line":402,"new":{"module_name":"cli","snapshot_name":"a_claimed_run_shows_on_the_issue_and_in_the_log-2","metadata":{"source":"crates/punchlist-cli/tests/cli.rs","assertion_line":402,"expression":"show.stdout.replace(&long, \"[200 x]\")"},"snapshot":"PL-1  Do it\nStatus: In Progress\nwaiting: a runner has not claimed it yet\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nGates for In Progress → Agent Review\n  pr_open: fail (no open pull request is linked to PL-1)\n  pr_ready: fail (no open pull request is linked to PL-1)\n  pr_names_issue: fail (no open pull request is linked to PL-1)\n  0 of 3 gates pass\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n  [time]  r1 (runner)  Start → In Progress\n\nRuns\n  [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out  cost $0.0453\n    cloning\n    editing\n    [200 x]"},"old":{"module_name":"cli","metadata":{},"snapshot":"PL-1  Do it\nStatus: In Progress\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nGates for In Progress → Agent Review\n  pr_open: fail (no open pull request is linked to PL-1)\n  pr_ready: fail (no open pull request is linked to PL-1)\n  pr_names_issue: fail (no open pull request is linked to PL-1)\n  0 of 3 gates pass\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n  [time]  r1 (runner)  Start → In Progress\n\nRuns\n  [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out  cost $0.0453\n    cloning\n    editing\n    [200 x]"}}
+{"run_id":"1792950584-185018810","line":1824,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":1842,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":267,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":1912,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":203,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":207,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":315,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":211,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":236,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":856,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":1941,"new":null,"old":null}
+{"run_id":"1792950584-185018810","line":892,"new":null,"old":null}
+{"run_id":"1792950610-128049864","line":111,"new":null,"old":null}
+{"run_id":"1792950610-128049864","line":144,"new":{"module_name":"cli","snapshot_name":"create_show_move_and_refuse-2","metadata":{"source":"crates/punchlist-cli/tests/cli.rs","assertion_line":144,"expression":"show.stdout"},"snapshot":"PL-1  First\nStatus: Start\nwaiting: no runner can run claude-code\n\nBody\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n\nRuns\n  No runs yet."},"old":{"module_name":"cli","metadata":{},"snapshot":"PL-1  First\nStatus: Start\n\nBody\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n\nRuns\n  No runs yet."}}
+{"run_id":"1792950621-272558621","line":353,"new":null,"old":null}
+{"run_id":"1792950621-272558621","line":402,"new":{"module_name":"cli","snapshot_name":"a_claimed_run_shows_on_the_issue_and_in_the_log-2","metadata":{"source":"crates/punchlist-cli/tests/cli.rs","assertion_line":402,"expression":"show.stdout.replace(&long, \"[200 x]\")"},"snapshot":"PL-1  Do it\nStatus: In Progress\nwaiting: a runner has not claimed it yet\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nGates for In Progress → Agent Review\n  pr_open: fail (no open pull request is linked to PL-1)\n  pr_ready: fail (no open pull request is linked to PL-1)\n  pr_names_issue: fail (no open pull request is linked to PL-1)\n  0 of 3 gates pass\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n  [time]  r1 (runner)  Start → In Progress\n\nRuns\n  [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out  cost $0.0453\n    cloning\n    editing\n    [200 x]"},"old":{"module_name":"cli","metadata":{},"snapshot":"PL-1  Do it\nStatus: In Progress\n\nPull requests\n  None linked.\n\nProof\n  None attached.\n\nGates for In Progress → Agent Review\n  pr_open: fail (no open pull request is linked to PL-1)\n  pr_ready: fail (no open pull request is linked to PL-1)\n  pr_names_issue: fail (no open pull request is linked to PL-1)\n  0 of 3 gates pass\n\nTimeline\n  [time]  Gannon (person)  created\n  [time]  Gannon (person)  Backlog → Todo\n  [time]  Gannon (person)  Todo → Start\n  [time]  r1 (runner)  Start → In Progress\n\nRuns\n  [run]  Claude Code  model agent default  runner r1  started [time]  duration 1m 23s  succeeded  tokens 1000 in / 250 out  cost $0.0453\n    cloning\n    editing\n    [200 x]"}}
+{"run_id":"1792950646-429745648","line":520,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":671,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1331,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1811,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1826,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1844,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":111,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":354,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":144,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":170,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":403,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":175,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":178,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":268,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":204,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1914,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":208,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":212,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":237,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":316,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":1943,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":858,"new":null,"old":null}
+{"run_id":"1792950646-429745648","line":894,"new":null,"old":null}

@@ -2323,3 +2323,246 @@ async fn a_claim_takes_the_model_of_the_version_its_dispatch_was_queued_under(po
         ]
     );
 }
+
+/// `waiting_to_run` of `GET /api/issues/{id}`, as the person reads it; `None` when the key is
+/// absent.
+async fn waiting_to_run(app: &Router, person: &str, id: &str) -> Option<String> {
+    let (status, issue) = call(app, person, "GET", &format!("/api/issues/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{issue}");
+    let object = issue.as_object().unwrap();
+    assert!(
+        object.get("waiting_to_run") != Some(&Value::Null),
+        "{issue}"
+    );
+    object
+        .get("waiting_to_run")
+        .map(|w| w.as_str().unwrap().to_string())
+}
+
+/// Says the claimed run waits on a person, so its finish dispatches no next run of it.
+async fn wait_on_person(app: &Router, claimed: &Value) {
+    let (status, body) = call(
+        app,
+        claimed["agent_token"].as_str().unwrap(),
+        "POST",
+        &format!("/api/runs/{}/waiting", claimed["run_id"].as_str().unwrap()),
+        Some(json!({"reason": "A check failed."})),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+}
+
+#[sqlx::test]
+async fn an_issue_no_runner_can_run_says_so_for_start_and_for_a_waiting_dispatch(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(&pool, 5, "").await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Review", &["todo"]).await;
+    create_and_move(&app, &person.token, "Parked", &[]).await;
+    let t = &person.token;
+    assert_eq!(
+        waiting_to_run(&app, t, "PL-1").await.as_deref(),
+        Some("no runner can run claude-code")
+    );
+    assert_eq!(
+        waiting_to_run(&app, t, "PL-2").await.as_deref(),
+        Some("no runner can run codex")
+    );
+    assert_eq!(waiting_to_run(&app, t, "PL-3").await, None);
+
+    // A runner of the other agent changes nothing, and claims nothing.
+    let codex = register(&app, t, "c", &["codex"]).await;
+    assert_eq!(
+        waiting_to_run(&app, t, "PL-1").await.as_deref(),
+        Some("no runner can run claude-code")
+    );
+    // The list's rows carry no reason.
+    let (_, list) = call(&app, t, "GET", "/api/issues", None).await;
+    let rows = list["issues"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .all(|row| row["issue"].get("waiting_to_run").is_none())
+    );
+    let (_, claimed) = claim(&app, &codex, 0).await;
+    assert_eq!(claimed["issue"]["id"], "PL-2");
+    assert_eq!(waiting_to_run(&app, t, "PL-2").await, None);
+}
+
+#[sqlx::test]
+async fn runners_that_stopped_heartbeating_are_named_with_the_newest_age(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "w", &["claude-code"]).await;
+    register(&app, &person.token, "older", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    sqlx::query(
+        "UPDATE runner SET last_heartbeat = now() - CASE name WHEN 'w' THEN interval '2 minutes'
+                                                             ELSE interval '3 hours' END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-1").await.as_deref(),
+        Some("no runner that can run claude-code is heartbeating (last seen 2m ago)")
+    );
+    let (status, _) = call(
+        &app,
+        &r.token,
+        "POST",
+        &format!("/api/runners/{}/heartbeat", r.id),
+        Some(json!({"held": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-1").await.as_deref(),
+        Some("a runner has not claimed it yet")
+    );
+}
+
+#[sqlx::test]
+async fn the_workspace_limit_is_the_reason_until_a_finish_frees_the_claim(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_max_concurrent(&pool, Some(1)).await;
+    let r = register(&app, &person.token, "w", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "One", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo", "start"]).await;
+    let (_, first) = claim(&app, &r, 0).await;
+    assert_eq!(first["issue"]["id"], "PL-1");
+    // An issue with a running attempt does not wait.
+    assert_eq!(waiting_to_run(&app, &person.token, "PL-1").await, None);
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-2").await.as_deref(),
+        Some("the workspace is at its limit of 1 running")
+    );
+    assert_eq!(
+        claim(&app, &r, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+
+    move_to_agent_review(&app, &pool, &first).await;
+    let (status, _) = finish(&app, &r, first["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-2").await.as_deref(),
+        Some("a runner has not claimed it yet")
+    );
+    assert_eq!(
+        claimed_issue(&claim(&app, &r, 0).await),
+        (StatusCode::OK, Some("PL-2"))
+    );
+    assert_eq!(waiting_to_run(&app, &person.token, "PL-2").await, None);
+}
+
+#[sqlx::test]
+async fn the_agent_limit_is_the_reason_until_a_finish_frees_the_claim(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(&pool, 5, "[dispatch.agent.codex]\nmax_concurrent = 1\n").await;
+    let c = register(&app, &person.token, "c", &["codex"]).await;
+    create_and_move(&app, &person.token, "One", &["todo"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo"]).await;
+    let (_, first) = claim(&app, &c, 0).await;
+    assert_eq!(first["issue"]["id"], "PL-1");
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-2").await.as_deref(),
+        Some("codex is at its limit of 1 running")
+    );
+    assert_eq!(
+        claim(&app, &c, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+
+    wait_on_person(&app, &first).await;
+    let (status, _) = finish(&app, &c, first["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        claimed_issue(&claim(&app, &c, 0).await),
+        (StatusCode::OK, Some("PL-2"))
+    );
+}
+
+#[sqlx::test]
+async fn with_both_limits_reached_the_workspace_limit_is_the_reason(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(&pool, 1, "[dispatch.agent.codex]\nmax_concurrent = 1\n").await;
+    let c = register(&app, &person.token, "c", &["codex"]).await;
+    create_and_move(&app, &person.token, "One", &["todo"]).await;
+    create_and_move(&app, &person.token, "Two", &["todo"]).await;
+    let (_, first) = claim(&app, &c, 0).await;
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-2").await.as_deref(),
+        Some("the workspace is at its limit of 1 running")
+    );
+    assert_eq!(
+        claim(&app, &c, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+
+    wait_on_person(&app, &first).await;
+    let (status, _) = finish(&app, &c, first["run_id"].as_str().unwrap(), succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    // The finished run waits on a person, so its issue has no reason either.
+    assert_eq!(waiting_to_run(&app, &person.token, "PL-1").await, None);
+    assert_eq!(
+        claimed_issue(&claim(&app, &c, 0).await),
+        (StatusCode::OK, Some("PL-2"))
+    );
+}
+
+#[sqlx::test]
+async fn a_status_locked_to_agents_has_no_reason_even_with_a_dispatch_row(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(&pool, 5, "").await;
+    create_and_move(&app, &person.token, "Review", &["todo"]).await;
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-1").await.as_deref(),
+        Some("no runner can run codex")
+    );
+    sqlx::query("UPDATE issue SET status = 'human_review' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(waiting_to_run(&app, &person.token, "PL-1").await, None);
+}
+
+#[sqlx::test]
+async fn a_run_waiting_for_its_next_attempt_names_the_runs_agent(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r, 0).await;
+    let (status, _) = finish(&app, &r, claimed["run_id"].as_str().unwrap(), lost(1)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-1").await.as_deref(),
+        Some("a runner has not claimed it yet")
+    );
+    sqlx::query("UPDATE runner SET agents = '{codex}'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        waiting_to_run(&app, &person.token, "PL-1").await.as_deref(),
+        Some("no runner can run claude-code")
+    );
+}
+
+#[sqlx::test]
+async fn an_issue_waiting_on_a_person_has_no_reason(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    for attempt in 0..3 {
+        let (status, claimed) = claim(&app, &r, 0).await;
+        assert_eq!(status, StatusCode::OK, "run {attempt}: {claimed}");
+        let (status, _) = finish(&app, &r, claimed["run_id"].as_str().unwrap(), succeeded()).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (_, issue) = call(&app, &person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(
+        issue["waiting_on_person"],
+        "3 runs in In Progress ended without moving it"
+    );
+    assert!(issue.get("waiting_to_run").is_none(), "{issue}");
+}

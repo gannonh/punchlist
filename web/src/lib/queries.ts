@@ -464,6 +464,8 @@ export const issuePageQueries = (id: string) => ({
   issue: queryOptions({
     queryKey: [...issueKey(id), 'issue'],
     queryFn: () => call(api.GET('/api/issues/{id}', path(id))),
+    // A lapsed heartbeat writes no event, so the reason an issue waits to be claimed is read again.
+    refetchInterval: (query) => (query.state.data?.waiting_to_run ? 15_000 : false),
   }),
   events: queryOptions({
     queryKey: [...issueKey(id), 'events'],

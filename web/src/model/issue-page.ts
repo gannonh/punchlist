@@ -237,6 +237,10 @@ export function tokens(input: number | null | undefined, output: number | null |
   return `${count(input)} in · ${count(output)} out`
 }
 
+/** The runs rail's line for an issue that waits to be claimed, with the server's reason; null when it does not wait. */
+export const waitingLine = (issue: Pick<Issue, 'waiting_to_run'>): string | null =>
+  issue.waiting_to_run ? `Waiting: ${issue.waiting_to_run}` : null
+
 /**
  * The cost the agent reported, as the server stored it: no rounding, so no float. Null when it
  * reported none (Codex), which is not `$0`.

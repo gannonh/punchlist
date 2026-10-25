@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use punchlist_api::{
     AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, GithubToken, Issue, LogLine,
     RefreshGithubToken, Repository, ResumeRun, Run, RunLog, RunOutcome, RunnerRef, WaitForPerson,
+    format_age,
 };
 use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
@@ -203,28 +204,13 @@ async fn try_claim(
     }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     // Under the workspace lock, so two claims cannot both take the last slot.
-    let running = sqlx::query!(
-        r#"SELECT r.agent, count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
-           WHERE r.workspace_id = $1 AND a.state = 'running' GROUP BY r.agent"#,
-        actor.workspace_id,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    if let Some(max) = workflow.max_concurrent()
-        && running.iter().map(|r| r.n).sum::<i64>() >= i64::from(max)
-    {
+    let reached = limits_reached(&mut tx, actor.workspace_id, &workflow).await?;
+    if reached.workspace.is_some() {
         tx.rollback().await?;
         return Ok(Claimed::AtLimit);
     }
     // An agent kind running `[dispatch.agent.<kind>] max_concurrent` attempts is not offered.
-    let full: Vec<&str> = (running.iter())
-        .filter(|r| {
-            workflow
-                .agent_limit(&r.agent)
-                .is_some_and(|max| r.n >= i64::from(max))
-        })
-        .map(|r| r.agent.as_str())
-        .collect();
+    let full: Vec<&str> = reached.agents.iter().map(|(a, _)| a.as_str()).collect();
     // An agent kind whose usage limit the runner hit is claimed again once it resets.
     let paused = sqlx::query_scalar!(
         "SELECT agent FROM runner_pause WHERE runner_id = $1 AND until > now()",
@@ -351,6 +337,120 @@ async fn try_claim(
         github: None,
         github_error: None,
     })))
+}
+
+/// The workflow's limits the workspace's running attempts (`attempt.state = 'running'`) have
+/// reached. `try_claim` and `why_unclaimed` both read them here, so what the issue page says
+/// and what a claim does cannot differ.
+struct Reached {
+    /// `[dispatch] max_concurrent`, when the workspace runs that many attempts.
+    workspace: Option<u32>,
+    /// Each agent kind running its `[dispatch.agent.<kind>] max_concurrent`, counted by
+    /// `run.agent`, with that limit.
+    agents: Vec<(String, u32)>,
+}
+
+async fn limits_reached(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+) -> sqlx::Result<Reached> {
+    let running = sqlx::query!(
+        r#"SELECT r.agent, count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
+           WHERE r.workspace_id = $1 AND a.state = 'running' GROUP BY r.agent"#,
+        workspace_id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let total: i64 = running.iter().map(|r| r.n).sum();
+    Ok(Reached {
+        workspace: workflow
+            .max_concurrent()
+            .filter(|&max| total >= i64::from(max)),
+        agents: (running.into_iter())
+            .filter_map(|r| {
+                let max = workflow.agent_limit(&r.agent)?;
+                (r.n >= i64::from(max)).then_some((r.agent, max))
+            })
+            .collect(),
+    })
+}
+
+/// Why no runner has claimed `issue`, when it waits to be claimed as `select_claimable` reads
+/// it: in Start, for the agent In Progress dispatches; behind a dispatch with no run yet, past
+/// its `not_before` and behind no running run of the issue, for the dispatch's agent; or
+/// behind a running run with no running attempt, for the run's agent. The first reason that
+/// holds: no runner of the workspace lists the agent; none that does has heartbeated within
+/// `lease`; the workspace is at its `max_concurrent`; the agent is at its own. Else a runner
+/// has not claimed it yet, since the server knows neither a runner's own `--max-concurrent`
+/// nor a claim in flight. `None` for an issue that does not wait, such as one in a status the
+/// workflow locks to agents or runners. Computed at each read: the runners' heartbeats age
+/// without writing anything.
+pub(crate) async fn why_unclaimed(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+    issue: &Issue,
+    lease: Duration,
+) -> sqlx::Result<Option<String>> {
+    let locked = workflow.locks().iter().any(|(status, roles)| {
+        status.as_str() == issue.status
+            && (roles.contains(&Role::Agent) || roles.contains(&Role::Runner))
+    });
+    if locked {
+        return Ok(None);
+    }
+    let agent = if issue.status == START {
+        workflow
+            .dispatch_for(IN_PROGRESS)
+            .map(|dispatch| dispatch.agent.clone())
+    } else {
+        sqlx::query_scalar!(
+            r#"SELECT coalesce(
+                 (SELECT r.agent FROM run r WHERE r.issue_id = $1 AND r.outcome = 'running'
+                    AND r.status = $2
+                    AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
+                                    AND a.state = 'running')),
+                 (SELECT d.agent FROM dispatch d WHERE d.issue_id = $1 AND d.run_id IS NULL
+                    AND (d.not_before IS NULL OR d.not_before <= now())
+                    AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = $1
+                                    AND run.outcome = 'running')))"#,
+            issue.id,
+            issue.status,
+        )
+        .fetch_one(&mut *conn)
+        .await?
+    };
+    let Some(agent) = agent else {
+        return Ok(None);
+    };
+    let seen = sqlx::query_scalar!(
+        "SELECT extract(epoch FROM now() - max(last_heartbeat))::float8 FROM runner
+         WHERE workspace_id = $1 AND $2 = ANY(agents)",
+        workspace_id,
+        agent,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let Some(seen) = seen else {
+        return Ok(Some(format!("no runner can run {agent}")));
+    };
+    if seen > lease.as_secs_f64() {
+        return Ok(Some(format!(
+            "no runner that can run {agent} is heartbeating (last seen {} ago)",
+            format_age(seen as i64)
+        )));
+    }
+    let reached = limits_reached(conn, workspace_id, workflow).await?;
+    if let Some(max) = reached.workspace {
+        return Ok(Some(format!(
+            "the workspace is at its limit of {max} running"
+        )));
+    }
+    if let Some((_, max)) = reached.agents.iter().find(|(a, _)| *a == agent) {
+        return Ok(Some(format!("{agent} is at its limit of {max} running")));
+    }
+    Ok(Some("a runner has not claimed it yet".to_string()))
 }
 
 /// What `try_claim` did.
