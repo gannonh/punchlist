@@ -1862,6 +1862,106 @@ async fn max_concurrent_is_read_from_the_active_workflow_at_each_claim(pool: PgP
     );
 }
 
+/// Makes the built-in workflow with `[dispatch] max_concurrent = max`, a Codex dispatch rule
+/// for Todo and `agent_limits` (`[dispatch.agent.<kind>]` tables) the active version.
+async fn set_agent_limits(pool: &PgPool, max: u32, agent_limits: &str) {
+    let built_in = punchlist_core::default_workflow();
+    let text = format!(
+        "{}\n[dispatch.status.todo]\nagent = \"codex\"\n{agent_limits}",
+        built_in
+            .source()
+            .replace("max_concurrent = 5", &format!("max_concurrent = {max}"))
+    );
+    activate(pool, &format!("agent-limits-{max}-{agent_limits}"), &text).await;
+}
+
+#[sqlx::test]
+async fn an_agent_at_its_limit_waits_and_other_agents_are_claimed(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(
+        &pool,
+        5,
+        "[dispatch.agent.claude-code]\nmax_concurrent = 1\n",
+    )
+    .await;
+    let both = register(&app, &person.token, "both", &["claude-code", "codex"]).await;
+    let builder = register(&app, &person.token, "builder", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build one", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Build two", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Review", &["todo"]).await;
+
+    let first = claim(&app, &both, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+    // PL-2 waits behind the Claude Code limit, and the Codex dispatch behind it is claimed.
+    let second = claim(&app, &both, 0).await;
+    assert_eq!(claimed_issue(&second), (StatusCode::OK, Some("PL-3")));
+    assert_eq!(second.1["agent"], "codex");
+    assert_eq!(
+        claim(&app, &builder, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+    assert_eq!(status_and_runs(&pool, "PL-2").await, ("start".into(), 0));
+
+    let waiting = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let answer = claim(&app, &builder, 20).await;
+            (answer, std::time::Instant::now())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !waiting.is_finished(),
+        "the claim waits at the agent's limit"
+    );
+    move_to_agent_review(&app, &pool, &first.1).await;
+    let finished_at = std::time::Instant::now();
+    let (status, _) = finish(
+        &app,
+        &both,
+        first.1["run_id"].as_str().unwrap(),
+        succeeded(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (answer, answered_at) = waiting.await.unwrap();
+    assert_eq!(claimed_issue(&answer), (StatusCode::OK, Some("PL-2")));
+    assert!(answered_at - finished_at < Duration::from_secs(2));
+}
+
+#[sqlx::test]
+async fn a_claim_needs_room_under_both_the_workspace_and_the_agent_limit(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_agent_limits(&pool, 1, "[dispatch.agent.codex]\nmax_concurrent = 2\n").await;
+    let both = register(&app, &person.token, "both", &["claude-code", "codex"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Review", &["todo"]).await;
+
+    let first = claim(&app, &both, 0).await;
+    assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
+    assert_eq!(
+        claim(&app, &both, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+    assert_eq!(status_and_runs(&pool, "PL-2").await, ("todo".into(), 0));
+
+    let (status, _) = finish(
+        &app,
+        &both,
+        first.1["run_id"].as_str().unwrap(),
+        succeeded(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // PL-1 is still In Progress, so its next Claude Code run goes first.
+    let next = claim(&app, &both, 0).await;
+    assert_eq!(claimed_issue(&next), (StatusCode::OK, Some("PL-1")));
+    assert_eq!(
+        claim(&app, &both, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
+}
+
 /// Makes the built-in workflow, with a person's move from Todo to Merging and a Claude Code
 /// dispatch rule for Merging that sets `serial`, the workspace's active version.
 async fn set_merging_dispatch(pool: &PgPool, serial: bool) {

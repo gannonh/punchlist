@@ -534,7 +534,8 @@ export interface paths {
         /**
          * Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
          *     names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
-         *     workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+         *     workspace runs the workflow's `[dispatch] max_concurrent` attempts, or the agent kinds that
+         *     have work run their `[dispatch.agent.<kind>] max_concurrent`; with `wait_seconds` the
          *     request waits for one. When several runners wait, each issue goes to
          *     one of them and the others get 409 `claim_taken`.
          */
