@@ -514,7 +514,7 @@ async fn run_attempt(
     let attempt = claim.attempt;
     // The branch is not checked yet, so it is logged escaped.
     tracing::info!(
-        "{} {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
+        "{} {} for {} (run {run_id}, attempt {attempt}) on branch {:?}, model {:?}",
         if resume_in.is_some() {
             "resumed"
         } else {
@@ -522,7 +522,8 @@ async fn run_attempt(
         },
         claim.issue.id,
         claim.agent,
-        claim.branch
+        claim.branch,
+        claim.model.as_deref().unwrap_or("the agent's default"),
     );
 
     let (lines_tx, lines_rx) = mpsc::channel(LOG_CHANNEL_LINES);
