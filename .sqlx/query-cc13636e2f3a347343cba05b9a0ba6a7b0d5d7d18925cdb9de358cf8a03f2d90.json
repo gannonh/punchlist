@@ -1,0 +1,180 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (i.id)\n                  i.id, i.title, i.status, r.from_status, r.to_status, r.gate, r.reason,\n                  a.id AS agent_id, a.name AS agent_name, a.role AS agent_role,\n                  a.kind AS agent_kind, e.seq AS since_seq, e.created_at AS since,\n                  (rd.since_seq IS NULL OR rd.since_seq < e.seq) AS \"unread!\"\n           FROM event e\n           JOIN refusal r ON r.id = e.refusal_id\n           JOIN actor a ON a.id = r.actor_id\n           JOIN issue i ON i.id = e.issue_id AND i.status = r.from_status\n           LEFT JOIN inbox_read rd\n                  ON rd.actor_id = $2 AND rd.issue_id = i.id AND rd.kind = 'refusal'\n           WHERE e.workspace_id = $1 AND e.kind = 'refusal' AND a.owner_id = $2\n             AND NOT EXISTS (SELECT 1 FROM event t\n                             WHERE t.issue_id = i.id AND t.kind = 'transition' AND t.seq > e.seq)\n           ORDER BY i.id, e.seq DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "from_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "from_status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "to_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "to_status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "gate",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "gate"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "refusal",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "agent_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "agent_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "agent_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "agent_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "actor",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "since_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "since",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "event",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "unread!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "cc13636e2f3a347343cba05b9a0ba6a7b0d5d7d18925cdb9de358cf8a03f2d90"
+}

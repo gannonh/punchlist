@@ -99,8 +99,9 @@ export const inboxQuery = (workspaceId: string) =>
     staleTime: Infinity,
   })
 
-// A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in.
-const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'workflow'])
+// A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in; a
+// refusal of an agent's move is an item.
+const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'workflow', 'refusal'])
 
 const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))

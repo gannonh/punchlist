@@ -103,7 +103,7 @@ const initials = (name: string): string =>
 
 /**
  * How an activity entry marks who wrote it. A refusal is the server's: it refused a move that GitHub's event
- * would have made, so the entry is marked as the server's and names GitHub in its text.
+ * would have made or an agent asked for, so the entry is marked as the server's and names that actor in its text.
  */
 export function actorMark(event: Pick<IssueEvent, 'actor' | 'detail'>): ActorMark {
   const { actor } = event

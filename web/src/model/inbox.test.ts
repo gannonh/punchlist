@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ageText, countText, ordered, runLines, type InboxItem, type RunItem } from './inbox'
+import { ageText, countText, ordered, refusalParts, runLines, type InboxItem, type RefusalItem, type RunItem } from './inbox'
 
 const item = (id: string, status: string, status_name: string, since: string, since_seq: number): InboxItem => ({
   kind: 'waiting',
@@ -59,5 +59,35 @@ describe('runLines', () => {
 
   it('says a run failed before the limit', () => {
     expect(runLines(run('failed', 'lease expired', false))).toEqual(['Run failed: lease expired'])
+  })
+})
+
+const refusal = (reason: string): RefusalItem => ({
+  kind: 'refusal',
+  issue: { id: 'PL-2', title: 'Issue PL-2', status: 'agent_review', status_name: 'Agent Review' },
+  agent: { id: '00000000-0000-0000-0000-000000000001', name: 'Reviewer', role: 'agent', kind: 'codex' },
+  from: 'agent_review',
+  from_name: 'Agent Review',
+  to: 'human_review',
+  to_name: 'Human Review',
+  gate: 'ci_green',
+  reason,
+  since: '2026-10-24T11:30:00Z',
+  since_seq: 12,
+  unread: true,
+})
+
+describe('refusalParts', () => {
+  it('names the agent, the move by status names, the gate and the reason', () => {
+    expect(refusalParts(refusal('1 of 6 checks failed on 3f2a1c4: test'))).toEqual({
+      agent: 'Reviewer (codex)',
+      move: 'Agent Review → Human Review',
+      gate: 'ci_green',
+      reason: '1 of 6 checks failed on 3f2a1c4: test',
+    })
+  })
+
+  it('keeps a reason with markup as the characters it has', () => {
+    expect(refusalParts(refusal('check <b>x</b> failed')).reason).toBe('check <b>x</b> failed')
   })
 })
