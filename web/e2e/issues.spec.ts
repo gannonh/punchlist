@@ -602,7 +602,9 @@ test('a screenshot uploaded from the issue page is the person\'s proof and shows
   await expect(page.locator('[data-proof-empty]')).toBeVisible()
   await page.locator('[data-proof-input]').setInputFiles({ name: 'board.png', mimeType: 'image/png', buffer: PNG })
   const thumb = page.locator('[data-proof="image"] img')
-  await expect(thumb).toHaveAttribute('alt', 'board.png')
+  // The thumbnail is inside the button that names it, so the image itself is decorative.
+  await expect(page.getByRole('button', { name: 'Open board.png' })).toBeVisible()
+  await expect(thumb).toHaveAttribute('alt', '')
   await expect.poll(() => thumb.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1)
   const stored = await ok<{ title: string; kind: string; actor: { name: string; role: string } }[]>(
     await request.get(`/api/issues/${id}/proof`, { headers: person }),
