@@ -1154,6 +1154,8 @@ mod tests {
                 parent: None,
                 project: None,
                 milestone: None,
+                blocked_by: Vec::new(),
+                blocks: Vec::new(),
                 waiting_on_person: None,
                 waiting_for_usage_limit: None,
                 linear: None,

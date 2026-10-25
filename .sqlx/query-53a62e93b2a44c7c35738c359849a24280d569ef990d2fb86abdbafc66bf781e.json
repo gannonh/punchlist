@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id AS issue_id, i.status AS issue_status, bl.id AS blocker_id,\n                bl.status AS blocker_status\n         FROM issue_blocker b\n         JOIN issue i ON i.id = b.issue_id\n         JOIN issue bl ON bl.id = b.blocker_id\n         WHERE b.workspace_id = $1\n           AND ($2::text[] IS NULL OR b.issue_id = ANY($2) OR b.blocker_id = ANY($2))\n         ORDER BY bl.number, i.number",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "issue_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "blocker_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "blocker_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "53a62e93b2a44c7c35738c359849a24280d569ef990d2fb86abdbafc66bf781e"
+}

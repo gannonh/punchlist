@@ -216,6 +216,13 @@ pub struct IssueEdit {
     /// Clear the milestone.
     #[arg(long)]
     pub no_milestone: bool,
+    /// An issue that blocks this one, such as PL-1; repeat it for more. Replaces the
+    /// blockers.
+    #[arg(long, conflicts_with = "no_blockers")]
+    pub blocked_by: Vec<String>,
+    /// Clear the blockers.
+    #[arg(long)]
+    pub no_blockers: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -319,8 +326,8 @@ pub enum IssueCommand {
     /// names the rule or gate.
     #[command(visible_alias = "transition")]
     Move { id: String, status: String },
-    /// Change an issue's title, body and labels, or set or clear its parent, project and
-    /// milestone.
+    /// Change an issue's title, body and labels, or set or clear its parent, project,
+    /// milestone and blockers.
     Edit {
         id: String,
         #[command(flatten)]
@@ -1183,7 +1190,7 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             let none = || "none".to_string();
             writeln!(
                 out,
-                "{}  {}\n  labels {} · parent {} · project {} · milestone {}",
+                "{}  {}\n  labels {} · parent {} · project {} · milestone {} · blocked by {}",
                 issue.id,
                 issue.title,
                 Some(issue.labels.join(", "))
@@ -1192,6 +1199,16 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 issue.parent.unwrap_or_else(none),
                 issue.project.map_or_else(none, |p| p.name),
                 issue.milestone.map_or_else(none, |m| m.name),
+                Some(
+                    issue
+                        .blocked_by
+                        .iter()
+                        .map(|i| i.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(none),
             )?;
         }
     }
@@ -1222,6 +1239,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         None => edit.body,
     };
     let labels = (!edit.label.is_empty() || edit.no_labels).then_some(edit.label);
+    let blocked_by = (!edit.blocked_by.is_empty() || edit.no_blockers).then_some(edit.blocked_by);
     let mut request = UpdateIssue {
         title: edit.title,
         body,
@@ -1229,6 +1247,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         parent: edit.parent.map(Some).or(edit.no_parent.then_some(None)),
         project: edit.no_project.then_some(None),
         milestone: edit.no_milestone.then_some(None),
+        blocked_by,
         ..UpdateIssue::default()
     };
     if edit.project.is_none() && edit.milestone.is_none() {
@@ -1349,6 +1368,14 @@ fn render_show(
     }
     if let Some(milestone) = &issue.milestone {
         text.push_str(&format!("Milestone: {}\n", milestone.name));
+    }
+    for (label, linked) in [("Blocked by", &issue.blocked_by), ("Blocks", &issue.blocks)] {
+        if !linked.is_empty() {
+            let linked: Vec<String> = (linked.iter())
+                .map(|i| format!("{} ({})", i.id, i.status_name))
+                .collect();
+            text.push_str(&format!("{label}: {}\n", linked.join(", ")));
+        }
     }
     if let Some(linear) = &issue.linear {
         text.push_str(&format!("Linear: {}  {}\n", linear.identifier, linear.url));
@@ -1686,6 +1713,8 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
             waiting_for_usage_limit: None,
             linear: None,
@@ -1801,6 +1830,8 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
             linear: None,

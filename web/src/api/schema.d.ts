@@ -129,7 +129,7 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+         * Edit an issue's title, body, labels, assignee, parent, project, milestone or blockers. Only the
          *     fields that change are written, with one `edited` event naming them; a request that
          *     changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
          *     in a role the issue's status locks may edit it.
@@ -1587,6 +1587,10 @@ export interface components {
         };
         Issue: {
             assignee?: components["schemas"]["Actor"] | null;
+            /** @description The issues that block this one, lowest number first. */
+            blocked_by?: components["schemas"]["LinkedIssue"][];
+            /** @description The issues this one blocks, lowest number first: `blocked_by` in reverse. */
+            blocks?: components["schemas"]["LinkedIssue"][];
             /** @description Markdown. */
             body: string;
             /** Format: date-time */
@@ -1732,6 +1736,12 @@ export interface components {
         LinearUser: {
             id: string;
             name: string;
+        };
+        /** @description An issue another one names, with its status. */
+        LinkedIssue: {
+            id: string;
+            status: string;
+            status_name: string;
         };
         LogLine: {
             /** Format: int32 */
@@ -2257,6 +2267,11 @@ export interface components {
              * @description A person's or an agent's actor id, or `null` to unassign.
              */
             assignee?: string | null;
+            /**
+             * @description The issue ids of the workspace that block the issue, replacing the ones it has; `[]`
+             *     clears them. Not the issue itself, and none that the issue already blocks.
+             */
+            blocked_by?: string[];
             /** @description Markdown. */
             body?: string;
             /** @description Each trimmed, 1 to 50 characters; at most 20, duplicates dropped. */
@@ -2731,7 +2746,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project. */
+            /** @description An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent or a blocker that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project. */
             422: {
                 headers: {
                     [name: string]: unknown;
