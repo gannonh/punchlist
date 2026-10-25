@@ -1275,14 +1275,15 @@ async fn settle_run(
 /// Dispatch again. The caller has just ended the run in this transaction, whatever the
 /// outcome, and holds the workspace's lock and then its issue's. When the issue is still
 /// where the run's dispatch put it (that dispatch's transition is the issue's latest),
-/// queues the next dispatch of that transition, for the same agent; `dispatch_workflow`
-/// gives its run the prompt of the transition's workflow version. Nothing is queued for a
-/// run without a dispatch, an issue that moved, a status the active workflow now locks to
-/// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
-/// run `RUNS_PER_ENTRY` of the entry, or a run whose agent said it waits on a person
-/// (`wait_for_person`): that issue waits on a person. Nor when the active workflow cannot be
-/// read, which is logged. `get_issue` and the inbox read the same three rules, the latest
-/// transition, the limit (`runs_ended`) and the waiting reason, to say so; change them together.
+/// queues the next dispatch of that transition, for the same agent and round; `dispatch_workflow`
+/// gives its run the prompt of the round's workflow version. Nothing is queued for a run
+/// without a dispatch, an issue that moved, a status the active workflow now locks to agents
+/// or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or run
+/// `RUNS_PER_ENTRY` of the round (a Run again starts the next, `runs_before`), or a run whose
+/// agent said it waits on a person (`wait_for_person`): that issue waits on a person. Nor when
+/// the active workflow cannot be read, which is logged. `waiting_on_person` reads the same
+/// three rules, the latest transition, the limit and the waiting reason, to say so; change
+/// them together.
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
@@ -1334,9 +1335,12 @@ async fn queue_redispatch(
         return Ok(());
     }
     sqlx::query!(
-        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number)
-         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1 FROM dispatch d
-         WHERE d.run_id = $1 AND d.run_number < $2
+        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
+                               workflow_version)
+         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1, d.runs_before,
+                d.workflow_version
+         FROM dispatch d
+         WHERE d.run_id = $1 AND d.run_number - d.runs_before < $2
            AND d.transition_id = (SELECT e.transition_id FROM event e
                                   WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
                                   ORDER BY e.seq DESC LIMIT 1)",

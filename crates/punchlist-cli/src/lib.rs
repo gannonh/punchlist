@@ -368,6 +368,8 @@ pub enum IssueCommand {
         #[arg(long)]
         body: String,
     },
+    /// Run again: give an issue waiting on a person another set of runs in its status.
+    Retry { id: String },
 }
 
 /// `~/.config/punchlist/config.toml`.
@@ -1231,6 +1233,16 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 )?;
             }
         }
+        IssueCommand::Retry { id } => {
+            let queued = client.run_again(&id).await?;
+            let EventDetail::RunAgain {
+                status_name, agent, ..
+            } = &queued.event.detail
+            else {
+                anyhow::bail!("the server answered a run again with another kind of event");
+            };
+            writeln!(out, "{id}: queued another {agent} run in {status_name}")?;
+        }
         IssueCommand::Comment { id, body } => {
             client.comment(&id, &body).await?;
             writeln!(out, "Commented on {id}.")?;
@@ -1403,7 +1415,8 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
             | EventDetail::PullRequest
             | EventDetail::Proof
             | EventDetail::Workflow
-            | EventDetail::Project => None,
+            | EventDetail::Project
+            | EventDetail::RunAgain { .. } => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -1506,6 +1519,9 @@ fn render_show(
                 text.push('\n');
             }
             EventDetail::Created => text.push_str(&format!("{who}created\n")),
+            EventDetail::RunAgain {
+                status_name, agent, ..
+            } => text.push_str(&format!("{who}Run again in {status_name} ({agent})\n")),
             EventDetail::Edited { fields } => {
                 text.push_str(&format!("{who}edited {}\n", fields.join(", ")));
             }
@@ -1875,6 +1891,44 @@ mod tests {
              \n\
              \x20   See #12.\n\
              \x20 2026-10-10 12:30:45 UTC  gannonh (github)  refused Merging → Done: gate proof_attached failed: no proof  [delivery d-2]\n"
+        );
+    }
+
+    #[test]
+    fn a_run_again_shows_on_the_timeline_with_its_status_and_agent() {
+        let run_again = EventDetail::RunAgain {
+            status: "in_progress".into(),
+            status_name: "In Progress".into(),
+            agent: "claude-code".into(),
+        };
+        let events = [event(punchlist_api::Role::Person, "Gannon", run_again)];
+        let issue = Issue {
+            id: "PL-7".into(),
+            title: "Fix".into(),
+            body: String::new(),
+            status: "in_progress".into(),
+            status_name: "In Progress".into(),
+            created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            assignee: None,
+            labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            waiting_on_person: None,
+            waiting_for_usage_limit: None,
+            waiting_to_run: None,
+            linear: None,
+        };
+        let text = render_show(&issue, &[], &[], None, &events);
+        assert!(
+            text.ends_with(
+                "\nTimeline\n\x20 2026-10-10 12:30:45 UTC  Gannon (person)  \
+                 Run again in In Progress (claude-code)\n"
+            ),
+            "{text}"
         );
     }
 

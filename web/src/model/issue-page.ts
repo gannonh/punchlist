@@ -147,6 +147,8 @@ export function eventText(event: IssueEvent): string {
       return `refused ${event.actor.name}'s move to ${detail.to_name}: gate ${detail.gate} failed: ${detail.reason}`
     case 'comment':
       return detail.body
+    case 'run_again':
+      return `Run again in ${detail.status_name} (${detail.agent})`
     default:
       return detail.kind
   }

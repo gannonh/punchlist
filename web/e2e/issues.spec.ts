@@ -736,3 +736,32 @@ test('select three rows by key, set their project and a label from the right-cli
   await expect.poll(async () => (await issue(a)).labels).toEqual(['ui'])
   expect((await issue(b)).labels).toEqual(['idea'])
 })
+
+test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
+  page,
+  request,
+}) => {
+  // One claim only: the runs of earlier tests' claims may hold the workspace's `max_concurrent`.
+  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a person')
+  const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
+  const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
+    headers: bearer(agent_token),
+    data: { reason: 'The check is flaky.' },
+  })
+  expect(waiting.status()).toBe(204)
+  await ok(
+    await request.post(`/api/runs/${claim.run_id}/finish`, {
+      headers: bearer(runner),
+      data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+    }),
+  )
+  await signIn(page)
+  await page.goto(`/issues/${id}`)
+  const notice = page.locator('[data-notice="waiting"]')
+  await expect(notice).toContainText('Claude Code is waiting on a person: The check is flaky.')
+  await notice.locator('[data-run-again]').click()
+  await expect(notice).toHaveCount(0, { timeout: 2000 })
+  await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
+  await page.keyboard.press('Escape')
+  await expect(row(page, id).locator('[data-run]')).toHaveText('Queued')
+})

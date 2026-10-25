@@ -2577,3 +2577,315 @@ async fn an_issue_waiting_on_a_person_has_no_reason(pool: PgPool) {
     );
     assert!(issue.get("waiting_to_run").is_none(), "{issue}");
 }
+
+/// Makes the built-in workflow, with `edit` applied to its text and `in_progress` as the
+/// In Progress prompt, the workspace's active version under its content hash.
+async fn activate_edited(pool: &PgPool, edit: (&str, &str), in_progress: &str) {
+    let built_in = punchlist_core::default_workflow();
+    let text = built_in.source().replace(edit.0, edit.1);
+    let mut prompts = built_in.prompts().clone();
+    prompts.insert("prompts/in_progress.md".into(), in_progress.into());
+    let (workflow, _) = punchlist_core::Workflow::from_stored(&text, prompts.clone()).unwrap();
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            SELECT id, $1, $1, $2, $3 FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+    )
+    .bind(workflow.version())
+    .bind(&text)
+    .bind(serde_json::to_value(&prompts).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Claims and finishes `runs` runs of whatever the runner claims, each `succeeded`, and
+/// returns the last claim.
+async fn run_out(app: &Router, runner: &Reg, runs: usize) -> Value {
+    let mut last = Value::Null;
+    for run in 0..runs {
+        let (status, claimed) = claim(app, runner, 0).await;
+        assert_eq!(status, StatusCode::OK, "run {run}: {claimed}");
+        let run_id = claimed["run_id"].as_str().unwrap();
+        let (status, body) = finish(app, runner, run_id, succeeded()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        last = claimed;
+    }
+    last
+}
+
+async fn waiting_on_person(app: &Router, person: &str, id: &str) -> Option<String> {
+    let (status, issue) = call(app, person, "GET", &format!("/api/issues/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{issue}");
+    issue["waiting_on_person"].as_str().map(str::to_string)
+}
+
+async fn run_again(app: &Router, token: &str, id: &str) -> (StatusCode, Value) {
+    call(app, token, "POST", &format!("/api/issues/{id}/retry"), None).await
+}
+
+async fn dispatches(pool: &PgPool, id: &str) -> Vec<(i32, i32, bool)> {
+    sqlx::query_as(
+        "SELECT run_number, runs_before, run_id IS NULL FROM dispatch WHERE issue_id = $1
+         ORDER BY run_number",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+const RAN_OUT: &str = "3 runs in In Progress ended without moving it";
+
+#[sqlx::test]
+async fn run_again_gives_an_issue_whose_runs_ran_out_a_fresh_set(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    let third = run_out(&app, &r, 3).await;
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some(RAN_OUT)
+    );
+
+    let (status, again) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["issue"]["status"], "in_progress");
+    assert_eq!(
+        again["event"]["detail"],
+        json!({"kind": "run_again", "status": "in_progress", "status_name": "In Progress",
+               "agent": "claude-code"})
+    );
+    assert_eq!(again["event"]["actor"]["name"], "Gannon");
+    assert_eq!(dispatches(&pool, "PL-1").await.last(), Some(&(4, 3, true)));
+    assert_eq!(waiting_on_person(&app, &person.token, "PL-1").await, None);
+    let (_, list) = call(&app, &person.token, "GET", "/api/issues", None).await;
+    assert_eq!(list["issues"][0]["run"]["state"], "queued");
+
+    // The person's decision is on the timeline.
+    let (_, timeline) = call(&app, &person.token, "GET", "/api/issues/PL-1/events", None).await;
+    let last = timeline.as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["detail"]["kind"], "run_again", "{timeline}");
+    assert_eq!(last["actor"]["role"], "person");
+
+    // Runs 4 and 5 end and are dispatched again; run 6 ends the round.
+    let fourth = run_out(&app, &r, 2).await;
+    assert_eq!(fourth["branch"], third["branch"]);
+    assert_eq!(
+        dispatches(&pool, "PL-1").await[3..],
+        [(4, 3, false), (5, 3, false), (6, 3, true)]
+    );
+    assert_eq!(waiting_on_person(&app, &person.token, "PL-1").await, None);
+    run_out(&app, &r, 1).await;
+    assert_eq!(dispatches(&pool, "PL-1").await.len(), 6);
+    assert_eq!(
+        status_and_runs(&pool, "PL-1").await,
+        ("in_progress".into(), 6)
+    );
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some(RAN_OUT)
+    );
+    assert_eq!(claim(&app, &r, 0).await.0, StatusCode::NO_CONTENT);
+
+    // A second round's Run again counts from the round before it.
+    let (status, _) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dispatches(&pool, "PL-1").await.last(), Some(&(7, 6, true)));
+}
+
+#[sqlx::test]
+async fn run_again_clears_an_agent_waiting_on_a_person(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    let (_, claimed) = claim(&app, &r, 0).await;
+    wait_on_person(&app, &claimed).await;
+    // The agent is still running: nothing to run again yet.
+    let (status, body) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("not_waiting"))
+    );
+    let run_id = claimed["run_id"].as_str().unwrap();
+    let (status, _) = finish(&app, &r, run_id, succeeded()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some("Claude Code is waiting on a person: A check failed.")
+    );
+
+    let (status, body) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(waiting_on_person(&app, &person.token, "PL-1").await, None);
+    assert_eq!(
+        dispatches(&pool, "PL-1").await,
+        [(1, 0, false), (2, 1, true)]
+    );
+    // The round is three runs from there.
+    run_out(&app, &r, 3).await;
+    assert_eq!(dispatches(&pool, "PL-1").await.len(), 4);
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some(RAN_OUT)
+    );
+}
+
+#[sqlx::test]
+async fn run_again_refuses_an_issue_not_waiting_on_a_person_and_writes_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Ran out", &["todo", "start"]).await;
+    run_out(&app, &r, 3).await;
+    create_and_move(&app, &person.token, "In Todo", &["todo"]).await;
+    create_and_move(&app, &person.token, "Running", &["todo", "start"]).await;
+    let (_, running) = claim(&app, &r, 0).await;
+    assert_eq!(running["issue"]["id"], "PL-3");
+    create_and_move(&app, &person.token, "Started", &["todo", "start"]).await;
+
+    let (status, _) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let events = || {
+        sqlx::query_scalar!("SELECT count(*) AS \"n!\" FROM event WHERE kind = 'run_again'")
+            .fetch_one(&pool)
+    };
+    let rows = || sqlx::query_scalar!("SELECT count(*) AS \"n!\" FROM dispatch").fetch_one(&pool);
+    let before = (rows().await.unwrap(), events().await.unwrap());
+    // A second request while its dispatch waits, Todo, a run running, Start before its claim.
+    for id in ["PL-1", "PL-2", "PL-3", "PL-4"] {
+        let (status, body) = run_again(&app, &person.token, id).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{id}: {body}");
+        assert_eq!(body["code"], "not_waiting");
+        assert_eq!(body["message"], format!("{id} is not waiting on a person"));
+    }
+    assert_eq!((rows().await.unwrap(), events().await.unwrap()), before);
+    let (status, _) = run_again(&app, &person.token, "PL-9").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn run_again_refuses_a_status_the_active_workflow_gives_no_dispatch_rule(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 3).await;
+    let rule = "[dispatch.status.in_progress]\nagent = \"claude-code\"\nprompt = \"prompts/in_progress.md\"\n";
+    activate_edited(&pool, (rule, ""), "Build it.\n").await;
+    let (status, body) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::CONFLICT, &json!("not_waiting"))
+    );
+    assert_eq!(dispatches(&pool, "PL-1").await.len(), 3);
+}
+
+#[sqlx::test]
+async fn run_again_is_locked_where_agents_or_runners_are_and_needs_a_person(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 3).await;
+    let (status, agent) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/actors",
+        Some(json!({"kind": "claude-code"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{agent}");
+    for token in [agent["token"].as_str().unwrap(), &r.token] {
+        let (status, body) = run_again(&app, token, "PL-1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+    assert_eq!(dispatches(&pool, "PL-1").await.len(), 3);
+
+    for roles in ["[\"agent\"]", "[\"runner\"]"] {
+        let lock = format!("[lock]\nin_progress = {roles}\n");
+        activate_edited(&pool, ("[lock]\n", &lock), "Build it.\n").await;
+        let (status, body) = run_again(&app, &person.token, "PL-1").await;
+        assert_eq!(
+            (status, &body["code"]),
+            (StatusCode::CONFLICT, &json!("locked")),
+            "{body}"
+        );
+        assert_eq!(dispatches(&pool, "PL-1").await.len(), 3);
+    }
+}
+
+#[sqlx::test]
+async fn a_run_again_runs_under_the_active_workflows_prompt(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    activate_edited(&pool, ("", ""), "Old prompt.\n").await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 1).await;
+    activate_edited(&pool, ("", ""), "New prompt.\n").await;
+    // The entry's redispatch still runs under the version the issue entered under.
+    let third = run_out(&app, &r, 2).await;
+    assert!(
+        third["prompt"].as_str().unwrap().contains("Old prompt."),
+        "{third}"
+    );
+
+    let (status, _) = run_again(&app, &person.token, "PL-1").await;
+    assert_eq!(status, StatusCode::OK);
+    let fourth = run_out(&app, &r, 1).await;
+    assert!(
+        fourth["prompt"].as_str().unwrap().contains("New prompt."),
+        "{fourth}"
+    );
+    // And so does the rest of its round, after another load.
+    activate_edited(&pool, ("", ""), "Newer prompt.\n").await;
+    let (_, fifth) = claim(&app, &r, 0).await;
+    assert!(
+        fifth["prompt"].as_str().unwrap().contains("New prompt."),
+        "{fifth}"
+    );
+}
+
+#[sqlx::test]
+async fn two_concurrent_run_agains_queue_one_dispatch(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 3).await;
+    let (a, b) = tokio::join!(
+        run_again(&app, &person.token, "PL-1"),
+        run_again(&app, &person.token, "PL-1"),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::CONFLICT]);
+    let waiting = dispatches(&pool, "PL-1").await;
+    assert_eq!(waiting.iter().filter(|d| d.2).count(), 1);
+}
+
+#[sqlx::test]
+async fn a_long_polling_runner_claims_a_run_again_at_once(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 3).await;
+    let started = std::time::Instant::now();
+    let (claimed, (status, _)) = tokio::join!(claim(&app, &r, 20), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        run_again(&app, &person.token, "PL-1").await
+    });
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed.0, StatusCode::OK, "{}", claimed.1);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}

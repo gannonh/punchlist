@@ -9,7 +9,8 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
-    IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
+    IssueWritten, MoveIssue, Moved, RunAgainResult, TransitionList, TransitionOption, UpdateIssue,
+    Verdict,
 };
 use punchlist_core::{
     CANCELED, DONE, Evidence, GateResult, IN_PROGRESS, ProofEvidence, ProofKind,
@@ -20,6 +21,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
+use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::events::{events, next_event_seq, record_row_event};
@@ -40,6 +42,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(issue_events))
         .routes(routes!(issue_gates))
         .routes(routes!(add_comment))
+        .routes(routes!(run_again))
 }
 
 /// Create an issue in the workflow's first status, and its `created` event.
@@ -189,35 +192,7 @@ async fn get_issue(
     let mut issue = issue(&mut conn, actor.workspace_id, &id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    let ended = runs_ended(&mut conn, std::slice::from_ref(&id))
-        .await?
-        .remove(&id);
-    // A run of the entry said it waits on a person (`wait_for_person`), which
-    // `queue_redispatch` reads too: it is the entry's last, since its end dispatches nothing.
-    let waiting = sqlx::query!(
-        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
-           JOIN run r ON r.id = d.run_id
-           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
-             AND d.transition_id = (SELECT e.transition_id FROM event e
-                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                    ORDER BY e.seq DESC LIMIT 1)"#,
-        id,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    issue.waiting_on_person = match (waiting, ended) {
-        (Some(waiting), _) => Some(format!(
-            "{} is waiting on a person: {}",
-            agent_display_name(&waiting.agent),
-            waiting.waiting_reason
-        )),
-        (None, ended) => ended.map(|runs| {
-            format!(
-                "{runs} runs in {} ended without moving it",
-                issue.status_name
-            )
-        }),
-    };
+    issue.waiting_on_person = waiting_on_person(&mut conn, &issue).await?;
     // A run of the entry hit its agent's usage limit and gave its dispatch back to wait for
     // the reset (`queue_redispatch`).
     let limited = sqlx::query!(
@@ -249,19 +224,61 @@ async fn get_issue(
     Ok(Json(issue))
 }
 
-/// The issues in `ids` whose entry into their status has had its last run end, with that
-/// run's number: nothing dispatches them again. The same two rules as `queue_redispatch`, the
-/// latest transition and the limit; change them together. `get_issue` and the inbox read it.
+/// Why the issue waits on a person, as `get_issue` says it: a run of the entry's round said so
+/// (`wait_for_person`), or the round's last run ended. `queue_redispatch` reads the same rules
+/// to queue nothing more, and a Run again only an issue this names.
+async fn waiting_on_person(
+    conn: &mut sqlx::PgConnection,
+    issue: &Issue,
+) -> sqlx::Result<Option<String>> {
+    // The entry's last dispatch only: one before a Run again's is of an earlier round.
+    let waiting = sqlx::query!(
+        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        issue.id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(waiting) = waiting {
+        return Ok(Some(format!(
+            "{} is waiting on a person: {}",
+            agent_display_name(&waiting.agent),
+            waiting.waiting_reason
+        )));
+    }
+    let ended = runs_ended(conn, std::slice::from_ref(&issue.id)).await?;
+    Ok(ended.get(&issue.id).map(|runs| {
+        format!(
+            "{runs} runs in {} ended without moving it",
+            issue.status_name
+        )
+    }))
+}
+
+/// The issues in `ids` whose entry into their status has had the last run of its round end,
+/// with how many runs the round had: nothing dispatches them again. The same rules as
+/// `queue_redispatch`, the latest transition, its last dispatch and the limit; change them
+/// together. `get_issue` and the inbox read it.
 pub(crate) async fn runs_ended(
     conn: &mut sqlx::PgConnection,
     ids: &[String],
 ) -> sqlx::Result<HashMap<String, i32>> {
     let rows = sqlx::query!(
-        "SELECT d.issue_id, d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
-         WHERE d.issue_id = ANY($1) AND d.run_number >= $2 AND r.outcome <> 'running'
-           AND d.transition_id = (SELECT e.transition_id FROM event e
-                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                  ORDER BY e.seq DESC LIMIT 1)",
+        r#"SELECT d.issue_id, d.run_number - d.runs_before AS "runs!"
+           FROM dispatch d JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = ANY($1) AND d.run_number - d.runs_before >= $2
+             AND r.outcome <> 'running'
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
         ids,
         RUNS_PER_ENTRY,
     )
@@ -269,8 +286,114 @@ pub(crate) async fn runs_ended(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| (row.issue_id, row.run_number))
+        .map(|row| (row.issue_id, row.runs))
         .collect())
+}
+
+/// Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
+/// `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+/// starting a round (`runs_before`) under the active workflow's agent and version, and writes
+/// the person's `run_again` event, in one transaction. Person token.
+#[utoipa::path(
+    post,
+    path = "/api/issues/{id}/retry",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = RunAgainResult),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "Not a person's token."),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody,
+         description = "`locked`: the status is locked to the person, agents or runners. `not_waiting`: the issue does not wait on a person."),
+    )
+)]
+async fn run_again(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Json<RunAgainResult>, ApiError> {
+    person_only(&actor)?;
+    let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
+    let status = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    // No runner claims an issue in a status locked to agents or runners (`select_claimable`).
+    for role in [actor.role, Role::Agent, Role::Runner] {
+        workflow.check_unlocked(&status, role)?;
+    }
+    let not_waiting = || ApiError::NotWaiting(id.clone());
+    let rule = workflow.dispatch_for(&status).ok_or_else(not_waiting)?;
+    let issue = issue(&mut tx, actor.workspace_id, &id)
+        .await?
+        .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    // The agent that said it waits may still be running, and a second request finds the
+    // dispatch the first queued.
+    let busy = sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM run WHERE issue_id = $1 AND outcome = 'running')
+               OR EXISTS (SELECT 1 FROM dispatch WHERE issue_id = $1 AND run_id IS NULL)
+           AS "busy!""#,
+        id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if busy || waiting_on_person(&mut tx, &issue).await?.is_none() {
+        return Err(not_waiting());
+    }
+    // Waiting on a person means the entry has a dispatch whose run ended.
+    sqlx::query!(
+        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
+                               workflow_version)
+         SELECT d.issue_id, d.transition_id, $2, d.run_number + 1, d.run_number, $3
+         FROM dispatch d
+         WHERE d.issue_id = $1
+           AND d.transition_id = (SELECT e.transition_id FROM event e
+                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                  ORDER BY e.seq DESC LIMIT 1)
+         ORDER BY d.run_number DESC LIMIT 1",
+        id,
+        rule.agent,
+        workflow.version(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    let seq = next_event_seq(&mut tx, actor.workspace_id).await?;
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, status, agent)
+         VALUES ($1, $2, $3, 'run_again', $4, $5, $6) RETURNING created_at",
+        actor.workspace_id,
+        seq,
+        id,
+        actor.id,
+        status,
+        rule.agent,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let agent = rule.agent.clone();
+    tx.commit().await?;
+    // Wake runners that are long-polling for work.
+    let _ = state.starts.send((actor.workspace_id, id.clone()));
+    Ok(Json(RunAgainResult {
+        event: Event {
+            seq,
+            issue_id: id,
+            actor: (&actor).into(),
+            created_at,
+            detail: EventDetail::RunAgain {
+                status_name: issue.status_name.clone(),
+                status,
+                agent,
+            },
+        },
+        issue,
+    }))
 }
 
 /// Move an issue to another status. The workflow's lock, role and gate rules are checked,

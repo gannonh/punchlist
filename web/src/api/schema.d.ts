@@ -258,6 +258,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/issues/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
+         *     `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+         *     starting a round (`runs_before`) under the active workflow's agent and version, and writes
+         *     the person's `run_again` event, in one transaction. Person token.
+         */
+        post: operations["run_again"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/issues/{id}/review-threads": {
         parameters: {
             query?: never;
@@ -1398,6 +1420,14 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "project";
+        } | {
+            /** @description The agent key of the active workflow's dispatch rule for `status`. */
+            agent: string;
+            /** @enum {string} */
+            kind: "run_again";
+            status: string;
+            /** @description `status` as people read it, such as `In Progress`. */
+            status_name: string;
         };
         /** @description What the gates read for one issue. */
         Evidence: {
@@ -2199,6 +2229,11 @@ export interface components {
             runner: components["schemas"]["RunnerRef"];
             /** Format: date-time */
             started_at: string;
+        };
+        /** @description `POST /api/issues/{id}/retry`: the issue, and the `run_again` event. */
+        RunAgainResult: {
+            event: components["schemas"]["Event"];
+            issue: components["schemas"]["Issue"];
         };
         /** @description `GET /api/runs/{id}/log`: every line, oldest first. */
         RunLog: {
@@ -3202,6 +3237,62 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    run_again: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Issue id, such as PL-1 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAgainResult"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `locked`: the status is locked to the person, agents or runners. `not_waiting`: the issue does not wait on a person. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

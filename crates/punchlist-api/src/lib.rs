@@ -366,6 +366,13 @@ pub struct Moved {
     pub warning: Option<String>,
 }
 
+/// `POST /api/issues/{id}/retry`: the issue, and the `run_again` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunAgainResult {
+    pub issue: Issue,
+    pub event: Event,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Actor {
     pub id: Uuid,
@@ -450,6 +457,15 @@ pub enum EventDetail {
     Workflow,
     /// The issue's project or milestone was renamed.
     Project,
+    /// A person gave the issue, whose runs in `status` had ended without moving it, another
+    /// set of runs there, the first of them queued for `agent`.
+    RunAgain {
+        status: String,
+        /// `status` as people read it, such as `In Progress`.
+        status_name: String,
+        /// The agent key of the active workflow's dispatch rule for `status`.
+        agent: String,
+    },
 }
 
 impl EventDetail {

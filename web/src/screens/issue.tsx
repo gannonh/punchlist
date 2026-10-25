@@ -19,6 +19,7 @@ import {
   useEventStream,
   useMove,
   useReadFromGithub,
+  useRunAgain,
 } from '@/lib/queries'
 import { age, agentName, assigneeView, pullRequestView, waitsOnMerge, type Actor, type WaitsOnMerge } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
@@ -326,6 +327,7 @@ export function IssueScreen({
 
           <div className="main">
             <Notice
+              id={id}
               moves={moves}
               viewer={viewer}
               waiting={data.waiting_on_person ?? null}
@@ -456,12 +458,42 @@ function DependenciesPanel({ issue }: { issue: Issue }) {
   )
 }
 
+/** A person gives an issue that waits on them another set of runs in its status. */
+function RunAgain({ id }: { id: string }) {
+  const runAgain = useRunAgain(id)
+  // `isPending` reaches the button after a render, which a double click's second click can beat.
+  const sent = useRef(false)
+  return (
+    <Button
+      variant="outline"
+      size="xs"
+      className="flex-none self-center"
+      data-run-again
+      disabled={runAgain.isPending}
+      aria-busy={runAgain.isPending}
+      onClick={() => {
+        if (sent.current) return
+        sent.current = true
+        runAgain.mutate(undefined, {
+          onSettled: () => {
+            sent.current = false
+          },
+        })
+      }}
+    >
+      Run again
+    </Button>
+  )
+}
+
 function Notice({
+  id,
   moves,
   viewer,
   waiting,
   usageLimit,
 }: {
+  id: string
   moves: TransitionList | undefined
   viewer: Actor
   waiting: string | null
@@ -493,9 +525,10 @@ function Notice({
     return (
       <div className="notice border-warn-line bg-warn-soft text-[#7c3a06]" data-notice="waiting" role="status">
         {lock}
-        <div>
+        <div className="min-w-0 flex-1">
           <strong className="text-warn">Waiting on a person:</strong> {waiting}.
         </div>
+        {viewer.role === 'person' && <RunAgain id={id} />}
       </div>
     )
   if (usageLimit)
