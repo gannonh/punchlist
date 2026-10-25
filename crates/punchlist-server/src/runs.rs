@@ -400,39 +400,36 @@ pub(crate) async fn why_unclaimed(
     if locked {
         return Ok(None);
     }
-    let agent = if issue.status == START {
-        workflow
-            .dispatch_for(IN_PROGRESS)
-            .map(|dispatch| dispatch.agent.clone())
-    } else {
-        sqlx::query_scalar!(
-            r#"SELECT coalesce(
+    let start_agent = workflow.dispatch_for(IN_PROGRESS).map(|d| d.agent.as_str());
+    // Select the waiting agent and its newest heartbeat together: with the workflow read
+    // and shared limit count, the issue read adds at most three queries.
+    let candidate = sqlx::query!(
+        r#"SELECT agent AS "agent!",
+                 (SELECT extract(epoch FROM now() - max(last_heartbeat))::float8 FROM runner
+                  WHERE workspace_id = $3 AND candidate.agent = ANY(agents)) AS seen
+               FROM (SELECT coalesce(
                  (SELECT r.agent FROM run r WHERE r.issue_id = $1 AND r.outcome = 'running'
                     AND r.status = $2
                     AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
                                     AND a.state = 'running')),
-                 (SELECT d.agent FROM dispatch d WHERE d.issue_id = $1 AND d.run_id IS NULL
+                 CASE WHEN $2 = 'start' THEN $4::text ELSE
+                  (SELECT d.agent FROM dispatch d WHERE d.issue_id = $1 AND d.run_id IS NULL
                     AND (d.not_before IS NULL OR d.not_before <= now())
                     AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = $1
-                                    AND run.outcome = 'running')))"#,
-            issue.id,
-            issue.status,
-        )
-        .fetch_one(&mut *conn)
-        .await?
-    };
-    let Some(agent) = agent else {
+                                    AND run.outcome = 'running')) END) AS agent) candidate
+               WHERE agent IS NOT NULL"#,
+        issue.id,
+        issue.status,
+        workspace_id,
+        start_agent,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(candidate) = candidate else {
         return Ok(None);
     };
-    let seen = sqlx::query_scalar!(
-        "SELECT extract(epoch FROM now() - max(last_heartbeat))::float8 FROM runner
-         WHERE workspace_id = $1 AND $2 = ANY(agents)",
-        workspace_id,
-        agent,
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-    let Some(seen) = seen else {
+    let agent = candidate.agent;
+    let Some(seen) = candidate.seen else {
         return Ok(Some(format!("no runner can run {agent}")));
     };
     if seen > lease.as_secs_f64() {

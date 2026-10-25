@@ -300,9 +300,6 @@ pub struct Workspace {
     pub repository: String,
 }
 
-/// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
-/// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
-/// the fence.
 /// An age in whole units: `4s`, `3m` or `2h`. A negative age is `0s`.
 pub fn format_age(seconds: i64) -> String {
     let seconds = seconds.max(0);
@@ -315,6 +312,9 @@ pub fn format_age(seconds: i64) -> String {
     }
 }
 
+/// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
+/// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
+/// the fence.
 pub fn plain_pull_request_url(number: i64, url: &str) -> Option<&str> {
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.split('/');
