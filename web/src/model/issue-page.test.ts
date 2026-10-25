@@ -72,7 +72,13 @@ const refused = event('github', 'gannonh', {
   workflow_version: 'sha256:1',
 })
 const edited = event('person', 'Gannon Hall', { kind: 'edited', fields: ['title', 'labels', 'assignee'] })
-const timeline = [created, comment, moved, refused, edited]
+const ranAgain = event('person', 'Gannon Hall', {
+  kind: 'run_again',
+  status: 'in_progress',
+  status_name: 'In Progress',
+  agent: 'claude-code',
+})
+const timeline = [created, comment, moved, refused, edited, ranAgain]
 
 describe('gateSummary', () => {
   test('counts the passing gates and names the first that fails', () => {
@@ -104,6 +110,7 @@ describe('actorMark', () => {
       { mark: 'runner', name: 'sartre', chip: 'runner', initials: '' },
       { mark: 'server', name: 'Punchlist', chip: 'server', initials: 'PL' },
       { mark: 'person', name: 'Gannon Hall', chip: null, initials: 'GH' },
+      { mark: 'person', name: 'Gannon Hall', chip: null, initials: 'GH' },
     ])
   })
 })
@@ -112,7 +119,7 @@ describe('feedEntries', () => {
   const seqs = (feed: Parameters<typeof feedEntries>[1]) => feedEntries(timeline, feed).map((e) => e.seq)
 
   test('All keeps every entry, Comments the comments, Transitions the moves and refusals', () => {
-    expect(seqs('all')).toEqual([created.seq, comment.seq, moved.seq, refused.seq, edited.seq])
+    expect(seqs('all')).toEqual([created.seq, comment.seq, moved.seq, refused.seq, edited.seq, ranAgain.seq])
     expect(seqs('comments')).toEqual([comment.seq])
     expect(seqs('transitions')).toEqual([moved.seq, refused.seq])
   })
@@ -124,6 +131,7 @@ describe('feedEntries', () => {
       'moved Start → In Progress',
       "refused gannonh's move to Done: gate pr_names_issue failed: pull request #7 names no issue",
       'edited the title, labels and assignee',
+      'Run again in In Progress (claude-code)',
     ])
   })
 })

@@ -2174,3 +2174,56 @@ async fn projects_and_milestones_are_edited(pool: PgPool) {
         )
     );
 }
+
+/// `pl issue retry` gives an issue whose three runs ended another set, and refuses one that
+/// does not wait on a person with the server's message.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn issue_retry_queues_another_run_and_refuses_an_issue_not_waiting(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let runner = register(&pl, "r1").await;
+    for _ in 0..3 {
+        let claim = runner.claim(0).await.unwrap().unwrap();
+        let finish = FinishRun {
+            attempt: claim.attempt,
+            outcome: RunOutcome::Succeeded,
+            reason: None,
+            duration_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            lost: false,
+            usage_limit: None,
+        };
+        let run = claim.run_id.to_string();
+        runner.finish_run(&run, &finish).await.unwrap();
+    }
+
+    let retried = pl.run(&["issue", "retry", "PL-1"]).await;
+    assert_eq!(
+        (retried.code, retried.stdout.as_str()),
+        (0, "PL-1: queued another claude-code run in In Progress\n")
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        !show.stdout.contains("waiting on a person"),
+        "{}",
+        show.stdout
+    );
+    assert!(
+        show.stdout
+            .contains("Gannon (person)  Run again in In Progress (claude-code)\n"),
+        "{}",
+        show.stdout
+    );
+
+    let again = pl.run(&["issue", "retry", "PL-1"]).await;
+    assert_eq!(again.code, 1);
+    assert!(
+        again.stderr.contains("PL-1 is not waiting on a person"),
+        "{}",
+        again.stderr
+    );
+}

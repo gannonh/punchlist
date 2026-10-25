@@ -7,9 +7,9 @@ use punchlist_api::{
     GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList,
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
     Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
-    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
-    UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson, WorkflowInfo, Workspace,
-    proof_type_by_extension,
+    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunAgainResult, RunLog, RunnerList,
+    SearchResults, Session, UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson,
+    WorkflowInfo, Workspace, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -167,6 +167,13 @@ impl Client {
     pub async fn move_issue(&self, id: &str, to: &str) -> Result<Moved, ClientError> {
         let request = MoveIssue { to: to.to_string() };
         self.send(Method::POST, &["issues", id, "transitions"], Some(&request))
+            .await
+    }
+
+    /// Run again: gives an issue that waits on a person another set of runs in its status.
+    /// A person's token.
+    pub async fn run_again(&self, id: &str) -> Result<RunAgainResult, ClientError> {
+        self.send::<(), _>(Method::POST, &["issues", id, "retry"], None)
             .await
     }
 

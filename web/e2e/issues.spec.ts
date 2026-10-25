@@ -736,3 +736,33 @@ test('select three rows by key, set their project and a label from the right-cli
   await expect.poll(async () => (await issue(a)).labels).toEqual(['ui'])
   expect((await issue(b)).labels).toEqual(['idea'])
 })
+
+test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
+  page,
+  request,
+}) => {
+  const { id, runner, claim: first } = await claimedInProgress(request, 'Ran out of runs')
+  let claim: { run_id: string; attempt: number; issue: { id: string } } = { ...first, issue: { id } }
+  for (let run = 1; ; run += 1) {
+    await ok(
+      await request.post(`/api/runs/${claim.run_id}/finish`, {
+        headers: bearer(runner),
+        data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+      }),
+    )
+    if (run === 3) break
+    do {
+      claim = await ok(await request.post('/api/runs/claim', { headers: bearer(runner), data: {} }))
+    } while (claim.issue.id !== id)
+  }
+  await signIn(page)
+  await row(page, id).click()
+  await page.keyboard.press('Enter')
+  const notice = page.locator('[data-notice="waiting"]')
+  await expect(notice).toContainText('3 runs in In Progress ended without moving it')
+  await notice.locator('[data-run-again]').click()
+  await expect(notice).toHaveCount(0, { timeout: 2000 })
+  await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
+  await page.keyboard.press('Escape')
+  await expect(row(page, id).locator('[data-run]')).toHaveText('Queued')
+})

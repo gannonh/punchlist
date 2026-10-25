@@ -100,8 +100,8 @@ export const inboxQuery = (workspaceId: string) =>
   })
 
 // A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in; a
-// refusal of an agent's move is an item.
-const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'workflow', 'refusal'])
+// refusal of an agent's move is an item; a Run again ends one.
+const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'run_again', 'workflow', 'refusal'])
 
 const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))
@@ -520,6 +520,21 @@ export function useComment(id: string) {
     onError: (error) => {
       toast.error(`The comment was not posted. ${refusal(error)}`)
     },
+  })
+}
+
+/**
+ * Run again: the issue, which waits on a person, gets another set of runs in its status. Not optimistic: the notice
+ * goes when the page reads the issue again. A refusal shows the server's message, and the page reads it again too.
+ */
+export function useRunAgain(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => call(api.POST('/api/issues/{id}/retry', path(id))),
+    onError: (error) => {
+      toast.error(`${id} was not run again. ${refusal(error)}`)
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
   })
 }
 

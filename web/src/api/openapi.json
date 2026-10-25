@@ -860,6 +860,72 @@
         }
       }
     },
+    "/api/issues/{id}/retry": {
+      "post": {
+        "summary": "Run again: an issue that waits on a person (`waiting_on_person`) gets another set of\n`RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,\nstarting a round (`runs_before`) under the active workflow's agent and version, and writes\nthe person's `run_again` event, in one transaction. Person token.",
+        "operationId": "run_again",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id, such as PL-1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunAgainResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`locked`: the status is locked to the person, agents or runners. `not_waiting`: the issue does not wait on a person.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/issues/{id}/review-threads": {
       "get": {
         "summary": "The unresolved review threads of an issue's open pull requests, as last recorded: a thread\nevent, a gated request and `get_issue` record them. Reads nothing from GitHub. The thread\ntext is from outside the team.",
@@ -4286,6 +4352,35 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A person gave the issue, whose runs in `status` had ended without moving it, another\nset of runs there, the first of them queued for `agent`.",
+            "required": [
+              "status",
+              "status_name",
+              "agent",
+              "kind"
+            ],
+            "properties": {
+              "agent": {
+                "type": "string",
+                "description": "The agent key of the active workflow's dispatch rule for `status`."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "run_again"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "status_name": {
+                "type": "string",
+                "description": "`status` as people read it, such as `In Progress`."
+              }
+            }
           }
         ]
       },
@@ -6320,6 +6415,22 @@
           "started_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "RunAgainResult": {
+        "type": "object",
+        "description": "`POST /api/issues/{id}/retry`: the issue, and the `run_again` event.",
+        "required": [
+          "issue",
+          "event"
+        ],
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "issue": {
+            "$ref": "#/components/schemas/Issue"
           }
         }
       },

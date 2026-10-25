@@ -143,6 +143,8 @@ struct EventRow {
     gate: Option<String>,
     reason: Option<String>,
     edited_fields: Option<Vec<String>>,
+    status: Option<String>,
+    agent: Option<String>,
 }
 
 impl TryFrom<EventRow> for Event {
@@ -162,6 +164,14 @@ impl TryFrom<EventRow> for Event {
                 fields: row
                     .edited_fields
                     .ok_or_else(|| corrupt("incomplete edited"))?,
+            },
+            ("run_again", None) => match (row.status, row.agent) {
+                (Some(status), Some(agent)) => EventDetail::RunAgain {
+                    status_name: display_name(&status),
+                    status,
+                    agent,
+                },
+                _ => return Err(corrupt("incomplete run_again")),
             },
             ("refusal", None) => match (
                 row.from_status,
@@ -233,7 +243,7 @@ pub(crate) async fn events(
                 coalesce(t.workflow_version, r.workflow_version) AS "workflow_version?",
                 coalesce(t.delivery_id, r.delivery_id) AS "delivery_id?",
                 c.body AS "comment_body?", r.gate AS "gate?", r.reason AS "reason?",
-                e.edited_fields
+                e.edited_fields, e.status, e.agent
          FROM event e
          JOIN actor a ON a.id = e.actor_id
          LEFT JOIN transition t ON t.id = e.transition_id

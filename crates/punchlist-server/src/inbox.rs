@@ -125,7 +125,7 @@ async fn run_items(
     // from before dispatches was its entry's only one.
     let ended = sqlx::query!(
         r#"SELECT r.id, r.issue_id, r.agent, r.outcome,
-                  coalesce(d.run_number, 1) AS "runs!",
+                  coalesce(d.run_number - d.runs_before, 1) AS "runs!",
                   coalesce(e.seq, 0) AS "since_seq!",
                   coalesce(e.created_at, r.finished_at, r.started_at) AS "since!",
                   (rd.since_seq IS NULL OR rd.since_seq < coalesce(e.seq, 0)) AS "unread!"

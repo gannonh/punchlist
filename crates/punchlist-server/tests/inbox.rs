@@ -527,3 +527,64 @@ async fn the_owner_of_a_refused_agent_sees_the_refusal_until_the_issue_moves(poo
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(inbox(&app, a).await, (vec![], 0));
 }
+
+/// What `get_issue` says PL-1 waits on a person for, asserting the inbox lists it just then.
+async fn agree(app: &Router, token: &str, listed: bool) -> Option<String> {
+    let (_, issue) = call(app, Some(token), "GET", "/api/issues/PL-1", None).await;
+    let waiting = issue["waiting_on_person"].as_str().map(str::to_string);
+    assert_eq!(
+        runs_of(&inbox(app, token).await, "PL-1"),
+        usize::from(listed)
+    );
+    assert_eq!(waiting.is_some(), listed, "{issue}");
+    waiting
+}
+
+#[sqlx::test]
+async fn run_again_takes_the_issue_out_of_the_inbox_until_its_next_round_runs_out(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let (status, runner) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r", "agents": ["claude-code"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    let r = runner["token"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Build"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    move_to(&app, a, "PL-1", "todo").await;
+    move_to(&app, a, "PL-1", "start").await;
+    for _ in 0..3 {
+        agree(&app, a, false).await;
+        run_once(&app, r, "PL-1", succeeded()).await;
+    }
+    assert_eq!(
+        agree(&app, a, true).await.as_deref(),
+        Some("3 runs in In Progress ended without moving it")
+    );
+
+    let (status, body) = call(&app, Some(a), "POST", "/api/issues/PL-1/retry", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for _ in 0..3 {
+        agree(&app, a, false).await;
+        run_once(&app, r, "PL-1", succeeded()).await;
+    }
+    agree(&app, a, true).await;
+    let again = item(&app, a, "PL-1").await;
+    assert_eq!(
+        (&again["runs"], &again["limit_reached"]),
+        (&json!(3), &json!(true))
+    );
+}
