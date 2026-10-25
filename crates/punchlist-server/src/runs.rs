@@ -181,7 +181,9 @@ async fn select_claimable(
 /// agent actor the run acts as, leases the attempt, and marks the issue's dispatch claimed.
 /// A run waiting for its next attempt gets that attempt instead, on the run's branch with the
 /// run's prompt, and no dispatch is touched. Claims nothing while the workspace runs the
-/// workflow's `[dispatch] max_concurrent` attempts.
+/// workflow's `[dispatch] max_concurrent` attempts, and nothing for an agent kind while the
+/// workspace runs its `[dispatch.agent.<kind>] max_concurrent` attempts, counted by
+/// `run.agent`.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
@@ -201,19 +203,28 @@ async fn try_claim(
     }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     // Under the workspace lock, so two claims cannot both take the last slot.
-    if let Some(max) = workflow.max_concurrent() {
-        let running = sqlx::query_scalar!(
-            r#"SELECT count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
-               WHERE r.workspace_id = $1 AND a.state = 'running'"#,
-            actor.workspace_id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if running >= i64::from(max) {
-            tx.rollback().await?;
-            return Ok(Claimed::AtLimit);
-        }
+    let running = sqlx::query!(
+        r#"SELECT r.agent, count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
+           WHERE r.workspace_id = $1 AND a.state = 'running' GROUP BY r.agent"#,
+        actor.workspace_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(max) = workflow.max_concurrent()
+        && running.iter().map(|r| r.n).sum::<i64>() >= i64::from(max)
+    {
+        tx.rollback().await?;
+        return Ok(Claimed::AtLimit);
     }
+    // An agent kind running `[dispatch.agent.<kind>] max_concurrent` attempts is not offered.
+    let full: Vec<&str> = (running.iter())
+        .filter(|r| {
+            workflow
+                .agent_limit(&r.agent)
+                .is_some_and(|max| r.n >= i64::from(max))
+        })
+        .map(|r| r.agent.as_str())
+        .collect();
     // An agent kind whose usage limit the runner hit is claimed again once it resets.
     let paused = sqlx::query_scalar!(
         "SELECT agent FROM runner_pause WHERE runner_id = $1 AND until > now()",
@@ -222,7 +233,7 @@ async fn try_claim(
     .fetch_all(&mut *tx)
     .await?;
     let agents: Vec<String> = (runner.agents.iter())
-        .filter(|agent| !paused.contains(agent))
+        .filter(|agent| !paused.contains(agent) && !full.contains(&agent.as_str()))
         .cloned()
         .collect();
     let claimable =
@@ -235,6 +246,14 @@ async fn try_claim(
     }) = claimable
     else {
         tx.rollback().await?;
+        // A run of a full agent kind that ends frees a slot for any issue.
+        if runner
+            .agents
+            .iter()
+            .any(|agent| full.contains(&agent.as_str()))
+        {
+            return Ok(Claimed::AtLimit);
+        }
         // A runner woken for an issue that a run is working on, with no dispatch waiting
         // behind that run, lost the race for it. Otherwise there is nothing here for this
         // runner, or not yet.
@@ -338,7 +357,8 @@ async fn try_claim(
 enum Claimed {
     Claim(Box<Claim>),
     Nothing,
-    /// The workspace runs `max_concurrent` attempts already.
+    /// The workspace runs `max_concurrent` attempts already, or found nothing while an agent
+    /// kind of the runner's ran its own `max_concurrent`.
     AtLimit,
 }
 
@@ -493,7 +513,8 @@ async fn set_agent_token(
 
 /// Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
 /// names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
-/// workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+/// workspace runs the workflow's `[dispatch] max_concurrent` attempts, or the agent kinds that
+/// have work run their `[dispatch.agent.<kind>] max_concurrent`; with `wait_seconds` the
 /// request waits for one. When several runners wait, each issue goes to
 /// one of them and the others get 409 `claim_taken`.
 #[utoipa::path(
