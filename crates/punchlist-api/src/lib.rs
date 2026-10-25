@@ -66,6 +66,12 @@ pub struct Issue {
     /// `GET /api/issues/{id}` fills this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_usage_limit: Option<String>,
+    /// Why no runner has claimed the issue, when it waits to be claimed: in Start, behind a
+    /// waiting dispatch, or behind a run that lost its attempt. `no runner can run codex`,
+    /// `codex is at its limit of 2 running`. Computed at read time and never stored; `None`
+    /// whenever `waiting_on_person` is set. Only `GET /api/issues/{id}` fills this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_to_run: Option<String>,
     /// The Linear issue it was imported from; `None` for an issue made in Punchlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear: Option<LinearLink>,
@@ -292,6 +298,18 @@ pub struct Workspace {
     pub issue_prefix: String,
     /// The workspace's GitHub repository, as `owner/name`.
     pub repository: String,
+}
+
+/// An age in whole units: `4s`, `3m` or `2h`. A negative age is `0s`.
+pub fn format_age(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
 }
 
 /// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`

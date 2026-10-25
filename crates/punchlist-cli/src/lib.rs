@@ -15,7 +15,7 @@ use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
     Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, gate_lines,
+    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, format_age, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -1070,18 +1070,6 @@ fn render_proof(proof: &[Proof]) -> String {
     text
 }
 
-/// `4s`, `3m` or `2h`.
-fn format_age(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h", seconds / 3600)
-    }
-}
-
 /// `1m 23s`, `4.2s` or `—`.
 fn format_duration(ms: Option<i64>) -> String {
     let Some(ms) = ms else {
@@ -1462,6 +1450,9 @@ fn render_show(
     if let Some(why) = &issue.waiting_on_person {
         text.push_str(&format!("waiting on a person: {why}\n"));
     }
+    if let Some(why) = &issue.waiting_to_run {
+        text.push_str(&format!("waiting: {why}\n"));
+    }
     if let Some(wait) = &issue.waiting_for_usage_limit {
         text.push_str(&format!("{wait}\n"));
     }
@@ -1797,6 +1788,7 @@ mod tests {
             blocks: Vec::new(),
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
             waiting_for_usage_limit: None,
+            waiting_to_run: None,
             linear: None,
         };
         let mut moved = EventDetail::transition(
@@ -1914,6 +1906,7 @@ mod tests {
             blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
+            waiting_to_run: None,
             linear: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);
@@ -1930,6 +1923,19 @@ mod tests {
                 "gannonh (github)  commented:",
             ]
         );
+
+        let mut waiting = issue.clone();
+        waiting.parent = Some("PL-1".into());
+        waiting.waiting_to_run = Some("codex is at its limit of 2 running".into());
+        let text = render_show(&waiting, &[], &[], None, &[]);
+        assert!(
+            text.starts_with(
+                "PL-7  Fix\nStatus: Todo\nParent: PL-1\nwaiting: codex is at its limit of 2 running\n"
+            ),
+            "{text}"
+        );
+        let text = render_show(&issue, &[], &[], None, &[]);
+        assert!(!text.contains("waiting"), "{text}");
     }
 
     #[test]

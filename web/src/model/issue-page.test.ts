@@ -19,6 +19,7 @@ import {
   tokens,
   cost,
   duration,
+  waitingLine,
   type GateChecklist,
   type IssueEvent,
   type TransitionOption,
@@ -419,5 +420,25 @@ describe('dependencies', () => {
     const issue = { blocked_by: [backlog('PL-1')], blocks: [backlog('PL-3')] }
     expect(['PL-1', 'PL-2', 'PL-3'].map((id) => linksTo(issue, id))).toEqual([true, false, true])
     expect(linksTo(undefined, 'PL-1')).toBe(false)
+  })
+})
+
+describe('waitingLine', () => {
+  test('says why the issue waits to be claimed, in the server\'s words', () => {
+    const reasons = [
+      'no runner can run claude-code',
+      'no runner that can run claude-code is heartbeating (last seen 2m ago)',
+      'the workspace is at its limit of 1 running',
+      'codex is at its limit of 1 running',
+      'a runner has not claimed it yet',
+    ]
+    expect(reasons.map((waiting_to_run) => waitingLine({ waiting_to_run }))).toEqual([
+      'Waiting: no runner can run claude-code',
+      'Waiting: no runner that can run claude-code is heartbeating (last seen 2m ago)',
+      'Waiting: the workspace is at its limit of 1 running',
+      'Waiting: codex is at its limit of 1 running',
+      'Waiting: a runner has not claimed it yet',
+    ])
+    expect(waitingLine({})).toBeNull()
   })
 })

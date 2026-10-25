@@ -43,6 +43,7 @@ import {
   threadView,
   tokens,
   cost,
+  waitingLine,
   type ActorMark,
   type AttemptInfo,
   type CheckRun,
@@ -354,7 +355,14 @@ export function IssueScreen({
           <aside className="rail" aria-label="Status, gates and runs">
             <TransitionsPanel id={id} workspaceId={workspaceId} moves={moves} gates={gates.data} viewer={viewer} />
             <GatesPanel checklist={gates.data} />
-            <RunsPanel issueId={id} runs={runs.data ?? []} moves={moves} person={person} now={now} />
+            <RunsPanel
+              issueId={id}
+              runs={runs.data ?? []}
+              moves={moves}
+              person={person}
+              now={now}
+              waiting={waitingLine(data)}
+            />
             <DependenciesPanel issue={data} />
             <Panel title="Properties" className="rail-only-wide">
               <dl className="m-0 grid grid-cols-[84px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5 text-meta">
@@ -1265,12 +1273,14 @@ function RunsPanel({
   moves,
   person,
   now,
+  waiting,
 }: {
   issueId: string
   runs: Run[]
   moves: TransitionList | undefined
   person: boolean
   now: Date
+  waiting: string | null
 }) {
   const status = moves?.status
   const count = runs.reduce((n, run) => n + (run.attempts ?? []).length, 0)
@@ -1292,6 +1302,11 @@ function RunsPanel({
         )
       }
     >
+      {waiting && (
+        <div className="mb-2 text-meta text-warn" data-waiting-to-run role="status">
+          {waiting}
+        </div>
+      )}
       {runs.length === 0 ? (
         <div className="text-meta text-ink-3">No runs yet.</div>
       ) : (

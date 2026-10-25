@@ -700,6 +700,7 @@ mod tests {
             blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
+            waiting_to_run: None,
             linear: None,
         }
     }

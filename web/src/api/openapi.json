@@ -5045,6 +5045,13 @@
               "null"
             ],
             "description": "Why the issue waits on a person, when it does: every run this entry into its status\ngets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;\nevery other response that carries an issue leaves it out."
+          },
+          "waiting_to_run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why no runner has claimed the issue, when it waits to be claimed: in Start, behind a\nwaiting dispatch, or behind a run that lost its attempt. `no runner can run codex`,\n`codex is at its limit of 2 running`. Computed at read time and never stored; `None`\nwhenever `waiting_on_person` is set. Only `GET /api/issues/{id}` fills this."
           }
         }
       },

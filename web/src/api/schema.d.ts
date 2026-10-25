@@ -1704,6 +1704,13 @@ export interface components {
              *     every other response that carries an issue leaves it out.
              */
             waiting_on_person?: string | null;
+            /**
+             * @description Why no runner has claimed the issue, when it waits to be claimed: in Start, behind a
+             *     waiting dispatch, or behind a run that lost its attempt. `no runner can run codex`,
+             *     `codex is at its limit of 2 running`. Computed at read time and never stored; `None`
+             *     whenever `waiting_on_person` is set. Only `GET /api/issues/{id}` fills this.
+             */
+            waiting_to_run?: string | null;
         };
         /** @description `GET /api/issues`. */
         IssueList: {

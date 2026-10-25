@@ -285,6 +285,7 @@ fn parse(row: Loaded) -> sqlx::Result<Parsed> {
         updated_at: row.updated_at,
         waiting_on_person: None,
         waiting_for_usage_limit: None,
+        waiting_to_run: None,
         linear: (row.linear_identifier.zip(row.linear_url))
             .map(|(identifier, url)| LinearLink { identifier, url }),
     };
