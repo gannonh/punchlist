@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pass_when_edited FROM milestone ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pass_when_edited",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "pass_when_edited"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e0a2213dfa21a060bd891d4a12afa85b29ef29b51d97073a5a35b68ed6d7d2b4"
+}
