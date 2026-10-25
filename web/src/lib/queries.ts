@@ -25,6 +25,7 @@ import {
 } from '@/model/issues'
 import { proofType, type GateChecklist } from '@/model/issue-page'
 import type { InboxItem } from '@/model/inbox'
+import { bulkSummary, refusedText } from '@/model/selection'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -104,6 +105,8 @@ const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edit
 const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))
 }
+
+const refusal = (error: unknown) => (error instanceof ApiError ? refusalText(error.body) : String(error))
 
 /**
  * Opens `GET /api/workspaces/{id}/events` once the workspace's list is loaded, after the list's last sequence. A
@@ -267,19 +270,60 @@ export function useEditIssue(workspaceId: string) {
       setIssues(client, workspaceId, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
       return { edited, seq: cache.rowSeq[edit.id] ?? -1 }
     },
-    onError: (error, edit, context) => {
+    onError: (_error, edit, context) => {
       if (context) {
         const fields = (['title', 'labels', 'assignee', 'parent', 'project', 'milestone'] as const).filter(
           (field) => edit[field] !== undefined,
         )
         setIssues(client, workspaceId, (cache) => revertEdit(cache, context.edited, fields, context.seq))
       }
-      toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
     onSuccess: (written) => {
       setIssues(client, workspaceId, (cache) => applyWrite(cache, written))
     },
   })
+}
+
+/** One edit from the sheet: a refusal rolls the row back and says why. */
+export function useEditOne(workspaceId: string) {
+  const { mutate } = useEditIssue(workspaceId)
+  return useCallback(
+    (edit: Edit) => {
+      mutate(edit, {
+        onError: (error) => {
+          toast.error(`${edit.id} was not changed. ${refusal(error)}`)
+        },
+      })
+    },
+    [mutate],
+  )
+}
+
+/**
+ * One change to several issues: one `PATCH` each, each with its optimistic edit, and one toast. A refused issue
+ * rolls back and the toast names it with the reason.
+ */
+export function useBulkEdit(workspaceId: string) {
+  const client = useQueryClient()
+  const { mutateAsync } = useEditIssue(workspaceId)
+  return useCallback(
+    async (action: string, edits: readonly Edit[], untouched: number) => {
+      const results = await Promise.allSettled(edits.map((edit) => mutateAsync(edit)))
+      const rows = client.getQueryData(issuesQuery(workspaceId).queryKey)?.rows ?? []
+      const refused = results.flatMap((result, index) => {
+        if (result.status === 'fulfilled') return []
+        const id = edits[index]?.id ?? ''
+        const error: unknown = result.reason
+        if (!(error instanceof ApiError)) return [`${id}: ${String(error)}`]
+        const statusName = rows.find((row) => row.issue.id === id)?.issue.status_name ?? ''
+        return [refusedText(id, statusName, error.body)]
+      })
+      const text = bulkSummary(action, untouched + edits.length - refused.length, refused)
+      if (refused.length > 0) toast.error(text)
+      else toast.success(text)
+    },
+    [client, mutateAsync, workspaceId],
+  )
 }
 
 /** Transitions are not optimistic: the row shows the request as pending, then settles or shows the refusal. */
@@ -446,8 +490,6 @@ export const runLogQuery = (issueId: string, runId: string, live: boolean) =>
     queryFn: async () => (await call(api.GET('/api/runs/{id}/log', path(runId)))).lines,
     refetchInterval: live ? 1000 : false,
   })
-
-const refusal = (error: unknown) => (error instanceof ApiError ? refusalText(error.body) : String(error))
 
 /** A comment from the composer; the timeline is read again as soon as it is written. */
 export function useComment(id: string) {

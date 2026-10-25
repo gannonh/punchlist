@@ -1,6 +1,7 @@
 import { memo, useLayoutEffect } from 'react'
 import { Lock } from 'lucide-react'
 import { cn } from 'cn'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Assignee,
   Gates,
@@ -23,6 +24,7 @@ import {
   type Transition,
   type Transitions,
 } from '@/model/issues'
+import type { Selection } from '@/model/selection'
 
 /**
  * Records a `pl:render` measure for each commit of the list or the board, from the start of the view's render to
@@ -81,22 +83,47 @@ function SnippetLine({ snippet }: { snippet: Snippet }) {
   )
 }
 
-const ListRow = memo(function ListRow({ row, status, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
+const ListRow = memo(function ListRow({
+  row,
+  status,
+  selected,
+  checked,
+  transition,
+  snippet,
+  now,
+  onPick,
+  onCheck,
+  onDismiss,
+}: RowProps & { checked: boolean; onCheck: (id: string, range: boolean) => void }) {
   const view = rowView(row, now, status)
   return (
     <div
-      className="list-row cursor-default items-center border-t px-2.5 py-2 outline-none first:border-t-0 hover:bg-stone-50"
+      className="list-row group cursor-default items-center border-t px-2.5 py-2 outline-none first:border-t-0 hover:bg-stone-50"
       role="option"
       data-issue={view.id}
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
+      data-checked={checked ? '' : undefined}
       aria-selected={selected}
       tabIndex={-1}
-      onClick={() => {
-        onPick(view.id)
+      onClick={(event) => {
+        if (event.shiftKey) onCheck(view.id, true)
+        else onPick(view.id)
       }}
     >
-      <span className="font-mono text-meta text-ink-3">{view.id}</span>
+      <span className="flex items-center gap-2 font-mono text-meta text-ink-3">
+        <Checkbox
+          checked={checked}
+          aria-label={`Select ${view.id}`}
+          tabIndex={-1}
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 in-data-selecting:opacity-100"
+          onClick={(event) => {
+            event.stopPropagation()
+            onCheck(view.id, event.shiftKey)
+          }}
+        />
+        {view.id}
+      </span>
       <span className="title truncate font-medium max-lg:whitespace-normal">
         {view.title}
         <Labels labels={view.labels} />
@@ -178,10 +205,20 @@ interface ViewProps {
   onDismiss: (id: string) => void
 }
 
-export function ListView({ groups, selected, transitions, snippets, now, onPick, onDismiss }: ViewProps) {
+export function ListView({
+  groups,
+  selected,
+  checked,
+  transitions,
+  snippets,
+  now,
+  onPick,
+  onCheck,
+  onDismiss,
+}: ViewProps & { checked: Selection; onCheck: (id: string, range: boolean) => void }) {
   useRenderMeasure('list', groups)
   return (
-    <div data-layout="list">
+    <div data-layout="list" data-selecting={checked.size > 0 ? '' : undefined}>
       {groups
         .filter((group) => group.rows.length > 0)
         .map((group) => (
@@ -196,10 +233,12 @@ export function ListView({ groups, selected, transitions, snippets, now, onPick,
                   row={row}
                   status={group.status}
                   selected={row.issue.id === selected}
+                  checked={checked.has(row.issue.id)}
                   transition={transitions[row.issue.id]}
                   snippet={snippets.get(row.issue.id)}
                   now={now}
                   onPick={onPick}
+                  onCheck={onCheck}
                   onDismiss={onDismiss}
                 />
               ))}

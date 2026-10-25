@@ -641,3 +641,90 @@ test('Enter opens the issue page, and a comment from its composer shows in the f
   await page.keyboard.press('Escape')
   await expect(page).toHaveURL(/\/w\/PL$/)
 })
+
+test('select three rows by key, set their project and a label from the right-click menu, and name a refused one', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const marker = `Bulk ${randomUUID().slice(0, 8)}`
+  const ids: string[] = []
+  for (const n of [1, 2, 3, 4]) {
+    const { row } = await ok<{ row: { issue: { id: string } } }>(
+      await request.post('/api/issues', { headers: person, data: { title: `${marker} ${String(n)}`, body: '' } }),
+    )
+    ids.push(row.issue.id)
+  }
+  const [a, b, c, d] = ids as [string, string, string, string]
+  await ok(await request.patch(`/api/issues/${a}`, { headers: person, data: { labels: ['idea', 'ui'] } }))
+  const name = `Project ${marker}`
+  await ok(await request.post('/api/projects', { headers: person, data: { name } }))
+  const issue = async (id: string) =>
+    ok<{ labels?: string[]; project?: { name: string } | null }>(await request.get(`/api/issues/${id}`, { headers: person }))
+  const edits = async (id: string) =>
+    (
+      await ok<{ detail: { kind: string; fields?: string[] } }[]>(
+        await request.get(`/api/issues/${id}/events`, { headers: person }),
+      )
+    ).filter((event) => event.detail.kind === 'edited')
+
+  await signIn(page)
+  await page.getByLabel('Filter issues').fill(marker)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-issue]')).toHaveCount(4)
+
+  // The first row is focused; a click on the focused row would open its sheet.
+  await expect(row(page, a)).toHaveAttribute('aria-selected', 'true')
+  for (const key of ['x', 'j', 'x', 'j', 'x']) await page.keyboard.press(key)
+  await expect(page.locator('[data-selection]')).toContainText('3 selected')
+  await expect(page.locator('[data-checked]')).toHaveCount(3)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-checked]')).toHaveCount(0)
+  await expect(page.locator('[data-selection]')).toHaveCount(0)
+
+  await row(page, a).getByRole('checkbox').click()
+  await row(page, c).getByRole('checkbox').click({ modifiers: ['Shift'] })
+  await expect(page.locator('[data-selection]')).toContainText('3 selected')
+
+  await row(page, b).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Project' }).click()
+  await page.getByLabel('Filter project').fill(name.slice(-8))
+  await page.getByRole('menuitemcheckbox', { name }).click()
+  await expect(page.getByText(`Set Project to ${name} on 3 issues`)).toBeVisible()
+  for (const id of [a, b, c]) {
+    await expect.poll(async () => (await issue(id)).project?.name).toBe(name)
+    expect((await edits(id)).filter((event) => event.detail.fields?.includes('project'))).toHaveLength(1)
+  }
+  expect((await issue(d)).project ?? null).toBeNull()
+
+  // A right-click on a row outside the selection acts on that row alone.
+  await row(page, d).click({ button: 'right' })
+  await expect(page.locator('[data-row-menu]')).toHaveAttribute('aria-label', `Change ${d}`)
+  await page.keyboard.press('Escape')
+
+  // `a` has idea already; adding it to a and b leaves one each, and a's ui label.
+  await row(page, c).getByRole('checkbox').click()
+  await expect(page.locator('[data-selection]')).toContainText('2 selected')
+  await page.keyboard.press('l')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'idea', exact: true })).toHaveAttribute('aria-checked', 'mixed')
+  await page.getByRole('menuitemcheckbox', { name: 'idea', exact: true }).click()
+  await expect(page.getByText('Added label idea on 2 issues')).toBeVisible()
+  await expect.poll(async () => (await issue(b)).labels).toEqual(['idea'])
+  expect((await issue(a)).labels).toEqual(['idea', 'ui'])
+  await page.keyboard.press('Escape')
+
+  // A refused edit: the row keeps its value and the toast names it.
+  await page.route(`**/api/issues/${b}`, (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 409, json: { code: 'locked', message: 'backlog is locked to people' } })
+      : route.continue(),
+  )
+  await page.keyboard.press('l')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'idea', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('menuitemcheckbox', { name: 'idea', exact: true }).click()
+  await expect(page.getByText(`1 updated; ${b} is in Backlog, locked`)).toBeVisible()
+  await expect(row(page, b).getByText('idea')).toBeVisible()
+  await expect(row(page, a).getByText('idea')).toHaveCount(0)
+  await expect.poll(async () => (await issue(a)).labels).toEqual(['ui'])
+  expect((await issue(b)).labels).toEqual(['idea'])
+})

@@ -130,13 +130,13 @@
 
   .list-row {
     display: grid;
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: 76px minmax(0, 1fr);
     gap: 4px 10px;
   }
   .list-row > :not(:first-child) { grid-column: 2; }
   .list-row .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; }
   @media (min-width: 1024px) {
-    .list-row { grid-template-columns: 64px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
+    .list-row { grid-template-columns: 88px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
     .list-row > :not(:first-child) { grid-column: auto; }
     .list-row .meta { display: contents; }
     .list-row :is(.transition-note, [data-snippet]) { grid-column: 2 / -1; }
