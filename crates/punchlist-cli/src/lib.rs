@@ -463,6 +463,11 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
             if flags.worktree_root.is_some() {
                 eprintln!("--worktree-root is deprecated; use --state-dir");
             }
+            tracing::warn!(
+                "agents run as {} and can read this user's files, including the Punchlist config at {}",
+                current_user(),
+                path.display()
+            );
             let (mut runner, move_from) =
                 runner_config(&config, *flags, home.as_deref(), &hostname(), Path::exists);
             runner.workspace = Some(workspace().to_string());
@@ -771,6 +776,15 @@ async fn shutdown_signal() {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
     }
+}
+
+/// The OS user this process runs as, which the agents it starts run as too.
+fn current_user() -> String {
+    use std::os::unix::fs::MetadataExt;
+    std::env::var("USER").unwrap_or_else(|_| match std::fs::metadata("/proc/self") {
+        Ok(meta) => format!("uid {}", meta.uid()),
+        Err(_) => "this user".to_string(),
+    })
 }
 
 fn hostname() -> String {
