@@ -354,7 +354,7 @@
         }
       },
       "patch": {
-        "summary": "Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the\nfields that change are written, with one `edited` event naming them; a request that\nchanges nothing writes nothing and answers the workspace's latest sequence number. Nobody\nin a role the issue's status locks may edit it.",
+        "summary": "Edit an issue's title, body, labels, assignee, parent, project, milestone or blockers. Only the\nfields that change are written, with one `edited` event naming them; a request that\nchanges nothing writes nothing and answers the workspace's latest sequence number. Nobody\nin a role the issue's status locks may edit it.",
         "operationId": "update_issue",
         "parameters": [
           {
@@ -426,7 +426,7 @@
             }
           },
           "422": {
-            "description": "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project.",
+            "description": "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent or a blocker that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4875,6 +4875,20 @@
               }
             ]
           },
+          "blocked_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkedIssue"
+            },
+            "description": "The issues that block this one, lowest number first."
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkedIssue"
+            },
+            "description": "The issues this one blocks, lowest number first: `blocked_by` in reverse."
+          },
           "body": {
             "type": "string",
             "description": "Markdown."
@@ -5306,6 +5320,26 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          }
+        }
+      },
+      "LinkedIssue": {
+        "type": "object",
+        "description": "An issue another one names, with its status.",
+        "required": [
+          "id",
+          "status",
+          "status_name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "status_name": {
             "type": "string"
           }
         }
@@ -6674,6 +6708,13 @@
             ],
             "format": "uuid",
             "description": "A person's or an agent's actor id, or `null` to unassign."
+          },
+          "blocked_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issue ids of the workspace that block the issue, replacing the ones it has; `[]`\nclears them. Not the issue itself, and none that the issue already blocks."
           },
           "body": {
             "type": "string",

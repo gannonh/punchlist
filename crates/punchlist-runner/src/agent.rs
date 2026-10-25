@@ -852,6 +852,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
             linear: None,

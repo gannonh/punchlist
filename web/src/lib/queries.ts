@@ -23,7 +23,7 @@ import {
   type Transitions,
   workflowStale,
 } from '@/model/issues'
-import { proofType, type GateChecklist } from '@/model/issue-page'
+import { linksTo, proofType, type GateChecklist, type Issue } from '@/model/issue-page'
 import type { InboxItem } from '@/model/inbox'
 
 export const sessionQuery = queryOptions({
@@ -134,6 +134,15 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       setIssues(client, workspaceId, (cache) => applyStream(cache, item))
       // An open issue page reads its issue again: its timeline, runs, proof, gates and moves.
       void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
+      // An issue page shows the status of the issues it blocks and is blocked by, and an edit of one's blockers
+      // changes the other's: read again each page the event's issue links, before or after the event.
+      void client.invalidateQueries({
+        queryKey: ['issue'],
+        predicate: ({ queryKey: [, id, what], state }) =>
+          what === 'issue' &&
+          typeof id === 'string' &&
+          (linksTo(item.row.issue, id) || linksTo(state.data as Issue | undefined, item.event.issue_id)),
+      })
       if (PULL_REQUEST_KINDS.has(item.event.detail.kind))
         void client.invalidateQueries({ queryKey: pullRequests })
       // One read per burst of events, as for the workflow below.

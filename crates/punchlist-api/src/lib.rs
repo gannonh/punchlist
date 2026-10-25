@@ -48,6 +48,12 @@ pub struct Issue {
     /// One of `project`'s milestones.
     #[serde(default)]
     pub milestone: Option<MilestoneRef>,
+    /// The issues that block this one, lowest number first.
+    #[serde(default)]
+    pub blocked_by: Vec<LinkedIssue>,
+    /// The issues this one blocks, lowest number first: `blocked_by` in reverse.
+    #[serde(default)]
+    pub blocks: Vec<LinkedIssue>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Why the issue waits on a person, when it does: every run this entry into its status
@@ -76,6 +82,14 @@ pub struct LinearLink {
 pub struct ProjectRef {
     pub id: Uuid,
     pub name: String,
+}
+
+/// An issue another one names, with its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinkedIssue {
+    pub id: String,
+    pub status: String,
+    pub status_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -218,6 +232,11 @@ pub struct UpdateIssue {
     )]
     #[schema(value_type = Option<Uuid>, nullable = true)]
     pub milestone: Option<Option<Uuid>>,
+    /// The issue ids of the workspace that block the issue, replacing the ones it has; `[]`
+    /// clears them. Not the issue itself, and none that the issue already blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub blocked_by: Option<Vec<String>>,
 }
 
 /// A field that is present, `null` or not, as `Some`; serde's default leaves an absent one

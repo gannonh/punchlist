@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO issue_blocker (workspace_id, issue_id, blocker_id)\n                 SELECT $1, $2, unnest($3::text[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1c53d85abb68eb1bdc6a15e483ce212f57a8484f55d7718c0ddebd24e43f595"
+}
