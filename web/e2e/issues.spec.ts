@@ -741,25 +741,24 @@ test('Run again on the waiting notice queues another run, and the notice goes wi
   page,
   request,
 }) => {
-  const { id, runner, claim: first } = await claimedInProgress(request, 'Ran out of runs')
-  let claim: { run_id: string; attempt: number; issue: { id: string } } = { ...first, issue: { id } }
-  for (let run = 1; ; run += 1) {
-    await ok(
-      await request.post(`/api/runs/${claim.run_id}/finish`, {
-        headers: bearer(runner),
-        data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
-      }),
-    )
-    if (run === 3) break
-    do {
-      claim = await ok(await request.post('/api/runs/claim', { headers: bearer(runner), data: {} }))
-    } while (claim.issue.id !== id)
-  }
+  // One claim only: the runs of earlier tests' claims may hold the workspace's `max_concurrent`.
+  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a person')
+  const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
+  const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
+    headers: bearer(agent_token),
+    data: { reason: 'The check is flaky.' },
+  })
+  expect(waiting.status()).toBe(204)
+  await ok(
+    await request.post(`/api/runs/${claim.run_id}/finish`, {
+      headers: bearer(runner),
+      data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+    }),
+  )
   await signIn(page)
-  await row(page, id).click()
-  await page.keyboard.press('Enter')
+  await page.goto(`/issues/${id}`)
   const notice = page.locator('[data-notice="waiting"]')
-  await expect(notice).toContainText('3 runs in In Progress ended without moving it')
+  await expect(notice).toContainText('Claude Code is waiting on a person: The check is flaky.')
   await notice.locator('[data-run-again]').click()
   await expect(notice).toHaveCount(0, { timeout: 2000 })
   await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
