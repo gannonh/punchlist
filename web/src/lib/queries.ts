@@ -118,10 +118,12 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     let retry: ReturnType<typeof setTimeout> | undefined
     let reread: ReturnType<typeof setTimeout> | undefined
     let rereadInbox: ReturnType<typeof setTimeout> | undefined
+    let rereadProjects: ReturnType<typeof setTimeout> | undefined
     const issues = issuesQuery(workspaceId).queryKey
     const workflow = workflowQuery(workspaceId).queryKey
     const pullRequests = pullRequestsQuery(workspaceId).queryKey
     const inbox = inboxQuery(workspaceId).queryKey
+    const projects = projectsQuery(workspaceId).queryKey
     const after = client.getQueryData(issues)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
@@ -138,6 +140,11 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       if (INBOX_KINDS.has(item.event.detail.kind)) {
         clearTimeout(rereadInbox)
         rereadInbox = setTimeout(() => void client.invalidateQueries({ queryKey: inbox }), 100)
+      }
+      // A rename writes one `project` event per issue in the project or milestone; the rows carry the new name.
+      if (item.event.detail.kind === 'project') {
+        clearTimeout(rereadProjects)
+        rereadProjects = setTimeout(() => void client.invalidateQueries({ queryKey: projects }), 100)
       }
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
@@ -169,6 +176,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       clearTimeout(retry)
       clearTimeout(reread)
       clearTimeout(rereadInbox)
+      clearTimeout(rereadProjects)
       source.close()
     }
   }, [client, workspaceId, ready, opened])
@@ -516,5 +524,34 @@ export function useMove(id: string, workspaceId: string) {
       toast.error(`${id} did not move to ${to.name}. ${refusal(error)}`)
     },
     onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+  })
+}
+
+/** What the projects screen's form saves: a new project or milestone without `id`, an edit with it. */
+export type ProjectSave =
+  | { kind: 'project'; id?: string; name: string }
+  | { kind: 'milestone'; project: string; id?: string; name: string; pass_when?: string }
+
+/**
+ * Creates or edits a project or a milestone, then reads the projects again. Not optimistic: the form waits for the
+ * answer and shows a refusal's message itself.
+ */
+export function useSaveProject(workspaceId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (save: ProjectSave): Promise<unknown> => {
+      const { name } = save
+      if (save.kind === 'project')
+        return save.id
+          ? call(api.PATCH('/api/projects/{id}', { ...path(save.id), body: { name } }))
+          : call(api.POST('/api/workspaces/{id}/projects', { ...inWorkspace(workspaceId), body: { name } }))
+      if (save.id) {
+        const params = { path: { id: save.project, milestone_id: save.id } }
+        return call(api.PATCH('/api/projects/{id}/milestones/{milestone_id}', { params, body: { name, pass_when: save.pass_when } }))
+      }
+      const body = { name, pass_when: save.pass_when ?? '' }
+      return call(api.POST('/api/projects/{id}/milestones', { ...path(save.project), body }))
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: projectsQuery(workspaceId).queryKey }),
   })
 }

@@ -1138,6 +1138,82 @@
         }
       }
     },
+    "/api/projects/{id}": {
+      "patch": {
+        "summary": "Rename a project. Each of its issues gets a `project` event. Person token.",
+        "operationId": "update_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The project's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "No name, an empty or long one, or one the workspace already has.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{id}/milestones": {
       "post": {
         "summary": "Create a milestone in one of the workspace's projects.",
@@ -1194,6 +1270,92 @@
           },
           "422": {
             "description": "An empty or long name, or one the project already has.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{id}/milestones/{milestone_id}": {
+      "patch": {
+        "summary": "Rename a milestone or set its `pass_when`, which a later Linear import then keeps. A rename\ngives each of its issues a `project` event. Person token.",
+        "operationId": "update_milestone",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The project's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "milestone_id",
+            "in": "path",
+            "description": "The milestone's id, in that project",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMilestone"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Nothing to change, an empty or long name, or one the project already has.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4052,7 +4214,7 @@
           },
           {
             "type": "object",
-            "description": "A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,\n`proof` and `workflow` say only that the issue's row changed: the event stream carries\nthem, and an issue's timeline leaves them out.",
+            "description": "A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,\n`proof`, `workflow` and `project` say only that the issue's row changed: the event stream carries\nthem, and an issue's timeline leaves them out.",
             "required": [
               "kind"
             ],
@@ -4106,6 +4268,21 @@
                 "type": "string",
                 "enum": [
                   "workflow"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The issue's project or milestone was renamed.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "project"
                 ]
               }
             }
@@ -6534,6 +6711,39 @@
           },
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateMilestone": {
+        "type": "object",
+        "description": "`PATCH /api/projects/{id}/milestones/{milestone_id}`: at least one of the two.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Trimmed, 1 to 100 characters, unique in the project."
+          },
+          "pass_when": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What must be true for the milestone to pass; empty clears it. A later Linear import keeps\nit."
+          }
+        }
+      },
+      "UpdateProject": {
+        "type": "object",
+        "description": "`PATCH /api/projects/{id}`.",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Trimmed, 1 to 100 characters, unique in the workspace. Required; a request without it\nis refused as changing nothing."
           }
         }
       },

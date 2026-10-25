@@ -1,21 +1,131 @@
 import { useEffect, useLayoutEffect, useState } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { cn } from 'cn'
+import { ApiError } from '@/api/client'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
+import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import {
   useEventStream,
   useInbox,
   useIssues,
   useProjects,
   usePullRequests,
+  useSaveProject,
   useSignOut,
   useWorkflow,
 } from '@/lib/queries'
-import { milestoneProgress, type Milestone, type Progress } from '@/model/projects'
+import { milestoneProgress, type Milestone, type Progress, type Project } from '@/model/projects'
 import type { Workspace } from '@/model/workspaces'
 
 const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' : 's'}`
+
+/** The form open on the screen: a new project or milestone, or an edit of one. */
+type Form = { kind: 'project'; project?: Project } | { kind: 'milestone'; project: Project; milestone?: Milestone }
+
+const fieldClass =
+  'rounded-md border border-input bg-transparent px-3 py-2 shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
+
+/**
+ * Creates or edits a project or a milestone. It stays open on a refusal, showing the server's message, and closes
+ * once the server has saved it. `Esc` closes it.
+ */
+function ProjectForm({ workspaceId, form, onClose }: { workspaceId: string; form: Form; onClose: () => void }) {
+  const save = useSaveProject(workspaceId)
+  const editing = form.kind === 'project' ? form.project : form.milestone
+  const oldPassWhen = form.kind === 'milestone' ? (form.milestone?.pass_when ?? '') : ''
+  const [name, setName] = useState(editing?.name ?? '')
+  const [passWhen, setPassWhen] = useState(oldPassWhen)
+  const title = editing
+    ? form.kind === 'project'
+      ? 'Rename project'
+      : 'Edit milestone'
+    : form.kind === 'project'
+      ? 'New project'
+      : `New milestone in ${form.project.name}`
+  const error = save.error && (save.error instanceof ApiError ? save.error.body.message : String(save.error))
+  return (
+    <DialogContent className="bg-card" data-form={form.kind}>
+      <DialogTitle className="text-title wrap-anywhere">{title}</DialogTitle>
+      <DialogDescription className="sr-only">
+        {form.kind === 'project' ? 'A project groups milestones.' : 'A milestone groups issues toward one outcome.'}
+      </DialogDescription>
+      <form
+        className="grid gap-2"
+        noValidate
+        onSubmit={(event) => {
+          event.preventDefault()
+          save.mutate(
+            form.kind === 'project'
+              ? { kind: 'project', id: form.project?.id, name }
+              : {
+                  kind: 'milestone',
+                  project: form.project.id,
+                  id: form.milestone?.id,
+                  name,
+                  // An edit sends PASS when only when it changed, since a sent one is kept over Linear's.
+                  pass_when: form.milestone && passWhen === oldPassWhen ? undefined : passWhen,
+                },
+            { onSuccess: onClose },
+          )
+        }}
+      >
+        <label htmlFor="form-name" className="text-meta font-semibold">
+          Name
+        </label>
+        <Input
+          id="form-name"
+          autoComplete="off"
+          autoFocus
+          value={name}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'form-hint form-error' : 'form-hint'}
+          onChange={(event) => {
+            setName(event.target.value)
+          }}
+        />
+        <p id="form-hint" className="text-caption text-muted-foreground">
+          1 to 100 characters, unique in {form.kind === 'project' ? 'the workspace' : form.project.name}.
+        </p>
+        {error && (
+          <p id="form-error" className="text-meta text-bad wrap-anywhere" role="alert" data-form-error>
+            {error}
+          </p>
+        )}
+        {form.kind === 'milestone' && (
+          <>
+            <label htmlFor="form-pass-when" className="mt-1 text-meta font-semibold">
+              PASS when
+            </label>
+            <textarea
+              id="form-pass-when"
+              rows={3}
+              value={passWhen}
+              aria-describedby="form-pass-when-hint"
+              className={fieldClass}
+              onChange={(event) => {
+                setPassWhen(event.target.value)
+              }}
+            />
+            <p id="form-pass-when-hint" className="text-caption text-muted-foreground">
+              What has to be true for the milestone to pass. Optional.
+            </p>
+          </>
+        )}
+        <DialogFooter className="mt-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={save.isPending}>
+            {save.isPending ? 'Saving…' : editing ? 'Save' : `Create ${form.kind}`}
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
+  )
+}
 
 /** Records a `pl:render` measure for each commit of the screen with its milestones, as the list does. */
 function useRenderMeasure(milestones: number | undefined) {
@@ -88,12 +198,14 @@ function MilestoneRow({
   prefix,
   open,
   onToggle,
+  onEdit,
 }: {
   milestone: Milestone
   progress: Progress
   prefix: string
   open: boolean
   onToggle: () => void
+  onEdit: () => void
 }) {
   const passWhen = milestone.pass_when.trim()
   return (
@@ -105,20 +217,25 @@ function MilestoneRow({
       data-milestone={milestone.id}
     >
       <div className="grid gap-1">
-        <button
-          type="button"
-          className="group cursor-pointer justify-self-start rounded-sm text-left font-semibold wrap-anywhere focus-visible:outline-2 focus-visible:outline-ring"
-          aria-expanded={open}
-          aria-controls={`issues-${milestone.id}`}
-          onClick={onToggle}
-        >
-          <span className="text-ink-3" aria-hidden="true">
-            {open ? '▾ ' : '▸ '}
-          </span>
-          <span className="group-hover:text-primary group-hover:underline" data-name>
-            {milestone.name}
-          </span>
-        </button>
+        <div className="flex items-start justify-between gap-2">
+          <button
+            type="button"
+            className="group cursor-pointer rounded-sm text-left font-semibold wrap-anywhere focus-visible:outline-2 focus-visible:outline-ring"
+            aria-expanded={open}
+            aria-controls={`issues-${milestone.id}`}
+            onClick={onToggle}
+          >
+            <span className="text-ink-3" aria-hidden="true">
+              {open ? '▾ ' : '▸ '}
+            </span>
+            <span className="group-hover:text-primary group-hover:underline" data-name>
+              {milestone.name}
+            </span>
+          </button>
+          <Button type="button" variant="ghost" size="xs" onClick={onEdit} data-edit-milestone={milestone.id}>
+            Edit<span className="sr-only"> milestone {milestone.name}</span>
+          </Button>
+        </div>
         <div className="grid gap-0.5 text-meta text-muted-foreground" data-pass-when>
           <span className="text-caption font-semibold tracking-[.04em] text-ink-3">PASS when</span>
           {passWhen ? (
@@ -178,6 +295,7 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
   const signOut = useSignOut()
   const navigate = useNavigate()
   const [open, setOpen] = useState<string | null>(null)
+  const [form, setForm] = useState<Form | null>(null)
   const ready = projects.data && issues.data && workflow.data
   const milestones = projects.data?.reduce((n, p) => n + p.milestones.length, 0) ?? 0
   useRenderMeasure(ready ? milestones : undefined)
@@ -218,14 +336,26 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
       </AppHeader>
 
       <main className="mx-auto grid w-full max-w-320 flex-1 content-start gap-3 px-3 py-2 sm:px-4 sm:py-3" aria-live="polite">
-        <h1 className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-title font-semibold">
-          Projects
-          {projects.data && (
-            <span className="text-meta font-normal text-ink-3">
-              {plural(projects.data.length, 'project')} · {plural(milestones, 'milestone')}
-            </span>
-          )}
-        </h1>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h1 className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-title font-semibold">
+            Projects
+            {projects.data && (
+              <span className="text-meta font-normal text-ink-3">
+                {plural(projects.data.length, 'project')} · {plural(milestones, 'milestone')}
+              </span>
+            )}
+          </h1>
+          <Button
+            type="button"
+            size="sm"
+            data-new-project
+            onClick={() => {
+              setForm({ kind: 'project' })
+            }}
+          >
+            + New project
+          </Button>
+        </div>
         <p className="text-meta text-muted-foreground">
           Progress counts a milestone&apos;s issues in <b>Done</b> out of its issues. <b>Canceled</b> issues are left
           out of the total. The bar is split by status, in the workflow&apos;s order.
@@ -238,18 +368,45 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
           <p className="p-6 text-center text-ink-3">Loading projects…</p>
         ) : projects.data.length === 0 ? (
           <p className="rounded-lg border border-dashed bg-card px-5 py-7 text-center text-muted-foreground" data-empty>
-            No projects yet. Create one with <code>pl project create &lt;name&gt;</code>.
+            No projects yet. Create one with <b>New project</b>.
           </p>
         ) : (
           projects.data.map((project) => (
             <section key={project.id} className="grid gap-2" data-project={project.id} aria-labelledby={`project-${project.id}`}>
-              <h2
-                id={`project-${project.id}`}
-                className="mt-1 flex flex-wrap items-baseline gap-x-2.5 text-lead font-semibold wrap-anywhere"
-              >
-                {project.name}{' '}
-                <span className="text-meta font-medium text-ink-3">{plural(project.milestones.length, 'milestone')}</span>
-              </h2>
+              <header className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <h2
+                  id={`project-${project.id}`}
+                  className="flex flex-wrap items-baseline gap-x-2.5 text-lead font-semibold wrap-anywhere"
+                >
+                  {project.name}{' '}
+                  <span className="text-meta font-medium text-ink-3">
+                    {plural(project.milestones.length, 'milestone')}
+                  </span>
+                </h2>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="xs"
+                  data-rename-project={project.id}
+                  onClick={() => {
+                    setForm({ kind: 'project', project })
+                  }}
+                >
+                  Rename<span className="sr-only"> project {project.name}</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  className="ml-auto"
+                  data-new-milestone={project.id}
+                  onClick={() => {
+                    setForm({ kind: 'milestone', project })
+                  }}
+                >
+                  + New milestone<span className="sr-only"> in {project.name}</span>
+                </Button>
+              </header>
               <div className="overflow-hidden rounded-lg border bg-card">
                 {project.milestones.length === 0 ? (
                   <p className="p-3 text-meta text-ink-3">No milestones yet.</p>
@@ -264,6 +421,9 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
                       onToggle={() => {
                         setOpen((now) => (now === milestone.id ? null : milestone.id))
                       }}
+                      onEdit={() => {
+                        setForm({ kind: 'milestone', project, milestone })
+                      }}
                     />
                   ))
                 )}
@@ -272,6 +432,23 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
           ))
         )}
       </main>
+
+      <Dialog
+        open={form !== null}
+        onOpenChange={(next) => {
+          if (!next) setForm(null)
+        }}
+      >
+        {form && (
+          <ProjectForm
+            workspaceId={workspace.id}
+            form={form}
+            onClose={() => {
+              setForm(null)
+            }}
+          />
+        )}
+      </Dialog>
 
       <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
         <span className="font-semibold text-foreground">Projects shortcuts</span>

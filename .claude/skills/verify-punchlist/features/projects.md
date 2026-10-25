@@ -1,6 +1,6 @@
-# Projects screen: milestones, PASS when and progress
+# Projects screen: milestones, PASS when and progress, and their forms
 
-A signed-in person opens `/w/<prefix>/projects` and sees each project of the workspace, oldest first, with its milestones, oldest first. Each milestone shows its name, its `PASS when` text with its line breaks (or `No PASS when yet`), `n of m done` and a bar split by status. An issue in `done` is done; an issue in `canceled` is left out of the total. Opening a milestone lists its issues that are not canceled, each linking to its issue page, and `Show in list` opens the list filtered to the milestone. The screen is read-only: projects and milestones are made with `pl` ([issue-placement.md](issue-placement.md)), and the counts follow the event stream.
+A signed-in person opens `/w/<prefix>/projects` and sees each project of the workspace, oldest first, with its milestones, oldest first. Each milestone shows its name, its `PASS when` text with its line breaks (or `No PASS when yet`), `n of m done` and a bar split by status. An issue in `done` is done; an issue in `canceled` is left out of the total. Opening a milestone lists its issues that are not canceled, each linking to its issue page, and `Show in list` opens the list filtered to the milestone. The screen creates projects and milestones and edits a project's name and a milestone's name and `PASS when` in dialogs, as `pl project create|edit` and `pl milestone create|edit` do ([issue-placement.md](issue-placement.md)), and the counts and names follow the event stream.
 
 ## Sub-features
 
@@ -10,6 +10,8 @@ A signed-in person opens `/w/<prefix>/projects` and sees each project of the wor
 - `projects-open`: the milestone's name is a `button[aria-expanded]`; open, `[data-issues]` lists `a[data-issue-link=<id>]` to `/issues/<id>` with the status name, canceled issues left out.
 - `projects-show-in-list`: `a[data-show-in-list]` to `/w/<prefix>?milestone=<id>`, where the list's milestone select reads `<project> · <milestone>`.
 - `projects-keys`: the header's `Projects` link after `Inbox`; `g` then `m` within a second opens the screen from the list, the board, the Pull requests page, the inbox and the screen (not in a field, nor with a dialog or menu open); `Esc` goes to the list.
+- `projects-forms`: `+ New project` (`[data-new-project]`), each project's `Rename` (`[data-rename-project=<id>]`, named `Rename project <name>`) and `+ New milestone` (`[data-new-milestone=<id>]`), and each milestone's `Edit` (`[data-edit-milestone=<id>]`, named `Edit milestone <name>`) open a shadcn dialog (`role=dialog`, `[data-form=project|milestone]`) with `Name` and, for a milestone, `PASS when`. Not optimistic: a refusal keeps it open with the server's message in `[data-form-error]` (`role=alert`); a save closes it and reads `GET /api/projects` again. `Esc` closes it without leaving the screen. An edit sends `pass_when` only when it changed, since a sent one sets `pass_when_edited`, which a Linear import keeps.
+- `projects-edit-api`: `PATCH /api/projects/{id}` (`{name}`) and `PATCH /api/projects/{id}/milestones/{milestone_id}` (`{name?, pass_when?}`, empty `pass_when` clears), person tokens only (403 for an agent, 401 for none, 404 for another workspace's project or a milestone of another project). 422 with the create messages, and `nothing to change: send name` / `nothing to change: send name or pass_when` for `{}`. A rename writes one `project` event per issue in the project or milestone (the stream carries them, a timeline leaves them out); a `pass_when` edit or a rename to the same name writes none.
 - `projects-perf`: each commit of the screen with its data records `pl:render` with `detail: {layout: 'projects', milestones}`.
 
 ## How to get to it (user POV)
@@ -30,10 +32,13 @@ Preconditions:
 - **Text from outside.** `$C pl "$RUN" milestone create XSS --project Punchlist --pass-when '<img src=x onerror=alert(1)>'`, reload: the text shows as characters and `document.querySelectorAll('img').length` is `0`.
 - **Phone.** At 390 px, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`, and each `[data-pass-when] span:last-child` has `scrollHeight <= clientHeight`.
 - **Theme.** `grep -nE '#[0-9a-fA-F]{3,8}\b|rgba?\(' web/src/screens/projects.tsx` prints nothing.
+- **Edit with `pl`.** `$C pl "$RUN" milestone edit "Gate 1" --project Punchlist --pass-when "New text"` prints `Updated milestone Gate 1 in Punchlist.`; `$C pl "$RUN" project edit Punchlist --name Docs` prints `Updated project Docs.`; `$C sql "$RUN" "SELECT count(*) FROM event WHERE kind = 'project'"` is the number of issues in `Docs`.
+- **Live rename.** With `/w/PL` (a placed issue's sheet open) and `/w/PL/projects` open in two contexts, `$C pl "$RUN" project edit Docs --name Punchlist`: the sheet's `Project` select and the section's `h2` read `Punchlist` within 2 s.
+- **Forms.** `+ New project`, type, `Enter`: the section shows and `$C sql "$RUN" "SELECT name FROM project"` has it; the same name again shows `a project named <name> already exists` in `[data-form-error]` with the dialog open.
 - **E2E.** `web/e2e/projects.spec.ts`; unit `web/src/model/projects.test.ts`.
 
 ## Gotchas
 
 - The setup's `UPDATE issue` rows are the exception to the read-only SQL rule, since only GitHub reaches `done` and `canceled` here; the issue's live checks name them. An `UPDATE` writes no event, so an open screen shows it only after a reload.
-- A milestone made with `pl` after the screen loaded shows on reload or on the next visit: the screen reads `GET /api/projects` when it opens, and the stream carries issues, not projects.
+- A milestone made with `pl` after the screen loaded, or a `PASS when` edited there, shows on reload or on the next visit: the screen reads `GET /api/projects` when it opens and after its own saves, and the stream carries only renames, as `project` events, one per issue. A rename of a milestone with no issues writes no event either.
 - The list hides Done and Canceled by default, so `Show in list` on a milestone shows only its open issues.
