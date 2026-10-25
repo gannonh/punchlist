@@ -218,7 +218,11 @@ async fn try_claim(
     }
     // An agent kind running `[dispatch.agent.<kind>] max_concurrent` attempts is not offered.
     let full: Vec<&str> = (running.iter())
-        .filter(|r| workflow.agent_limit(&r.agent).is_some_and(|max| r.n >= i64::from(max)))
+        .filter(|r| {
+            workflow
+                .agent_limit(&r.agent)
+                .is_some_and(|max| r.n >= i64::from(max))
+        })
         .map(|r| r.agent.as_str())
         .collect();
     // An agent kind whose usage limit the runner hit is claimed again once it resets.
@@ -243,7 +247,11 @@ async fn try_claim(
     else {
         tx.rollback().await?;
         // A run of a full agent kind that ends frees a slot for any issue.
-        if runner.agents.iter().any(|agent| full.contains(&agent.as_str())) {
+        if runner
+            .agents
+            .iter()
+            .any(|agent| full.contains(&agent.as_str()))
+        {
             return Ok(Claimed::AtLimit);
         }
         // A runner woken for an issue that a run is working on, with no dispatch waiting

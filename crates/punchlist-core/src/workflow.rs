@@ -1650,7 +1650,8 @@ mod tests {
 
     #[test]
     fn agent_limits_are_kept() {
-        let text = runnable("[dispatch]\nmax_concurrent = 5\n[dispatch.agent.codex]\nmax_concurrent = 2");
+        let text =
+            runnable("[dispatch]\nmax_concurrent = 5\n[dispatch.agent.codex]\nmax_concurrent = 2");
         let workflow = Workflow::from_toml(&text).unwrap();
         assert_eq!(workflow.agent_limit("codex"), Some(2));
         assert_eq!(workflow.agent_limit("claude-code"), None);

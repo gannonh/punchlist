@@ -1878,7 +1878,12 @@ async fn set_agent_limits(pool: &PgPool, max: u32, agent_limits: &str) {
 #[sqlx::test]
 async fn an_agent_at_its_limit_waits_and_other_agents_are_claimed(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
-    set_agent_limits(&pool, 5, "[dispatch.agent.claude-code]\nmax_concurrent = 1\n").await;
+    set_agent_limits(
+        &pool,
+        5,
+        "[dispatch.agent.claude-code]\nmax_concurrent = 1\n",
+    )
+    .await;
     let both = register(&app, &person.token, "both", &["claude-code", "codex"]).await;
     let builder = register(&app, &person.token, "builder", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Build one", &["todo", "start"]).await;
@@ -1891,7 +1896,10 @@ async fn an_agent_at_its_limit_waits_and_other_agents_are_claimed(pool: PgPool) 
     let second = claim(&app, &both, 0).await;
     assert_eq!(claimed_issue(&second), (StatusCode::OK, Some("PL-3")));
     assert_eq!(second.1["agent"], "codex");
-    assert_eq!(claim(&app, &builder, 0).await, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(
+        claim(&app, &builder, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
     assert_eq!(status_and_runs(&pool, "PL-2").await, ("start".into(), 0));
 
     let waiting = tokio::spawn({
@@ -1902,10 +1910,19 @@ async fn an_agent_at_its_limit_waits_and_other_agents_are_claimed(pool: PgPool) 
         }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!waiting.is_finished(), "the claim waits at the agent's limit");
+    assert!(
+        !waiting.is_finished(),
+        "the claim waits at the agent's limit"
+    );
     move_to_agent_review(&app, &pool, &first.1).await;
     let finished_at = std::time::Instant::now();
-    let (status, _) = finish(&app, &both, first.1["run_id"].as_str().unwrap(), succeeded()).await;
+    let (status, _) = finish(
+        &app,
+        &both,
+        first.1["run_id"].as_str().unwrap(),
+        succeeded(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (answer, answered_at) = waiting.await.unwrap();
     assert_eq!(claimed_issue(&answer), (StatusCode::OK, Some("PL-2")));
@@ -1922,15 +1939,27 @@ async fn a_claim_needs_room_under_both_the_workspace_and_the_agent_limit(pool: P
 
     let first = claim(&app, &both, 0).await;
     assert_eq!(claimed_issue(&first), (StatusCode::OK, Some("PL-1")));
-    assert_eq!(claim(&app, &both, 0).await, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(
+        claim(&app, &both, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
     assert_eq!(status_and_runs(&pool, "PL-2").await, ("todo".into(), 0));
 
-    let (status, _) = finish(&app, &both, first.1["run_id"].as_str().unwrap(), succeeded()).await;
+    let (status, _) = finish(
+        &app,
+        &both,
+        first.1["run_id"].as_str().unwrap(),
+        succeeded(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     // PL-1 is still In Progress, so its next Claude Code run goes first.
     let next = claim(&app, &both, 0).await;
     assert_eq!(claimed_issue(&next), (StatusCode::OK, Some("PL-1")));
-    assert_eq!(claim(&app, &both, 0).await, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(
+        claim(&app, &both, 0).await,
+        (StatusCode::NO_CONTENT, Value::Null)
+    );
 }
 
 /// Makes the built-in workflow, with a person's move from Todo to Merging and a Claude Code
