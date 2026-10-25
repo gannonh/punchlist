@@ -197,6 +197,9 @@ pub struct Workflow {
     dispatch: Vec<Dispatch>,
     /// `[dispatch] max_concurrent`: the most attempts that run at once in the workspace.
     max_concurrent: Option<u32>,
+    /// `[dispatch.agent.<kind>] max_concurrent`: the most attempts of each agent kind that
+    /// run at once in the workspace.
+    agent_limits: BTreeMap<String, u32>,
     /// `[gate]`: what `ci_green` and `proof_attached` need. Empty when the file has none.
     gates: GateSettings,
     /// `[import.linear.states]`: a Linear state's name and the status it imports into.
@@ -265,7 +268,7 @@ pub enum Problem {
     NoAgent,
     #[error("{}", unknown_agent_kind(.0).unwrap_or_default())]
     UnknownAgent(String),
-    #[error("`max_concurrent` must be at least 1")]
+    #[error("`max_concurrent` must be a whole number, at least 1")]
     BadMaxConcurrent,
     #[error("`serial` is true or false")]
     BadSerial,
@@ -611,6 +614,23 @@ impl Workflow {
             .dispatch
             .max_concurrent
             .map(|max| u32::try_from(max.into_inner()).unwrap_or(u32::MAX));
+        let mut agent_limits = BTreeMap::new();
+        for (kind, limit) in raw.dispatch.agent {
+            let key = format!("dispatch.agent.{kind}");
+            let span = limit.max_concurrent.span();
+            if unknown_agent_kind(&kind).is_some() {
+                return Err(errors.at(span, key, Problem::UnknownAgent(kind)));
+            }
+            // Read as any value, so a wrong type names its key, not only its line.
+            let max = match limit.max_concurrent.get_ref() {
+                toml::Value::Integer(max) if *max >= 1 => u32::try_from(*max).unwrap_or(u32::MAX),
+                _ => {
+                    let key = format!("{key}.max_concurrent");
+                    return Err(errors.at(span, key, Problem::BadMaxConcurrent));
+                }
+            };
+            agent_limits.insert(kind, max);
+        }
         let mut dispatch = Vec::new();
         for (name, rule) in raw.dispatch.status {
             let key = |field: &str| format!("dispatch.status.{name}.{field}");
@@ -717,6 +737,7 @@ impl Workflow {
             locks,
             dispatch,
             max_concurrent,
+            agent_limits,
             gates: GateSettings {
                 required_checks,
                 kinds_by_label,
@@ -853,6 +874,12 @@ impl Workflow {
     /// The most attempts that may run at once in the workspace; `None` for no limit.
     pub fn max_concurrent(&self) -> Option<u32> {
         self.max_concurrent
+    }
+
+    /// The most attempts of the agent `kind` that may run at once in the workspace; `None`
+    /// for no limit of its own.
+    pub fn agent_limit(&self, kind: &str) -> Option<u32> {
+        self.agent_limits.get(kind).copied()
     }
 
     /// The dispatch rule for a status, if a runner starts an agent there.
@@ -1157,6 +1184,19 @@ struct RawDispatch {
     /// The statuses that start an agent, keyed by status.
     #[serde(default)]
     status: BTreeMap<String, RawDispatchRule>,
+    /// Limits for one agent kind, keyed by kind: one of `claude-code`, `codex`, `opencode`,
+    /// `pi` and `cursor`.
+    #[serde(default)]
+    agent: BTreeMap<String, RawAgentLimit>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawAgentLimit {
+    /// Attempts of this agent kind that run at once in the workspace, counted apart from
+    /// `[dispatch] max_concurrent`; a claim needs room under both.
+    #[schemars(with = "u32")]
+    max_concurrent: Spanned<toml::Value>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1606,6 +1646,30 @@ mod tests {
                 Problem::BadMaxConcurrent
             )
         );
+    }
+
+    #[test]
+    fn agent_limits_are_kept() {
+        let text = runnable("[dispatch]\nmax_concurrent = 5\n[dispatch.agent.codex]\nmax_concurrent = 2");
+        let workflow = Workflow::from_toml(&text).unwrap();
+        assert_eq!(workflow.agent_limit("codex"), Some(2));
+        assert_eq!(workflow.agent_limit("claude-code"), None);
+        assert_eq!(workflow.max_concurrent(), Some(5));
+        assert_eq!(
+            Workflow::from_toml(&runnable("[dispatch.agent.opncode]\nmax_concurrent = 2"))
+                .unwrap_err()
+                .to_string(),
+            "line 3, `dispatch.agent.opncode`: unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+        );
+        for limit in ["0", "\"2\"", "1.5"] {
+            let text = runnable(&format!("[dispatch.agent.codex]\nmax_concurrent = {limit}"));
+            assert_eq!(
+                Workflow::from_toml(&text).unwrap_err().to_string(),
+                "line 3, `dispatch.agent.codex.max_concurrent`: `max_concurrent` must be a whole number, at least 1"
+            );
+        }
+        let text = runnable("[dispatch.agent.codex]\nmax = 2");
+        assert!(matches!(error(&text).2, Problem::Toml(m) if m.contains("unknown field `max`")));
     }
 
     #[test]
@@ -2268,6 +2332,14 @@ agent = "claude-code"
         assert_eq!(
             schema["$defs"]["RawDispatchRule"]["properties"]["agent"]["description"],
             format!("The agent to start: one of {} and {last}.", rest.join(", "))
+        );
+        assert_eq!(
+            schema["$defs"]["RawDispatch"]["properties"]["agent"]["additionalProperties"]["$ref"],
+            "#/$defs/RawAgentLimit"
+        );
+        assert_eq!(
+            schema["$defs"]["RawAgentLimit"]["required"],
+            serde_json::json!(["max_concurrent"])
         );
         assert_eq!(
             schema["$defs"]["RawDispatchRule"]["properties"]["serial"]["type"],
