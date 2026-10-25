@@ -12,7 +12,7 @@
   "paths": {
     "/api/actors": {
       "get": {
-        "summary": "List the workspace's people, agents and runners, oldest first. A person's or a\nstandalone agent's token.",
+        "summary": "List the workspace's people, agents and runners, oldest first. A person's or an agent's\ntoken.",
         "operationId": "list_actors",
         "responses": {
           "200": {
@@ -34,7 +34,7 @@
             }
           },
           "403": {
-            "description": "A runner's or a run's agent's token.",
+            "description": "A runner's token.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1207,7 +1207,7 @@
     },
     "/api/proof/{id}": {
       "get": {
-        "summary": "A proof file's bytes, with its content type. It is served so that a browser neither\nguesses another type nor runs it. A run's agent's token gets 403: it reaches only its\nrun's issue.",
+        "summary": "A proof file's bytes, with its content type. It is served so that a browser neither\nguesses another type nor runs it.",
         "operationId": "get_proof",
         "parameters": [
           {
@@ -2269,7 +2269,7 @@
     },
     "/api/workspaces/{id}/actors": {
       "get": {
-        "summary": "List the workspace's people, agents and runners, oldest first. A person's or a\nstandalone agent's token.",
+        "summary": "List the workspace's people, agents and runners, oldest first. A person's or an agent's\ntoken.",
         "operationId": "list_actors_in_workspace",
         "parameters": [
           {
@@ -2303,7 +2303,7 @@
             }
           },
           "403": {
-            "description": "A runner's or a run's agent's token.",
+            "description": "A runner's token.",
             "content": {
               "application/json": {
                 "schema": {

@@ -481,8 +481,6 @@ pub(crate) async fn run_codex(
         // It would put Codex's state databases somewhere runs and the person share.
         .env_remove("CODEX_SQLITE_HOME")
         .current_dir(worktree)
-        // The agent reads untrusted issue text; keep the person's config path out of its reach.
-        .env_remove("PUNCHLIST_CONFIG")
         .env(RUNNER_MARKER, marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

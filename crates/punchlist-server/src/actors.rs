@@ -142,15 +142,15 @@ pub(crate) async fn create_agent(
     ))
 }
 
-/// List the workspace's people, agents and runners, oldest first. A person's or a
-/// standalone agent's token.
+/// List the workspace's people, agents and runners, oldest first. A person's or an agent's
+/// token.
 #[utoipa::path(
     get,
     path = "/api/actors",
     responses(
         (status = 200, body = ActorList),
         (status = 401, body = ErrorBody),
-        (status = 403, body = ErrorBody, description = "A runner's or a run's agent's token."),
+        (status = 403, body = ErrorBody, description = "A runner's token."),
     )
 )]
 pub(crate) async fn list_actors(
