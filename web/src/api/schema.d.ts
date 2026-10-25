@@ -61,7 +61,8 @@ export interface paths {
          * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
-         *     owns, ended with nothing to dispatch them again. A person's token.
+         *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
+         *     asked to move, refused by a gate, with no move since. A person's token.
          */
         get: operations["inbox"];
         put?: never;
@@ -863,7 +864,8 @@ export interface paths {
          * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
-         *     owns, ended with nothing to dispatch them again. A person's token.
+         *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
+         *     asked to move, refused by a gate, with no move since. A person's token.
          */
         get: operations["inbox_in_workspace"];
         put?: never;
@@ -1621,12 +1623,40 @@ export interface components {
             since_seq: number;
             /** @description The caller has not opened the item since `since_seq`. */
             unread: boolean;
+        } | {
+            /** @description The agent that asked. */
+            agent: components["schemas"]["Actor"];
+            from: string;
+            /** @description `from` as people read it, such as `In Progress`. */
+            from_name: string;
+            /** @description The gate that failed, such as `pr_open`. */
+            gate: string;
+            issue: components["schemas"]["PullRequestIssue"];
+            /** @enum {string} */
+            kind: "refusal";
+            /** @description Why it failed. It can name checks GitHub's users wrote: text from outside the team. */
+            reason: string;
+            /**
+             * Format: date-time
+             * @description When the refusal was recorded.
+             */
+            since: string;
+            /**
+             * Format: int64
+             * @description The refusal event's sequence number.
+             */
+            since_seq: number;
+            to: string;
+            /** @description `to` as people read it. */
+            to_name: string;
+            /** @description The caller has not opened the item since `since_seq`. */
+            unread: boolean;
         };
         /**
          * @description The kinds of inbox item, as `POST /api/inbox/read` names them.
          * @enum {string}
          */
-        InboxKind: "waiting" | "run";
+        InboxKind: "waiting" | "run" | "refusal";
         /** @description `GET /api/inbox`: what waits on the caller, newest first. */
         InboxList: {
             items: components["schemas"]["InboxItem"][];

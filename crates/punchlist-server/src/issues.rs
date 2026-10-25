@@ -348,7 +348,34 @@ async fn request_move(
         tracing::info!(issue = id, "evidence changed after it was read from GitHub");
         return Err(ApiError::EvidenceChanged(id.to_string()));
     }
-    let gates = checked?;
+    // An agent's request a gate refuses goes on the timeline and in its owner's inbox, so a
+    // person sees an agent that keeps being refused. Every other refusal names no gate, and a
+    // person's is in the answer they got.
+    let gates = match checked {
+        Err(ApiError::GateFailed(failure)) if actor.role == Role::Agent => {
+            if let Refusal::GateFailed {
+                to, gate, reason, ..
+            } = &failure.refusal
+                && !repeats_refusal(&mut tx, actor, id, &from, to, gate, reason).await?
+            {
+                record_refusal(
+                    &mut tx,
+                    actor,
+                    id,
+                    &from,
+                    to,
+                    gate,
+                    reason,
+                    None,
+                    workflow.version(),
+                )
+                .await?;
+                tx.commit().await?;
+            }
+            return Err(ApiError::GateFailed(failure));
+        }
+        checked => checked?,
+    };
     let (mut moved, _, dispatched) = write_transition(
         &mut tx,
         actor,
@@ -370,6 +397,36 @@ async fn request_move(
         let _ = state.starts.send((actor.workspace_id, id.to_string()));
     }
     Ok(moved)
+}
+
+/// True when the issue's newest refusal, with no transition after it, is this one: an agent
+/// retrying gets the same answer, and the timeline says it once. A changed reason is new.
+async fn repeats_refusal(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: &str,
+    to: &str,
+    gate: &str,
+    reason: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM event e JOIN refusal r ON r.id = e.refusal_id
+               WHERE e.seq = (SELECT max(seq) FROM event
+                              WHERE issue_id = $1 AND kind IN ('refusal', 'transition'))
+                 AND e.issue_id = $1 AND e.kind = 'refusal' AND r.actor_id = $2
+                 AND r.from_status = $3 AND r.to_status = $4 AND r.gate = $5 AND r.reason = $6
+           ) AS "repeats!""#,
+        id,
+        actor.id,
+        from,
+        to,
+        gate,
+        reason,
+    )
+    .fetch_one(&mut *tx)
+    .await
 }
 
 /// Before the issue is locked: if the move has gates, reads the issue's pull requests from
@@ -1049,8 +1106,8 @@ pub(crate) async fn record_comment(
     })
 }
 
-/// Writes the refusal of a transition that a GitHub event would have made, and its event:
-/// `gate` failed for `reason`, so the issue stays in `from`.
+/// Writes the refusal of a transition, one a GitHub event would have made or an agent asked
+/// for, and its event: `gate` failed for `reason`, so the issue stays in `from`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_refusal(
     tx: &mut sqlx::PgConnection,

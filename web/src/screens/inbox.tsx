@@ -4,7 +4,7 @@ import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
 import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests, useSignOut } from '@/lib/queries'
-import { ageText, ordered, runLines, type InboxItem } from '@/model/inbox'
+import { ageText, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
 import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
 import { useNow } from '@/screens/issues'
@@ -18,11 +18,18 @@ function useRenderMeasure(items: number | undefined) {
   })
 }
 
-const KIND = { waiting: 'Waiting on you', run: 'Run needs you' } as const
+const KIND = { waiting: 'Waiting on you', run: 'Run needs you', refusal: 'Refused transition' } as const
+
+const EMPTY = {
+  waiting: 'Nothing waits on you.',
+  run: 'No run needs you.',
+  refusal: 'No agent of yours was refused.',
+} as const
 
 const KIND_STYLE = {
   waiting: 'border-warn-line bg-warn-soft text-warn',
   run: 'border-border bg-bad-soft text-bad',
+  refusal: 'border-agent-line bg-agent-soft text-agent',
 } as const
 
 function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item: InboxItem) => void }) {
@@ -80,7 +87,20 @@ function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item
           ))}
         </span>
       )}
+      {item.kind === 'refusal' && <RefusalCause parts={refusalParts(item)} />}
     </Link>
+  )
+}
+
+function RefusalCause({ parts }: { parts: ReturnType<typeof refusalParts> }) {
+  return (
+    <span className="border-l-3 border-agent-line pl-2 text-meta wrap-anywhere text-muted-foreground" data-cause>
+      <span className="font-semibold text-foreground" data-agent>
+        {parts.agent}
+      </span>{' '}
+      asked for <span data-move>{parts.move}</span>. Refused: gate <code data-gate>{parts.gate}</code> failed:{' '}
+      <span data-refusal-reason>{parts.reason}</span>
+    </span>
   )
 }
 
@@ -147,8 +167,8 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
           )}
         </h1>
         <p className="text-meta text-muted-foreground">
-          Issues in a status only a person moves on, and issues your agents' runs left with nothing to run again. An
-          item leaves when its issue moves on; opening one marks it read.
+          Issues in a status only a person moves on, issues your agents' runs left with nothing to run again, and moves
+          your agents asked for that a gate refused. An item leaves when its issue moves on; opening one marks it read.
         </p>
         {inbox.error ? (
           <p className="p-6 text-center text-bad" role="alert">
@@ -157,7 +177,7 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
         ) : !inbox.data ? (
           <p className="p-6 text-center text-ink-3">Loading the inbox…</p>
         ) : (
-          (['run', 'waiting'] as const).map((kind) => {
+          (['refusal', 'run', 'waiting'] as const).map((kind) => {
             const its = items.filter((item) => item.kind === kind)
             return (
               <section key={kind} data-section={kind} aria-labelledby={`section-${kind}`}>
@@ -166,7 +186,7 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
                 </h2>
                 {its.length === 0 ? (
                   <p className="rounded-lg border border-dashed bg-card px-5 py-7 text-center text-muted-foreground" data-empty>
-                    {kind === 'run' ? 'No run needs you.' : 'Nothing waits on you.'}
+                    {EMPTY[kind]}
                   </p>
                 ) : (
                   <div className="overflow-hidden rounded-lg border bg-card">

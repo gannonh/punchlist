@@ -25,3 +25,16 @@ export const runLines = (item: RunItem): string[] => [
   ...(item.limit_reached ? [`${String(item.runs)} runs in ${item.issue.status_name} ended without moving it`] : []),
   ...(item.last_outcome === 'failed' ? [item.reason ? `Run failed: ${item.reason}` : 'Run failed'] : []),
 ]
+
+export type RefusalItem = Extract<InboxItem, { kind: 'refusal' }>
+
+/**
+ * What a refusal item says: the agent that asked, as `Reviewer (codex)`, the move by status names, the gate and the
+ * reason. The reason can name checks GitHub's users wrote: text from outside the team, rendered as text.
+ */
+export const refusalParts = (item: RefusalItem) => ({
+  agent: item.agent.kind ? `${item.agent.name} (${item.agent.kind})` : item.agent.name,
+  move: `${item.from_name} → ${item.to_name}`,
+  gate: item.gate,
+  reason: item.reason,
+})

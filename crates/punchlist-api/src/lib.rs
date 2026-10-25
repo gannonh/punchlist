@@ -392,8 +392,8 @@ pub enum EventDetail {
         /// Markdown.
         body: String,
     },
-    /// A transition that a GitHub event would have made and a gate refused. The issue
-    /// stayed in `from`.
+    /// A transition that a GitHub event would have made, or an agent asked for, and a gate
+    /// refused. The issue stayed in `from`.
     Refusal {
         from: String,
         /// `from` as people read it, such as `Merging`.
@@ -1255,6 +1255,29 @@ pub enum InboxItem {
         /// The caller has not opened the item since `since_seq`.
         unread: bool,
     },
+    /// An agent the caller owns asked to move the issue and a gate refused it. The issue is
+    /// still in `from`, with no transition since.
+    Refusal {
+        issue: PullRequestIssue,
+        /// The agent that asked.
+        agent: Actor,
+        from: String,
+        /// `from` as people read it, such as `In Progress`.
+        from_name: String,
+        to: String,
+        /// `to` as people read it.
+        to_name: String,
+        /// The gate that failed, such as `pr_open`.
+        gate: String,
+        /// Why it failed. It can name checks GitHub's users wrote: text from outside the team.
+        reason: String,
+        /// When the refusal was recorded.
+        since: DateTime<Utc>,
+        /// The refusal event's sequence number.
+        since_seq: i64,
+        /// The caller has not opened the item since `since_seq`.
+        unread: bool,
+    },
 }
 
 /// The kinds of inbox item, as `POST /api/inbox/read` names them.
@@ -1263,6 +1286,7 @@ pub enum InboxItem {
 pub enum InboxKind {
     Waiting,
     Run,
+    Refusal,
 }
 
 impl InboxKind {
@@ -1270,6 +1294,7 @@ impl InboxKind {
         match self {
             InboxKind::Waiting => "waiting",
             InboxKind::Run => "run",
+            InboxKind::Refusal => "refusal",
         }
     }
 }

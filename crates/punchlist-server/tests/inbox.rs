@@ -443,3 +443,87 @@ async fn the_owner_of_a_runs_agent_sees_an_issue_nothing_dispatches_again(pool: 
     let (_, issue) = call(&app, Some(a), "GET", "/api/issues/PL-2", None).await;
     assert_eq!(issue["waiting_on_person"], Value::Null);
 }
+
+#[sqlx::test]
+async fn the_owner_of_a_refused_agent_sees_the_refusal_until_the_issue_moves(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let b = "plt_second";
+    second_person(&pool, first.workspace_id).await;
+    let (status, agent) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/actors",
+        Some(json!({"kind": "codex", "name": "Reviewer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{agent}");
+    let agent_id = agent["actor"]["id"].clone();
+    let agent = agent["token"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Built"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sqlx::query("UPDATE issue SET status = 'in_progress' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let request = json!({"to": "agent_review"});
+    let uri = "/api/issues/PL-1/transitions";
+    let (status, _) = call(&app, Some(agent), "POST", uri, Some(request.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let since_seq: i64 =
+        sqlx::query_scalar("SELECT seq FROM event WHERE issue_id = 'PL-1' AND kind = 'refusal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let refused = item(&app, a, "PL-1").await;
+    assert_eq!(
+        refused,
+        json!({
+            "kind": "refusal",
+            "issue": {"id": "PL-1", "title": "Built", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": {"id": agent_id, "name": "Reviewer", "role": "agent", "kind": "codex"},
+            "from": "in_progress",
+            "from_name": "In Progress",
+            "to": "agent_review",
+            "to_name": "Agent Review",
+            "gate": "pr_open",
+            "reason": "no open pull request is linked to PL-1",
+            "since": refused["since"],
+            "since_seq": since_seq,
+            "unread": true,
+        })
+    );
+    assert_eq!(inbox(&app, a).await, (vec!["PL-1".into()], 1));
+    assert_eq!(inbox(&app, b).await, (vec![], 0));
+
+    // Opening it reads it, as its own kind.
+    let body = json!({"issue": "PL-1", "kind": "refusal", "since_seq": since_seq});
+    let (status, _) = call(&app, Some(a), "POST", "/api/inbox/read", Some(body)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(inbox(&app, a).await, (vec!["PL-1".into()], 0));
+
+    // The agent's next request is allowed: the issue moved, and the item leaves.
+    sqlx::query(
+        "INSERT INTO pull_request (repository_id, number, github_id, title, branch, head_sha,
+                                   url, author_login, state, draft, issue_id, github_updated_at)
+         SELECT id, 1, 1, 'Built (PL-1)', 'feature/pl-1', 'abc', 'https://github.com/x/y/pull/1',
+                'gannonh', 'open', false, 'PL-1', now() FROM repository",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = call(&app, Some(agent), "POST", uri, Some(request)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(inbox(&app, a).await, (vec![], 0));
+}
