@@ -102,9 +102,8 @@ const ListRow = memo(function ListRow({
       data-issue={view.id}
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
-      // The checked rows; `aria-selected` is the row the keys act on.
-      aria-checked={checked}
-      aria-selected={selected}
+      aria-selected={checked}
+      data-focused={selected ? '' : undefined}
       tabIndex={-1}
       onClick={(event) => {
         if (event.shiftKey) onCheck(view.id, true)
@@ -159,6 +158,7 @@ const Card = memo(function Card({ row, status, selected, transition, snippet, no
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
       aria-selected={selected}
+      data-focused={selected ? '' : undefined}
       tabIndex={-1}
       onClick={() => {
         onPick(view.id)
@@ -224,7 +224,7 @@ export function ListView({
             <div className="px-2 py-1.5">
               <GroupHead group={group} />
             </div>
-            <div className="overflow-hidden rounded-lg border bg-card" role="listbox" aria-label={group.status.name}>
+            <div className="overflow-hidden rounded-lg border bg-card" role="listbox" aria-multiselectable="true" aria-label={group.status.name}>
               {group.rows.map((row) => (
                 <ListRow
                   key={row.issue.id}

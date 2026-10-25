@@ -73,8 +73,8 @@ const row = (page: Page, id: string) => page.locator(`[data-issue="${id}"]`)
 async function openSheet(page: Page, id: string) {
   // A sheet still closing would take the clicks.
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  if ((await row(page, id).getAttribute('aria-selected')) !== 'true') await row(page, id).click()
-  await expect(row(page, id)).toHaveAttribute('aria-selected', 'true')
+  if ((await row(page, id).getAttribute('data-focused')) === null) await row(page, id).click()
+  await expect(row(page, id)).toHaveAttribute('data-focused', '')
   await row(page, id).click()
   return page.getByRole('dialog')
 }
@@ -408,8 +408,8 @@ test('the filter finds bodies and comments with a marked snippet, and Enter open
   await page.keyboard.press('Escape')
   await expect(page.getByLabel('Filter issues')).toHaveValue(word)
   // A click on the selected row opens the sheet instead.
-  if ((await row(page, inComment).getAttribute('aria-selected')) !== 'true') await row(page, inComment).click()
-  await expect(row(page, inComment)).toHaveAttribute('aria-selected', 'true')
+  if ((await row(page, inComment).getAttribute('data-focused')) === null) await row(page, inComment).click()
+  await expect(row(page, inComment)).toHaveAttribute('data-focused', '')
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${inComment}#seq-${String(seq)}$`))
   await expect(page.locator(`#seq-${String(seq)}`)).toBeInViewport()
@@ -680,12 +680,14 @@ test('select three rows by key, set their project and a label from the right-cli
   await expect(page.locator('[data-issue]')).toHaveCount(4)
 
   // The first row is focused; a click on the focused row would open its sheet.
-  await expect(row(page, a)).toHaveAttribute('aria-selected', 'true')
+  await expect(row(page, a)).toHaveAttribute('data-focused', '')
+  await expect(row(page, a)).toHaveAttribute('aria-selected', 'false')
+  await expect(row(page, a).locator('..')).toHaveAttribute('aria-multiselectable', 'true')
   for (const key of ['x', 'j', 'x', 'j', 'x']) await page.keyboard.press(key)
   await expect(page.locator('[data-selection]')).toContainText('3 selected')
-  await expect(page.locator('[data-issue][aria-checked="true"]')).toHaveCount(3)
+  await expect(page.locator('[data-issue][aria-selected="true"]')).toHaveCount(3)
   await page.keyboard.press('Escape')
-  await expect(page.locator('[data-issue][aria-checked="true"]')).toHaveCount(0)
+  await expect(page.locator('[data-issue][aria-selected="true"]')).toHaveCount(0)
   await expect(page.locator('[data-selection]')).toHaveCount(0)
 
   await box(page, a).click()
