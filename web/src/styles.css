@@ -123,20 +123,32 @@
   }
 
   [data-issue] { scroll-margin: 90px 0; }
-  [data-issue][aria-selected="true"] {
+  .list-row[data-focused], [data-layout="board"] [data-issue][aria-selected="true"] {
     box-shadow: inset 3px 0 0 var(--primary);
     background: var(--color-primary-soft) !important;
   }
 
+  /* A row's selection box, drawn rather than an element per row, which would slow a 500-row list's first render
+     past its budget. Shown on hover and while any row is checked. */
+  .list-row .check::before {
+    content: '';
+    @apply size-3.5 flex-none cursor-pointer rounded-[3px] border border-ink-3 opacity-0;
+  }
+  .list-row:hover .check::before, [data-selecting] .list-row .check::before { opacity: 1; }
+  .list-row[aria-selected="true"] .check::before {
+    border-color: var(--primary);
+    background: var(--primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / 10px no-repeat;
+  }
+
   .list-row {
     display: grid;
-    grid-template-columns: 56px minmax(0, 1fr);
+    grid-template-columns: 76px minmax(0, 1fr);
     gap: 4px 10px;
   }
   .list-row > :not(:first-child) { grid-column: 2; }
   .list-row .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; }
   @media (min-width: 1024px) {
-    .list-row { grid-template-columns: 64px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
+    .list-row { grid-template-columns: 88px minmax(0, 1fr) 180px 170px 130px 170px; gap: 12px; }
     .list-row > :not(:first-child) { grid-column: auto; }
     .list-row .meta { display: contents; }
     .list-row :is(.transition-note, [data-snippet]) { grid-column: 2 / -1; }

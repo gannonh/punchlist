@@ -1,9 +1,11 @@
 //! Issues as responses carry them, and as the list, the board and the event stream show
 //! them (`IssueRow`): one query for any set of a workspace's issues.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use punchlist_api::{
-    ChecksState, GateSummary, Issue, IssueRow, LinearLink, MilestoneRef, ProjectRef,
+    ChecksState, GateSummary, Issue, IssueRow, LinearLink, LinkedIssue, MilestoneRef, ProjectRef,
     PullRequestState, PullRequestStatus, PullRequestSummary, RunSummary, plain_pull_request_url,
 };
 use punchlist_core::display_name;
@@ -168,7 +170,56 @@ async fn load(
     )
     .fetch_all(&mut *conn)
     .await?;
-    rows.into_iter().map(parse).collect()
+    let mut parsed = rows
+        .into_iter()
+        .map(parse)
+        .collect::<sqlx::Result<Vec<_>>>()?;
+    link_blockers(conn, workspace_id, ids, &mut parsed).await?;
+    Ok(parsed)
+}
+
+/// Fills each issue's `blocked_by` and `blocks`, lowest number first.
+async fn link_blockers(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    ids: Option<&[String]>,
+    parsed: &mut [Parsed],
+) -> sqlx::Result<()> {
+    let links = sqlx::query!(
+        "SELECT i.id AS issue_id, i.status AS issue_status, bl.id AS blocker_id,
+                bl.status AS blocker_status
+         FROM issue_blocker b
+         JOIN issue i ON i.id = b.issue_id
+         JOIN issue bl ON bl.id = b.blocker_id
+         WHERE b.workspace_id = $1
+           AND ($2::text[] IS NULL OR b.issue_id = ANY($2) OR b.blocker_id = ANY($2))
+         ORDER BY bl.number, i.number",
+        workspace_id,
+        ids,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let linked = |id: String, status: String| LinkedIssue {
+        status_name: display_name(&status),
+        id,
+        status,
+    };
+    let at: HashMap<String, usize> = (parsed.iter().enumerate())
+        .map(|(n, p)| (p.issue.id.clone(), n))
+        .collect();
+    for link in links {
+        if let Some(&n) = at.get(&link.issue_id) {
+            let blocker = linked(link.blocker_id.clone(), link.blocker_status.clone());
+            parsed[n].issue.blocked_by.push(blocker);
+        }
+        if let Some(&n) = at.get(&link.blocker_id) {
+            parsed[n]
+                .issue
+                .blocks
+                .push(linked(link.issue_id, link.issue_status));
+        }
+    }
+    Ok(())
 }
 
 fn parse(row: Loaded) -> sqlx::Result<Parsed> {
@@ -228,6 +279,8 @@ fn parse(row: Loaded) -> sqlx::Result<Parsed> {
         project: (row.project_id.zip(row.project_name)).map(|(id, name)| ProjectRef { id, name }),
         milestone: (row.milestone_id.zip(row.milestone_name))
             .map(|(id, name)| MilestoneRef { id, name }),
+        blocked_by: Vec::new(),
+        blocks: Vec::new(),
         created_at: row.created_at,
         updated_at: row.updated_at,
         waiting_on_person: None,

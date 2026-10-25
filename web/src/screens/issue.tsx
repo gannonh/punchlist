@@ -1,6 +1,6 @@
 // The issue page (the approved Sidebar prototype): spec, pull request, proof and activity in the main column;
 // status and moves, gates, runs and properties in a sticky rail that stacks above the main column on phones.
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Bot, Clock, GitMerge, GitPullRequest, Lock, Paperclip, Server, HardDrive } from 'lucide-react'
@@ -25,6 +25,7 @@ import type { Workspace } from '@/model/workspaces'
 import {
   GATE_EVIDENCE,
   actorMark,
+  dependencies,
   duration,
   eventText,
   feedEntries,
@@ -47,6 +48,7 @@ import {
   type CheckRun,
   type Feed,
   type GateChecklist,
+  type Issue,
   type IssueEvent,
   type LogLine,
   type Proof,
@@ -353,6 +355,7 @@ export function IssueScreen({
             <TransitionsPanel id={id} workspaceId={workspaceId} moves={moves} gates={gates.data} viewer={viewer} />
             <GatesPanel checklist={gates.data} />
             <RunsPanel issueId={id} runs={runs.data ?? []} moves={moves} person={person} now={now} />
+            <DependenciesPanel issue={data} />
             <Panel title="Properties" className="rail-only-wide">
               <dl className="m-0 grid grid-cols-[84px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5 text-meta">
                 <dt className="text-ink-3">Assignee</dt>
@@ -406,6 +409,42 @@ export function IssueScreen({
         ))}
       </footer>
     </div>
+  )
+}
+
+// Unlike Properties, shown on phones too: what blocks the issue matters before its spec.
+function DependenciesPanel({ issue }: { issue: Issue }) {
+  const lists = dependencies(issue)
+  if (lists.length === 0) return null
+  return (
+    <Panel title="Dependencies">
+      <dl className="m-0 grid grid-cols-[84px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5 text-meta" data-dependencies>
+        {lists.map(({ label, issues }) => (
+          <Fragment key={label}>
+            <dt className="text-ink-3">{label}</dt>
+            <dd className="m-0" data-linked={label === 'Blocks' ? 'blocks' : 'blocked-by'}>
+              {issues.length === 0 ? (
+                '—'
+              ) : (
+                <ul className="m-0 grid list-none gap-1 p-0">
+                  {issues.map((linked) => (
+                    <li key={linked.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5" data-linked-issue={linked.id}>
+                      <Link to="/issues/$id" params={{ id: linked.id }} className="font-mono text-primary hover:underline">
+                        {linked.id}
+                      </Link>
+                      <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-linked-status>
+                        <StatusDot status={linked.status} />
+                        {linked.status_name}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </dd>
+          </Fragment>
+        ))}
+      </dl>
+    </Panel>
   )
 }
 

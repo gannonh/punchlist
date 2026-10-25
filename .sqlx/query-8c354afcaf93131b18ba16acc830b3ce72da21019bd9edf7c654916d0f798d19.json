@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT blocker_id FROM issue_blocker WHERE issue_id = $1 ORDER BY blocker_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "blocker_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue_blocker",
+            "name": "blocker_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8c354afcaf93131b18ba16acc830b3ce72da21019bd9edf7c654916d0f798d19"
+}

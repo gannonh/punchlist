@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.project_id, m.id FROM milestone m WHERE m.linear_id = 'm-gate0'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "project_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "project_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "milestone",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "14b9aa5fb9fd1e366f0438c50a8e3e0902003cadc22b7fded2fe7b4aae113e14"
+}

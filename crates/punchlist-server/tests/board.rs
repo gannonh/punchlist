@@ -1143,3 +1143,191 @@ async fn a_parent_cycle_and_anything_outside_the_workspace_or_project_are_refuse
     assert_eq!(top, (None, None));
     assert_eq!(events(&pool).await.len(), before);
 }
+
+/// Each issue's `blocked_by` and `blocks` as `id (status)`.
+async fn links(app: &Router, token: &str, id: &str) -> (Vec<String>, Vec<String>) {
+    let (status, issue) = call(app, token, "GET", &format!("/api/issues/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{issue}");
+    let named = |field: &str| -> Vec<String> {
+        (issue[field].as_array().unwrap().iter())
+            .map(|i| {
+                format!(
+                    "{} ({})",
+                    i["id"].as_str().unwrap(),
+                    i["status_name"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    (named("blocked_by"), named("blocks"))
+}
+
+#[sqlx::test]
+async fn an_edit_sets_replaces_and_clears_the_blockers_and_blocks_is_the_reverse(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    for title in ["One", "Two", "Three", "Four"] {
+        create(&app, &person.token, title).await;
+    }
+    let before = events(&pool).await.len();
+    let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let (status, body) = patch(
+        &app,
+        &person.token,
+        "PL-4",
+        json!({"blocked_by": ["PL-3", "PL-1", " PL-1 "]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["row"]["issue"]["blocked_by"],
+        json!([
+            {"id": "PL-1", "status": "backlog", "status_name": "Backlog"},
+            {"id": "PL-3", "status": "backlog", "status_name": "Backlog"},
+        ])
+    );
+    let (status, _) = patch(&app, &person.token, "PL-2", json!({"blocked_by": ["PL-1"]})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        links(&app, &person.token, "PL-1").await,
+        (s(&[]), s(&["PL-2 (Backlog)", "PL-4 (Backlog)"]))
+    );
+    assert_eq!(
+        links(&app, &person.token, "PL-4").await,
+        (s(&["PL-1 (Backlog)", "PL-3 (Backlog)"]), s(&[]))
+    );
+    // The list's rows carry the same.
+    let rows = list(&app, &person.token).await;
+    assert_eq!(
+        rows["issues"][0]["issue"]["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // The same set in another order changes nothing and writes no event.
+    let (status, _) = patch(
+        &app,
+        &person.token,
+        "PL-4",
+        json!({"blocked_by": ["PL-1", "PL-3"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // A blocker's move shows in the issues it blocks.
+    let (status, body) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        links(&app, &person.token, "PL-2").await,
+        (s(&["PL-1 (Todo)"]), s(&[]))
+    );
+
+    let (status, _) = patch(&app, &person.token, "PL-4", json!({"blocked_by": ["PL-2"]})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        links(&app, &person.token, "PL-4").await,
+        (s(&["PL-2 (Backlog)"]), s(&[]))
+    );
+    assert_eq!(
+        links(&app, &person.token, "PL-1").await,
+        (s(&[]), s(&["PL-2 (Backlog)"]))
+    );
+    let (status, body) = patch(&app, &person.token, "PL-4", json!({"blocked_by": []})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["row"]["issue"]["blocked_by"], json!([]));
+
+    let fields = |f: &[&str]| Some(f.iter().map(|f| f.to_string()).collect::<Vec<_>>());
+    let written: Vec<_> = events(&pool)
+        .await
+        .into_iter()
+        .skip(before)
+        .map(|(_, kind, f)| (kind, f))
+        .collect();
+    assert_eq!(
+        written,
+        vec![
+            ("edited".to_string(), fields(&["blocked_by"])),
+            ("edited".to_string(), fields(&["blocked_by"])),
+            ("transition".to_string(), None),
+            ("edited".to_string(), fields(&["blocked_by"])),
+            ("edited".to_string(), fields(&["blocked_by"])),
+        ]
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_blocker")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[sqlx::test]
+async fn a_blocker_cycle_the_issue_itself_and_another_workspaces_issue_are_refused(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    let other = workspace(&pool, "OT", "Ola").await;
+    for title in ["One", "Two", "Three"] {
+        create(&app, &person.token, title).await;
+    }
+    create(&app, &other.token, "Theirs").await;
+    for (issue, blocker) in [("PL-1", "PL-2"), ("PL-2", "PL-3")] {
+        let (status, body) =
+            patch(&app, &person.token, issue, json!({"blocked_by": [blocker]})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let before = events(&pool).await.len();
+    let refused = [
+        (
+            "PL-3",
+            json!({"blocked_by": ["PL-1"]}),
+            "PL-3 cannot be blocked by PL-1: PL-1 is already blocked by PL-3 (PL-1 → PL-2 → PL-3)",
+        ),
+        (
+            "PL-2",
+            json!({"blocked_by": ["PL-3", "PL-1"]}),
+            "PL-2 cannot be blocked by PL-1: PL-1 is already blocked by PL-2 (PL-1 → PL-2)",
+        ),
+        (
+            "PL-2",
+            json!({"blocked_by": ["PL-2"]}),
+            "PL-2 cannot be blocked by itself",
+        ),
+        (
+            "PL-2",
+            json!({"blocked_by": ["OT-1"]}),
+            "no issue OT-1 in this workspace",
+        ),
+        (
+            "PL-2",
+            json!({"blocked_by": [""]}),
+            "a blocker is an issue id such as PL-1",
+        ),
+    ];
+    for (id, body, message) in refused {
+        let (status, answer) = patch(&app, &person.token, id, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer, json!({"code": "invalid", "message": message}));
+    }
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT issue_id, blocker_id FROM issue_blocker ORDER BY issue_id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("PL-1".into(), "PL-2".into()),
+            ("PL-2".into(), "PL-3".into())
+        ]
+    );
+    assert_eq!(events(&pool).await.len(), before);
+    // Another workspace's issue cannot name this one's either.
+    let (status, _) = patch(&app, &other.token, "OT-1", json!({"blocked_by": ["PL-1"]})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}

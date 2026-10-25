@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'vitest'
 import {
   actorMark,
+  dependencies,
+  linksTo,
   eventText,
   feedEntries,
   gateSummary,
@@ -393,5 +395,29 @@ describe('mergeNotice', () => {
     expect(mergeNotice('PL-3', 'Done', 'dirty')).toBe(
       'Waits on the merge. PL-3 moves to Done when GitHub reports it. The pull request has conflicts.',
     )
+  })
+})
+
+describe('dependencies', () => {
+  const backlog = (id: string) => ({ id, status: 'backlog', status_name: 'Backlog' })
+  test("lists both directions with each issue's status, and nothing when there are none", () => {
+    expect(
+      dependencies({ blocked_by: [{ id: 'PL-68', status: 'todo', status_name: 'Todo' }], blocks: [backlog('PL-79'), backlog('PL-83')] }),
+    ).toEqual([
+      { label: 'Blocked by', issues: [{ id: 'PL-68', status: 'todo', status_name: 'Todo' }] },
+      { label: 'Blocks', issues: [backlog('PL-79'), backlog('PL-83')] },
+    ])
+    expect(dependencies({ blocked_by: [], blocks: [backlog('PL-2')] })).toEqual([
+      { label: 'Blocked by', issues: [] },
+      { label: 'Blocks', issues: [backlog('PL-2')] },
+    ])
+    expect(dependencies({ blocked_by: [], blocks: [] })).toEqual([])
+    expect(dependencies({})).toEqual([])
+  })
+
+  test('an issue links to its blockers and to what it blocks', () => {
+    const issue = { blocked_by: [backlog('PL-1')], blocks: [backlog('PL-3')] }
+    expect(['PL-1', 'PL-2', 'PL-3'].map((id) => linksTo(issue, id))).toEqual([true, false, true])
+    expect(linksTo(undefined, 'PL-1')).toBe(false)
   })
 })

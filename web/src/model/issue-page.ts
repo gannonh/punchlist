@@ -16,6 +16,7 @@ export type GateResult = Schemas['GateResult']
 export type TransitionList = Schemas['TransitionList']
 export type TransitionOption = Schemas['TransitionOption']
 export type LogLine = Schemas['LogLine']
+export type LinkedIssue = Schemas['LinkedIssue']
 
 export interface GateSummary {
   text: string
@@ -58,6 +59,28 @@ export const GATE_EVIDENCE: Readonly<Record<string, string>> = {
   no_open_threads: 'threads',
   proof_attached: 'proof',
 }
+
+type Links = Pick<Issue, 'blocked_by' | 'blocks'>
+
+export interface Dependency {
+  label: 'Blocked by' | 'Blocks'
+  issues: LinkedIssue[]
+}
+
+/** The rail's two dependency lists, or none when the issue neither blocks nor is blocked. */
+export function dependencies(issue: Links): Dependency[] {
+  const blockedBy = issue.blocked_by ?? []
+  const blocks = issue.blocks ?? []
+  if (blockedBy.length === 0 && blocks.length === 0) return []
+  return [
+    { label: 'Blocked by', issues: blockedBy },
+    { label: 'Blocks', issues: blocks },
+  ]
+}
+
+/** Whether `issue` blocks or is blocked by `id`: an event on either can change what the other's page shows. */
+export const linksTo = (issue: Links | undefined, id: string): boolean =>
+  issue !== undefined && [...(issue.blocked_by ?? []), ...(issue.blocks ?? [])].some((linked) => linked.id === id)
 
 export type Mark = 'person' | 'agent' | 'runner' | 'github' | 'server'
 

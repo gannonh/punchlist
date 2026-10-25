@@ -8,7 +8,8 @@ use punchlist_api::{
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
     Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunLog, RunnerList, SearchResults, Session,
-    UpdateIssue, WaitForPerson, WorkflowInfo, Workspace, proof_type_by_extension,
+    UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson, WorkflowInfo, Workspace,
+    proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -142,6 +143,25 @@ impl Client {
     ) -> Result<Milestone, ClientError> {
         let path = ["projects", project_id, "milestones"];
         self.send(Method::POST, &path, Some(request)).await
+    }
+
+    pub async fn update_project(
+        &self,
+        project_id: &str,
+        request: &UpdateProject,
+    ) -> Result<Project, ClientError> {
+        self.send(Method::PATCH, &["projects", project_id], Some(request))
+            .await
+    }
+
+    pub async fn update_milestone(
+        &self,
+        project_id: &str,
+        milestone_id: &str,
+        request: &UpdateMilestone,
+    ) -> Result<Milestone, ClientError> {
+        let path = ["projects", project_id, "milestones", milestone_id];
+        self.send(Method::PATCH, &path, Some(request)).await
     }
 
     pub async fn move_issue(&self, id: &str, to: &str) -> Result<Moved, ClientError> {
