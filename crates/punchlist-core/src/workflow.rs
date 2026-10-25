@@ -174,6 +174,11 @@ pub struct Dispatch {
     /// At most one run in this status at a time for the workspace's repository, such as
     /// merges into its default branch.
     pub serial: bool,
+    /// The model the agent runs on, such as `haiku`. `None`: the runner's flag for the
+    /// agent, else the agent's own default.
+    pub model: Option<String>,
+    /// Codex's reasoning effort, such as `low`. `None`: the runner's `--codex-effort`.
+    pub effort: Option<String>,
     /// The line of `agent` in the file, for an error about it.
     agent_line: usize,
     /// The line of `prompt` in the file, for an error about it.
@@ -264,6 +269,16 @@ pub enum Problem {
     BadMaxConcurrent,
     #[error("`serial` is true or false")]
     BadSerial,
+    #[error(
+        "`model` is a model's name, such as `haiku`: not empty, no spaces, not starting with `-`"
+    )]
+    BadModel,
+    #[error(
+        "`effort` is a reasoning effort, such as `low`: not empty, no spaces, not starting with `-`"
+    )]
+    BadEffort,
+    #[error("`effort` applies only to agent `codex`")]
+    EffortNotCodex,
     #[error("the runtime needs the status `{0}`")]
     MissingStatus(&'static str),
     #[error("the runtime needs a transition from `start` to `in_progress`")]
@@ -615,8 +630,27 @@ impl Workflow {
                     _ => return Err(errors.at(value.span(), key("serial"), Problem::BadSerial)),
                 },
             };
+            // The runner passes each as one argument, such as `--model <model>`.
+            let name = |field, problem, value: Option<Spanned<toml::Value>>| match value {
+                None => Ok(None),
+                Some(value) => match value.get_ref() {
+                    toml::Value::String(name) if is_plain_name(name) => Ok(Some(name.clone())),
+                    _ => Err(errors.at(value.span(), key(field), problem)),
+                },
+            };
+            if let Some(effort) = rule
+                .effort
+                .as_ref()
+                .filter(|_| rule.agent.get_ref() != "codex")
+            {
+                return Err(errors.at(effort.span(), key("effort"), Problem::EffortNotCodex));
+            }
+            let model = name("model", Problem::BadModel, rule.model)?;
+            let effort = name("effort", Problem::BadEffort, rule.effort)?;
             dispatch.push(Dispatch {
                 status,
+                model,
+                effort,
                 agent_line: errors.line(rule.agent.span().start),
                 agent: rule.agent.into_inner(),
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
@@ -968,6 +1002,13 @@ impl Workflow {
 }
 
 /// A plain relative path with no `..`, so a prompt cannot name a file outside `.punchlist/`.
+/// A model or effort the runner can pass as one argument after its flag.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 fn is_relative(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
@@ -1134,6 +1175,16 @@ struct RawDispatchRule {
     #[serde(default)]
     #[schemars(with = "Option<bool>")]
     serial: Option<Spanned<toml::Value>>,
+    /// The model the agent runs on, such as `haiku`; without it, the runner's flag for the
+    /// agent (`--model`, `--codex-model`), else the agent's own default.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    model: Option<Spanned<toml::Value>>,
+    /// Codex's reasoning effort, such as `low`; without it, the runner's `--codex-effort`.
+    /// Only for agent `codex`.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    effort: Option<Spanned<toml::Value>>,
 }
 
 // Schema-only types: the names a field accepts.
@@ -1554,6 +1605,65 @@ mod tests {
                 "dispatch.max_concurrent".into(),
                 Problem::BadMaxConcurrent
             )
+        );
+    }
+
+    #[test]
+    fn model_and_effort_are_kept() {
+        let text = runnable(
+            "[dispatch.status.a]\nagent = \"codex\"\nmodel = \"gpt-6-luna\"\neffort = \"low\"",
+        );
+        let workflow = Workflow::from_toml(&text).unwrap();
+        let rule = workflow.dispatch_for("a").unwrap();
+        assert_eq!(rule.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(rule.effort.as_deref(), Some("low"));
+        let rule = workflow.dispatch_for("in_progress").unwrap();
+        assert_eq!(
+            (rule.model.as_deref(), rule.effort.as_deref()),
+            (None, None)
+        );
+        let text = runnable("").replace(
+            "agent = \"claude-code\"\n",
+            "agent = \"claude-code\"\nmodel = \"haiku\"\n",
+        );
+        let workflow = Workflow::from_toml(&text).unwrap();
+        assert_eq!(
+            workflow
+                .dispatch_for("in_progress")
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("haiku")
+        );
+    }
+
+    #[test]
+    fn a_bad_model_or_effort_is_refused_naming_the_status() {
+        let refused = |rule: &str| {
+            let text = runnable(&format!("[dispatch.status.a]\nagent = \"codex\"\n{rule}"));
+            Workflow::from_toml(&text).unwrap_err().to_string()
+        };
+        let model = "`model` is a model's name, such as `haiku`: not empty, no spaces, not starting with `-`";
+        for rule in [
+            "model = \"\"",
+            "model = 3",
+            "model = \"a b\"",
+            "model = \"--yolo\"",
+        ] {
+            assert_eq!(
+                refused(rule),
+                format!("line 4, `dispatch.status.a.model`: {model}")
+            );
+        }
+        assert_eq!(
+            refused("effort = \"\""),
+            "line 4, `dispatch.status.a.effort`: `effort` is a reasoning effort, such as `low`: \
+             not empty, no spaces, not starting with `-`"
+        );
+        let text = runnable("[dispatch.status.a]\nagent = \"claude-code\"\neffort = \"low\"");
+        assert_eq!(
+            Workflow::from_toml(&text).unwrap_err().to_string(),
+            "line 4, `dispatch.status.a.effort`: `effort` applies only to agent `codex`"
         );
     }
 
@@ -2163,5 +2273,11 @@ agent = "claude-code"
             schema["$defs"]["RawDispatchRule"]["properties"]["serial"]["type"],
             serde_json::json!(["boolean", "null"])
         );
+        for field in ["model", "effort"] {
+            assert_eq!(
+                schema["$defs"]["RawDispatchRule"]["properties"][field]["type"],
+                serde_json::json!(["string", "null"])
+            );
+        }
     }
 }

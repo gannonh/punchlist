@@ -514,7 +514,7 @@ async fn run_attempt(
     let attempt = claim.attempt;
     // The branch is not checked yet, so it is logged escaped.
     tracing::info!(
-        "{} {} for {} (run {run_id}, attempt {attempt}) on branch {:?}",
+        "{} {} for {} (run {run_id}, attempt {attempt}) on branch {:?}, model {:?}",
         if resume_in.is_some() {
             "resumed"
         } else {
@@ -522,7 +522,8 @@ async fn run_attempt(
         },
         claim.issue.id,
         claim.agent,
-        claim.branch
+        claim.branch,
+        claim.model.as_deref().unwrap_or("the agent's default"),
     );
 
     let (lines_tx, lines_rx) = mpsc::channel(LOG_CHANNEL_LINES);
@@ -806,9 +807,10 @@ async fn run_agent(
                 Ok(home) => home,
                 Err(e) => return failed(format!("cannot make the Codex home: {e}")),
             };
+            // An older server sends neither: the runner's flags.
             let params = thread_params(
-                config.codex_model.as_deref(),
-                &config.codex_effort,
+                claim.model.as_deref().or(config.codex_model.as_deref()),
+                claim.effort.as_deref().unwrap_or(&config.codex_effort),
                 mcp_servers(config, claim),
                 worktree,
             );
@@ -835,7 +837,7 @@ async fn run_agent(
                 Err(e) => return failed(format!("cannot write the MCP config: {e}")),
             };
             let args = claude_args(
-                config.model.as_deref(),
+                claim.model.as_deref().or(config.model.as_deref()),
                 Some(&mcp_config),
                 claim.session_id,
                 resume,
@@ -1167,6 +1169,8 @@ mod tests {
             prompt: "Do the work.".into(),
             agent_token: "agent-token".into(),
             session_id,
+            model: None,
+            effort: None,
             next_line,
             github: Some(punchlist_api::GithubToken {
                 token: "ghs_run".into(),
@@ -1264,8 +1268,12 @@ mod tests {
                         }
                         ("POST", "/api/runs/claim") => {
                             if claims.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                                axum::Json(fake_claim(FRESH, "PL-3", FRESH_SESSION, 1))
-                                    .into_response()
+                                // The dispatch rule's model, over the runner's (none here).
+                                axum::Json(Claim {
+                                    model: Some("haiku".into()),
+                                    ..fake_claim(FRESH, "PL-3", FRESH_SESSION, 1)
+                                })
+                                .into_response()
                             } else {
                                 tokio::time::sleep(Duration::from_millis(100)).await;
                                 StatusCode::NO_CONTENT.into_response()
@@ -1503,6 +1511,15 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
                 format!("--resume {RESUMED_SESSION}"),
                 format!("--session-id {FRESH_SESSION}"),
             ]
+        );
+        let models: Vec<&str> = (argv.lines())
+            .filter(|line| line.contains("--model"))
+            .collect();
+        assert_eq!(models.len(), 1, "{argv}");
+        assert!(models[0].contains("--model haiku --mcp-config"), "{argv}");
+        assert!(
+            models[0].ends_with(&format!("--session-id {FRESH_SESSION}")),
+            "{argv}"
         );
     }
 
