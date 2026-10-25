@@ -1162,8 +1162,8 @@ const MAX_LABELS: usize = 20;
 const MAX_LABEL_CHARS: usize = 50;
 
 /// A `PATCH` request, parsed: the title trimmed and not empty, the labels trimmed, each
-/// neither empty nor too long, duplicates dropped in order, and the parent trimmed and not
-/// empty.
+/// neither empty nor too long, duplicates dropped in order, and the parent and the blockers
+/// trimmed and not empty, the blockers' duplicates dropped.
 #[derive(Debug, PartialEq)]
 struct Edit {
     title: Option<String>,
@@ -1173,6 +1173,7 @@ struct Edit {
     parent: Option<Option<String>>,
     project: Option<Option<Uuid>>,
     milestone: Option<Option<Uuid>>,
+    blocked_by: Option<Vec<String>>,
 }
 
 fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
@@ -1213,6 +1214,23 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         }
         parent => parent.map(|p| p.map(|p| p.trim().to_string())),
     };
+    let blocked_by = match request.blocked_by {
+        Some(raw) => {
+            let mut blockers: Vec<String> = Vec::new();
+            for blocker in raw.iter().map(|b| b.trim()) {
+                if blocker.is_empty() {
+                    return Err(ApiError::Invalid(
+                        "a blocker is an issue id such as PL-1".into(),
+                    ));
+                }
+                if !blockers.iter().any(|b| b == blocker) {
+                    blockers.push(blocker.to_string());
+                }
+            }
+            Some(blockers)
+        }
+        None => None,
+    };
     Ok(Edit {
         title,
         body: request.body,
@@ -1221,6 +1239,7 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         parent,
         project: request.project,
         milestone: request.milestone,
+        blocked_by,
     })
 }
 
@@ -1265,7 +1284,61 @@ async fn check_parent(
     Ok(())
 }
 
-/// Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+/// Refuses blockers that are not issues of the workspace, that are the issue itself, or that
+/// the issue already blocks, directly or through others: the shortest such chain is named.
+/// The caller holds the workspace lock, as for `check_parent`.
+async fn check_blockers(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    id: &str,
+    blockers: &[String],
+) -> Result<(), ApiError> {
+    if blockers.iter().any(|b| b == id) {
+        return Err(ApiError::Invalid(format!(
+            "{id} cannot be blocked by itself"
+        )));
+    }
+    let found = sqlx::query_scalar!(
+        r#"SELECT id AS "id!" FROM issue WHERE id = ANY($1) AND workspace_id = $2"#,
+        blockers,
+        workspace_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(missing) = blockers.iter().find(|b| !found.contains(b)) {
+        return Err(ApiError::Invalid(format!(
+            "no issue {missing} in this workspace"
+        )));
+    }
+    // ponytail: walks every path from the blockers, so a dense graph of hundreds of relations
+    // costs paths, not edges. Upgrade path: a breadth-first walk keeping each issue once.
+    let chain = sqlx::query_scalar!(
+        r#"WITH RECURSIVE chain (id, path) AS (
+               SELECT b, ARRAY[b] FROM unnest($1::text[]) b
+               UNION ALL
+               SELECT ib.blocker_id, chain.path || ib.blocker_id
+               FROM issue_blocker ib JOIN chain ON ib.issue_id = chain.id
+               WHERE chain.id <> $2
+           ) CYCLE id SET looped USING visited
+           SELECT path AS "path!" FROM chain WHERE id = $2 AND NOT looped
+           ORDER BY cardinality(path), path LIMIT 1"#,
+        blockers,
+        id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(chain) = chain {
+        return Err(ApiError::Invalid(format!(
+            "{id} cannot be blocked by {}: {} is already blocked by {id} ({})",
+            chain[0],
+            chain[0],
+            chain.join(" → ")
+        )));
+    }
+    Ok(())
+}
+
+/// Edit an issue's title, body, labels, assignee, parent, project, milestone or blockers. Only the
 /// fields that change are written, with one `edited` event naming them; a request that
 /// changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
 /// in a role the issue's status locks may edit it.
@@ -1280,7 +1353,7 @@ async fn check_parent(
         (status = 403, body = ErrorBody, description = "An agent edited another issue than its run's."),
         (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
-        (status = 422, body = ErrorBody, description = "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project."),
+        (status = 422, body = ErrorBody, description = "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent or a blocker that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project."),
     )
 )]
 async fn update_issue(
@@ -1324,6 +1397,20 @@ async fn update_issue(
     if let Some(Some(parent)) = &edit.parent {
         check_parent(&mut tx, actor.workspace_id, &id, parent).await?;
     }
+    let current_blockers = sqlx::query_scalar!(
+        "SELECT blocker_id FROM issue_blocker WHERE issue_id = $1 ORDER BY blocker_id",
+        id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let blocked_by = match edit.blocked_by {
+        Some(mut blockers) => {
+            check_blockers(&mut tx, actor.workspace_id, &id, &blockers).await?;
+            blockers.sort();
+            (blockers != current_blockers).then_some(blockers)
+        }
+        None => None,
+    };
     if let Some(Some(project)) = edit.project {
         let found = sqlx::query_scalar!(
             r#"SELECT EXISTS (SELECT 1 FROM project WHERE id = $1 AND workspace_id = $2)
@@ -1380,6 +1467,7 @@ async fn update_issue(
         ("parent", parent != current.parent_id),
         ("project", project != current.project_id),
         ("milestone", milestone != current.milestone_id),
+        ("blocked_by", blocked_by.is_some()),
     ]
     .into_iter()
     .filter_map(|(field, changed)| changed.then_some(field))
@@ -1410,6 +1498,20 @@ async fn update_issue(
         )
         .execute(&mut *tx)
         .await?;
+        if let Some(blockers) = &blocked_by {
+            sqlx::query!("DELETE FROM issue_blocker WHERE issue_id = $1", id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query!(
+                "INSERT INTO issue_blocker (workspace_id, issue_id, blocker_id)
+                 SELECT $1, $2, unnest($3::text[])",
+                actor.workspace_id,
+                id,
+                blockers,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
         record_event(&mut tx, &actor, &id, Some(&fields), None).await?
     };
     let written = written(&mut tx, &actor, &id, seq).await?;
@@ -1439,6 +1541,7 @@ mod tests {
                 parent: None,
                 project: None,
                 milestone: None,
+                blocked_by: None,
             }
         );
         let refused = |request: UpdateIssue| parse_edit(request).unwrap_err().to_string();

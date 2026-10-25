@@ -15,7 +15,7 @@ use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
     Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    WorkflowInfo, Workspace, gate_lines,
+    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -164,6 +164,13 @@ pub enum ProjectCommand {
     Create { name: String },
     /// List the workspace's projects, each with its milestones and their PASS when text.
     List,
+    /// Rename a project.
+    Edit {
+        name: String,
+        /// The project's new name.
+        #[arg(long = "name", value_name = "NEW")]
+        new_name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -178,6 +185,27 @@ pub enum MilestoneCommand {
         #[arg(long, default_value = "")]
         pass_when: String,
     },
+    /// Rename a milestone or set its PASS when text, which a later Linear import keeps.
+    Edit {
+        name: String,
+        /// The project's name.
+        #[arg(long)]
+        project: String,
+        #[command(flatten)]
+        edit: MilestoneEdit,
+    },
+}
+
+/// What `pl milestone edit` sets: at least one of these.
+#[derive(Debug, clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct MilestoneEdit {
+    /// The milestone's new name.
+    #[arg(long = "name", value_name = "NEW")]
+    pub new_name: Option<String>,
+    /// What must be true for the milestone to pass; `""` clears it.
+    #[arg(long)]
+    pub pass_when: Option<String>,
 }
 
 /// What `pl issue edit` sets or clears: at least one of these.
@@ -216,6 +244,13 @@ pub struct IssueEdit {
     /// Clear the milestone.
     #[arg(long)]
     pub no_milestone: bool,
+    /// An issue that blocks this one, such as PL-1; repeat it for more. Replaces the
+    /// blockers.
+    #[arg(long, conflicts_with = "no_blockers")]
+    pub blocked_by: Vec<String>,
+    /// Clear the blockers.
+    #[arg(long)]
+    pub no_blockers: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -319,8 +354,8 @@ pub enum IssueCommand {
     /// names the rule or gate.
     #[command(visible_alias = "transition")]
     Move { id: String, status: String },
-    /// Change an issue's title, body and labels, or set or clear its parent, project and
-    /// milestone.
+    /// Change an issue's title, body and labels, or set or clear its parent, project,
+    /// milestone and blockers.
     Edit {
         id: String,
         #[command(flatten)]
@@ -523,6 +558,41 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         Command::Project(ProjectCommand::List) => {
             let projects = client.list_projects().await?.projects;
             write!(out, "{}", render_projects(&projects))?;
+            Ok(())
+        }
+        Command::Project(ProjectCommand::Edit { name, new_name }) => {
+            let projects = client.list_projects().await?.projects;
+            let id = find_project(&projects, &name)?.id.to_string();
+            let request = UpdateProject {
+                name: Some(new_name),
+            };
+            let project = client.update_project(&id, &request).await?;
+            writeln!(out, "Updated project {}.", project.name)?;
+            Ok(())
+        }
+        Command::Milestone(MilestoneCommand::Edit {
+            name,
+            project,
+            edit,
+        }) => {
+            let projects = client.list_projects().await?.projects;
+            let project = find_project(&projects, &project)?;
+            let milestone = (project.milestones.iter())
+                .find(|milestone| milestone.name == name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("project {} has no milestone named {name}", project.name)
+                })?;
+            let request = UpdateMilestone {
+                name: edit.new_name,
+                pass_when: edit.pass_when,
+            };
+            let (project_id, milestone_id) = (project.id.to_string(), milestone.id.to_string());
+            let milestone = (client.update_milestone(&project_id, &milestone_id, &request)).await?;
+            writeln!(
+                out,
+                "Updated milestone {} in {}.",
+                milestone.name, project.name
+            )?;
             Ok(())
         }
         Command::Milestone(MilestoneCommand::Create {
@@ -1183,7 +1253,7 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             let none = || "none".to_string();
             writeln!(
                 out,
-                "{}  {}\n  labels {} · parent {} · project {} · milestone {}",
+                "{}  {}\n  labels {} · parent {} · project {} · milestone {} · blocked by {}",
                 issue.id,
                 issue.title,
                 Some(issue.labels.join(", "))
@@ -1192,6 +1262,16 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 issue.parent.unwrap_or_else(none),
                 issue.project.map_or_else(none, |p| p.name),
                 issue.milestone.map_or_else(none, |m| m.name),
+                Some(
+                    issue
+                        .blocked_by
+                        .iter()
+                        .map(|i| i.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(none),
             )?;
         }
     }
@@ -1222,6 +1302,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         None => edit.body,
     };
     let labels = (!edit.label.is_empty() || edit.no_labels).then_some(edit.label);
+    let blocked_by = (!edit.blocked_by.is_empty() || edit.no_blockers).then_some(edit.blocked_by);
     let mut request = UpdateIssue {
         title: edit.title,
         body,
@@ -1229,6 +1310,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         parent: edit.parent.map(Some).or(edit.no_parent.then_some(None)),
         project: edit.no_project.then_some(None),
         milestone: edit.no_milestone.then_some(None),
+        blocked_by,
         ..UpdateIssue::default()
     };
     if edit.project.is_none() && edit.milestone.is_none() {
@@ -1293,6 +1375,21 @@ fn render_workflow(workflow: &WorkflowInfo) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    for status in &workflow.statuses {
+        let Some(agent) = &status.dispatch else {
+            continue;
+        };
+        let model = status
+            .dispatch_model
+            .as_deref()
+            .unwrap_or("the runner's model");
+        let effort = (status.dispatch_effort.as_ref()).map(|effort| format!(", effort {effort}"));
+        out += &format!(
+            "Dispatch  {}: {agent} on {model}{}\n",
+            status.key,
+            effort.unwrap_or_default()
+        );
+    }
     if let Some(refused) = &workflow.refused {
         out += &format!("Refused   {}: {}\n", refused.commit_sha, refused.reason);
     }
@@ -1317,7 +1414,8 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
             | EventDetail::Run
             | EventDetail::PullRequest
             | EventDetail::Proof
-            | EventDetail::Workflow => None,
+            | EventDetail::Workflow
+            | EventDetail::Project => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -1349,6 +1447,14 @@ fn render_show(
     }
     if let Some(milestone) = &issue.milestone {
         text.push_str(&format!("Milestone: {}\n", milestone.name));
+    }
+    for (label, linked) in [("Blocked by", &issue.blocked_by), ("Blocks", &issue.blocks)] {
+        if !linked.is_empty() {
+            let linked: Vec<String> = (linked.iter())
+                .map(|i| format!("{} ({})", i.id, i.status_name))
+                .collect();
+            text.push_str(&format!("{label}: {}\n", linked.join(", ")));
+        }
     }
     if let Some(linear) = &issue.linear {
         text.push_str(&format!("Linear: {}  {}\n", linear.identifier, linear.url));
@@ -1426,7 +1532,8 @@ fn render_show(
             EventDetail::Run
             | EventDetail::PullRequest
             | EventDetail::Proof
-            | EventDetail::Workflow => {}
+            | EventDetail::Workflow
+            | EventDetail::Project => {}
         }
     }
     text
@@ -1686,6 +1793,8 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
             waiting_for_usage_limit: None,
             linear: None,
@@ -1801,6 +1910,8 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
             linear: None,
@@ -1876,6 +1987,8 @@ mod tests {
                     name: key.into(),
                     locked_to: Vec::new(),
                     dispatch: None,
+                    dispatch_model: None,
+                    dispatch_effort: None,
                     closed: false,
                     on_merge_to: None,
                 })
@@ -1885,6 +1998,17 @@ mod tests {
         assert_eq!(
             render_workflow(&info),
             "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n"
+        );
+        let mut dispatching = info.clone();
+        dispatching.statuses[0].dispatch = Some("claude-code".into());
+        dispatching.statuses[0].dispatch_model = Some("haiku".into());
+        dispatching.statuses[1].dispatch = Some("codex".into());
+        dispatching.statuses[1].dispatch_effort = Some("low".into());
+        assert_eq!(
+            render_workflow(&dispatching),
+            "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n\
+             Dispatch  backlog: claude-code on haiku\n\
+             Dispatch  todo: codex on the runner's model, effort low\n"
         );
         let info = WorkflowInfo {
             invalid: Some("line 4, `statuses`: the runtime needs the status `start`".into()),

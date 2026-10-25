@@ -48,6 +48,12 @@ pub struct Issue {
     /// One of `project`'s milestones.
     #[serde(default)]
     pub milestone: Option<MilestoneRef>,
+    /// The issues that block this one, lowest number first.
+    #[serde(default)]
+    pub blocked_by: Vec<LinkedIssue>,
+    /// The issues this one blocks, lowest number first: `blocked_by` in reverse.
+    #[serde(default)]
+    pub blocks: Vec<LinkedIssue>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Why the issue waits on a person, when it does: every run this entry into its status
@@ -76,6 +82,14 @@ pub struct LinearLink {
 pub struct ProjectRef {
     pub id: Uuid,
     pub name: String,
+}
+
+/// An issue another one names, with its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinkedIssue {
+    pub id: String,
+    pub status: String,
+    pub status_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -218,6 +232,11 @@ pub struct UpdateIssue {
     )]
     #[schema(value_type = Option<Uuid>, nullable = true)]
     pub milestone: Option<Option<Uuid>>,
+    /// The issue ids of the workspace that block the issue, replacing the ones it has; `[]`
+    /// clears them. Not the issue itself, and none that the issue already blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub blocked_by: Option<Vec<String>>,
 }
 
 /// A field that is present, `null` or not, as `Some`; serde's default leaves an absent one
@@ -400,7 +419,7 @@ pub enum EventDetail {
         fields: Vec<String>,
     },
     /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,
-    /// `proof` and `workflow` say only that the issue's row changed: the event stream carries
+    /// `proof`, `workflow` and `project` say only that the issue's row changed: the event stream carries
     /// them, and an issue's timeline leaves them out.
     Run,
     /// GitHub evidence on the issue's pull requests was recorded: a pull request, the check
@@ -411,6 +430,8 @@ pub enum EventDetail {
     /// The workspace loaded a different workflow version, which can change the gates and status
     /// names every row shows.
     Workflow,
+    /// The issue's project or milestone was renamed.
+    Project,
 }
 
 impl EventDetail {
@@ -442,6 +463,27 @@ pub struct CreateMilestone {
     /// What must be true for the milestone to pass.
     #[serde(default)]
     pub pass_when: String,
+}
+
+/// `PATCH /api/projects/{id}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateProject {
+    /// Trimmed, 1 to 100 characters, unique in the workspace. Required; a request without it
+    /// is refused as changing nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `PATCH /api/projects/{id}/milestones/{milestone_id}`: at least one of the two.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateMilestone {
+    /// Trimmed, 1 to 100 characters, unique in the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What must be true for the milestone to pass; empty clears it. A later Linear import keeps
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_when: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -809,6 +851,14 @@ pub struct Claim {
     /// The attempt's agent session: `claude --session-id` on a fresh attempt, `--resume`
     /// on a resumed one.
     pub session_id: Uuid,
+    /// The model the attempt runs on: the dispatch rule's `model`, else the runner's flag
+    /// for the agent. `None`: the agent's own default.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Codex's reasoning effort from the dispatch rule's `effort`. `None`: the runner's
+    /// `--codex-effort`.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
     /// stored line on a resumed one.
     pub next_line: i64,
@@ -1425,6 +1475,12 @@ pub struct StatusInfo {
     pub locked_to: Vec<Role>,
     /// The agent a runner starts when an issue enters it, such as `claude-code`.
     pub dispatch: Option<String>,
+    /// The model its dispatch rule names, such as `haiku`; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_model: Option<String>,
+    /// The Codex reasoning effort its dispatch rule names; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_effort: Option<String>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
     /// The status, as people read it (`Done`), that a merge of the issue's pull request
