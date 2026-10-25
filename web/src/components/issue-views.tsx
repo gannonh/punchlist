@@ -1,7 +1,6 @@
 import { memo, useLayoutEffect } from 'react'
 import { Lock } from 'lucide-react'
 import { cn } from 'cn'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   Assignee,
   Gates,
@@ -98,12 +97,13 @@ const ListRow = memo(function ListRow({
   const view = rowView(row, now, status)
   return (
     <div
-      className="list-row group cursor-default items-center border-t px-2.5 py-2 outline-none first:border-t-0 hover:bg-stone-50"
+      className="list-row cursor-default items-center border-t px-2.5 py-2 outline-none first:border-t-0 hover:bg-stone-50"
       role="option"
       data-issue={view.id}
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
-      data-checked={checked ? '' : undefined}
+      // The checked rows; `aria-selected` is the row the keys act on.
+      aria-checked={checked}
       aria-selected={selected}
       tabIndex={-1}
       onClick={(event) => {
@@ -111,17 +111,15 @@ const ListRow = memo(function ListRow({
         else onPick(view.id)
       }}
     >
-      <span className="flex items-center gap-2 font-mono text-meta text-ink-3">
-        <Checkbox
-          checked={checked}
-          aria-label={`Select ${view.id}`}
-          tabIndex={-1}
-          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 in-data-selecting:opacity-100"
-          onClick={(event) => {
-            event.stopPropagation()
-            onCheck(view.id, event.shiftKey)
-          }}
-        />
+      <span
+        className="check flex items-center gap-2 font-mono text-meta text-ink-3"
+        onClick={(event) => {
+          // The box is this cell's ::before, its first 18 px; a click on the id picks the row as before.
+          if (event.nativeEvent.offsetX > 18) return
+          event.stopPropagation()
+          onCheck(view.id, event.shiftKey)
+        }}
+      >
         {view.id}
       </span>
       <span className="title truncate font-medium max-lg:whitespace-normal">

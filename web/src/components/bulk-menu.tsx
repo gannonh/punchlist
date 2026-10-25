@@ -1,6 +1,6 @@
 // The list's menu for a selection: a right-click opens it with a picker per property in a submenu, and a key
 // opens one picker at the focused row. Both pick through the same `Picker`.
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react'
 import { toast } from 'sonner'
 import {
   ContextMenu,
@@ -317,13 +317,18 @@ export function RowMenu({
   onApply: Apply
   children: ReactNode
 }) {
+  const target = (event: SyntheticEvent) => {
+    const id = (event.target as Element).closest('[data-issue]')?.getAttribute('data-issue') ?? null
+    if (!onTarget(id)) event.preventDefault()
+  }
   return (
     <ContextMenu onOpenChange={onOpenChange}>
       <ContextMenuTrigger
         asChild
-        onContextMenu={(event) => {
-          const id = (event.target as Element).closest('[data-issue]')?.getAttribute('data-issue') ?? null
-          if (!onTarget(id)) event.preventDefault()
+        onContextMenu={target}
+        // A touch opens the menu after a long press, with no `contextmenu` event.
+        onPointerDown={(event) => {
+          if (event.pointerType !== 'mouse') target(event)
         }}
       >
         <div>{children}</div>
@@ -331,6 +336,7 @@ export function RowMenu({
       <ContextMenuContent
         className="min-w-52"
         aria-label={`Change ${targetName(targets)}`}
+        collisionPadding={12}
         data-row-menu
         onKeyDown={tabThrough}
       >

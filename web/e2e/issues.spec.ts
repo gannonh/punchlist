@@ -668,6 +668,12 @@ test('select three rows by key, set their project and a label from the right-cli
       )
     ).filter((event) => event.detail.kind === 'edited')
 
+  // The box is drawn at the start of the row's id cell.
+  const box = (page: Page, id: string) => ({
+    click: (options: { modifiers?: ['Shift'] } = {}) =>
+      row(page, id).locator('.check').click({ ...options, position: { x: 7, y: 8 } }),
+  })
+
   await signIn(page)
   await page.getByLabel('Filter issues').fill(marker)
   await page.keyboard.press('Escape')
@@ -677,13 +683,13 @@ test('select three rows by key, set their project and a label from the right-cli
   await expect(row(page, a)).toHaveAttribute('aria-selected', 'true')
   for (const key of ['x', 'j', 'x', 'j', 'x']) await page.keyboard.press(key)
   await expect(page.locator('[data-selection]')).toContainText('3 selected')
-  await expect(page.locator('[data-checked]')).toHaveCount(3)
+  await expect(page.locator('[data-issue][aria-checked="true"]')).toHaveCount(3)
   await page.keyboard.press('Escape')
-  await expect(page.locator('[data-checked]')).toHaveCount(0)
+  await expect(page.locator('[data-issue][aria-checked="true"]')).toHaveCount(0)
   await expect(page.locator('[data-selection]')).toHaveCount(0)
 
-  await row(page, a).getByRole('checkbox').click()
-  await row(page, c).getByRole('checkbox').click({ modifiers: ['Shift'] })
+  await box(page, a).click()
+  await box(page, c).click({ modifiers: ['Shift'] })
   await expect(page.locator('[data-selection]')).toContainText('3 selected')
 
   await row(page, b).click({ button: 'right' })
@@ -703,7 +709,7 @@ test('select three rows by key, set their project and a label from the right-cli
   await page.keyboard.press('Escape')
 
   // `a` has idea already; adding it to a and b leaves one each, and a's ui label.
-  await row(page, c).getByRole('checkbox').click()
+  await box(page, c).click()
   await expect(page.locator('[data-selection]')).toContainText('2 selected')
   await page.keyboard.press('l')
   await expect(page.getByRole('menuitemcheckbox', { name: 'idea', exact: true })).toHaveAttribute('aria-checked', 'mixed')
