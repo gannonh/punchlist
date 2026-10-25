@@ -95,9 +95,9 @@ function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item
 function RefusalCause({ parts }: { parts: ReturnType<typeof refusalParts> }) {
   return (
     <span className="border-l-3 border-agent-line pl-2 text-meta wrap-anywhere text-muted-foreground" data-cause>
-      <b className="font-semibold text-foreground" data-agent>
+      <span className="font-semibold text-foreground" data-agent>
         {parts.agent}
-      </b>{' '}
+      </span>{' '}
       asked for <span data-move>{parts.move}</span>. Refused: gate <code data-gate>{parts.gate}</code> failed:{' '}
       <span data-refusal-reason>{parts.reason}</span>
     </span>
