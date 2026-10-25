@@ -314,7 +314,7 @@ async fn a_runner_without_the_dispatch_agent_claims_nothing(pool: PgPool) {
 
 #[sqlx::test]
 async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool) {
-    let (app, person) = setup(&pool, Duration::from_secs(1)).await;
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Lease", &["todo", "start"]).await;
     let (status, claimed) = claim(&app, &r1, 0).await;
@@ -323,13 +323,13 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
 
     let heartbeat_uri = format!("/api/runners/{}/heartbeat", r1.id);
 
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    advance_leases(&pool, 20.0).await;
     let (status, hb) = call(&app, &r1.token, "POST", &heartbeat_uri, Some(held.clone())).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hb["name"], "r1");
     assert_eq!(hb["stale"], json!([]));
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    // 1.4 s after the claim, but only 0.7 s after the heartbeat.
+    advance_leases(&pool, 20.0).await;
+    // 40 s after the claim, but only 20 s after the heartbeat.
     assert_eq!(expire_leases(&pool).await.unwrap(), 0);
     let state = sqlx::query_scalar!("SELECT state FROM attempt WHERE issue_id = 'PL-1'")
         .fetch_one(&pool)
@@ -337,7 +337,7 @@ async fn expired_lease_fails_the_attempt_and_a_heartbeat_renews_it(pool: PgPool)
         .unwrap();
     assert_eq!(state, "running");
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    advance_leases(&pool, 20.0).await;
     assert_eq!(expire_leases(&pool).await.unwrap(), 1);
     let attempt = sqlx::query!(
         "SELECT state, failure_reason, finished_at FROM attempt WHERE issue_id = 'PL-1'"
@@ -420,7 +420,7 @@ async fn a_lease_that_expires_on_the_third_run_queues_no_fourth(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: PgPool) {
-    let (app, person) = setup(&pool, Duration::from_secs(1)).await;
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Orphan", &["todo", "start"]).await;
     let (status, claimed) = claim(&app, &r1, 0).await;
@@ -428,8 +428,8 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
     let heartbeat_uri = format!("/api/runners/{}/heartbeat", r1.id);
 
     // The runner never received the claim, so it never lists the attempt as held.
-    for wait in [600, 600] {
-        tokio::time::sleep(Duration::from_millis(wait)).await;
+    for _ in 0..2 {
+        advance_leases(&pool, 20.0).await;
         let (status, _) = call(
             &app,
             &r1.token,
@@ -440,7 +440,6 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
         .await;
         assert_eq!(status, StatusCode::OK);
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(expire_leases(&pool).await.unwrap(), 1);
     let attempt = sqlx::query!("SELECT state, failure_reason FROM attempt WHERE issue_id = 'PL-1'")
         .fetch_one(&pool)
@@ -459,11 +458,11 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
     assert_eq!(claimed2["attempt"], 2);
     let held = json!({"held": [{"run_id": claimed2["run_id"], "attempt": 2}]});
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        advance_leases(&pool, 20.0).await;
         let (status, _) = call(&app, &r1.token, "POST", &heartbeat_uri, Some(held.clone())).await;
         assert_eq!(status, StatusCode::OK);
     }
-    // 1.8 s after the claim, past the original 1 s lease.
+    // 60 s after the claim, past the original 30 s lease.
     assert_eq!(expire_leases(&pool).await.unwrap(), 0);
     let states: Vec<String> =
         sqlx::query_scalar("SELECT state FROM attempt WHERE issue_id = 'PL-1' ORDER BY started_at")
@@ -475,14 +474,14 @@ async fn a_heartbeat_does_not_renew_an_attempt_the_runner_does_not_hold(pool: Pg
 
 #[sqlx::test]
 async fn a_lapsed_lease_is_not_renewed_and_refuses_logs_and_finish_before_the_sweep(pool: PgPool) {
-    let (app, person) = setup(&pool, Duration::from_secs(1)).await;
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r1 = register(&app, &person.token, "r1", &["claude-code"]).await;
     create_and_move(&app, &person.token, "Paused", &["todo", "start"]).await;
     let (_, claimed) = claim(&app, &r1, 0).await;
     let run_id = claimed["run_id"].as_str().unwrap().to_string();
 
     // The runner was paused past its lease; the sweep has not run yet.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    lapse_leases(&pool).await;
     let (status, _) = call(
         &app,
         &r1.token,
@@ -1041,6 +1040,18 @@ async fn a_claim_after_the_branchs_pull_request_merged_names_the_next_branch(poo
         renamed["merged_branches"],
         json!(["feature/pl-1", "feature/pl-1-2"])
     );
+}
+
+/// Moves every running lease `secs` closer to its expiry, as that much time would.
+async fn advance_leases(pool: &PgPool, secs: f64) {
+    sqlx::query(
+        "UPDATE attempt SET lease_expires_at = lease_expires_at - make_interval(secs => $1)
+         WHERE state = 'running'",
+    )
+    .bind(secs)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// Lapses every running lease now, as time would.
