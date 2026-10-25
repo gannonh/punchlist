@@ -1293,6 +1293,21 @@ fn render_workflow(workflow: &WorkflowInfo) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    for status in &workflow.statuses {
+        let Some(agent) = &status.dispatch else {
+            continue;
+        };
+        let model = status
+            .dispatch_model
+            .as_deref()
+            .unwrap_or("the runner's model");
+        let effort = (status.dispatch_effort.as_ref()).map(|effort| format!(", effort {effort}"));
+        out += &format!(
+            "Dispatch  {}: {agent} on {model}{}\n",
+            status.key,
+            effort.unwrap_or_default()
+        );
+    }
     if let Some(refused) = &workflow.refused {
         out += &format!("Refused   {}: {}\n", refused.commit_sha, refused.reason);
     }
@@ -1876,6 +1891,8 @@ mod tests {
                     name: key.into(),
                     locked_to: Vec::new(),
                     dispatch: None,
+                    dispatch_model: None,
+                    dispatch_effort: None,
                     closed: false,
                     on_merge_to: None,
                 })
@@ -1885,6 +1902,17 @@ mod tests {
         assert_eq!(
             render_workflow(&info),
             "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n"
+        );
+        let mut dispatching = info.clone();
+        dispatching.statuses[0].dispatch = Some("claude-code".into());
+        dispatching.statuses[0].dispatch_model = Some("haiku".into());
+        dispatching.statuses[1].dispatch = Some("codex".into());
+        dispatching.statuses[1].dispatch_effort = Some("low".into());
+        assert_eq!(
+            render_workflow(&dispatching),
+            "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n\
+             Dispatch  backlog: claude-code on haiku\n\
+             Dispatch  todo: codex on the runner's model, effort low\n"
         );
         let info = WorkflowInfo {
             invalid: Some("line 4, `statuses`: the runtime needs the status `start`".into()),

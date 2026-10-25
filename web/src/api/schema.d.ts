@@ -1159,6 +1159,11 @@ export interface components {
              *     lifecycle on.
              */
             branch: string;
+            /**
+             * @description Codex's reasoning effort from the dispatch rule's `effort`. `None`: the runner's
+             *     `--codex-effort`.
+             */
+            effort?: string | null;
             github?: components["schemas"]["GithubToken"] | null;
             /**
              * @description Why the server could not mint the run's token, such as GitHub's answer. The runner
@@ -1175,6 +1180,11 @@ export interface components {
              *     issue has merged.
              */
             merged_branches?: string[];
+            /**
+             * @description The model the attempt runs on: the dispatch rule's `model`, else the runner's flag
+             *     for the agent. `None`: the agent's own default.
+             */
+            model?: string | null;
             /**
              * Format: int64
              * @description The number of the attempt's next log line: 1 on a fresh attempt, one past the last
@@ -2212,6 +2222,10 @@ export interface components {
             closed: boolean;
             /** @description The agent a runner starts when an issue enters it, such as `claude-code`. */
             dispatch?: string | null;
+            /** @description The Codex reasoning effort its dispatch rule names; `None`: the runner's flag. */
+            dispatch_effort?: string | null;
+            /** @description The model its dispatch rule names, such as `haiku`; `None`: the runner's flag. */
+            dispatch_model?: string | null;
             /** @description The status key, such as `in_progress`. */
             key: string;
             /** @description The roles that may not act on an issue in it, from the workflow's `[lock]`. */

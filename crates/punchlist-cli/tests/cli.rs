@@ -723,7 +723,9 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
     assert_eq!(
         show.stdout,
         format!(
-            "Version   {}\nCommit    built-in\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n",
+            "Version   {}\nCommit    built-in\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n\
+             Dispatch  in_progress: claude-code on the runner's model\n\
+             Dispatch  agent_review: codex on the runner's model\n",
             punchlist_core::default_workflow().version()
         )
     );

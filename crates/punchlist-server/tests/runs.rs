@@ -2094,3 +2094,132 @@ async fn a_workflow_that_lists_its_statuses_in_another_order_claims_in_that_orde
 
     assert_eq!(claim_all(&app, &runner).await, ["PL-2", "PL-1"]);
 }
+
+/// Makes the built-in workflow, with `in_progress` and `agent_review` lines after each
+/// dispatch rule's prompt, the workspace's active version, under its content hash, which a
+/// transition records and a claim finds the version its dispatch was queued under by.
+async fn set_dispatch_models(pool: &PgPool, in_progress: &str, agent_review: &str) {
+    let text = (punchlist_core::default_workflow().source())
+        .replace(
+            "prompt = \"prompts/in_progress.md\"\n",
+            &format!("prompt = \"prompts/in_progress.md\"\n{in_progress}\n"),
+        )
+        .replace(
+            "prompt = \"prompts/agent_review.md\"\n",
+            &format!("prompt = \"prompts/agent_review.md\"\n{agent_review}\n"),
+        );
+    let built_in = punchlist_core::default_workflow();
+    let version = punchlist_core::Workflow::from_files(&text, built_in.prompts().clone())
+        .unwrap()
+        .version()
+        .to_string();
+    activate(pool, &version, &text).await;
+}
+
+/// A runner that can run both agents, registered with a model for each.
+async fn register_with_models(app: &Router, person: &str) -> Reg {
+    let (status, body) = call(
+        app,
+        person,
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r1", "agents": ["claude-code", "codex"],
+                    "models": {"claude-code": "sonnet", "codex": "gpt-6-luna"}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    Reg {
+        id: body["runner"]["id"].as_str().unwrap().to_string(),
+        token: body["token"].as_str().unwrap().to_string(),
+    }
+}
+
+async fn attempt_models(pool: &PgPool) -> Vec<(String, i32, Option<String>)> {
+    sqlx::query_as(
+        "SELECT r.status, a.attempt, a.model FROM attempt a JOIN run r ON r.id = a.run_id
+         ORDER BY a.started_at",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_claim_takes_the_dispatch_rules_model_else_the_runners(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "model = \"haiku\"", "").await;
+    let runner = register_with_models(&app, &person.token).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+
+    let (status, first) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(
+        (&first["model"], &first["effort"]),
+        (&json!("haiku"), &Value::Null)
+    );
+    // The run's next attempt keeps the run's model.
+    let run_id = first["run_id"].as_str().unwrap();
+    let (status, run) = finish(&app, &runner, run_id, lost(1)).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let (_, second) = claim(&app, &runner, 0).await;
+    assert_eq!(
+        (&second["attempt"], &second["model"]),
+        (&json!(2), &json!("haiku"))
+    );
+
+    // Agent Review's rule names no model: the runner's for Codex.
+    move_to_agent_review(&app, &pool, &second).await;
+    let body = json!({"attempt": 2, "outcome": "succeeded", "duration_ms": 1});
+    let (status, run) = finish(&app, &runner, run_id, body).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let (status, review) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["agent"], "codex");
+    assert_eq!(
+        (&review["model"], &review["effort"]),
+        (&json!("gpt-6-luna"), &Value::Null)
+    );
+
+    assert_eq!(
+        attempt_models(&pool).await,
+        [
+            ("in_progress".into(), 1, Some("haiku".into())),
+            ("in_progress".into(), 2, Some("haiku".into())),
+            ("agent_review".into(), 1, Some("gpt-6-luna".into())),
+        ]
+    );
+}
+
+#[sqlx::test]
+async fn a_claim_takes_the_model_of_the_version_its_dispatch_was_queued_under(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "", "model = \"gpt-6-mini\"\neffort = \"low\"").await;
+    let runner = register_with_models(&app, &person.token).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    // In Progress names no model: the runner's for Claude Code, as before.
+    let (_, build) = claim(&app, &runner, 0).await;
+    assert_eq!(
+        (&build["model"], &build["effort"]),
+        (&json!("sonnet"), &Value::Null)
+    );
+    move_to_agent_review(&app, &pool, &build).await;
+    let run_id = build["run_id"].as_str().unwrap();
+    let (status, run) = finish(&app, &runner, run_id, succeeded()).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+
+    // A load after Agent Review's dispatch was queued does not change its model.
+    set_dispatch_models(&pool, "", "").await;
+    let (status, review) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(
+        (&review["model"], &review["effort"]),
+        (&json!("gpt-6-mini"), &json!("low"))
+    );
+    assert_eq!(
+        attempt_models(&pool).await,
+        [
+            ("in_progress".into(), 1, Some("sonnet".into())),
+            ("agent_review".into(), 1, Some("gpt-6-mini".into())),
+        ]
+    );
+}

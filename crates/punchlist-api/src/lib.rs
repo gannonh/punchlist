@@ -809,6 +809,14 @@ pub struct Claim {
     /// The attempt's agent session: `claude --session-id` on a fresh attempt, `--resume`
     /// on a resumed one.
     pub session_id: Uuid,
+    /// The model the attempt runs on: the dispatch rule's `model`, else the runner's flag
+    /// for the agent. `None`: the agent's own default.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Codex's reasoning effort from the dispatch rule's `effort`. `None`: the runner's
+    /// `--codex-effort`.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
     /// stored line on a resumed one.
     pub next_line: i64,
@@ -1425,6 +1433,12 @@ pub struct StatusInfo {
     pub locked_to: Vec<Role>,
     /// The agent a runner starts when an issue enters it, such as `claude-code`.
     pub dispatch: Option<String>,
+    /// The model its dispatch rule names, such as `haiku`; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_model: Option<String>,
+    /// The Codex reasoning effort its dispatch rule names; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_effort: Option<String>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
     /// The status, as people read it (`Done`), that a merge of the issue's pull request
