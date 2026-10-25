@@ -1195,7 +1195,7 @@ struct RawDispatch {
 struct RawAgentLimit {
     /// Attempts of this agent kind that run at once in the workspace, counted apart from
     /// `[dispatch] max_concurrent`; a claim needs room under both.
-    #[schemars(with = "u32")]
+    #[schemars(with = "u32", range(min = 1))]
     max_concurrent: Spanned<toml::Value>,
 }
 
@@ -2341,6 +2341,10 @@ agent = "claude-code"
         assert_eq!(
             schema["$defs"]["RawAgentLimit"]["required"],
             serde_json::json!(["max_concurrent"])
+        );
+        assert_eq!(
+            schema["$defs"]["RawAgentLimit"]["properties"]["max_concurrent"]["minimum"],
+            1
         );
         assert_eq!(
             schema["$defs"]["RawDispatchRule"]["properties"]["serial"]["type"],
