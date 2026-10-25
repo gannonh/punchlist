@@ -72,6 +72,8 @@ test('the projects screen creates and edits projects and milestones, and shows a
   await dialog.getByLabel('Name').fill(site)
   await dialog.getByLabel('Name').press('Enter')
   await expect(dialog.locator('[data-form-error]')).toHaveText(`a project named ${site} already exists`)
+  // Off the fields too: Radix closes the dialog before the screen's own Esc handler runs.
+  await dialog.getByRole('heading', { name: 'New project' }).click()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
   await expect(page).toHaveURL(/\/w\/PL\/projects$/)
