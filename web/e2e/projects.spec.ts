@@ -130,7 +130,7 @@ test('a rename shows on an open list and projects screen without a reload', asyn
 
   const listed = page.locator(`[data-issue="${row.issue.id}"]`)
   await listed.click()
-  await expect(listed).toHaveAttribute('aria-selected', 'true')
+  await expect(listed).toHaveAttribute('data-focused', '')
   await listed.click()
   const sheet = page.getByRole('dialog')
   await expect(sheet.getByLabel('Project')).toHaveText(name)
