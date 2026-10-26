@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO session (id, account_id, expires_at, user_agent)\n         VALUES ($1, $2, now() + interval '30 days', $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7a51d6e937c6291299f90eebbbfc79bb530ccb83669538acfab0412c6709e642"
+}

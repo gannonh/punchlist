@@ -17,6 +17,7 @@ This directory is the maintained source for verifying Punchlist's user-facing be
 | Web app: issue list, board, edits, transitions and the issue page | [web-app.md](web-app.md) | the server's URL (`web/dist`), `/issues/<id>`, `$C sign-in-url`, `/api/session`, `GET /api/workspaces/{id}/events`, `PATCH /api/issues/{id}`, `GET /api/issues/{id}/transitions`, `pnpm e2e` |
 | Inbox: what waits on a person | [inbox.md](inbox.md) | `GET /api/inbox`, `POST /api/inbox/read`, `/w/<prefix>/inbox`, `[data-inbox-count]`, key `i` |
 | Projects screen: milestones, PASS when and progress | [projects.md](projects.md) | `/w/<prefix>/projects`, `[data-milestone]`, `[data-done-count]`, `Show in list`, keys `g m` |
+| Sign-in: sessions, GitHub sign-in and linking, the Origin check | [sign-in.md](sign-in.md) | `/sign-in`, `$C fake-github`, `GET /api/auth`, `/api/auth/github/start`, `/api/auth/github/callback`, `/api/session`, the account menu |
 | API document and auth | [api-and-auth.md](api-and-auth.md) | `GET /api/openapi.json`, any endpoint without a valid token, `pl` without a config |
 
 ## Baseline preconditions

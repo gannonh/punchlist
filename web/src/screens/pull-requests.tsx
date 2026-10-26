@@ -2,9 +2,10 @@ import { useEffect, useLayoutEffect, useMemo } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { GitMerge } from 'lucide-react'
 import { cn } from 'cn'
+import { AccountMenu } from '@/components/account-menu'
 import { AppHeader, inField } from '@/components/app-header'
 import { GithubLink, StatusDot } from '@/components/atoms'
-import { useEventStream, useInbox, useIssues, usePullRequests, useSignOut } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, usePullRequests } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
@@ -109,7 +110,6 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
   useEventStream(workspace.id, issues.isSuccess)
   const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
   const inbox = useInbox(workspace.id, issues.isSuccess)
-  const signOut = useSignOut()
   const navigate = useNavigate()
   const grouped = useMemo(() => sections(pullRequests.data ?? []), [pullRequests.data])
   useRenderMeasure(pullRequests.data?.length)
@@ -136,16 +136,7 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
   return (
     <div className="flex min-h-screen flex-col">
       <AppHeader workspace={workspace} current="pull-requests" pullRequests={pullRequests.data?.length} inbox={inbox.data?.unread}>
-        <button
-          type="button"
-          className="ml-auto cursor-pointer text-meta text-ink-3 hover:text-foreground"
-          title={`Signed in as ${me}`}
-          onClick={() => {
-            signOut.mutate(undefined, { onSuccess: () => void navigate({ to: '/sign-in' }) })
-          }}
-        >
-          Sign out
-        </button>
+        <AccountMenu me={me} className="ml-auto" />
       </AppHeader>
 
       <main className="mx-auto grid w-full max-w-320 flex-1 content-start gap-3 px-3 py-2 sm:px-4 sm:py-3" aria-live="polite">

@@ -32,6 +32,9 @@ async fn call(
         .method(method)
         .uri(uri)
         .header(auth.0, auth.1)
+        // A browser's writes come from the instance's own origin.
+        .header("host", "localhost")
+        .header("origin", "http://localhost")
         .header("content-type", "application/json")
         .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
         .unwrap();
@@ -170,7 +173,15 @@ async fn one_token_reaches_each_workspace_of_its_account_and_no_other(pool: PgPo
 #[sqlx::test]
 async fn an_edit_in_a_workspace_is_recorded_as_the_accounts_person_there(pool: PgPool) {
     let s = setup(&pool).await;
-    let cookie = format!("punchlist_session={}", s.account.token);
+    let sign_in = Request::builder()
+        .method("POST")
+        .uri("/api/session")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"token": s.account.token}).to_string()))
+        .unwrap();
+    let response = s.app.clone().oneshot(sign_in).await.unwrap();
+    let cookie = response.headers()["set-cookie"].to_str().unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_string();
     let auth = ("cookie", cookie.as_str());
 
     let (status, body) = call(

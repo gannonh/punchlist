@@ -1,9 +1,10 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use punchlist_server::{
-    AppState, Bootstrap, GithubClient, MIGRATOR, ProofStore, bootstrap, catch_up_at_start,
-    expire_leases, join, openapi, queue_workflow_load, queue_workflow_loads_at_start, router,
-    warn_invalid_workflows, with_web_app, work_jobs, write_pull_request_events,
+    AppState, Bootstrap, GithubClient, GithubSignIn, MIGRATOR, ProofStore, bootstrap,
+    catch_up_at_start, expire_leases, join, openapi, queue_workflow_load,
+    queue_workflow_loads_at_start, router, warn_invalid_workflows, with_web_app, work_jobs,
+    write_pull_request_events,
 };
 use sqlx::postgres::PgPoolOptions;
 use tower_http::trace::TraceLayer;
@@ -60,6 +61,42 @@ enum Command {
         /// The web app's build. Served at `/` when it has an `index.html`.
         #[arg(long, env = "PUNCHLIST_WEB_DIR", default_value = "web/dist")]
         web_dir: std::path::PathBuf,
+        /// The GitHub App's OAuth client id. With its client secret, people sign in with GitHub.
+        #[arg(
+            long,
+            env = "GITHUB_APP_CLIENT_ID",
+            requires = "github_app_client_secret"
+        )]
+        github_app_client_id: Option<String>,
+        /// The GitHub App's OAuth client secret.
+        #[arg(
+            long,
+            env = "GITHUB_APP_CLIENT_SECRET",
+            hide_env_values = true,
+            requires = "github_app_client_id"
+        )]
+        github_app_client_secret: Option<String>,
+        /// The instance's own origin as browsers reach it, such as
+        /// `https://sartre.tail984796.ts.net:7880`: GitHub's callback goes there, and a
+        /// browser's writes must come from it. Without it, the request's host.
+        #[arg(long, env = "PUNCHLIST_PUBLIC_URL")]
+        public_url: Option<String>,
+        /// GitHub's OAuth endpoints, replaced for tests.
+        #[arg(
+            long,
+            env = "GITHUB_OAUTH_URL",
+            default_value = "https://github.com",
+            hide = true
+        )]
+        github_oauth_url: String,
+        /// GitHub's API for sign-in, replaced for tests.
+        #[arg(
+            long,
+            env = "GITHUB_API_URL",
+            default_value = "https://api.github.com",
+            hide = true
+        )]
+        github_api_url: String,
     },
     /// Print the OpenAPI document as JSON. Needs no database.
     Openapi,
@@ -121,6 +158,11 @@ async fn main() -> anyhow::Result<()> {
             proof_dir,
             proof_max_bytes,
             web_dir,
+            github_app_client_id,
+            github_app_client_secret,
+            public_url,
+            github_oauth_url,
+            github_api_url,
         } => {
             let proof_dir = match proof_dir.strip_prefix("~/") {
                 Some(rest) => std::path::PathBuf::from(
@@ -184,6 +226,28 @@ async fn main() -> anyhow::Result<()> {
                 }
                 None => tracing::warn!(
                     "no GitHub App credentials; the workflow cannot load from the repository"
+                ),
+            }
+            if let Some(url) = public_url.filter(|url| !url.is_empty()) {
+                let parsed = reqwest::Url::parse(&url)
+                    .ok()
+                    .filter(|url| ["http", "https"].contains(&url.scheme()) && url.path() == "/")
+                    .with_context(|| {
+                        format!("PUNCHLIST_PUBLIC_URL `{url}` is not an origin such as https://example.com:7880")
+                    })?;
+                state = state.with_public_url(&parsed.origin().ascii_serialization());
+            }
+            match github_app_client_id.zip(github_app_client_secret) {
+                Some((client_id, client_secret)) if !client_secret.is_empty() => {
+                    state = state.with_github_sign_in(GithubSignIn {
+                        client_id,
+                        client_secret,
+                        oauth_url: github_oauth_url.trim_end_matches('/').to_string(),
+                        api_url: github_api_url.trim_end_matches('/').to_string(),
+                    });
+                }
+                _ => tracing::info!(
+                    "no GitHub App client id and secret; sign-in takes a token alone"
                 ),
             }
             catch_up_at_start(&state.pool)
