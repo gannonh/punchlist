@@ -1,14 +1,17 @@
 import { useState } from 'react'
-import { useNavigate } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
+import { useNavigate, useSearch } from '@tanstack/react-router'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ApiError } from '@/api/client'
-import { useSignIn } from '@/lib/queries'
+import { signInOptionsQuery, useSignIn } from '@/lib/queries'
 
-/** The server keeps the token in an HttpOnly session cookie. */
+/** Sign in with GitHub, when the server has it, or with a token; either starts a session held in an HttpOnly cookie. */
 export function SignInScreen() {
   const signIn = useSignIn()
   const navigate = useNavigate()
+  const github = useQuery(signInOptionsQuery).data?.github === true
+  const { unlinked } = useSearch({ from: '/sign-in' })
   const [token, setToken] = useState('')
   const failed =
     signIn.error instanceof ApiError && signIn.error.status === 401
@@ -24,6 +27,25 @@ export function SignInScreen() {
         }}
       >
         <h1 className="text-title font-semibold">Sign in to Punchlist</h1>
+        {unlinked && (
+          <p className="text-meta text-bad wrap-anywhere" role="alert" data-unlinked>
+            No Punchlist account is linked to GitHub user {unlinked}. Sign in with a token once and link GitHub from the
+            account menu.
+          </p>
+        )}
+        {github && (
+          <>
+            {/* A navigation, not a fetch: the server sends the browser on to GitHub. */}
+            <Button asChild variant="outline">
+              <a href="/api/auth/github/start" data-github-sign-in>
+                Sign in with GitHub
+              </a>
+            </Button>
+            <p className="flex items-center gap-2 text-meta text-ink-3 before:h-px before:flex-1 before:bg-border after:h-px after:flex-1 after:bg-border">
+              or
+            </p>
+          </>
+        )}
         <p className="text-muted-foreground">
           Paste your token. <code className="font-mono text-meta">punchlist-server bootstrap</code> printed it in your{' '}
           <code className="font-mono text-meta">pl</code> config.

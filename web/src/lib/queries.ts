@@ -40,6 +40,13 @@ export const sessionQuery = queryOptions({
   staleTime: Infinity,
 })
 
+/** The ways the sign-in page offers: `github` when the server has the GitHub App's client id and secret. */
+export const signInOptionsQuery = queryOptions({
+  queryKey: ['sign-in-options'],
+  queryFn: () => call(api.GET('/api/auth')),
+  staleTime: Infinity,
+})
+
 /** The workspaces the signed-in account belongs to, oldest first (ADR 0011). */
 export const workspacesQuery = queryOptions({
   queryKey: ['workspaces'],

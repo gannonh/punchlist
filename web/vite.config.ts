@@ -4,7 +4,7 @@ import viteReact from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 // `pnpm dev` proxies /api to the server it started (scripts/dev.sh), so the app and the API share one
-// origin and the SameSite=Strict session cookie works as it does when the server serves web/dist.
+// origin: the session cookie and the Origin check on writes work as they do when the server serves web/dist.
 const api = `http://${process.env.PUNCHLIST_BIND ?? '127.0.0.1:7878'}`
 
 export default defineConfig({
