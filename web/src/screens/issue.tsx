@@ -458,30 +458,32 @@ function DependenciesPanel({ issue }: { issue: Issue }) {
   )
 }
 
-/** A person gives an issue that waits on them another set of runs in its status. */
-function RunAgain({ id }: { id: string }) {
+/** A person gives an issue that waits on them another set of runs in its status; the inbox's run items have it too. */
+export function RunAgain({ id }: { id: string }) {
   const runAgain = useRunAgain(id)
-  // `isPending` reaches the button after a render, which a double click's second click can beat.
-  const sent = useRef(false)
+  // Set in the click, so the button is pending from the click on: `isPending` reaches it a render later, which a
+  // double click's second click can beat.
+  const [sent, setSent] = useState(false)
   return (
     <Button
       variant="outline"
       size="xs"
       className="flex-none self-center"
       data-run-again
-      disabled={runAgain.isPending}
-      aria-busy={runAgain.isPending}
+      aria-label={`Run again ${id}`}
+      disabled={sent}
+      aria-busy={sent}
       onClick={() => {
-        if (sent.current) return
-        sent.current = true
+        if (sent) return
+        setSent(true)
         runAgain.mutate(undefined, {
           onSettled: () => {
-            sent.current = false
+            setSent(false)
           },
         })
       }}
     >
-      Run again
+      {sent ? 'Running again…' : 'Run again'}
     </Button>
   )
 }
