@@ -13,19 +13,25 @@ use punchlist_api::GithubToken;
 /// Hands git the token in the file `PUNCHLIST_GITHUB_TOKEN_FILE` names.
 const CREDENTIAL_HELPER: &str = r#"!f() { test "$1" = get && printf 'username=x-access-token\npassword=%s\n' "$(cat "$PUNCHLIST_GITHUB_TOKEN_FILE")"; }; f"#;
 
-/// Variables that carry a GitHub credential, or a way to one, into the agent.
-const REMOVED: [&str; 7] = [
+/// Variables that carry a GitHub credential, or a way to one, into the agent. Removing them
+/// holds, since nothing on the machines exports them again in a profile. `SSH_AUTH_SOCK` is
+/// not removed but pointed at [`NO_SSH_AGENT`]: a login shell's `~/.bashrc` may set it back
+/// to the person's agent with `${SSH_AUTH_SOCK:-…}`.
+const REMOVED: [&str; 6] = [
     "GH_TOKEN",
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
-    "SSH_AUTH_SOCK",
     "GIT_ASKPASS",
     "GIT_CONFIG_PARAMETERS",
 ];
 
+/// An empty regular file, not a socket, that the agent's `SSH_AUTH_SOCK` names, so `ssh`
+/// finds no agent there.
+const NO_SSH_AGENT: &str = "no-ssh-agent";
+
 /// `<root>/github/<run id>/`: `token`, read by git's credential helper, and `gh/hosts.yml`,
-/// `gh`'s login. Removed when dropped.
+/// `gh`'s login, and [`NO_SSH_AGENT`]. Removed when dropped.
 pub(crate) struct GithubAccess {
     dir: PathBuf,
     bot_name: String,
@@ -57,6 +63,7 @@ impl GithubAccess {
             bot_email: token.bot_email.clone(),
         };
         access.write(&token.token)?;
+        replace(&access.dir.join(NO_SSH_AGENT), "")?;
         Ok(access)
     }
 
@@ -91,6 +98,10 @@ impl GithubAccess {
         let set = |value: &str| Some(OsString::from(value));
         env.extend([
             ("GH_CONFIG_DIR", Some(self.dir.join("gh").into_os_string())),
+            (
+                "SSH_AUTH_SOCK",
+                Some(self.dir.join(NO_SSH_AGENT).into_os_string()),
+            ),
             (
                 "PUNCHLIST_GITHUB_TOKEN_FILE",
                 Some(self.dir.join("token").into_os_string()),
@@ -212,13 +223,35 @@ mod tests {
                 ""
             );
         }
+        let no_agent = format!("{}\n", access.dir.join("no-ssh-agent").display());
         assert_eq!(
             run(
                 &access,
                 &repo,
-                "echo \"${GH_TOKEN-unset} ${GITHUB_TOKEN-unset} ${SSH_AUTH_SOCK-unset}\""
+                "echo \"${GH_TOKEN-unset} ${GITHUB_TOKEN-unset}\"; echo \"$SSH_AUTH_SOCK\""
             ),
-            "unset unset unset\n"
+            format!("unset unset\n{no_agent}")
+        );
+        // A profile that falls back to the person's agent, as sartre's `~/.bashrc` does,
+        // keeps the path, which is no socket.
+        let profile = temp.path().join("bashrc");
+        std::fs::write(
+            &profile,
+            "export SSH_AUTH_SOCK=\"${SSH_AUTH_SOCK:-/run/user/1000/ssh-agent.socket}\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &access,
+                &repo,
+                &format!(". '{}'; echo \"$SSH_AUTH_SOCK\"", profile.display())
+            ),
+            no_agent
+        );
+        run(
+            &access,
+            &repo,
+            "test -f \"$SSH_AUTH_SOCK\" && ! test -S \"$SSH_AUTH_SOCK\"",
         );
         assert_eq!(
             run(&access, &repo, "cat \"$GH_CONFIG_DIR/hosts.yml\""),
