@@ -155,13 +155,14 @@ pub fn display_name(status: &str) -> String {
         .join(" ")
 }
 
-/// One allowed move. A transition with an empty `by` is made only by its `on` event.
+/// One allowed move. A transition with an empty `by` is made only by its `on` events.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transition {
     pub from: Vec<Status>,
     pub to: Status,
     pub by: Vec<Role>,
-    pub on: Option<String>,
+    /// The events that make the move, any one of them; empty when only `by` makes it.
+    pub on: Vec<String>,
     /// Gates that must pass on recorded evidence before the move.
     pub gates: Vec<Gate>,
     /// What the move must carry, such as `comment`.
@@ -255,6 +256,8 @@ pub enum Problem {
     NoActor,
     #[error("unknown event `{0}`; events are {events}", events = EVENTS.join(", "))]
     UnknownEvent(String),
+    #[error("`on` is an event or a non-empty list of events")]
+    BadOn,
     #[error("unknown gate `{0}`; gates are {gates}", gates = gate_names())]
     UnknownGate(String),
     #[error("unknown requirement `{0}`; requirements are {requirements}", requirements = REQUIREMENTS.join(", "))]
@@ -326,11 +329,11 @@ pub enum Refusal {
     UnknownStatus { status: String },
     #[error("no transition {from} → {to} exists in the workflow")]
     NoTransition { from: String, to: String },
-    #[error("{from} → {to} happens only on the `{on}` event, not on request")]
+    #[error("{from} → {to} happens only on the `{on}` event, not on request", on = on.join("` or `"))]
     EventOnly {
         from: String,
         to: String,
-        on: String,
+        on: Vec<String>,
     },
     #[error("only {} makes {from} → {to}, not {}", role_list(allowed), role.with_article())]
     RoleNotAllowed {
@@ -541,15 +544,30 @@ impl Workflow {
             let to = known(t.to.get_ref(), t.to.span(), key("to"))?;
             let by_span = t.by.first().map(Spanned::span);
             let by = roles(t.by, &key("by"))?;
-            if by.is_empty() && t.on.is_none() {
+            let on: Vec<String> = match t.on {
+                None => Vec::new(),
+                Some(on) => {
+                    let span = on.span();
+                    let names = match on.into_inner() {
+                        toml::Value::String(name) => vec![name],
+                        toml::Value::Array(items) if !items.is_empty() => items
+                            .into_iter()
+                            .map(|item| match item {
+                                toml::Value::String(name) => Ok(name),
+                                _ => Err(errors.at(span.clone(), key("on"), Problem::BadOn)),
+                            })
+                            .collect::<Result<_, _>>()?,
+                        _ => return Err(errors.at(span, key("on"), Problem::BadOn)),
+                    };
+                    if let Some(name) = names.iter().find(|n| !EVENTS.contains(&n.as_str())) {
+                        let problem = Problem::UnknownEvent(name.clone());
+                        return Err(errors.at(span, key("on"), problem));
+                    }
+                    names
+                }
+            };
+            if by.is_empty() && on.is_empty() {
                 return Err(errors.at(t.to.span(), format!("transition[{i}]"), Problem::NoActor));
-            }
-            if let Some(on) =
-                t.on.as_ref()
-                    .filter(|on| !EVENTS.contains(&on.get_ref().as_str()))
-            {
-                let problem = Problem::UnknownEvent(on.get_ref().clone());
-                return Err(errors.at(on.span(), key("on"), problem));
             }
             let mut gates = Vec::new();
             for (j, name) in t.gates.iter().enumerate() {
@@ -566,7 +584,7 @@ impl Workflow {
                 }
             }
             if loading
-                && t.on.is_none()
+                && on.is_empty()
                 && let Some(name) = t.require.first()
             {
                 let problem = Problem::RequireWithoutEvent;
@@ -593,7 +611,7 @@ impl Workflow {
                 from,
                 to,
                 by,
-                on: t.on.map(Spanned::into_inner),
+                on,
                 gates,
                 require: t.require.into_iter().map(Spanned::into_inner).collect(),
             });
@@ -987,11 +1005,11 @@ impl Workflow {
         if transition.by.contains(&role) {
             return Ok(transition);
         }
-        match (&transition.on, transition.by.is_empty()) {
-            (Some(on), true) => Err(Refusal::EventOnly {
+        match (&transition.on[..], transition.by.is_empty()) {
+            ([_, ..], true) => Err(Refusal::EventOnly {
                 from: from.to_string(),
                 to: to.to_string(),
-                on: on.clone(),
+                on: transition.on.clone(),
             }),
             _ => Err(Refusal::RoleNotAllowed {
                 from: from.to_string(),
@@ -1009,7 +1027,7 @@ impl Workflow {
     pub fn next_gated(&self, from: &str) -> Option<&Transition> {
         self.transitions
             .iter()
-            .find(|t| t.on.is_none() && !t.gates.is_empty() && t.from.iter().any(|f| f.0 == from))
+            .find(|t| t.on.is_empty() && !t.gates.is_empty() && t.from.iter().any(|f| f.0 == from))
     }
 
     /// The transitions an actor can request from `from`, in the file's order: every one
@@ -1017,7 +1035,7 @@ impl Workflow {
     pub fn requestable(&self, from: &str) -> impl Iterator<Item = &Transition> {
         self.transitions
             .iter()
-            .filter(move |t| t.on.is_none() && t.from.iter().any(|f| f.0 == from))
+            .filter(move |t| t.on.is_empty() && t.from.iter().any(|f| f.0 == from))
     }
 
     /// The statuses an issue waits on a person in, in the workflow's order: not the first
@@ -1042,7 +1060,7 @@ impl Workflow {
     pub fn transition_on(&self, from: &str, event: &str) -> Option<&Transition> {
         self.transitions
             .iter()
-            .find(|t| t.on.as_deref() == Some(event) && t.from.iter().any(|f| f.0 == from))
+            .find(|t| t.on.iter().any(|on| on == event) && t.from.iter().any(|f| f.0 == from))
     }
 
     /// The status a merge of the issue's pull request moves an issue in `from` to, such as
@@ -1184,10 +1202,10 @@ struct RawTransition {
     #[serde(default)]
     #[schemars(with = "Vec<RoleName>")]
     by: Vec<Spanned<String>>,
-    /// The GitHub event that makes the move.
+    /// The event that makes the move, or a list of events, any of which makes it.
     #[serde(default)]
-    #[schemars(with = "Option<EventName>")]
-    on: Option<Spanned<String>>,
+    #[schemars(with = "Option<Events>")]
+    on: Option<Spanned<toml::Value>>,
     /// Checks over recorded evidence that must pass first.
     #[serde(default)]
     #[schemars(with = "Vec<GateName>")]
@@ -1265,6 +1283,14 @@ struct RawDispatchRule {
 enum FromStatuses {
     One(String),
     Many(Vec<String>),
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(untagged)]
+enum Events {
+    One(EventName),
+    Many(#[schemars(length(min = 1))] Vec<EventName>),
 }
 
 #[allow(dead_code)]
@@ -1534,6 +1560,28 @@ mod tests {
     }
 
     #[test]
+    fn a_list_of_events_moves_on_each_of_them_and_only_on_them() {
+        let workflow = Workflow::from_toml(&runnable(
+            "[[transition]]\nfrom = \"a\"\nto = \"b\"\non = [\"children_done\", \"pr_merged\"]\nrequire = [\"comment\"]",
+        ))
+        .unwrap();
+        let to = |event| workflow.transition_on("a", event).map(|t| t.to.as_str());
+        assert_eq!(to("children_done"), Some("b"));
+        assert_eq!(to("pr_merged"), Some("b"));
+        assert_eq!(to("pr_closed_unmerged"), None);
+        assert_eq!(workflow.on_merge_to("a").map(Status::as_str), Some("b"));
+        assert_eq!(workflow.requestable("a").count(), 0);
+        let refusal = workflow
+            .check_transition("a", "b", Role::Person)
+            .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "a → b happens only on the `children_done` or `pr_merged` event, not on request"
+        );
+        assert_eq!(refusal.code(), "event_only");
+    }
+
+    #[test]
     fn display_names() {
         assert_eq!(display_name("backlog"), "Backlog");
         assert_eq!(display_name("in_progress"), "In Progress");
@@ -1586,7 +1634,11 @@ mod tests {
                     from.join(","),
                     t.to,
                     by.join(","),
-                    t.on.as_deref().unwrap_or("-"),
+                    if t.on.is_empty() {
+                        "-".to_string()
+                    } else {
+                        t.on.join("|")
+                    },
                     gates.join(","),
                     t.require.join(",")
                 )
@@ -1861,6 +1913,35 @@ mod tests {
                 .map(|t| t.to.as_str()),
             Some("b")
         );
+        for (on, problem) in [
+            ("[]", Problem::BadOn),
+            ("[\"pr_merged\", 1]", Problem::BadOn),
+            (
+                "[\"pr_merged\", \"nope\"]",
+                Problem::UnknownEvent("nope".into()),
+            ),
+        ] {
+            assert_eq!(
+                transition(&format!("on = {on}")),
+                (Some(5), "transition[0].on".into(), problem)
+            );
+        }
+        for (on, message) in [
+            ("[]", "`on` is an event or a non-empty list of events"),
+            (
+                "[\"pr_merged\", \"nope\"]",
+                "unknown event `nope`; events are pr_merged, pr_closed_unmerged, children_done",
+            ),
+        ] {
+            assert_eq!(
+                Workflow::from_toml(&runnable(&format!(
+                    "[[transition]]\nfrom = \"a\"\nto = \"b\"\non = {on}"
+                )))
+                .unwrap_err()
+                .to_string(),
+                format!("line 5, `transition[0].on`: {message}")
+            );
+        }
         assert_eq!(
             transition("by = [\"person\"]\nrequire = [\"evidence\"]"),
             (
@@ -2235,6 +2316,12 @@ mod tests {
         let workflow = punchlists_own(include_str!("../../../.punchlist/workflow.toml"));
         assert_eq!(workflow.statuses().len(), 9);
         assert_eq!(workflow.prompts().len(), 4);
+        for from in ["backlog", "todo"] {
+            for event in ["children_done", "pr_merged"] {
+                let to = workflow.transition_on(from, event).map(|t| t.to.as_str());
+                assert_eq!(to, Some("done"), "{from} on {event}");
+            }
+        }
         let merging = workflow.dispatch_for("merging").unwrap();
         assert_eq!(
             (merging.agent.as_str(), merging.prompt.as_deref()),
@@ -2381,6 +2468,13 @@ agent = "claude-code"
         assert_eq!(
             schema["$defs"]["EventName"]["enum"],
             serde_json::json!(EVENTS)
+        );
+        assert_eq!(
+            schema["$defs"]["Events"]["anyOf"],
+            serde_json::json!([
+                {"$ref": "#/$defs/EventName"},
+                {"type": "array", "items": {"$ref": "#/$defs/EventName"}, "minItems": 1}
+            ])
         );
         assert_eq!(schema["title"], "Punchlist workflow");
         let kinds = AGENT_KINDS.map(|kind| format!("`{kind}`"));
