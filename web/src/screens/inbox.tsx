@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { cn } from 'cn'
+import { AccountMenu } from '@/components/account-menu'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
-import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests, useSignOut } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests } from '@/lib/queries'
 import { ageText, canRunAgain, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
 import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
@@ -119,7 +120,6 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
   const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
   const inbox = useInbox(workspace.id, true)
   const markRead = useMarkRead(workspace.id)
-  const signOut = useSignOut()
   const navigate = useNavigate()
   const now = useNow()
   const items = useMemo(() => ordered(inbox.data?.items ?? []), [inbox.data])
@@ -154,16 +154,7 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
         pullRequests={pullRequests.data?.length}
         inbox={inbox.data?.unread}
       >
-        <button
-          type="button"
-          className="ml-auto cursor-pointer text-meta text-ink-3 hover:text-foreground"
-          title={`Signed in as ${me}`}
-          onClick={() => {
-            signOut.mutate(undefined, { onSuccess: () => void navigate({ to: '/sign-in' }) })
-          }}
-        >
-          Sign out
-        </button>
+        <AccountMenu me={me} className="ml-auto" />
       </AppHeader>
 
       <main className="mx-auto grid w-full max-w-320 flex-1 content-start gap-3 px-3 py-2 sm:px-4 sm:py-3" aria-live="polite">

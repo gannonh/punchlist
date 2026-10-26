@@ -1,5 +1,5 @@
 use axum::extract::FromRequestParts;
-use axum::http::header::{AUTHORIZATION, COOKIE};
+use axum::http::header::{AUTHORIZATION, COOKIE, HOST, ORIGIN};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use percent_encoding::percent_decode_str;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{ApiError, AppState};
 
-/// The actor a request's bearer token belongs to.
+/// The actor a request's bearer token or session belongs to.
 #[derive(Debug, Clone)]
 pub struct Actor {
     pub id: Uuid,
@@ -20,7 +20,8 @@ pub struct Actor {
     pub role: Role,
     /// The agent key, such as `codex`. Only agents have one.
     pub kind: Option<String>,
-    /// The hash of the token the request came with; none for an actor acting without one.
+    /// The hash of the token the request came with; none for a session and an actor acting
+    /// without one.
     pub token_hash: Option<String>,
     /// The account a person's token authenticates; the actor is its person in the workspace
     /// the request names (ADR 0011). Agents and runners have none.
@@ -38,19 +39,90 @@ impl From<&Actor> for punchlist_api::Actor {
     }
 }
 
-/// The cookie a browser signs in with (`POST /api/session`); its value is a person's token.
-/// It is `SameSite=Strict`, so a browser sends it only on requests that Punchlist's own
-/// pages make: that is the defence against cross-site request forgery, since no other
-/// site's page can make a request that carries it.
+/// The cookie a browser signs in with (`POST /api/session`, or GitHub): its value is a random
+/// session id, whose SHA-256 is a `session` row's id (ADR 0013). It is `SameSite=Lax`, so a
+/// browser sends it on another site's top-level navigations and forms too; `same_origin`
+/// refuses any write that carries it from another origin.
 pub const SESSION_COOKIE: &str = "punchlist_session";
 
-/// The token in the request's session cookie.
-fn session_token(headers: &HeaderMap) -> Option<&str> {
+/// The named cookie's value in the request.
+pub fn request_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     (headers.get_all(COOKIE).iter())
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
-        .find_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
-        .filter(|token| !token.is_empty())
+        .find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('='))
+        .filter(|value| !value.is_empty())
+}
+
+/// The session id in the request's session cookie.
+pub fn session_id(headers: &HeaderMap) -> Option<&str> {
+    request_cookie(headers, SESSION_COOKIE)
+}
+
+/// The account of a live session, by the hash of its id. A use pushes its expiry 30 days out,
+/// written at most once a minute.
+pub async fn session_account(
+    pool: &sqlx::PgPool,
+    session_hash: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar!(
+        r#"WITH found AS (
+               SELECT id, account_id, last_used_at FROM session
+               WHERE id = $1 AND expires_at > now()
+           ), touched AS (
+               UPDATE session
+               SET last_used_at = now(), expires_at = now() + interval '30 days'
+               FROM found
+               WHERE session.id = found.id AND found.last_used_at < now() - interval '1 minute'
+           )
+           SELECT account_id FROM found"#,
+        session_hash,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Refuses a write (any method but `GET`, `HEAD` and `OPTIONS`) from another origin: one whose
+/// `Origin` is not the instance's own, or one that carries the session cookie and no `Origin`.
+/// A browser sends `Origin` with every such request; `pl`, runners and GitHub's deliveries
+/// send neither it nor the cookie.
+pub async fn same_origin(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let headers = request.headers();
+    let safe = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let origin = headers.get(ORIGIN).and_then(|value| value.to_str().ok());
+    if safe || (origin.is_none() && session_id(headers).is_none()) {
+        return next.run(request).await;
+    }
+    if origin.is_some_and(|origin| own_origin(&state, headers, origin)) {
+        return next.run(request).await;
+    }
+    tracing::warn!(
+        origin,
+        path = request.uri().path(),
+        "refused a write from another origin"
+    );
+    ApiError::Forbidden("refused a write from another origin".into()).into_response()
+}
+
+/// Whether `origin` is the instance's: `PUNCHLIST_PUBLIC_URL`, else the request's own host,
+/// which a page on another site cannot set.
+fn own_origin(state: &AppState, headers: &HeaderMap, origin: &str) -> bool {
+    match state.public_url.as_deref() {
+        Some(url) => origin == url,
+        None => origin.split_once("://").is_some_and(|(_, authority)| {
+            [HOST.as_str(), "x-forwarded-host"]
+                .iter()
+                .any(|name| headers.get(*name).is_some_and(|host| host == authority))
+        }),
+    }
 }
 
 /// Reads an `actor.role` column. Its `CHECK` constraint allows only known roles, so an
@@ -154,17 +226,22 @@ impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Actor, ApiError> {
-        let (token, from_cookie) = match parts.headers.get(AUTHORIZATION) {
-            Some(value) => (
-                (value.to_str().ok())
+        // A bearer token is a person's account's, else an agent's or a runner's. A session
+        // cookie is an account's.
+        let (token_hash, session) = match parts.headers.get(AUTHORIZATION) {
+            Some(value) => {
+                let token = (value.to_str().ok())
                     .and_then(|value| value.strip_prefix("Bearer "))
-                    .ok_or(ApiError::Unauthorized)?,
-                false,
-            ),
-            None => (
-                session_token(&parts.headers).ok_or(ApiError::Unauthorized)?,
-                true,
-            ),
+                    .ok_or(ApiError::Unauthorized)?;
+                (Some(hash_token(token)), None)
+            }
+            None => {
+                let id = session_id(&parts.headers).ok_or(ApiError::Unauthorized)?;
+                let account = session_account(&state.pool, &hash_token(id))
+                    .await?
+                    .ok_or(ApiError::Unauthorized)?;
+                (None, Some(account))
+            }
         };
         let path = parts.uri.path();
         // The issue a path names: `/api/issues/<id>` and below. Decoded as the route's `Path`
@@ -176,17 +253,17 @@ impl FromRequestParts<AppState> for Actor {
             .filter(|id| !id.is_empty());
         let issue_id = issue_id.as_deref();
         let named = named_workspace(&state.pool, path, issue_id).await?;
-        let token_hash = hash_token(token);
-        // A person's token is their account's: the actor is the account's person in the
-        // workspace the request names, oldest workspace first.
+        // The actor of an account is its person in the workspace the request names, oldest
+        // workspace first.
         let memberships = sqlx::query!(
-            r#"SELECT acc.id AS account_id, acc.name AS account_name, a.id, a.workspace_id,
-                      a.name, w.issue_prefix
+            r#"SELECT acc.id AS account_id, acc.name AS account_name, acc.github_login, a.id,
+                      a.workspace_id, a.name, w.issue_prefix
                FROM account acc
                JOIN actor a ON a.account_id = acc.id
                JOIN workspace w ON w.id = a.workspace_id
-               WHERE acc.token_hash = $1
+               WHERE acc.id = $1 OR acc.token_hash = $2
                ORDER BY w.created_at, w.id"#,
+            session,
             token_hash,
         )
         .fetch_all(&state.pool)
@@ -224,13 +301,16 @@ impl FromRequestParts<AppState> for Actor {
                 name: actor.name.clone(),
                 role: Role::Person,
                 kind: None,
-                token_hash: Some(token_hash),
+                token_hash,
                 account: Some(punchlist_api::Account {
                     id: actor.account_id,
                     name: actor.account_name.clone(),
+                    github_login: actor.github_login.clone(),
                 }),
             });
         }
+        // A session is a person's, in at least one workspace.
+        let token_hash = token_hash.ok_or(ApiError::Unauthorized)?;
         let row = sqlx::query!(
             r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
                       r.outcome AS "outcome?"
@@ -242,10 +322,6 @@ impl FromRequestParts<AppState> for Actor {
         .await?
         .ok_or(ApiError::Unauthorized)?;
         let role = parse_role(&row.role)?;
-        // Only a person signs in from a browser.
-        if from_cookie && role != Role::Person {
-            return Err(ApiError::Unauthorized);
-        }
         // A run's agent says its own run waits on a person, which that route refuses once the
         // run has ended.
         let own_waiting = parts.method == Method::POST
