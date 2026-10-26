@@ -4,9 +4,10 @@ import { cn } from 'cn'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
 import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests, useSignOut } from '@/lib/queries'
-import { ageText, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
+import { ageText, canRunAgain, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
 import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
+import { RunAgain } from '@/screens/issue'
 import { useNow } from '@/screens/issues'
 
 /** Records a `pl:render` measure for each commit of the page with its items, as the list does. */
@@ -34,61 +35,69 @@ const KIND_STYLE = {
 
 function Item({ item, now, onOpen }: { item: InboxItem; now: Date; onOpen: (item: InboxItem) => void }) {
   const { issue } = item
+  // A button cannot sit in a link, so Run again is the link's sibling in the item's row.
   return (
-    <Link
-      to="/issues/$id"
-      params={{ id: issue.id }}
-      data-item={issue.id}
-      data-kind={item.kind}
-      data-unread={item.unread || undefined}
-      aria-label={`${KIND[item.kind]}: ${issue.id} ${issue.title}, ${issue.status_name}${item.unread ? ', unread' : ''}`}
-      className="grid gap-1.5 border-t px-3 py-2.5 first:border-t-0 hover:bg-secondary focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
-      onClick={(event) => {
-        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return
-        event.preventDefault()
-        onOpen(item)
-      }}
-    >
-      <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-meta">
-        <span
-          className={cn('inline-block size-2 flex-none rounded-full', item.unread ? 'bg-primary' : 'bg-transparent')}
-          aria-hidden="true"
-        />
-        <span className="font-mono">{issue.id}</span>
-        <span
-          className={cn(
-            'rounded-full border px-2 py-px text-caption font-medium whitespace-nowrap',
-            KIND_STYLE[item.kind],
-          )}
-        >
-          {KIND[item.kind]}
-        </span>
-        <span className="inline-flex items-center gap-1.25 whitespace-nowrap text-muted-foreground" data-field="status">
-          <StatusDot status={issue.status} />
-          {issue.status_name}
-        </span>
-        <span className="ml-auto text-ink-3" data-age title={item.since}>
-          {ageText(item, now)}
-        </span>
-      </span>
-      <span className={cn('wrap-anywhere', item.unread ? 'font-semibold' : 'font-medium')}>{issue.title}</span>
-      {item.kind === 'run' && (
-        <span className="grid gap-0.5 text-meta wrap-anywhere text-muted-foreground" data-cause>
-          <span>
-            <b className="font-semibold text-bad" data-agent>
-              {agentName(item.agent)}
-            </b>{' '}
-            run on your runner
+    <div className="flex items-center border-t first:border-t-0 hover:bg-secondary">
+      <Link
+        to="/issues/$id"
+        params={{ id: issue.id }}
+        data-item={issue.id}
+        data-kind={item.kind}
+        data-unread={item.unread || undefined}
+        aria-label={`${KIND[item.kind]}: ${issue.id} ${issue.title}, ${issue.status_name}${item.unread ? ', unread' : ''}`}
+        className="grid min-w-0 flex-1 gap-1.5 px-3 py-2.5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+        onClick={(event) => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return
+          event.preventDefault()
+          onOpen(item)
+        }}
+      >
+        <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-meta">
+          <span
+            className={cn('inline-block size-2 flex-none rounded-full', item.unread ? 'bg-primary' : 'bg-transparent')}
+            aria-hidden="true"
+          />
+          <span className="font-mono">{issue.id}</span>
+          <span
+            className={cn(
+              'rounded-full border px-2 py-px text-caption font-medium whitespace-nowrap',
+              KIND_STYLE[item.kind],
+            )}
+          >
+            {KIND[item.kind]}
           </span>
-          {runLines(item).map((line) => (
-            <span key={line} data-run-line>
-              {line}
+          <span className="inline-flex items-center gap-1.25 whitespace-nowrap text-muted-foreground" data-field="status">
+            <StatusDot status={issue.status} />
+            {issue.status_name}
+          </span>
+          <span className="ml-auto text-ink-3" data-age title={item.since}>
+            {ageText(item, now)}
+          </span>
+        </span>
+        <span className={cn('wrap-anywhere', item.unread ? 'font-semibold' : 'font-medium')}>{issue.title}</span>
+        {item.kind === 'run' && (
+          <span className="grid gap-0.5 text-meta wrap-anywhere text-muted-foreground" data-cause>
+            <span>
+              <b className="font-semibold text-bad" data-agent>
+                {agentName(item.agent)}
+              </b>{' '}
+              run on your runner
             </span>
-          ))}
+            {runLines(item).map((line) => (
+              <span key={line} data-run-line>
+                {line}
+              </span>
+            ))}
+          </span>
+        )}
+        {item.kind === 'refusal' && <RefusalCause parts={refusalParts(item)} />}
+      </Link>
+      {canRunAgain(item) && (
+        <span className="flex-none pr-3">
+          <RunAgain id={issue.id} />
         </span>
       )}
-      {item.kind === 'refusal' && <RefusalCause parts={refusalParts(item)} />}
-    </Link>
+    </div>
   )
 }
 

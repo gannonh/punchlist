@@ -534,7 +534,12 @@ export function useRunAgain(id: string) {
     onError: (error) => {
       toast.error(`${id} was not run again. ${refusal(error)}`)
     },
-    onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+    // The inbox of any workspace, so a refused item shows its issue's current state.
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: issueKey(id) }),
+        client.invalidateQueries({ queryKey: ['inbox'] }),
+      ]),
   })
 }
 
