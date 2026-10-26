@@ -68,9 +68,9 @@ fn parse_stored(
     Ok((workflow, invalid.map(|e| e.to_string())))
 }
 
-/// The workflow version the issue's waiting dispatch was queued under: the one its
-/// transition recorded. The dispatch's agent is that version's, so the run's prompt is too,
-/// whatever version has loaded since.
+/// The workflow version the issue's waiting dispatch was queued under: the one a Run again
+/// recorded on its round, else the one its transition recorded. The dispatch's agent is that
+/// version's, so the run's prompt is too, whatever version has loaded since.
 pub(crate) async fn dispatch_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -79,7 +79,8 @@ pub(crate) async fn dispatch_workflow(
     let row = sqlx::query!(
         "SELECT v.workflow_toml, v.prompts
          FROM dispatch d JOIN transition t ON t.id = d.transition_id
-         JOIN workflow_version v ON v.workspace_id = $1 AND v.hash = t.workflow_version
+         JOIN workflow_version v ON v.workspace_id = $1
+                                 AND v.hash = coalesce(d.workflow_version, t.workflow_version)
          WHERE d.issue_id = $2 AND d.run_id IS NULL",
         workspace_id,
         issue_id,

@@ -61,7 +61,8 @@ export interface paths {
          * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
-         *     owns, ended with nothing to dispatch them again. A person's token.
+         *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
+         *     asked to move, refused by a gate, with no move since. A person's token.
          */
         get: operations["inbox"];
         put?: never;
@@ -129,7 +130,7 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+         * Edit an issue's title, body, labels, assignee, parent, project, milestone or blockers. Only the
          *     fields that change are written, with one `edited` event naming them; a request that
          *     changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
          *     in a role the issue's status locks may edit it.
@@ -251,6 +252,28 @@ export interface paths {
          *     and the answer is what is recorded.
          */
         post: operations["refresh_issue_pull_requests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/issues/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
+         *     `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+         *     starting a round (`runs_before`) under the active workflow's agent and version, and writes
+         *     the person's `run_again` event, in one transaction. Person token.
+         */
+        post: operations["run_again"];
         delete?: never;
         options?: never;
         head?: never;
@@ -533,7 +556,8 @@ export interface paths {
         /**
          * Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
          *     names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
-         *     workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+         *     workspace runs the workflow's `[dispatch] max_concurrent` attempts, or the agent kinds that
+         *     have work run their `[dispatch.agent.<kind>] max_concurrent`; with `wait_seconds` the
          *     request waits for one. When several runners wait, each issue goes to
          *     one of them and the others get 409 `claim_taken`.
          */
@@ -862,7 +886,8 @@ export interface paths {
          * What waits on the caller, newest `since_seq` first: the workspace's issues in a status that
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
-         *     owns, ended with nothing to dispatch them again. A person's token.
+         *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
+         *     asked to move, refused by a gate, with no move since. A person's token.
          */
         get: operations["inbox_in_workspace"];
         put?: never;
@@ -1395,6 +1420,14 @@ export interface components {
         } | {
             /** @enum {string} */
             kind: "project";
+        } | {
+            /** @description The agent key of the active workflow's dispatch rule for `status`. */
+            agent: string;
+            /** @enum {string} */
+            kind: "run_again";
+            status: string;
+            /** @description `status` as people read it, such as `In Progress`. */
+            status_name: string;
         };
         /** @description What the gates read for one issue. */
         Evidence: {
@@ -1620,12 +1653,40 @@ export interface components {
             since_seq: number;
             /** @description The caller has not opened the item since `since_seq`. */
             unread: boolean;
+        } | {
+            /** @description The agent that asked. */
+            agent: components["schemas"]["Actor"];
+            from: string;
+            /** @description `from` as people read it, such as `In Progress`. */
+            from_name: string;
+            /** @description The gate that failed, such as `pr_open`. */
+            gate: string;
+            issue: components["schemas"]["PullRequestIssue"];
+            /** @enum {string} */
+            kind: "refusal";
+            /** @description Why it failed. It can name checks GitHub's users wrote: text from outside the team. */
+            reason: string;
+            /**
+             * Format: date-time
+             * @description When the refusal was recorded.
+             */
+            since: string;
+            /**
+             * Format: int64
+             * @description The refusal event's sequence number.
+             */
+            since_seq: number;
+            to: string;
+            /** @description `to` as people read it. */
+            to_name: string;
+            /** @description The caller has not opened the item since `since_seq`. */
+            unread: boolean;
         };
         /**
          * @description The kinds of inbox item, as `POST /api/inbox/read` names them.
          * @enum {string}
          */
-        InboxKind: "waiting" | "run";
+        InboxKind: "waiting" | "run" | "refusal";
         /** @description `GET /api/inbox`: what waits on the caller, newest first. */
         InboxList: {
             items: components["schemas"]["InboxItem"][];
@@ -1637,6 +1698,10 @@ export interface components {
         };
         Issue: {
             assignee?: components["schemas"]["Actor"] | null;
+            /** @description The issues that block this one, lowest number first. */
+            blocked_by?: components["schemas"]["LinkedIssue"][];
+            /** @description The issues this one blocks, lowest number first: `blocked_by` in reverse. */
+            blocks?: components["schemas"]["LinkedIssue"][];
             /** @description Markdown. */
             body: string;
             /** Format: date-time */
@@ -1669,6 +1734,13 @@ export interface components {
              *     every other response that carries an issue leaves it out.
              */
             waiting_on_person?: string | null;
+            /**
+             * @description Why no runner has claimed the issue, when it waits to be claimed: in Start, behind a
+             *     waiting dispatch, or behind a run that lost its attempt. `no runner can run codex`,
+             *     `codex is at its limit of 2 running`. Computed at read time and never stored; `None`
+             *     whenever `waiting_on_person` is set. Only `GET /api/issues/{id}` fills this.
+             */
+            waiting_to_run?: string | null;
         };
         /** @description `GET /api/issues`. */
         IssueList: {
@@ -1782,6 +1854,12 @@ export interface components {
         LinearUser: {
             id: string;
             name: string;
+        };
+        /** @description An issue another one names, with its status. */
+        LinkedIssue: {
+            id: string;
+            status: string;
+            status_name: string;
         };
         LogLine: {
             /** Format: int32 */
@@ -2152,6 +2230,11 @@ export interface components {
             /** Format: date-time */
             started_at: string;
         };
+        /** @description `POST /api/issues/{id}/retry`: the issue, and the `run_again` event. */
+        RunAgainResult: {
+            event: components["schemas"]["Event"];
+            issue: components["schemas"]["Issue"];
+        };
         /** @description `GET /api/runs/{id}/log`: every line, oldest first. */
         RunLog: {
             lines: components["schemas"]["LogLine"][];
@@ -2311,6 +2394,11 @@ export interface components {
              * @description A person's or an agent's actor id, or `null` to unassign.
              */
             assignee?: string | null;
+            /**
+             * @description The issue ids of the workspace that block the issue, replacing the ones it has; `[]`
+             *     clears them. Not the issue itself, and none that the issue already blocks.
+             */
+            blocked_by?: string[];
             /** @description Markdown. */
             body?: string;
             /** @description Each trimmed, 1 to 50 characters; at most 20, duplicates dropped. */
@@ -2803,7 +2891,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project. */
+            /** @description An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent or a blocker that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -3149,6 +3237,62 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    run_again: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Issue id, such as PL-1 */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunAgainResult"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description `locked`: the status is locked to the person, agents or runners. `not_waiting`: the issue does not wait on a person. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

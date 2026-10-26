@@ -15,7 +15,7 @@ use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
     Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, gate_lines,
+    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, format_age, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -244,6 +244,13 @@ pub struct IssueEdit {
     /// Clear the milestone.
     #[arg(long)]
     pub no_milestone: bool,
+    /// An issue that blocks this one, such as PL-1; repeat it for more. Replaces the
+    /// blockers.
+    #[arg(long, conflicts_with = "no_blockers")]
+    pub blocked_by: Vec<String>,
+    /// Clear the blockers.
+    #[arg(long)]
+    pub no_blockers: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -347,8 +354,8 @@ pub enum IssueCommand {
     /// names the rule or gate.
     #[command(visible_alias = "transition")]
     Move { id: String, status: String },
-    /// Change an issue's title, body and labels, or set or clear its parent, project and
-    /// milestone.
+    /// Change an issue's title, body and labels, or set or clear its parent, project,
+    /// milestone and blockers.
     Edit {
         id: String,
         #[command(flatten)]
@@ -361,6 +368,8 @@ pub enum IssueCommand {
         #[arg(long)]
         body: String,
     },
+    /// Run again: give an issue waiting on a person another set of runs in its status.
+    Retry { id: String },
 }
 
 /// `~/.config/punchlist/config.toml`.
@@ -1063,18 +1072,6 @@ fn render_proof(proof: &[Proof]) -> String {
     text
 }
 
-/// `4s`, `3m` or `2h`.
-fn format_age(seconds: i64) -> String {
-    let seconds = seconds.max(0);
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 3600 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h", seconds / 3600)
-    }
-}
-
 /// `1m 23s`, `4.2s` or `—`.
 fn format_duration(ms: Option<i64>) -> String {
     let Some(ms) = ms else {
@@ -1236,6 +1233,16 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 )?;
             }
         }
+        IssueCommand::Retry { id } => {
+            let queued = client.run_again(&id).await?;
+            let EventDetail::RunAgain {
+                status_name, agent, ..
+            } = &queued.event.detail
+            else {
+                anyhow::bail!("the server answered a run again with another kind of event");
+            };
+            writeln!(out, "{id}: queued another {agent} run in {status_name}")?;
+        }
         IssueCommand::Comment { id, body } => {
             client.comment(&id, &body).await?;
             writeln!(out, "Commented on {id}.")?;
@@ -1246,7 +1253,7 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
             let none = || "none".to_string();
             writeln!(
                 out,
-                "{}  {}\n  labels {} · parent {} · project {} · milestone {}",
+                "{}  {}\n  labels {} · parent {} · project {} · milestone {} · blocked by {}",
                 issue.id,
                 issue.title,
                 Some(issue.labels.join(", "))
@@ -1255,6 +1262,16 @@ async fn issue(client: &Client, command: IssueCommand, out: &mut dyn Write) -> a
                 issue.parent.unwrap_or_else(none),
                 issue.project.map_or_else(none, |p| p.name),
                 issue.milestone.map_or_else(none, |m| m.name),
+                Some(
+                    issue
+                        .blocked_by
+                        .iter()
+                        .map(|i| i.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(none),
             )?;
         }
     }
@@ -1285,6 +1302,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         None => edit.body,
     };
     let labels = (!edit.label.is_empty() || edit.no_labels).then_some(edit.label);
+    let blocked_by = (!edit.blocked_by.is_empty() || edit.no_blockers).then_some(edit.blocked_by);
     let mut request = UpdateIssue {
         title: edit.title,
         body,
@@ -1292,6 +1310,7 @@ async fn issue_edit(client: &Client, id: &str, edit: IssueEdit) -> anyhow::Resul
         parent: edit.parent.map(Some).or(edit.no_parent.then_some(None)),
         project: edit.no_project.then_some(None),
         milestone: edit.no_milestone.then_some(None),
+        blocked_by,
         ..UpdateIssue::default()
     };
     if edit.project.is_none() && edit.milestone.is_none() {
@@ -1396,7 +1415,8 @@ async fn issue_with_timeline(client: &Client, id: &str) -> anyhow::Result<(Issue
             | EventDetail::PullRequest
             | EventDetail::Proof
             | EventDetail::Workflow
-            | EventDetail::Project => None,
+            | EventDetail::Project
+            | EventDetail::RunAgain { .. } => None,
         });
         let consistent = last_move.is_none_or(|to| *to == issue.status);
         attempts += 1;
@@ -1429,11 +1449,22 @@ fn render_show(
     if let Some(milestone) = &issue.milestone {
         text.push_str(&format!("Milestone: {}\n", milestone.name));
     }
+    for (label, linked) in [("Blocked by", &issue.blocked_by), ("Blocks", &issue.blocks)] {
+        if !linked.is_empty() {
+            let linked: Vec<String> = (linked.iter())
+                .map(|i| format!("{} ({})", i.id, i.status_name))
+                .collect();
+            text.push_str(&format!("{label}: {}\n", linked.join(", ")));
+        }
+    }
     if let Some(linear) = &issue.linear {
         text.push_str(&format!("Linear: {}  {}\n", linear.identifier, linear.url));
     }
     if let Some(why) = &issue.waiting_on_person {
         text.push_str(&format!("waiting on a person: {why}\n"));
+    }
+    if let Some(why) = &issue.waiting_to_run {
+        text.push_str(&format!("waiting: {why}\n"));
     }
     if let Some(wait) = &issue.waiting_for_usage_limit {
         text.push_str(&format!("{wait}\n"));
@@ -1488,6 +1519,9 @@ fn render_show(
                 text.push('\n');
             }
             EventDetail::Created => text.push_str(&format!("{who}created\n")),
+            EventDetail::RunAgain {
+                status_name, agent, ..
+            } => text.push_str(&format!("{who}Run again in {status_name} ({agent})\n")),
             EventDetail::Edited { fields } => {
                 text.push_str(&format!("{who}edited {}\n", fields.join(", ")));
             }
@@ -1766,8 +1800,11 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: Some("3 runs in Agent Review ended without moving it".into()),
             waiting_for_usage_limit: None,
+            waiting_to_run: None,
             linear: None,
         };
         let mut moved = EventDetail::transition(
@@ -1858,6 +1895,44 @@ mod tests {
     }
 
     #[test]
+    fn a_run_again_shows_on_the_timeline_with_its_status_and_agent() {
+        let run_again = EventDetail::RunAgain {
+            status: "in_progress".into(),
+            status_name: "In Progress".into(),
+            agent: "claude-code".into(),
+        };
+        let events = [event(punchlist_api::Role::Person, "Gannon", run_again)];
+        let issue = Issue {
+            id: "PL-7".into(),
+            title: "Fix".into(),
+            body: String::new(),
+            status: "in_progress".into(),
+            status_name: "In Progress".into(),
+            created_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-10-10T12:00:00Z".parse().unwrap(),
+            assignee: None,
+            labels: Vec::new(),
+            parent: None,
+            project: None,
+            milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            waiting_on_person: None,
+            waiting_for_usage_limit: None,
+            waiting_to_run: None,
+            linear: None,
+        };
+        let text = render_show(&issue, &[], &[], None, &events);
+        assert!(
+            text.ends_with(
+                "\nTimeline\n\x20 2026-10-10 12:30:45 UTC  Gannon (person)  \
+                 Run again in In Progress (claude-code)\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn timeline_marks_each_role_and_an_agent_kind() {
         let comment = || EventDetail::Comment { body: "Hi".into() };
         let mut codex = event(punchlist_api::Role::Agent, "Codex", comment());
@@ -1881,8 +1956,11 @@ mod tests {
             parent: None,
             project: None,
             milestone: None,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
             waiting_on_person: None,
             waiting_for_usage_limit: None,
+            waiting_to_run: None,
             linear: None,
         };
         let text = render_show(&issue, &[], &[], None, &events);
@@ -1899,6 +1977,19 @@ mod tests {
                 "gannonh (github)  commented:",
             ]
         );
+
+        let mut waiting = issue.clone();
+        waiting.parent = Some("PL-1".into());
+        waiting.waiting_to_run = Some("codex is at its limit of 2 running".into());
+        let text = render_show(&waiting, &[], &[], None, &[]);
+        assert!(
+            text.starts_with(
+                "PL-7  Fix\nStatus: Todo\nParent: PL-1\nwaiting: codex is at its limit of 2 running\n"
+            ),
+            "{text}"
+        );
+        let text = render_show(&issue, &[], &[], None, &[]);
+        assert!(!text.contains("waiting"), "{text}");
     }
 
     #[test]

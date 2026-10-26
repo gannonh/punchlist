@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM run WHERE issue_id = $1 AND outcome = 'running')\n               OR EXISTS (SELECT 1 FROM dispatch WHERE issue_id = $1 AND run_id IS NULL)\n           AS \"busy!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "busy!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f149cb5818f27a78a1293d3aae1a5a508a9f0c666246e1e68ff66bb19205459d"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT r.id, r.issue_id, r.agent, r.outcome,\n                  coalesce(d.run_number, 1) AS \"runs!\",\n                  coalesce(e.seq, 0) AS \"since_seq!\",\n                  coalesce(e.created_at, r.finished_at, r.started_at) AS \"since!\",\n                  (rd.since_seq IS NULL OR rd.since_seq < coalesce(e.seq, 0)) AS \"unread!\"\n           FROM actor a\n           JOIN run r ON r.id = a.run_id\n           JOIN issue i ON i.id = r.issue_id AND i.status = r.status\n           LEFT JOIN dispatch d ON d.run_id = r.id\n           LEFT JOIN LATERAL (\n               SELECT seq, created_at FROM event\n               WHERE issue_id = i.id AND kind = 'run'\n               ORDER BY seq DESC LIMIT 1\n           ) e ON true\n           LEFT JOIN inbox_read rd\n                  ON rd.actor_id = $2 AND rd.issue_id = i.id AND rd.kind = 'run'\n           WHERE a.workspace_id = $1 AND a.owner_id = $2 AND r.outcome <> 'running'",
+  "query": "SELECT r.id, r.issue_id, r.agent, r.outcome,\n                  coalesce(d.run_number - d.runs_before, 1) AS \"runs!\",\n                  coalesce(e.seq, 0) AS \"since_seq!\",\n                  coalesce(e.created_at, r.finished_at, r.started_at) AS \"since!\",\n                  (rd.since_seq IS NULL OR rd.since_seq < coalesce(e.seq, 0)) AS \"unread!\"\n           FROM actor a\n           JOIN run r ON r.id = a.run_id\n           JOIN issue i ON i.id = r.issue_id AND i.status = r.status\n           LEFT JOIN dispatch d ON d.run_id = r.id\n           LEFT JOIN LATERAL (\n               SELECT seq, created_at FROM event\n               WHERE issue_id = i.id AND kind = 'run'\n               ORDER BY seq DESC LIMIT 1\n           ) e ON true\n           LEFT JOIN inbox_read rd\n                  ON rd.actor_id = $2 AND rd.issue_id = i.id AND rd.kind = 'run'\n           WHERE a.workspace_id = $1 AND a.owner_id = $2 AND r.outcome <> 'running'",
   "describe": {
     "columns": [
       {
@@ -89,5 +89,5 @@
       null
     ]
   },
-  "hash": "1aed7372863c1cf14345e5a80f4ae71f993d02f34a98b4200f3b1983c1d90f40"
+  "hash": "bc930c7ce67207d8a4d2ededb01a927e6b0c07ca3fe0de0315fd46fcfe6b783a"
 }

@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use punchlist_api::{
     AppendLog, AttemptInfo, Claim, ClaimRequest, ErrorBody, FinishRun, GithubToken, Issue, LogLine,
     RefreshGithubToken, Repository, ResumeRun, Run, RunLog, RunOutcome, RunnerRef, WaitForPerson,
+    format_age,
 };
 use punchlist_core::{IN_PROGRESS, Role, START, Workflow, agent_display_name, branch_name};
 use sqlx::PgPool;
@@ -181,7 +182,9 @@ async fn select_claimable(
 /// agent actor the run acts as, leases the attempt, and marks the issue's dispatch claimed.
 /// A run waiting for its next attempt gets that attempt instead, on the run's branch with the
 /// run's prompt, and no dispatch is touched. Claims nothing while the workspace runs the
-/// workflow's `[dispatch] max_concurrent` attempts.
+/// workflow's `[dispatch] max_concurrent` attempts, and nothing for an agent kind while the
+/// workspace runs its `[dispatch.agent.<kind>] max_concurrent` attempts, counted by
+/// `run.agent`.
 async fn try_claim(
     state: &AppState,
     actor: &Actor,
@@ -201,19 +204,13 @@ async fn try_claim(
     }
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     // Under the workspace lock, so two claims cannot both take the last slot.
-    if let Some(max) = workflow.max_concurrent() {
-        let running = sqlx::query_scalar!(
-            r#"SELECT count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
-               WHERE r.workspace_id = $1 AND a.state = 'running'"#,
-            actor.workspace_id,
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if running >= i64::from(max) {
-            tx.rollback().await?;
-            return Ok(Claimed::AtLimit);
-        }
+    let reached = limits_reached(&mut tx, actor.workspace_id, &workflow).await?;
+    if reached.workspace.is_some() {
+        tx.rollback().await?;
+        return Ok(Claimed::AtLimit);
     }
+    // An agent kind running `[dispatch.agent.<kind>] max_concurrent` attempts is not offered.
+    let full: Vec<&str> = reached.agents.iter().map(|(a, _)| a.as_str()).collect();
     // An agent kind whose usage limit the runner hit is claimed again once it resets.
     let paused = sqlx::query_scalar!(
         "SELECT agent FROM runner_pause WHERE runner_id = $1 AND until > now()",
@@ -222,7 +219,7 @@ async fn try_claim(
     .fetch_all(&mut *tx)
     .await?;
     let agents: Vec<String> = (runner.agents.iter())
-        .filter(|agent| !paused.contains(agent))
+        .filter(|agent| !paused.contains(agent) && !full.contains(&agent.as_str()))
         .cloned()
         .collect();
     let claimable =
@@ -235,6 +232,14 @@ async fn try_claim(
     }) = claimable
     else {
         tx.rollback().await?;
+        // A run of a full agent kind that ends frees a slot for any issue.
+        if runner
+            .agents
+            .iter()
+            .any(|agent| full.contains(&agent.as_str()))
+        {
+            return Ok(Claimed::AtLimit);
+        }
         // A runner woken for an issue that a run is working on, with no dispatch waiting
         // behind that run, lost the race for it. Otherwise there is nothing here for this
         // runner, or not yet.
@@ -334,11 +339,123 @@ async fn try_claim(
     })))
 }
 
+/// The workflow's limits the workspace's running attempts (`attempt.state = 'running'`) have
+/// reached. `try_claim` and `why_unclaimed` both read them here, so what the issue page says
+/// and what a claim does cannot differ.
+struct Reached {
+    /// `[dispatch] max_concurrent`, when the workspace runs that many attempts.
+    workspace: Option<u32>,
+    /// Each agent kind running its `[dispatch.agent.<kind>] max_concurrent`, counted by
+    /// `run.agent`, with that limit.
+    agents: Vec<(String, u32)>,
+}
+
+async fn limits_reached(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+) -> sqlx::Result<Reached> {
+    let running = sqlx::query!(
+        r#"SELECT r.agent, count(*) AS "n!" FROM attempt a JOIN run r ON r.id = a.run_id
+           WHERE r.workspace_id = $1 AND a.state = 'running' GROUP BY r.agent"#,
+        workspace_id,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let total: i64 = running.iter().map(|r| r.n).sum();
+    Ok(Reached {
+        workspace: workflow
+            .max_concurrent()
+            .filter(|&max| total >= i64::from(max)),
+        agents: (running.into_iter())
+            .filter_map(|r| {
+                let max = workflow.agent_limit(&r.agent)?;
+                (r.n >= i64::from(max)).then_some((r.agent, max))
+            })
+            .collect(),
+    })
+}
+
+/// Why no runner has claimed `issue`, when it waits to be claimed as `select_claimable` reads
+/// it: in Start, for the agent In Progress dispatches; behind a dispatch with no run yet, past
+/// its `not_before` and behind no running run of the issue, for the dispatch's agent; or
+/// behind a running run with no running attempt, for the run's agent. The first reason that
+/// holds: no runner of the workspace lists the agent; none that does has heartbeated within
+/// `lease`; the workspace is at its `max_concurrent`; the agent is at its own. Else a runner
+/// has not claimed it yet, since the server knows neither a runner's own `--max-concurrent`
+/// nor a claim in flight. `None` for an issue that does not wait, such as one in a status the
+/// workflow locks to agents or runners. Computed at each read: the runners' heartbeats age
+/// without writing anything.
+pub(crate) async fn why_unclaimed(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    workflow: &Workflow,
+    issue: &Issue,
+    lease: Duration,
+) -> sqlx::Result<Option<String>> {
+    let locked = workflow.locks().iter().any(|(status, roles)| {
+        status.as_str() == issue.status
+            && (roles.contains(&Role::Agent) || roles.contains(&Role::Runner))
+    });
+    if locked {
+        return Ok(None);
+    }
+    let start_agent = workflow.dispatch_for(IN_PROGRESS).map(|d| d.agent.as_str());
+    // Select the waiting agent and its newest heartbeat together: with the workflow read
+    // and shared limit count, the issue read adds at most three queries.
+    let candidate = sqlx::query!(
+        r#"SELECT agent AS "agent!",
+                 (SELECT extract(epoch FROM now() - max(last_heartbeat))::float8 FROM runner
+                  WHERE workspace_id = $3 AND candidate.agent = ANY(agents)) AS seen
+               FROM (SELECT coalesce(
+                 (SELECT r.agent FROM run r WHERE r.issue_id = $1 AND r.outcome = 'running'
+                    AND r.status = $2
+                    AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
+                                    AND a.state = 'running')),
+                 CASE WHEN $2 = 'start' THEN $4::text ELSE
+                  (SELECT d.agent FROM dispatch d WHERE d.issue_id = $1 AND d.run_id IS NULL
+                    AND (d.not_before IS NULL OR d.not_before <= now())
+                    AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = $1
+                                    AND run.outcome = 'running')) END) AS agent) candidate
+               WHERE agent IS NOT NULL"#,
+        issue.id,
+        issue.status,
+        workspace_id,
+        start_agent,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    let agent = candidate.agent;
+    let Some(seen) = candidate.seen else {
+        return Ok(Some(format!("no runner can run {agent}")));
+    };
+    if seen > lease.as_secs_f64() {
+        return Ok(Some(format!(
+            "no runner that can run {agent} is heartbeating (last seen {} ago)",
+            format_age(seen as i64)
+        )));
+    }
+    let reached = limits_reached(conn, workspace_id, workflow).await?;
+    if let Some(max) = reached.workspace {
+        return Ok(Some(format!(
+            "the workspace is at its limit of {max} running"
+        )));
+    }
+    if let Some((_, max)) = reached.agents.iter().find(|(a, _)| *a == agent) {
+        return Ok(Some(format!("{agent} is at its limit of {max} running")));
+    }
+    Ok(Some("a runner has not claimed it yet".to_string()))
+}
+
 /// What `try_claim` did.
 enum Claimed {
     Claim(Box<Claim>),
     Nothing,
-    /// The workspace runs `max_concurrent` attempts already.
+    /// The workspace runs `max_concurrent` attempts already, or found nothing while an agent
+    /// kind of the runner's ran its own `max_concurrent`.
     AtLimit,
 }
 
@@ -493,7 +610,8 @@ async fn set_agent_token(
 
 /// Claim an issue: one in Start, or one waiting in a status it entered whose dispatch rule
 /// names an agent the runner can run. Runner token. 204 when nothing is claimable, or when the
-/// workspace runs the workflow's `[dispatch] max_concurrent` attempts; with `wait_seconds` the
+/// workspace runs the workflow's `[dispatch] max_concurrent` attempts, or the agent kinds that
+/// have work run their `[dispatch.agent.<kind>] max_concurrent`; with `wait_seconds` the
 /// request waits for one. When several runners wait, each issue goes to
 /// one of them and the others get 409 `claim_taken`.
 #[utoipa::path(
@@ -1157,14 +1275,15 @@ async fn settle_run(
 /// Dispatch again. The caller has just ended the run in this transaction, whatever the
 /// outcome, and holds the workspace's lock and then its issue's. When the issue is still
 /// where the run's dispatch put it (that dispatch's transition is the issue's latest),
-/// queues the next dispatch of that transition, for the same agent; `dispatch_workflow`
-/// gives its run the prompt of the transition's workflow version. Nothing is queued for a
-/// run without a dispatch, an issue that moved, a status the active workflow now locks to
-/// agents or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or
-/// run `RUNS_PER_ENTRY` of the entry, or a run whose agent said it waits on a person
-/// (`wait_for_person`): that issue waits on a person. Nor when the active workflow cannot be
-/// read, which is logged. `get_issue` and the inbox read the same three rules, the latest
-/// transition, the limit (`runs_ended`) and the waiting reason, to say so; change them together.
+/// queues the next dispatch of that transition, for the same agent and round; `dispatch_workflow`
+/// gives its run the prompt of the round's workflow version. Nothing is queued for a run
+/// without a dispatch, an issue that moved, a status the active workflow now locks to agents
+/// or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or run
+/// `RUNS_PER_ENTRY` of the round (a Run again starts the next, `runs_before`), or a run whose
+/// agent said it waits on a person (`wait_for_person`): that issue waits on a person. Nor when
+/// the active workflow cannot be read, which is logged. `waiting_on_person` reads the same
+/// three rules, the latest transition, the limit and the waiting reason, to say so; change
+/// them together.
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
@@ -1216,9 +1335,12 @@ async fn queue_redispatch(
         return Ok(());
     }
     sqlx::query!(
-        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number)
-         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1 FROM dispatch d
-         WHERE d.run_id = $1 AND d.run_number < $2
+        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
+                               workflow_version)
+         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1, d.runs_before,
+                d.workflow_version
+         FROM dispatch d
+         WHERE d.run_id = $1 AND d.run_number - d.runs_before < $2
            AND d.transition_id = (SELECT e.transition_id FROM event e
                                   WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
                                   ORDER BY e.seq DESC LIMIT 1)",
