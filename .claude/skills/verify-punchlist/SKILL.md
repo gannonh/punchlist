@@ -101,7 +101,7 @@ URL=$($C sign-in-url "$RUN")                           # a page that signs the b
 Drive it one of two ways:
 
 - **T3 Code integrated browser** (it runs on the Mac mini, so the run must be bound to the Tailscale address). Load the tools with ToolSearch `select:mcp__t3-code__preview_open,mcp__t3-code__preview_click,mcp__t3-code__preview_evaluate,mcp__t3-code__preview_snapshot,mcp__t3-code__preview_type,mcp__t3-code__preview_press,mcp__t3-code__preview_resize,mcp__t3-code__preview_recording_start,mcp__t3-code__preview_recording_stop`, then `preview_open` the URL. Assert with `preview_evaluate` on the DOM, not by looking at a screenshot.
-- **Headless Chromium on sartre**, through Playwright from this repository (`node_modules/.pnpm/node_modules/playwright`), for scripted checks and timings.
+- **Headless Chromium on sartre**, through Playwright from this repository (`node_modules/.pnpm/node_modules/playwright`), for scripted checks and timings. Launch it with `chromium.launch({ ignoreDefaultArgs: ['--disable-dev-shm-usage'] })`, as `web/playwright.config.ts` does: Playwright's default puts the renderer's shared memory in `/tmp`, a quota-limited tmpfs on sartre, and renderers crash when that quota fills.
 
 [features/web-app.md](features/web-app.md) lists the selectors, the keys, the render measure and the recipes, including an In Progress issue without a model call. `pnpm e2e` runs `web/e2e/` against a run of its own.
 
