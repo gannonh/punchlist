@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use punchlist_api::DEFAULT_RUNS_PER_ENTRY;
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
@@ -1384,10 +1385,14 @@ fn render_workflow(workflow: &WorkflowInfo) -> String {
             .as_deref()
             .unwrap_or("the runner's model");
         let effort = (status.dispatch_effort.as_ref()).map(|effort| format!(", effort {effort}"));
+        let runs = (status.dispatch_runs_per_entry)
+            .filter(|runs| *runs != DEFAULT_RUNS_PER_ENTRY)
+            .map(|runs| format!(", {runs} run{} per entry", if runs == 1 { "" } else { "s" }));
         out += &format!(
-            "Dispatch  {}: {agent} on {model}{}\n",
+            "Dispatch  {}: {agent} on {model}{}{}\n",
             status.key,
-            effort.unwrap_or_default()
+            effort.unwrap_or_default(),
+            runs.unwrap_or_default()
         );
     }
     if let Some(refused) = &workflow.refused {
@@ -2049,6 +2054,7 @@ mod tests {
                     dispatch: None,
                     dispatch_model: None,
                     dispatch_effort: None,
+                    dispatch_runs_per_entry: None,
                     closed: false,
                     on_merge_to: None,
                 })
@@ -2063,13 +2069,17 @@ mod tests {
         dispatching.statuses[0].dispatch = Some("claude-code".into());
         dispatching.statuses[0].dispatch_model = Some("haiku".into());
         dispatching.statuses[1].dispatch = Some("codex".into());
+        dispatching.statuses[0].dispatch_runs_per_entry = Some(3);
         dispatching.statuses[1].dispatch_effort = Some("low".into());
+        dispatching.statuses[1].dispatch_runs_per_entry = Some(1);
         assert_eq!(
             render_workflow(&dispatching),
             "Version   sha256:ab\nCommit    built-in\nStatuses  backlog, todo\n\
              Dispatch  backlog: claude-code on haiku\n\
-             Dispatch  todo: codex on the runner's model, effort low\n"
+             Dispatch  todo: codex on the runner's model, effort low, 1 run per entry\n"
         );
+        dispatching.statuses[1].dispatch_runs_per_entry = Some(5);
+        assert!(render_workflow(&dispatching).ends_with("effort low, 5 runs per entry\n"));
         let info = WorkflowInfo {
             invalid: Some("line 4, `statuses`: the runtime needs the status `start`".into()),
             refused: Some(punchlist_api::WorkflowRefusal {

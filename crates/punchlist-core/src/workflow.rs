@@ -46,6 +46,11 @@ const EVENTS: [&str; 3] = ["pr_merged", "pr_closed_unmerged", "children_done"];
 const REQUIREMENTS: [&str; 1] = ["comment"];
 /// The app that owns a required check named without one: GitHub Actions' slug.
 pub const GITHUB_ACTIONS: &str = "github-actions";
+/// How many runs one entry into a status gets before the issue waits on a person, when its
+/// dispatch rule names no `runs_per_entry`.
+pub const DEFAULT_RUNS_PER_ENTRY: u32 = 3;
+/// The most `runs_per_entry` a dispatch rule may name.
+const MAX_RUNS_PER_ENTRY: u32 = 20;
 /// The roles a workflow names. GitHub acts only through `on`.
 const ROLES: [Role; 3] = [Role::Person, Role::Agent, Role::Runner];
 
@@ -174,6 +179,8 @@ pub struct Dispatch {
     /// At most one run in this status at a time for the workspace's repository, such as
     /// merges into its default branch.
     pub serial: bool,
+    /// How many runs one entry into this status gets before the issue waits on a person.
+    pub runs_per_entry: u32,
     /// The model the agent runs on, such as `haiku`. `None`: the runner's flag for the
     /// agent, else the agent's own default.
     pub model: Option<String>,
@@ -272,6 +279,8 @@ pub enum Problem {
     BadMaxConcurrent,
     #[error("`serial` is true or false")]
     BadSerial,
+    #[error("`runs_per_entry` must be a whole number from 1 to {MAX_RUNS_PER_ENTRY}")]
+    BadRunsPerEntry,
     #[error(
         "`model` is a model's name, such as `haiku`: not empty, no spaces, not starting with `-`"
     )]
@@ -650,6 +659,20 @@ impl Workflow {
                     _ => return Err(errors.at(value.span(), key("serial"), Problem::BadSerial)),
                 },
             };
+            let runs_per_entry = match rule.runs_per_entry {
+                None => DEFAULT_RUNS_PER_ENTRY,
+                Some(value) => match value.get_ref() {
+                    toml::Value::Integer(runs)
+                        if (1..=MAX_RUNS_PER_ENTRY.into()).contains(runs) =>
+                    {
+                        *runs as u32
+                    }
+                    _ => {
+                        let problem = Problem::BadRunsPerEntry;
+                        return Err(errors.at(value.span(), key("runs_per_entry"), problem));
+                    }
+                },
+            };
             // The runner passes each as one argument, such as `--model <model>`.
             let name = |field, problem, value: Option<Spanned<toml::Value>>| match value {
                 None => Ok(None),
@@ -676,6 +699,7 @@ impl Workflow {
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
                 prompt: rule.prompt.map(Spanned::into_inner),
                 serial,
+                runs_per_entry,
             });
         }
 
@@ -1215,6 +1239,12 @@ struct RawDispatchRule {
     #[serde(default)]
     #[schemars(with = "Option<bool>")]
     serial: Option<Spanned<toml::Value>>,
+    /// How many runs one entry into this status gets before the issue waits on a person: a
+    /// run that ends with the issue still here is followed by the next, up to this many. The
+    /// entry keeps the number of the version it was queued under. Default 3.
+    #[serde(default)]
+    #[schemars(with = "Option<u32>", range(min = 1, max = 20))]
+    runs_per_entry: Option<Spanned<toml::Value>>,
     /// The model the agent runs on, such as `haiku`; without it, the runner's flag for the
     /// agent (`--model`, `--codex-model`), else the agent's own default.
     #[serde(default)]
@@ -1755,6 +1785,31 @@ mod tests {
                 Problem::BadSerial
             )
         );
+    }
+
+    #[test]
+    fn runs_per_entry_is_kept() {
+        let runs = |rule: &str| {
+            let text = runnable(&format!("[dispatch.status.a]\nagent = \"codex\"\n{rule}"));
+            Workflow::from_toml(&text)
+                .unwrap()
+                .dispatch_for("a")
+                .unwrap()
+                .runs_per_entry
+        };
+        assert_eq!(runs("runs_per_entry = 1"), 1);
+        assert_eq!(runs("runs_per_entry = 20"), 20);
+        assert_eq!(runs(""), 3);
+        for value in ["0", "21", "\"3\"", "1.5"] {
+            let text = runnable(&format!(
+                "[dispatch.status.a]\nagent = \"codex\"\nruns_per_entry = {value}"
+            ));
+            assert_eq!(
+                Workflow::from_toml(&text).unwrap_err().to_string(),
+                "line 4, `dispatch.status.a.runs_per_entry`: \
+                 `runs_per_entry` must be a whole number from 1 to 20"
+            );
+        }
     }
 
     #[test]
@@ -2349,6 +2404,12 @@ agent = "claude-code"
         assert_eq!(
             schema["$defs"]["RawDispatchRule"]["properties"]["serial"]["type"],
             serde_json::json!(["boolean", "null"])
+        );
+        let runs = &schema["$defs"]["RawDispatchRule"]["properties"]["runs_per_entry"];
+        assert_eq!(runs["type"], serde_json::json!(["integer", "null"]));
+        assert_eq!(
+            (runs["minimum"].clone(), runs["maximum"].clone()),
+            (1.into(), 20.into())
         );
         for field in ["model", "effort"] {
             assert_eq!(

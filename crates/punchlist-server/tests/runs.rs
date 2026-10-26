@@ -2889,3 +2889,85 @@ async fn a_long_polling_runner_claims_a_run_again_at_once(pool: PgPool) {
         started.elapsed()
     );
 }
+
+#[sqlx::test]
+async fn runs_per_entry_1_gives_an_entry_one_run(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "runs_per_entry = 1", "").await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 1).await;
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some("1 runs in In Progress ended without moving it")
+    );
+    assert_eq!(claim(&app, &r, 0).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        status_and_runs(&pool, "PL-1").await,
+        ("in_progress".into(), 1)
+    );
+}
+
+#[sqlx::test]
+async fn a_dispatch_rule_without_runs_per_entry_gives_an_entry_three_runs(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "", "").await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 2).await;
+    assert_eq!(waiting_on_person(&app, &person.token, "PL-1").await, None);
+    run_out(&app, &r, 1).await;
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some(RAN_OUT)
+    );
+    assert_eq!(claim(&app, &r, 0).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        status_and_runs(&pool, "PL-1").await,
+        ("in_progress".into(), 3)
+    );
+}
+
+#[sqlx::test]
+async fn an_entry_keeps_the_runs_per_entry_of_the_version_it_was_queued_under(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "runs_per_entry = 2", "").await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    run_out(&app, &r, 1).await;
+
+    // A push mid-entry: PL-1's entry still counts to 2, and PL-2's, after it, to 5.
+    set_dispatch_models(&pool, "runs_per_entry = 5", "").await;
+    run_out(&app, &r, 1).await;
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-1")
+            .await
+            .as_deref(),
+        Some("2 runs in In Progress ended without moving it")
+    );
+    assert_eq!(claim(&app, &r, 0).await.0, StatusCode::NO_CONTENT);
+
+    create_and_move(&app, &person.token, "Next", &["todo", "start"]).await;
+    run_out(&app, &r, 4).await;
+    assert_eq!(waiting_on_person(&app, &person.token, "PL-2").await, None);
+    run_out(&app, &r, 1).await;
+    assert_eq!(
+        waiting_on_person(&app, &person.token, "PL-2")
+            .await
+            .as_deref(),
+        Some("5 runs in In Progress ended without moving it")
+    );
+    assert_eq!(claim(&app, &r, 0).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        status_and_runs(&pool, "PL-1").await,
+        ("in_progress".into(), 2)
+    );
+    assert_eq!(
+        status_and_runs(&pool, "PL-2").await,
+        ("in_progress".into(), 5)
+    );
+}

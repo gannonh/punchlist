@@ -354,6 +354,7 @@ pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
         dispatch: dispatch.map(|d| d.agent.clone()),
         dispatch_model: dispatch.and_then(|d| d.model.clone()),
         dispatch_effort: dispatch.and_then(|d| d.effort.clone()),
+        dispatch_runs_per_entry: dispatch.map(|d| d.runs_per_entry),
         closed: !(workflow.transitions().iter()).any(|transition| transition.from.contains(status)),
         on_merge_to: workflow
             .on_merge_to(status.as_str())

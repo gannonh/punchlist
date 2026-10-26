@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dispatch (issue_id, transition_id, agent, runs_per_entry)\n         VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3450dfcecb9ec36bf0721587c0583518c7f60a21d9cc530d9db8482930eaadfa"
+}
