@@ -26,6 +26,12 @@ export const runLines = (item: RunItem): string[] => [
   ...(item.last_outcome === 'failed' ? [item.reason ? `Run failed: ${item.reason}` : 'Run failed'] : []),
 ]
 
+/**
+ * A person can give the item's issue another set of runs (`POST /api/issues/{id}/retry`): its entry's runs are used up.
+ * A run that failed with runs left is not waiting on a person, and a waiting item's status dispatches nothing.
+ */
+export const canRunAgain = (item: InboxItem): item is RunItem => item.kind === 'run' && item.limit_reached
+
 export type RefusalItem = Extract<InboxItem, { kind: 'refusal' }>
 
 /**
