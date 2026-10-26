@@ -4,7 +4,7 @@
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::header::{HOST, LOCATION, SET_COOKIE};
+use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use punchlist_api::{ErrorBody, SignInOptions};
@@ -91,11 +91,7 @@ async fn start(
     let flow = random_id();
     let authorize = reqwest::Url::parse_with_params(
         &format!("{}/login/oauth/authorize", github.oauth_url),
-        [
-            ("client_id", github.client_id.as_str()),
-            ("redirect_uri", &callback_url(&state, &uri, &headers)),
-            ("state", &flow),
-        ],
+        [("client_id", github.client_id.as_str()), ("state", &flow)],
     )
     .map_err(|error| ApiError::Invalid(format!("GITHUB_OAUTH_URL: {error}")))?;
     let https = https(&state, &uri, &headers);
@@ -176,7 +172,7 @@ async fn callback(
     let code = query
         .code
         .ok_or_else(|| ApiError::BadRequest("GitHub sent no code".into()))?;
-    let user = github_user(github, &code, &callback_url(&state, &uri, &headers)).await?;
+    let user = github_user(github, &code).await?;
     if let Some(account) = linking {
         let linked = sqlx::query!(
             "UPDATE account SET github_user_id = $2, github_login = $3 WHERE id = $1",
@@ -218,11 +214,7 @@ async fn callback(
 
 /// Exchanges the code for the user's token and reads who the user is with it. The token goes
 /// no further.
-async fn github_user(
-    github: &GithubSignIn,
-    code: &str,
-    redirect_uri: &str,
-) -> Result<GithubUser, ApiError> {
+async fn github_user(github: &GithubSignIn, code: &str) -> Result<GithubUser, ApiError> {
     let unreadable = |error: reqwest::Error| {
         tracing::warn!(%error, "sign-in with GitHub: GitHub could not be read");
         ApiError::GithubSignIn("GitHub could not be read; try again".into())
@@ -235,7 +227,6 @@ async fn github_user(
             "client_id": github.client_id,
             "client_secret": github.client_secret,
             "code": code,
-            "redirect_uri": redirect_uri,
         }))
         .send()
         .await
@@ -272,28 +263,6 @@ async fn github_user(
         ));
     }
     Ok(user)
-}
-
-/// Where GitHub sends the browser back: on `PUNCHLIST_PUBLIC_URL`, else on the host the
-/// request came to.
-fn callback_url(state: &AppState, uri: &Uri, headers: &HeaderMap) -> String {
-    let origin = match state.public_url.as_deref() {
-        Some(url) => url.to_string(),
-        None => {
-            let host = (headers
-                .get("x-forwarded-host")
-                .or_else(|| headers.get(HOST)))
-            .and_then(|host| host.to_str().ok())
-            .unwrap_or("localhost");
-            let scheme = if https(state, uri, headers) {
-                "https"
-            } else {
-                "http"
-            };
-            format!("{scheme}://{host}")
-        }
-    };
-    format!("{origin}/api/auth/github/callback")
 }
 
 fn not_configured() -> ApiError {

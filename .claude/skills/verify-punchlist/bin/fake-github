@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """A stand-in for GitHub's OAuth pages and `GET /user`, for sign-in with GitHub without GitHub.
 
-    fake-github PORT [HOST]     serve on HOST (default 127.0.0.1)
+    fake-github PORT [HOST] [CALLBACK]     serve on HOST (default 127.0.0.1)
+
+CALLBACK is the App's registered callback URL (default http://127.0.0.1:7878/api/auth/github/callback,
+`pnpm dev`'s server; `control-punchlist fake-github` passes the run's). As GitHub does, the authorize
+page sends the browser there when the request has no `redirect_uri`, and refuses one that differs.
 
 Start the server with GITHUB_APP_CLIENT_ID=fake-client-id GITHUB_APP_CLIENT_SECRET=fake-client-secret
 and GITHUB_OAUTH_URL and GITHUB_API_URL both at http://HOST:PORT (`control-punchlist fake-github` does).
@@ -19,6 +23,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 CLIENT_ID, CLIENT_SECRET = "fake-client-id", "fake-client-secret"
 USERS = {"octocat": 583231, "stranger": 9001}
+CALLBACK = sys.argv[3] if len(sys.argv) > 3 else "http://127.0.0.1:7878/api/auth/github/callback"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,10 +41,12 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         query = {key: values[0] for key, values in parse_qs(url.query).items()}
         if url.path == "/login/oauth/authorize":
-            if query.get("client_id") != CLIENT_ID or "redirect_uri" not in query:
-                return self.answer(400, "unknown client_id or no redirect_uri", "text/plain")
+            if query.get("client_id") != CLIENT_ID:
+                return self.answer(400, "unknown client_id", "text/plain")
+            if query.get("redirect_uri", CALLBACK) != CALLBACK:
+                return self.answer(400, "The redirect_uri is not associated with this application.", "text/plain")
             buttons = "".join(
-                f'<p><a role="button" href="{html.escape(query["redirect_uri"] + "?" + urlencode({"code": f"code-{login}", "state": query.get("state", "")}))}">'
+                f'<p><a role="button" href="{html.escape(CALLBACK + "?" + urlencode({"code": f"code-{login}", "state": query.get("state", "")}))}">'
                 f"Authorize as {login}</a></p>"
                 for login in USERS)
             page = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
@@ -59,6 +66,8 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
         body = (json.loads(raw) if self.headers.get("content-type", "").startswith("application/json")
                 else {key: values[0] for key, values in parse_qs(raw).items()})
+        sys.stderr.write("fake-github: token exchange " + json.dumps(
+            {key: "<redacted>" if key == "client_secret" else value for key, value in body.items()}) + "\n")
         if body.get("client_id") != CLIENT_ID or body.get("client_secret") != CLIENT_SECRET:
             return self.answer(200, {"error": "incorrect_client_credentials"})
         login = str(body.get("code", "")).removeprefix("code-")

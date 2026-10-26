@@ -41,6 +41,7 @@ Preconditions:
 - The cookie is `SameSite=Lax`, not Strict: the session set on GitHub's redirect back must be kept. The Origin check is the CSRF defence, so a cross-site `POST` check needs a cookie or an `Origin` header; plain `curl` with neither is allowed, as `pl` is.
 - A cookie from before sessions held the raw token and now answers 401. Sign in again.
 - The browser must reach the fake: it is redirected to `FAKE_GITHUB_URL`. Start the run with `PUNCHLIST_VERIFY_HOST` set to an address the browser can reach so the server and the fake bind the same host; `127.0.0.1` suits a headless browser on sartre.
-- `$C restart "$RUN"` keeps the fake's four variables; `$C down "$RUN"` stops the fake. Its log is `verify-artifacts/<run>/fake-github.log`.
+- `$C restart "$RUN"` keeps the fake's four variables; `$C down "$RUN"` stops the fake. Its log is `verify-artifacts/<run>/fake-github.log`, which prints each token exchange's body (the secret redacted).
+- The server sends GitHub no `redirect_uri`, so GitHub sends every sign-in to the App's registered Callback URL. The fake does the same with the run's `$SERVER_URL/api/auth/github/callback`, so the browser comes back to the address the run started on, whatever address it started the flow from.
 - The Origin check compares against the request's `Host` unless `PUNCHLIST_PUBLIC_URL` is set, so a check that uses a different address for the same server (an `Origin` of `localhost` against a run on a Tailscale address) is refused.
 - `pnpm e2e` runs `fake-github` after `up`, so GitHub sign-in is on in that run; a plain `$C up` run has it off and `/sign-in` shows the token field alone.

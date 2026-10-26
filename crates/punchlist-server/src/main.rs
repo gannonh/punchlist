@@ -77,8 +77,8 @@ enum Command {
         )]
         github_app_client_secret: Option<String>,
         /// The instance's own origin as browsers reach it, such as
-        /// `https://sartre.tail984796.ts.net:7880`: GitHub's callback goes there, and a
-        /// browser's writes must come from it. Without it, the request's host.
+        /// `https://sartre.tail984796.ts.net:7880`: a browser's writes must come from it, and
+        /// cookies are `Secure` when it is https. Without it, the request's host.
         #[arg(long, env = "PUNCHLIST_PUBLIC_URL")]
         public_url: Option<String>,
         /// GitHub's OAuth endpoints, replaced for tests.

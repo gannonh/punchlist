@@ -18,7 +18,7 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 Sign in with GitHub needs the App's OAuth client, which Gannon sets up once:
 
 1. GitHub, Settings, Developer settings, GitHub Apps, `punchlist-sartre`, Edit.
-2. Under Callback URL add `https://sartre.tail984796.ts.net:7880/api/auth/github/callback`.
+2. Make `https://sartre.tail984796.ts.net:7880/api/auth/github/callback` the first Callback URL. The server sends GitHub no `redirect_uri` (GitHub refused it, PL-171), so GitHub sends every sign-in and link to the App's first Callback URL.
 3. Under Client secrets choose Generate a new client secret and copy it.
 4. In the Punchlist 1Password Environment add `DOGFOOD_GITHUB_APP_CLIENT_ID` (the App's Client ID) and `DOGFOOD_GITHUB_APP_CLIENT_SECRET`.
 5. On sartre run `scripts/dogfood.sh up -d --build --wait`.

@@ -34,8 +34,12 @@ async fn fake_github() -> String {
     async fn access_token(Json(body): Json<Value>) -> Json<Value> {
         let login = (body["code"].as_str()).and_then(|code| code.strip_prefix("code-"));
         match login {
+            // GitHub sends the user to the App's registered callback; a `redirect_uri` sent
+            // anyway must match it exactly, so the server sends none.
             Some(login)
-                if body["client_id"] == "client-id" && body["client_secret"] == "secret" =>
+                if body["client_id"] == "client-id"
+                    && body["client_secret"] == "secret"
+                    && body.get("redirect_uri").is_none() =>
             {
                 Json(json!({"access_token": format!("token-{login}"), "token_type": "bearer"}))
             }
@@ -160,11 +164,10 @@ async fn github_flow(
     let location = reqwest::Url::parse(headers["location"].to_str().unwrap()).unwrap();
     assert_eq!(location.path(), "/login/oauth/authorize");
     let query: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
+    let mut keys: Vec<_> = query.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["client_id", "state"]);
     assert_eq!(query["client_id"], "client-id");
-    assert_eq!(
-        query["redirect_uri"],
-        "http://localhost/api/auth/github/callback"
-    );
     let [flow] = set_cookies(&headers, "punchlist_github")[..] else {
         panic!("no state cookie in {headers:?}");
     };
