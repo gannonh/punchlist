@@ -458,8 +458,8 @@ function DependenciesPanel({ issue }: { issue: Issue }) {
   )
 }
 
-/** A person gives an issue that waits on them another set of runs in its status. */
-function RunAgain({ id }: { id: string }) {
+/** A person gives an issue that waits on them another set of runs in its status; the inbox's run items have it too. */
+export function RunAgain({ id }: { id: string }) {
   const runAgain = useRunAgain(id)
   // `isPending` reaches the button after a render, which a double click's second click can beat.
   const sent = useRef(false)
@@ -469,6 +469,7 @@ function RunAgain({ id }: { id: string }) {
       size="xs"
       className="flex-none self-center"
       data-run-again
+      aria-label={`Run again ${id}`}
       disabled={runAgain.isPending}
       aria-busy={runAgain.isPending}
       onClick={() => {
@@ -481,7 +482,7 @@ function RunAgain({ id }: { id: string }) {
         })
       }}
     >
-      Run again
+      {runAgain.isPending ? 'Running again…' : 'Run again'}
     </Button>
   )
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ageText, countText, ordered, refusalParts, runLines, type InboxItem, type RefusalItem, type RunItem } from './inbox'
+import { ageText, canRunAgain, countText, ordered, refusalParts, runLines, type InboxItem, type RefusalItem, type RunItem } from './inbox'
 
 const item = (id: string, status: string, status_name: string, since: string, since_seq: number): InboxItem => ({
   kind: 'waiting',
@@ -89,5 +89,19 @@ describe('refusalParts', () => {
 
   it('keeps a reason with markup as the characters it has', () => {
     expect(refusalParts(refusal('check <b>x</b> failed')).reason).toBe('check <b>x</b> failed')
+  })
+})
+
+describe('canRunAgain', () => {
+  it('is true for a run item whose entry used its last run, and for nothing else', () => {
+    expect(
+      [
+        run('succeeded', null, true),
+        run('failed', 'agent crashed', true),
+        run('failed', 'lease expired', false),
+        item('PL-1', 'todo', 'Todo', '2026-10-24T11:56:00Z', 5),
+        refusal('1 of 6 checks failed on 3f2a1c4: test'),
+      ].map(canRunAgain),
+    ).toEqual([true, true, false, false, false])
   })
 })
