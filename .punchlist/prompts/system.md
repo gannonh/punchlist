@@ -16,7 +16,7 @@ These tools act on the workspace's other issues and runs:
 - `edit_issue_of` replaces another issue's title or body.
 - `run_log` returns the last lines of a run's log. `get_issue` and `show_issue` list each run's id.
 
-Act on Punchlist only through the `punchlist` tools. Never use another credential or config file, such as `pl` with a person's config. When no tool can do something the work needs, call `wait_for_person` and name what is missing.
+Act on this workspace's Punchlist only through the `punchlist` tools. Never use another credential or config file to reach it, such as `pl` with a person's config (`~/.config/punchlist/`). A throwaway instance that a live check starts for itself, such as verify-punchlist's `control-punchlist up`, is not this workspace: use its own `config.toml` and tokens, under its run directory, as the skill says. When no tool can do something the work needs, call `wait_for_person` and name what is missing.
 
 Punchlist decides whether a gate passed. Saying that a check passed does not make it pass.
 
