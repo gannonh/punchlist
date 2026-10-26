@@ -328,7 +328,7 @@ export interface paths {
         put?: never;
         /**
          * Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
-         *     `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+         *     runs in its status, as many as the active workflow's `runs_per_entry`, without a transition. Queues the entry's next dispatch,
          *     starting a round (`runs_before`) under the active workflow's agent and version, and writes
          *     the person's `run_again` event, in one transaction. Person token.
          */
@@ -2415,6 +2415,12 @@ export interface components {
             dispatch_effort?: string | null;
             /** @description The model its dispatch rule names, such as `haiku`; `None`: the runner's flag. */
             dispatch_model?: string | null;
+            /**
+             * Format: int32
+             * @description How many runs one entry into it gets before the issue waits on a person, from its
+             *     dispatch rule's `runs_per_entry` (default 3); `None` when it does not dispatch.
+             */
+            dispatch_runs_per_entry?: number | null;
             /** @description The status key, such as `in_progress`. */
             key: string;
             /** @description The roles that may not act on an issue in it, from the workflow's `[lock]`. */

@@ -998,7 +998,7 @@
     },
     "/api/issues/{id}/retry": {
       "post": {
-        "summary": "Run again: an issue that waits on a person (`waiting_on_person`) gets another set of\n`RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,\nstarting a round (`runs_before`) under the active workflow's agent and version, and writes\nthe person's `run_again` event, in one transaction. Person token.",
+        "summary": "Run again: an issue that waits on a person (`waiting_on_person`) gets another set of\nruns in its status, as many as the active workflow's `runs_per_entry`, without a transition. Queues the entry's next dispatch,\nstarting a round (`runs_before`) under the active workflow's agent and version, and writes\nthe person's `run_again` event, in one transaction. Person token.",
         "operationId": "run_again",
         "parameters": [
           {
@@ -6951,6 +6951,15 @@
               "null"
             ],
             "description": "The model its dispatch rule names, such as `haiku`; `None`: the runner's flag."
+          },
+          "dispatch_runs_per_entry": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many runs one entry into it gets before the issue waits on a person, from its\ndispatch rule's `runs_per_entry` (default 3); `None` when it does not dispatch.",
+            "minimum": 0
           },
           "key": {
             "type": "string",

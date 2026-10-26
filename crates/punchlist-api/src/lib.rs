@@ -6,8 +6,8 @@
 
 use chrono::{DateTime, Utc};
 pub use punchlist_core::{
-    CheckRunEvidence, Evidence, GateResult, ProofEvidence, ProofKind, PullRequestEvidence,
-    PullRequestState, ReviewThreadEvidence, Role,
+    CheckRunEvidence, DEFAULT_RUNS_PER_ENTRY, Evidence, GateResult, ProofEvidence, ProofKind,
+    PullRequestEvidence, PullRequestState, ReviewThreadEvidence, Role,
 };
 use punchlist_core::{display_name, is_plain_name};
 use serde::{Deserialize, Serialize};
@@ -1550,6 +1550,10 @@ pub struct StatusInfo {
     /// The Codex reasoning effort its dispatch rule names; `None`: the runner's flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_effort: Option<String>,
+    /// How many runs one entry into it gets before the issue waits on a person, from its
+    /// dispatch rule's `runs_per_entry` (default 3); `None` when it does not dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_runs_per_entry: Option<u32>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
     /// The status, as people read it (`Done`), that a merge of the issue's pull request
