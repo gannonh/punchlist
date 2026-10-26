@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,\n                               workflow_version, runs_per_entry)\n         SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1, d.runs_before,\n                d.workflow_version, d.runs_per_entry\n         FROM dispatch d\n         WHERE d.run_id = $1 AND d.run_number - d.runs_before < d.runs_per_entry\n           AND d.transition_id = (SELECT e.transition_id FROM event e\n                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                  ORDER BY e.seq DESC LIMIT 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6df772fde9e8740b709d548a8a0929918b1279eff8eb98d0e1eed9b7d1db3bc3"
+}
