@@ -257,3 +257,334 @@ async fn reading_another_workspaces_issue_is_not_found(pool: PgPool) {
         .unwrap();
     assert_eq!(rows, 0);
 }
+
+/// Claims the next run as the runner and finishes it with `outcome`; returns its run id.
+async fn run_once(app: &Router, runner: &str, id: &str, outcome: Value) -> String {
+    let body = json!({"wait_seconds": 0});
+    let (status, claimed) = call(app, Some(runner), "POST", "/api/runs/claim", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["issue"]["id"], id);
+    let run_id = claimed["run_id"].as_str().unwrap().to_string();
+    let mut finish = json!({"attempt": 1, "duration_ms": 1});
+    finish
+        .as_object_mut()
+        .unwrap()
+        .extend(outcome.as_object().unwrap().clone());
+    let uri = format!("/api/runs/{run_id}/finish");
+    let (status, body) = call(app, Some(runner), "POST", &uri, Some(finish)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    run_id
+}
+
+fn succeeded() -> Value {
+    json!({"outcome": "succeeded"})
+}
+
+fn crashed() -> Value {
+    json!({"outcome": "failed", "reason": "agent crashed"})
+}
+
+async fn newest_run_event(pool: &PgPool, id: &str) -> i64 {
+    sqlx::query_scalar("SELECT max(seq) FROM event WHERE issue_id = $1 AND kind = 'run'")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn runs_of(items: &(Vec<String>, i64), id: &str) -> usize {
+    items.0.iter().filter(|item| *item == id).count()
+}
+
+#[sqlx::test]
+async fn the_owner_of_a_runs_agent_sees_an_issue_nothing_dispatches_again(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let b = "plt_second";
+    second_person(&pool, first.workspace_id).await;
+    let (status, runner) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r", "agents": ["claude-code"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    let r = runner["token"].as_str().unwrap();
+    for title in ["Succeeds", "Crashes"] {
+        let (status, body) = call(
+            &app,
+            Some(a),
+            "POST",
+            "/api/issues",
+            Some(json!({"title": title})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // Three runs that end without moving PL-1: an item only after the third.
+    move_to(&app, a, "PL-1", "todo").await;
+    move_to(&app, a, "PL-1", "start").await;
+    for _ in 0..2 {
+        run_once(&app, r, "PL-1", succeeded()).await;
+        assert_eq!(inbox(&app, a).await, (vec![], 0));
+    }
+    run_once(&app, r, "PL-1", succeeded()).await;
+    let limit = item(&app, a, "PL-1").await;
+    assert_eq!(
+        limit,
+        json!({
+            "kind": "run",
+            "issue": {"id": "PL-1", "title": "Succeeds", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": "claude-code",
+            "runs": 3,
+            "last_outcome": "succeeded",
+            "reason": null,
+            "limit_reached": true,
+            "since": limit["since"],
+            "since_seq": newest_run_event(&pool, "PL-1").await,
+            "unread": true,
+        })
+    );
+    let (_, issue) = call(&app, Some(a), "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(
+        issue["waiting_on_person"],
+        "3 runs in In Progress ended without moving it"
+    );
+
+    // A failed run with a retry queued, or running, is no item; the third failure is one.
+    move_to(&app, a, "PL-2", "todo").await;
+    move_to(&app, a, "PL-2", "start").await;
+    run_once(&app, r, "PL-2", crashed()).await;
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM dispatch WHERE issue_id = 'PL-2' AND run_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued, 1);
+    assert_eq!(runs_of(&inbox(&app, a).await, "PL-2"), 0);
+    run_once(&app, r, "PL-2", crashed()).await;
+    run_once(&app, r, "PL-2", crashed()).await;
+    assert_eq!(runs_of(&inbox(&app, a).await, "PL-2"), 1);
+    let failed = item(&app, a, "PL-2").await;
+    assert_eq!(
+        (
+            &failed["last_outcome"],
+            &failed["reason"],
+            &failed["runs"],
+            &failed["limit_reached"]
+        ),
+        (
+            &json!("failed"),
+            &json!("agent crashed"),
+            &json!(3),
+            &json!(true)
+        )
+    );
+    let (_, issue) = call(&app, Some(a), "GET", "/api/issues/PL-2", None).await;
+    assert_eq!(
+        issue["waiting_on_person"],
+        "3 runs in In Progress ended without moving it"
+    );
+
+    // The person who did not register the runner sees neither.
+    assert_eq!(inbox(&app, b).await, (vec![], 0));
+    assert_eq!(
+        inbox(&app, a).await,
+        (vec!["PL-2".into(), "PL-1".into()], 2)
+    );
+
+    // Opening a run item reads it, apart from a waiting item for the issue.
+    let since_seq = failed["since_seq"].as_i64().unwrap();
+    let body = json!({"issue": "PL-2", "kind": "run", "since_seq": since_seq});
+    let (status, _) = call(&app, Some(a), "POST", "/api/inbox/read", Some(body)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(inbox(&app, a).await.1, 1);
+    let stored: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT issue_id, kind, since_seq FROM inbox_read")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, [("PL-2".to_string(), "run".to_string(), since_seq)]);
+
+    // A run that failed with nothing queued after it is an item before the limit.
+    sqlx::query("UPDATE issue SET status = 'todo' WHERE id = 'PL-2'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs_of(&inbox(&app, a).await, "PL-2"), 1);
+    assert_eq!(item(&app, a, "PL-2").await["kind"], "waiting");
+    move_to(&app, a, "PL-2", "start").await;
+    run_once(&app, r, "PL-2", crashed()).await;
+    sqlx::query("DELETE FROM dispatch WHERE issue_id = 'PL-2' AND run_id IS NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let early = item(&app, a, "PL-2").await;
+    assert_eq!(
+        (
+            &early["kind"],
+            &early["runs"],
+            &early["limit_reached"],
+            &early["reason"]
+        ),
+        (
+            &json!("run"),
+            &json!(1),
+            &json!(false),
+            &json!("agent crashed")
+        )
+    );
+    let (_, issue) = call(&app, Some(a), "GET", "/api/issues/PL-2", None).await;
+    assert_eq!(issue["waiting_on_person"], Value::Null);
+}
+
+#[sqlx::test]
+async fn the_owner_of_a_refused_agent_sees_the_refusal_until_the_issue_moves(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let b = "plt_second";
+    second_person(&pool, first.workspace_id).await;
+    let (status, agent) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/actors",
+        Some(json!({"kind": "codex", "name": "Reviewer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{agent}");
+    let agent_id = agent["actor"]["id"].clone();
+    let agent = agent["token"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Built"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    sqlx::query("UPDATE issue SET status = 'in_progress' WHERE id = 'PL-1'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let request = json!({"to": "agent_review"});
+    let uri = "/api/issues/PL-1/transitions";
+    let (status, _) = call(&app, Some(agent), "POST", uri, Some(request.clone())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let since_seq: i64 =
+        sqlx::query_scalar("SELECT seq FROM event WHERE issue_id = 'PL-1' AND kind = 'refusal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let refused = item(&app, a, "PL-1").await;
+    assert_eq!(
+        refused,
+        json!({
+            "kind": "refusal",
+            "issue": {"id": "PL-1", "title": "Built", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": {"id": agent_id, "name": "Reviewer", "role": "agent", "kind": "codex"},
+            "from": "in_progress",
+            "from_name": "In Progress",
+            "to": "agent_review",
+            "to_name": "Agent Review",
+            "gate": "pr_open",
+            "reason": "no open pull request is linked to PL-1",
+            "since": refused["since"],
+            "since_seq": since_seq,
+            "unread": true,
+        })
+    );
+    assert_eq!(inbox(&app, a).await, (vec!["PL-1".into()], 1));
+    assert_eq!(inbox(&app, b).await, (vec![], 0));
+
+    // Opening it reads it, as its own kind.
+    let body = json!({"issue": "PL-1", "kind": "refusal", "since_seq": since_seq});
+    let (status, _) = call(&app, Some(a), "POST", "/api/inbox/read", Some(body)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(inbox(&app, a).await, (vec!["PL-1".into()], 0));
+
+    // The agent's next request is allowed: the issue moved, and the item leaves.
+    sqlx::query(
+        "INSERT INTO pull_request (repository_id, number, github_id, title, branch, head_sha,
+                                   url, author_login, state, draft, issue_id, github_updated_at)
+         SELECT id, 1, 1, 'Built (PL-1)', 'feature/pl-1', 'abc', 'https://github.com/x/y/pull/1',
+                'gannonh', 'open', false, 'PL-1', now() FROM repository",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = call(&app, Some(agent), "POST", uri, Some(request)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(inbox(&app, a).await, (vec![], 0));
+}
+
+/// What `get_issue` says PL-1 waits on a person for, asserting the inbox lists it just then.
+async fn agree(app: &Router, token: &str, listed: bool) -> Option<String> {
+    let (_, issue) = call(app, Some(token), "GET", "/api/issues/PL-1", None).await;
+    let waiting = issue["waiting_on_person"].as_str().map(str::to_string);
+    assert_eq!(
+        runs_of(&inbox(app, token).await, "PL-1"),
+        usize::from(listed)
+    );
+    assert_eq!(waiting.is_some(), listed, "{issue}");
+    waiting
+}
+
+#[sqlx::test]
+async fn run_again_takes_the_issue_out_of_the_inbox_until_its_next_round_runs_out(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let (status, runner) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r", "agents": ["claude-code"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    let r = runner["token"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Build"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    move_to(&app, a, "PL-1", "todo").await;
+    move_to(&app, a, "PL-1", "start").await;
+    for _ in 0..3 {
+        agree(&app, a, false).await;
+        run_once(&app, r, "PL-1", succeeded()).await;
+    }
+    assert_eq!(
+        agree(&app, a, true).await.as_deref(),
+        Some("3 runs in In Progress ended without moving it")
+    );
+
+    let (status, body) = call(&app, Some(a), "POST", "/api/issues/PL-1/retry", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    for _ in 0..3 {
+        agree(&app, a, false).await;
+        run_once(&app, r, "PL-1", succeeded()).await;
+    }
+    agree(&app, a, true).await;
+    let again = item(&app, a, "PL-1").await;
+    assert_eq!(
+        (&again["runs"], &again["limit_reached"]),
+        (&json!(3), &json!(true))
+    );
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE chain (id, path) AS (\n               SELECT b, ARRAY[b] FROM unnest($1::text[]) b\n               UNION ALL\n               SELECT ib.blocker_id, chain.path || ib.blocker_id\n               FROM issue_blocker ib JOIN chain ON ib.issue_id = chain.id\n               WHERE chain.id <> $2\n           ) CYCLE id SET looped USING visited\n           SELECT path AS \"path!\" FROM chain WHERE id = $2 AND NOT looped\n           ORDER BY cardinality(path), path LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path!",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "128a87a61dbe5b44478e505d4821906c2524d80a065a71ff92af672714411ac0"
+}

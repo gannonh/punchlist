@@ -686,6 +686,10 @@ async fn a_move_while_a_run_waits_for_its_next_attempt_fails_the_run(pool: PgPoo
     .await;
     assert_eq!(status, StatusCode::OK, "{run}");
     assert_eq!(run["outcome"], "running");
+    let before: i64 = sqlx::query_scalar("SELECT max(seq) FROM event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     let (status, agent) = call(
         &s.app,
@@ -711,6 +715,17 @@ async fn a_move_while_a_run_waits_for_its_next_attempt_fails_the_run(pool: PgPoo
     assert_eq!(runs[0]["outcome"], "failed");
     assert!(runs[0]["finished_at"].is_string());
     assert_eq!(runs[0]["failure_reason"], "runner restarted");
+    let run_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM event WHERE issue_id = 'PL-1' AND kind = 'run' AND seq > $1",
+    )
+    .bind(before)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_events, 1,
+        "ending a waiting run publishes its row change"
+    );
     // Agent Review's dispatch is not behind it: a Codex runner claims it.
     let (status, codex) = call(
         &s.app,
@@ -741,6 +756,10 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     let agent = issue_with_a_ready_pull_request(&s).await;
     s.github.lock().unwrap().pulls = vec![pull_request_now(MERGED)];
 
+    let before: i64 = sqlx::query_scalar("SELECT max(seq) FROM event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     deliver(&s, "pull_request", "d-merged", MERGED).await;
     let once = [moved("in_progress", "done", "octocat", Some("d-merged"))];
     assert_eq!(event_transitions(&pool).await, once);
@@ -752,6 +771,17 @@ async fn a_merge_delivered_first_moves_the_issue_once(pool: PgPool) {
     deliver(&s, "pull_request", "d-merged-again", MERGED).await;
     assert_eq!(event_transitions(&pool).await, once);
     assert_eq!(issue_status(&pool).await, "done");
+    let run_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM event WHERE issue_id = 'PL-1' AND kind = 'run' AND seq > $1",
+    )
+    .bind(before)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_events, 1,
+        "ending an active run publishes once, even on redelivery"
+    );
 }
 
 #[sqlx::test]
@@ -1601,7 +1631,7 @@ async fn agent_comments_end_with_agent_and_stay_on_their_issue(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(event["detail"]["body"], "Thanks");
 
-    // An agent acts only on its run's issue.
+    // It comments on another issue of the workspace as itself, signed.
     let (status, _) = call(
         &s.app,
         &s.person.token,
@@ -1611,7 +1641,7 @@ async fn agent_comments_end_with_agent_and_stay_on_their_issue(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, body) = call(
+    let (status, event) = call(
         &s.app,
         &agent,
         "POST",
@@ -1619,7 +1649,11 @@ async fn agent_comments_end_with_agent_and_stay_on_their_issue(pool: PgPool) {
         Some(json!({"body": "Hi"})),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::CREATED, "{event}");
+    assert_eq!(
+        (&event["detail"]["body"], &event["actor"]["role"]),
+        (&json!("Hi\n\n(agent)"), &json!("agent"))
+    );
 
     // Its token stops working when the run ends.
     sqlx::query!("UPDATE run SET outcome = 'failed', finished_at = now()")
@@ -2391,13 +2425,17 @@ async fn the_schema_needs_no_token(pool: PgPool) {
     assert!(schema.to_string().contains("pr_names_issue"));
 }
 
+/// A run's agent reaches its workspace's issues and the run logs while its run runs, as
+/// itself, under the workflow's `by` rules and locks; the rest stays people's and runners'.
 #[sqlx::test]
-async fn an_agent_token_reaches_only_its_runs_issue(pool: PgPool) {
+async fn a_run_agent_reaches_its_workspaces_issues_while_its_run_runs(pool: PgPool) {
     let s = setup(&pool).await;
-    let agent = claimed_issue(&s).await;
+    let (agent, _, claim) = claimed_by_runner(&s).await;
+    let run = claim["run_id"].as_str().unwrap();
+    let person = &s.person.token;
     let (status, _) = call(
         &s.app,
-        &s.person.token,
+        person,
         "POST",
         "/api/issues",
         Some(json!({"title": "Another"})),
@@ -2405,35 +2443,140 @@ async fn an_agent_token_reaches_only_its_runs_issue(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    let run_log = format!("/api/runs/{run}/log");
     for uri in [
-        "/api/issues/PL-1",
-        "/api/issues/PL-1/events",
-        "/api/issues/PL-1/pull-requests",
+        "/api/issues",
+        "/api/issues/PL-2",
+        "/api/issues/PL-2/events",
+        "/api/issues/PL-1/runs",
+        "/api/workflow",
+        "/api/projects",
+        "/api/actors",
+        "/api/session",
+        &run_log,
     ] {
         let (status, body) = call(&s.app, &agent, "GET", uri, None).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
     }
+    let (status, created) = call(
+        &s.app,
+        &agent,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "Follow-up"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let (status, edited) = call(
+        &s.app,
+        &agent,
+        "PATCH",
+        "/api/issues/PL-2",
+        Some(json!({"title": "Another, renamed", "parent": "PL-3"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    let written = sqlx::query!(
+        r#"SELECT e.issue_id, e.kind, a.name, a.role
+           FROM event e JOIN actor a ON a.id = e.actor_id
+           WHERE e.issue_id IN ('PL-2', 'PL-3') ORDER BY e.seq"#
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|r| (r.issue_id, r.kind, r.name, r.role))
+    .collect::<Vec<_>>();
+    let by = |issue: &str, kind: &str, name: &str, role: &str| {
+        (issue.into(), kind.into(), name.into(), role.into())
+    };
+    assert_eq!(
+        written,
+        [
+            by("PL-2", "created", "Gannon", "person"),
+            by("PL-3", "created", "Claude Code", "agent"),
+            by("PL-2", "edited", "Claude Code", "agent"),
+        ]
+    );
+
     for (method, uri, body) in [
-        ("POST", "/api/issues", Some(json!({"title": "Mine now"}))),
-        ("GET", "/api/issues", None),
-        ("GET", "/api/issues/PL-2", None),
-        ("GET", "/api/issues/PL-2/events", None),
-        ("GET", "/api/issues/PL-10", None),
+        ("GET", "/api/runners", None),
         ("GET", "/api/pull-requests/unlinked", None),
-        ("GET", "/api/workflow", None),
+        ("POST", "/api/projects", Some(json!({"name": "Mine"}))),
+        ("POST", "/api/actors", Some(json!({"kind": "codex"}))),
+        ("POST", "/api/runs/claim", Some(json!({"wait_seconds": 0}))),
+        ("POST", &format!("/api/runs/{run}/finish"), Some(json!({}))),
     ] {
         let (status, error) = call(&s.app, &agent, method, uri, body).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {error}");
         assert_eq!(
-            error["message"],
-            "an agent acts only on its run's issue, PL-1"
+            (status, &error["message"]),
+            (
+                StatusCode::FORBIDDEN,
+                &json!("an agent acts only on the workspace's issues")
+            ),
+            "{method} {uri}"
         );
     }
-    let issues = sqlx::query_scalar!(r#"SELECT count(*) AS "n!" FROM issue"#)
+
+    // A person's moves stay a person's, and a status locked to agents stays locked.
+    let (status, _) = call(
+        &s.app,
+        person,
+        "POST",
+        "/api/issues/PL-2/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = call(
+        &s.app,
+        &agent,
+        "POST",
+        "/api/issues/PL-2/transitions",
+        Some(json!({"to": "start"})),
+    )
+    .await;
+    assert_eq!(
+        (status, &refused["code"]),
+        (StatusCode::CONFLICT, &json!("role_not_allowed")),
+        "{refused}"
+    );
+    // Test-only: the path to Human Review needs gates.
+    sqlx::query!("UPDATE issue SET status = 'human_review' WHERE id = 'PL-2'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (method, uri, body) in [
+        (
+            "POST",
+            "/api/issues/PL-2/transitions",
+            json!({"to": "merging"}),
+        ),
+        ("PATCH", "/api/issues/PL-2", json!({"title": "Mine"})),
+        ("POST", "/api/issues/PL-2/comments", json!({"body": "Mine"})),
+    ] {
+        let (status, refused) = call(&s.app, &agent, method, uri, Some(body)).await;
+        assert_eq!(
+            (status, &refused["code"]),
+            (StatusCode::CONFLICT, &json!("locked")),
+            "{method} {uri}: {refused}"
+        );
+    }
+    let status = sqlx::query_scalar!("SELECT status FROM issue WHERE id = 'PL-2'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(issues, 2);
+    assert_eq!(status, "human_review");
+
+    // Its token stops working when the run ends.
+    sqlx::query!("UPDATE run SET outcome = 'failed', finished_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for uri in ["/api/issues", "/api/issues/PL-3", &run_log] {
+        let (status, _) = call(&s.app, &agent, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+    }
 }
 
 #[sqlx::test]

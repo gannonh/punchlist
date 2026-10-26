@@ -296,6 +296,7 @@ struct Named {
     id: Uuid,
     linear_id: Option<String>,
     pass_when: String,
+    pass_when_edited: bool,
 }
 
 /// The one of `rows` that is the Linear record `linear_id`: the row with that id, else a row of
@@ -481,7 +482,7 @@ pub(crate) async fn run(
     let project = &snapshot.project;
     let rows = sqlx::query_as!(
         Named,
-        r#"SELECT id, linear_id, '' AS "pass_when!" FROM project
+        r#"SELECT id, linear_id, '' AS "pass_when!", false AS "pass_when_edited!" FROM project
            WHERE workspace_id = $1 AND (linear_id = $2 OR name = $3)"#,
         workspace_id,
         project.id,
@@ -529,7 +530,7 @@ pub(crate) async fn run(
         let pass_when = milestone.description.as_deref().unwrap_or("").trim();
         let rows = sqlx::query_as!(
             Named,
-            "SELECT id, linear_id, pass_when FROM milestone
+            "SELECT id, linear_id, pass_when, pass_when_edited FROM milestone
              WHERE project_id = $1 AND (linear_id = $2 OR name = $3)",
             project_id,
             milestone.id,
@@ -547,6 +548,19 @@ pub(crate) async fn run(
                 .into());
             }
             Ok(Some(row)) => {
+                // A `pass_when` a person edited in Punchlist stays.
+                let kept = row.pass_when_edited && row.pass_when != pass_when;
+                if kept {
+                    report.notes.push(format!(
+                        "kept PASS when of milestone {} (edited in Punchlist)",
+                        milestone.name.trim()
+                    ));
+                }
+                let pass_when = if row.pass_when_edited {
+                    row.pass_when.as_str()
+                } else {
+                    pass_when
+                };
                 if row.linear_id.is_none() || row.pass_when != pass_when {
                     sqlx::query!(
                         "UPDATE milestone SET linear_id = $2, pass_when = $3 WHERE id = $1",
@@ -741,7 +755,7 @@ pub(crate) async fn run(
         }
         if to != current.status {
             // As any move does, without queuing a dispatch for the new status.
-            end_dispatches(tx, &current.id).await?;
+            end_dispatches(tx, &importer, &current.id).await?;
             let transition = insert_transition(
                 tx,
                 &importer,

@@ -49,8 +49,8 @@ pub(crate) async fn next_event_seq(
     .await
 }
 
-/// Writes an event that says only that the issue's row changed: `run`, `pull_request`, `proof`
-/// or `workflow`. The caller took the workspace's lock first, as the lock order has it.
+/// Writes an event that says only that the issue's row changed: `run`, `pull_request`, `proof`,
+/// `workflow` or `project`. The caller took the workspace's lock first, as the lock order has it.
 pub(crate) async fn record_row_event(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -143,6 +143,8 @@ struct EventRow {
     gate: Option<String>,
     reason: Option<String>,
     edited_fields: Option<Vec<String>>,
+    status: Option<String>,
+    agent: Option<String>,
 }
 
 impl TryFrom<EventRow> for Event {
@@ -157,10 +159,19 @@ impl TryFrom<EventRow> for Event {
             ("pull_request", None) => EventDetail::PullRequest,
             ("proof", None) => EventDetail::Proof,
             ("workflow", None) => EventDetail::Workflow,
+            ("project", None) => EventDetail::Project,
             ("edited", None) => EventDetail::Edited {
                 fields: row
                     .edited_fields
                     .ok_or_else(|| corrupt("incomplete edited"))?,
+            },
+            ("run_again", None) => match (row.status, row.agent) {
+                (Some(status), Some(agent)) => EventDetail::RunAgain {
+                    status_name: display_name(&status),
+                    status,
+                    agent,
+                },
+                _ => return Err(corrupt("incomplete run_again")),
             },
             ("refusal", None) => match (
                 row.from_status,
@@ -213,7 +224,7 @@ impl TryFrom<EventRow> for Event {
 
 /// The workspace's events after `after`, in sequence order, at most `limit` of them: every
 /// event, as the stream reads them, or with `issue_id` that issue's timeline, which leaves out
-/// the `run`, `pull_request`, `proof` and `workflow` events that only tell the stream its row
+/// the `run`, `pull_request`, `proof`, `workflow` and `project` events that only tell the stream its row
 /// changed.
 pub(crate) async fn events(
     conn: &mut sqlx::PgConnection,
@@ -232,7 +243,7 @@ pub(crate) async fn events(
                 coalesce(t.workflow_version, r.workflow_version) AS "workflow_version?",
                 coalesce(t.delivery_id, r.delivery_id) AS "delivery_id?",
                 c.body AS "comment_body?", r.gate AS "gate?", r.reason AS "reason?",
-                e.edited_fields
+                e.edited_fields, e.status, e.agent
          FROM event e
          JOIN actor a ON a.id = e.actor_id
          LEFT JOIN transition t ON t.id = e.transition_id
@@ -240,7 +251,7 @@ pub(crate) async fn events(
          LEFT JOIN refusal r ON r.id = e.refusal_id
          WHERE e.workspace_id = $1 AND e.seq > $3
            AND ($2::text IS NULL
-                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof', 'workflow')))
+                OR (e.issue_id = $2 AND e.kind NOT IN ('run', 'pull_request', 'proof', 'workflow', 'project')))
          ORDER BY e.seq
          LIMIT $4"#,
         workspace_id,

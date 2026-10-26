@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id, r.issue_id, r.agent, r.outcome,\n                  coalesce(d.run_number - d.runs_before, 1) AS \"runs!\",\n                  coalesce(e.seq, 0) AS \"since_seq!\",\n                  coalesce(e.created_at, r.finished_at, r.started_at) AS \"since!\",\n                  (rd.since_seq IS NULL OR rd.since_seq < coalesce(e.seq, 0)) AS \"unread!\"\n           FROM actor a\n           JOIN run r ON r.id = a.run_id\n           JOIN issue i ON i.id = r.issue_id AND i.status = r.status\n           LEFT JOIN dispatch d ON d.run_id = r.id\n           LEFT JOIN LATERAL (\n               SELECT seq, created_at FROM event\n               WHERE issue_id = i.id AND kind = 'run'\n               ORDER BY seq DESC LIMIT 1\n           ) e ON true\n           LEFT JOIN inbox_read rd\n                  ON rd.actor_id = $2 AND rd.issue_id = i.id AND rd.kind = 'run'\n           WHERE a.workspace_id = $1 AND a.owner_id = $2 AND r.outcome <> 'running'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "issue_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "issue_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "agent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "outcome",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "runs!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "since_seq!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "since!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "unread!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "bc930c7ce67207d8a4d2ededb01a927e6b0c07ca3fe0de0315fd46fcfe6b783a"
+}

@@ -23,6 +23,7 @@ import {
   type Transition,
   type Transitions,
 } from '@/model/issues'
+import type { Selection } from '@/model/selection'
 
 /**
  * Records a `pl:render` measure for each commit of the list or the board, from the start of the view's render to
@@ -81,7 +82,18 @@ function SnippetLine({ snippet }: { snippet: Snippet }) {
   )
 }
 
-const ListRow = memo(function ListRow({ row, status, selected, transition, snippet, now, onPick, onDismiss }: RowProps) {
+const ListRow = memo(function ListRow({
+  row,
+  status,
+  selected,
+  checked,
+  transition,
+  snippet,
+  now,
+  onPick,
+  onCheck,
+  onDismiss,
+}: RowProps & { checked: boolean; onCheck: (id: string, range: boolean) => void }) {
   const view = rowView(row, now, status)
   return (
     <div
@@ -90,13 +102,25 @@ const ListRow = memo(function ListRow({ row, status, selected, transition, snipp
       data-issue={view.id}
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
-      aria-selected={selected}
+      aria-selected={checked}
+      data-focused={selected ? '' : undefined}
       tabIndex={-1}
-      onClick={() => {
-        onPick(view.id)
+      onClick={(event) => {
+        if (event.shiftKey) onCheck(view.id, true)
+        else onPick(view.id)
       }}
     >
-      <span className="font-mono text-meta text-ink-3">{view.id}</span>
+      <span
+        className="check flex items-center gap-2 font-mono text-meta text-ink-3"
+        onClick={(event) => {
+          // The box is this cell's ::before, its first 18 px; a click on the id picks the row as before.
+          if (event.nativeEvent.offsetX > 18) return
+          event.stopPropagation()
+          onCheck(view.id, event.shiftKey)
+        }}
+      >
+        {view.id}
+      </span>
       <span className="title truncate font-medium max-lg:whitespace-normal">
         {view.title}
         <Labels labels={view.labels} />
@@ -134,6 +158,7 @@ const Card = memo(function Card({ row, status, selected, transition, snippet, no
       data-status={view.status}
       data-waits-on-merge={view.waitsOnMerge ? '' : undefined}
       aria-selected={selected}
+      data-focused={selected ? '' : undefined}
       tabIndex={-1}
       onClick={() => {
         onPick(view.id)
@@ -178,10 +203,20 @@ interface ViewProps {
   onDismiss: (id: string) => void
 }
 
-export function ListView({ groups, selected, transitions, snippets, now, onPick, onDismiss }: ViewProps) {
+export function ListView({
+  groups,
+  selected,
+  checked,
+  transitions,
+  snippets,
+  now,
+  onPick,
+  onCheck,
+  onDismiss,
+}: ViewProps & { checked: Selection; onCheck: (id: string, range: boolean) => void }) {
   useRenderMeasure('list', groups)
   return (
-    <div data-layout="list">
+    <div data-layout="list" data-selecting={checked.size > 0 ? '' : undefined}>
       {groups
         .filter((group) => group.rows.length > 0)
         .map((group) => (
@@ -189,17 +224,19 @@ export function ListView({ groups, selected, transitions, snippets, now, onPick,
             <div className="px-2 py-1.5">
               <GroupHead group={group} />
             </div>
-            <div className="overflow-hidden rounded-lg border bg-card" role="listbox" aria-label={group.status.name}>
+            <div className="overflow-hidden rounded-lg border bg-card" role="listbox" aria-multiselectable="true" aria-label={group.status.name}>
               {group.rows.map((row) => (
                 <ListRow
                   key={row.issue.id}
                   row={row}
                   status={group.status}
                   selected={row.issue.id === selected}
+                  checked={checked.has(row.issue.id)}
                   transition={transitions[row.issue.id]}
                   snippet={snippets.get(row.issue.id)}
                   now={now}
                   onPick={onPick}
+                  onCheck={onCheck}
                   onDismiss={onDismiss}
                 />
               ))}

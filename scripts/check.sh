@@ -17,6 +17,7 @@ step "web typecheck, lint and unit tests"
 pnpm --filter @punchlist/web typecheck
 pnpm --filter @punchlist/web lint
 pnpm --filter @punchlist/web test
+node --test scripts/backfill-blockers.test.mjs
 
 step "rustfmt"
 cargo fmt --all --check

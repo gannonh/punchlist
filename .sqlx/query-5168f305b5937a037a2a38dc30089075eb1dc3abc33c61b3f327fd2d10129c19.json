@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT d.agent, r.waiting_reason AS \"waiting_reason!\" FROM dispatch d\n           JOIN run r ON r.id = d.run_id\n           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL\n             AND d.run_number = (SELECT max(run_number) FROM dispatch\n                                 WHERE transition_id = d.transition_id)\n             AND d.transition_id = (SELECT e.transition_id FROM event e\n                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                    ORDER BY e.seq DESC LIMIT 1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "agent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "dispatch",
+            "name": "agent"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "waiting_reason!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "waiting_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5168f305b5937a037a2a38dc30089075eb1dc3abc33c61b3f327fd2d10129c19"
+}

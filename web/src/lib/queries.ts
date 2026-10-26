@@ -23,8 +23,9 @@ import {
   type Transitions,
   workflowStale,
 } from '@/model/issues'
-import { proofType, type GateChecklist } from '@/model/issue-page'
+import { linksTo, proofType, type GateChecklist, type Issue } from '@/model/issue-page'
 import type { InboxItem } from '@/model/inbox'
+import { bulkSummary, refusedText } from '@/model/selection'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -98,12 +99,15 @@ export const inboxQuery = (workspaceId: string) =>
     staleTime: Infinity,
   })
 
-// A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in.
-const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'workflow'])
+// A move or a new issue changes which issues wait; an edit can change the assignee, so whose inbox an issue is in; a
+// refusal of an agent's move is an item; a Run again ends one.
+const INBOX_KINDS: ReadonlySet<string> = new Set(['transition', 'created', 'edited', 'run', 'run_again', 'workflow', 'refusal'])
 
 const setIssues = (client: QueryClient, workspaceId: string, change: (cache: IssueCache) => IssueCache) => {
   client.setQueryData(issuesQuery(workspaceId).queryKey, (cache) => (cache ? change(cache) : cache))
 }
+
+const refusal = (error: unknown) => (error instanceof ApiError ? refusalText(error.body) : String(error))
 
 /**
  * Opens `GET /api/workspaces/{id}/events` once the workspace's list is loaded, after the list's last sequence. A
@@ -118,10 +122,12 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
     let retry: ReturnType<typeof setTimeout> | undefined
     let reread: ReturnType<typeof setTimeout> | undefined
     let rereadInbox: ReturnType<typeof setTimeout> | undefined
+    let rereadProjects: ReturnType<typeof setTimeout> | undefined
     const issues = issuesQuery(workspaceId).queryKey
     const workflow = workflowQuery(workspaceId).queryKey
     const pullRequests = pullRequestsQuery(workspaceId).queryKey
     const inbox = inboxQuery(workspaceId).queryKey
+    const projects = projectsQuery(workspaceId).queryKey
     const after = client.getQueryData(issues)?.lastSeq ?? 0
     // EventSource reconnects by itself after a network error and sends Last-Event-ID, which the server prefers
     // over `after`.
@@ -132,12 +138,26 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       setIssues(client, workspaceId, (cache) => applyStream(cache, item))
       // An open issue page reads its issue again: its timeline, runs, proof, gates and moves.
       void client.invalidateQueries({ queryKey: issueKey(item.event.issue_id) })
+      // An issue page shows the status of the issues it blocks and is blocked by, and an edit of one's blockers
+      // changes the other's: read again each page the event's issue links, before or after the event.
+      void client.invalidateQueries({
+        queryKey: ['issue'],
+        predicate: ({ queryKey: [, id, what], state }) =>
+          what === 'issue' &&
+          typeof id === 'string' &&
+          (linksTo(item.row.issue, id) || linksTo(state.data as Issue | undefined, item.event.issue_id)),
+      })
       if (PULL_REQUEST_KINDS.has(item.event.detail.kind))
         void client.invalidateQueries({ queryKey: pullRequests })
       // One read per burst of events, as for the workflow below.
       if (INBOX_KINDS.has(item.event.detail.kind)) {
         clearTimeout(rereadInbox)
         rereadInbox = setTimeout(() => void client.invalidateQueries({ queryKey: inbox }), 100)
+      }
+      // A rename writes one `project` event per issue in the project or milestone; the rows carry the new name.
+      if (item.event.detail.kind === 'project') {
+        clearTimeout(rereadProjects)
+        rereadProjects = setTimeout(() => void client.invalidateQueries({ queryKey: projects }), 100)
       }
       // A load writes one `workflow` message per issue. One read starts 100 ms after the last of them, so it
       // starts after every load they came from committed.
@@ -169,6 +189,7 @@ export function useEventStream(workspaceId: string, ready: boolean): void {
       clearTimeout(retry)
       clearTimeout(reread)
       clearTimeout(rereadInbox)
+      clearTimeout(rereadProjects)
       source.close()
     }
   }, [client, workspaceId, ready, opened])
@@ -267,19 +288,60 @@ export function useEditIssue(workspaceId: string) {
       setIssues(client, workspaceId, (cache) => replaceRow(cache, edit.id, (row) => ({ ...row, issue: edited })))
       return { edited, seq: cache.rowSeq[edit.id] ?? -1 }
     },
-    onError: (error, edit, context) => {
+    onError: (_error, edit, context) => {
       if (context) {
         const fields = (['title', 'labels', 'assignee', 'parent', 'project', 'milestone'] as const).filter(
           (field) => edit[field] !== undefined,
         )
         setIssues(client, workspaceId, (cache) => revertEdit(cache, context.edited, fields, context.seq))
       }
-      toast.error(`${edit.id} was not changed. ${error instanceof ApiError ? refusalText(error.body) : String(error)}`)
     },
     onSuccess: (written) => {
       setIssues(client, workspaceId, (cache) => applyWrite(cache, written))
     },
   })
+}
+
+/** One edit from the sheet: a refusal rolls the row back and says why. */
+export function useEditOne(workspaceId: string) {
+  const { mutate } = useEditIssue(workspaceId)
+  return useCallback(
+    (edit: Edit) => {
+      mutate(edit, {
+        onError: (error) => {
+          toast.error(`${edit.id} was not changed. ${refusal(error)}`)
+        },
+      })
+    },
+    [mutate],
+  )
+}
+
+/**
+ * One change to several issues: one `PATCH` each, each with its optimistic edit, and one toast. A refused issue
+ * rolls back and the toast names it with the reason.
+ */
+export function useBulkEdit(workspaceId: string) {
+  const client = useQueryClient()
+  const { mutateAsync } = useEditIssue(workspaceId)
+  return useCallback(
+    async (action: string, edits: readonly Edit[], untouched: number) => {
+      const results = await Promise.allSettled(edits.map((edit) => mutateAsync(edit)))
+      const rows = client.getQueryData(issuesQuery(workspaceId).queryKey)?.rows ?? []
+      const refused = results.flatMap((result, index) => {
+        if (result.status === 'fulfilled') return []
+        const id = edits[index]?.id ?? ''
+        const error: unknown = result.reason
+        if (!(error instanceof ApiError)) return [`${id}: ${String(error)}`]
+        const statusName = rows.find((row) => row.issue.id === id)?.issue.status_name ?? ''
+        return [refusedText(id, statusName, error.body)]
+      })
+      const text = bulkSummary(action, untouched + edits.length - refused.length, refused)
+      if (refused.length > 0) toast.error(text)
+      else toast.success(text)
+    },
+    [client, mutateAsync, workspaceId],
+  )
 }
 
 /** Transitions are not optimistic: the row shows the request as pending, then settles or shows the refusal. */
@@ -402,6 +464,8 @@ export const issuePageQueries = (id: string) => ({
   issue: queryOptions({
     queryKey: [...issueKey(id), 'issue'],
     queryFn: () => call(api.GET('/api/issues/{id}', path(id))),
+    // A lapsed heartbeat writes no event, so the reason an issue waits to be claimed is read again.
+    refetchInterval: (query) => (query.state.data?.waiting_to_run ? 15_000 : false),
   }),
   events: queryOptions({
     queryKey: [...issueKey(id), 'events'],
@@ -447,8 +511,6 @@ export const runLogQuery = (issueId: string, runId: string, live: boolean) =>
     refetchInterval: live ? 1000 : false,
   })
 
-const refusal = (error: unknown) => (error instanceof ApiError ? refusalText(error.body) : String(error))
-
 /** A comment from the composer; the timeline is read again as soon as it is written. */
 export function useComment(id: string) {
   const client = useQueryClient()
@@ -458,6 +520,21 @@ export function useComment(id: string) {
     onError: (error) => {
       toast.error(`The comment was not posted. ${refusal(error)}`)
     },
+  })
+}
+
+/**
+ * Run again: the issue, which waits on a person, gets another set of runs in its status. Not optimistic: the notice
+ * goes when the page reads the issue again. A refusal shows the server's message, and the page reads it again too.
+ */
+export function useRunAgain(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => call(api.POST('/api/issues/{id}/retry', path(id))),
+    onError: (error) => {
+      toast.error(`${id} was not run again. ${refusal(error)}`)
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
   })
 }
 
@@ -516,5 +593,34 @@ export function useMove(id: string, workspaceId: string) {
       toast.error(`${id} did not move to ${to.name}. ${refusal(error)}`)
     },
     onSettled: () => client.invalidateQueries({ queryKey: issueKey(id) }),
+  })
+}
+
+/** What the projects screen's form saves: a new project or milestone without `id`, an edit with it. */
+export type ProjectSave =
+  | { kind: 'project'; id?: string; name: string }
+  | { kind: 'milestone'; project: string; id?: string; name: string; pass_when?: string }
+
+/**
+ * Creates or edits a project or a milestone, then reads the projects again. Not optimistic: the form waits for the
+ * answer and shows a refusal's message itself.
+ */
+export function useSaveProject(workspaceId: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (save: ProjectSave): Promise<unknown> => {
+      const { name } = save
+      if (save.kind === 'project')
+        return save.id
+          ? call(api.PATCH('/api/projects/{id}', { ...path(save.id), body: { name } }))
+          : call(api.POST('/api/workspaces/{id}/projects', { ...inWorkspace(workspaceId), body: { name } }))
+      if (save.id) {
+        const params = { path: { id: save.project, milestone_id: save.id } }
+        return call(api.PATCH('/api/projects/{id}/milestones/{milestone_id}', { params, body: { name, pass_when: save.pass_when } }))
+      }
+      const body = { name, pass_when: save.pass_when ?? '' }
+      return call(api.POST('/api/projects/{id}/milestones', { ...path(save.project), body }))
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: projectsQuery(workspaceId).queryKey }),
   })
 }

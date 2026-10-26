@@ -83,7 +83,7 @@ enum Named {
     /// `/api/issues/{id}/...`: the issue's workspace, none when there is no such issue (the
     /// handler's 404). Another workspace's issue is 403.
     Issue(Option<Uuid>),
-    /// The row behind `/api/runs/{id}`, `/api/proof/{id}` or `/api/projects/{id}/milestones`,
+    /// The row behind `/api/runs/{id}`, `/api/proof/{id}` or `/api/projects/{id}` and below,
     /// none when there is no such row. Its handler refuses a row of another workspace.
     Row(Option<Uuid>),
 }
@@ -126,7 +126,7 @@ async fn named_workspace(
             }
             None => None,
         },
-        ["", "api", "projects", id, "milestones"] => match uuid(id) {
+        ["", "api", "projects", id, ..] => match uuid(id) {
             Some(id) => {
                 sqlx::query_scalar!("SELECT workspace_id FROM project WHERE id = $1", id)
                     .fetch_optional(pool)
@@ -233,7 +233,7 @@ impl FromRequestParts<AppState> for Actor {
         }
         let row = sqlx::query!(
             r#"SELECT a.id, a.workspace_id, a.name, a.role, a.kind, a.run_id,
-                      r.issue_id AS "issue_id?", r.outcome AS "outcome?"
+                      r.outcome AS "outcome?"
                FROM actor a LEFT JOIN run r ON r.id = a.run_id
                WHERE a.token_hash = $1"#,
             token_hash,
@@ -270,27 +270,20 @@ impl FromRequestParts<AppState> for Actor {
             }
             _ => {}
         }
-        // A run's agent reaches only its run's issue, `/api/issues/<id>` and below, and its
-        // run's waiting route. A standalone agent reaches any issue of its workspace, and the
-        // few reads and the one write an orchestrator needs to file, list and watch them
-        // (`standalone_agent_route`).
+        // An agent, while its run runs if it has one, reaches any issue of its workspace,
+        // `/api/issues/<id>` and below, and the few reads and the one write it needs to file,
+        // list and watch them (`agent_route`); a run's agent also reads run logs, to review
+        // another run's work. The workflow's `by` rules and locks still judge each move.
         // Everything else, such as sessions, runners, minting actors and creating projects, is
         // for people and runners.
-        if role == Role::Agent && !own_waiting {
-            match (row.run_id, row.issue_id.as_deref()) {
-                (Some(_), own) if issue_id.is_none() || issue_id != own => {
-                    return Err(ApiError::Forbidden(format!(
-                        "an agent acts only on its run's issue, {}",
-                        own.unwrap_or("none")
-                    )));
-                }
-                (None, _) if issue_id.is_none() && !standalone_agent_route(&parts.method, path) => {
-                    return Err(ApiError::Forbidden(
-                        "an agent acts only on the workspace's issues".into(),
-                    ));
-                }
-                _ => {}
-            }
+        if role == Role::Agent
+            && !own_waiting
+            && issue_id.is_none()
+            && !agent_route(&parts.method, path, row.run_id.is_some())
+        {
+            return Err(ApiError::Forbidden(
+                "an agent acts only on the workspace's issues".into(),
+            ));
         }
         Ok(Actor {
             id: row.id,
@@ -304,24 +297,25 @@ impl FromRequestParts<AppState> for Actor {
     }
 }
 
-/// The routes outside `/api/issues/<id>` a standalone agent's token reaches. Each handler
-/// keeps it to the token's workspace.
-fn standalone_agent_route(method: &Method, path: &str) -> bool {
+/// The routes outside `/api/issues/<id>` an agent's token reaches, and a run's agent's the
+/// run logs too. Each handler keeps it to the token's workspace.
+fn agent_route(method: &Method, path: &str, run_agent: bool) -> bool {
     let route = (crate::workspaces::workspace_route(path))
         .or_else(|| path.strip_prefix("/api"))
         .unwrap_or(path);
     let segments: Vec<&str> = route.split('/').collect();
-    matches!(
-        (method.as_str(), segments.as_slice()),
+    match (method.as_str(), segments.as_slice()) {
+        ("GET", ["", "runs", _, "log"]) => run_agent,
         ("GET" | "POST", ["", "issues"])
-            | ("GET", ["", "workspaces", _, "events"])
-            | ("GET", ["", "projects"])
-            | ("GET", ["", "workflow"])
-            | ("GET", ["", "actors"])
-            | ("GET", ["", "proof", _])
-            | ("GET", ["", "session"])
-            | ("GET", ["", "workspaces"])
-    )
+        | ("GET", ["", "workspaces", _, "events"])
+        | ("GET", ["", "projects"])
+        | ("GET", ["", "workflow"])
+        | ("GET", ["", "actors"])
+        | ("GET", ["", "proof", _])
+        | ("GET", ["", "session"])
+        | ("GET", ["", "workspaces"]) => true,
+        _ => false,
+    }
 }
 
 pub struct BearerAuth;

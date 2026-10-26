@@ -73,8 +73,8 @@ const row = (page: Page, id: string) => page.locator(`[data-issue="${id}"]`)
 async function openSheet(page: Page, id: string) {
   // A sheet still closing would take the clicks.
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  if ((await row(page, id).getAttribute('aria-selected')) !== 'true') await row(page, id).click()
-  await expect(row(page, id)).toHaveAttribute('aria-selected', 'true')
+  if ((await row(page, id).getAttribute('data-focused')) === null) await row(page, id).click()
+  await expect(row(page, id)).toHaveAttribute('data-focused', '')
   await row(page, id).click()
   return page.getByRole('dialog')
 }
@@ -408,8 +408,8 @@ test('the filter finds bodies and comments with a marked snippet, and Enter open
   await page.keyboard.press('Escape')
   await expect(page.getByLabel('Filter issues')).toHaveValue(word)
   // A click on the selected row opens the sheet instead.
-  if ((await row(page, inComment).getAttribute('aria-selected')) !== 'true') await row(page, inComment).click()
-  await expect(row(page, inComment)).toHaveAttribute('aria-selected', 'true')
+  if ((await row(page, inComment).getAttribute('data-focused')) === null) await row(page, inComment).click()
+  await expect(row(page, inComment)).toHaveAttribute('data-focused', '')
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${inComment}#seq-${String(seq)}$`))
   await expect(page.locator(`#seq-${String(seq)}`)).toBeInViewport()
@@ -602,7 +602,9 @@ test('a screenshot uploaded from the issue page is the person\'s proof and shows
   await expect(page.locator('[data-proof-empty]')).toBeVisible()
   await page.locator('[data-proof-input]').setInputFiles({ name: 'board.png', mimeType: 'image/png', buffer: PNG })
   const thumb = page.locator('[data-proof="image"] img')
-  await expect(thumb).toHaveAttribute('alt', 'board.png')
+  // The thumbnail is inside the button that names it, so the image itself is decorative.
+  await expect(page.getByRole('button', { name: 'Open board.png' })).toBeVisible()
+  await expect(thumb).toHaveAttribute('alt', '')
   await expect.poll(() => thumb.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1)
   const stored = await ok<{ title: string; kind: string; actor: { name: string; role: string } }[]>(
     await request.get(`/api/issues/${id}/proof`, { headers: person }),
@@ -640,4 +642,128 @@ test('Enter opens the issue page, and a comment from its composer shows in the f
   expect(shown.toString()).toContain(text)
   await page.keyboard.press('Escape')
   await expect(page).toHaveURL(/\/w\/PL$/)
+})
+
+test('select three rows by key, set their project and a label from the right-click menu, and name a refused one', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const marker = `Bulk ${randomUUID().slice(0, 8)}`
+  const ids: string[] = []
+  for (const n of [1, 2, 3, 4]) {
+    const { row } = await ok<{ row: { issue: { id: string } } }>(
+      await request.post('/api/issues', { headers: person, data: { title: `${marker} ${String(n)}`, body: '' } }),
+    )
+    ids.push(row.issue.id)
+  }
+  const [a, b, c, d] = ids as [string, string, string, string]
+  await ok(await request.patch(`/api/issues/${a}`, { headers: person, data: { labels: ['idea', 'ui'] } }))
+  const name = `Project ${marker}`
+  await ok(await request.post('/api/projects', { headers: person, data: { name } }))
+  const issue = async (id: string) =>
+    ok<{ labels?: string[]; project?: { name: string } | null }>(await request.get(`/api/issues/${id}`, { headers: person }))
+  const edits = async (id: string) =>
+    (
+      await ok<{ detail: { kind: string; fields?: string[] } }[]>(
+        await request.get(`/api/issues/${id}/events`, { headers: person }),
+      )
+    ).filter((event) => event.detail.kind === 'edited')
+
+  // The box is drawn at the start of the row's id cell.
+  const box = (page: Page, id: string) => ({
+    click: (options: { modifiers?: ['Shift'] } = {}) =>
+      row(page, id).locator('.check').click({ ...options, position: { x: 7, y: 8 } }),
+  })
+
+  await signIn(page)
+  await page.getByLabel('Filter issues').fill(marker)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-issue]')).toHaveCount(4)
+
+  // The first row is focused; a click on the focused row would open its sheet.
+  await expect(row(page, a)).toHaveAttribute('data-focused', '')
+  await expect(row(page, a)).toHaveAttribute('aria-selected', 'false')
+  await expect(row(page, a).locator('..')).toHaveAttribute('aria-multiselectable', 'true')
+  for (const key of ['x', 'j', 'x', 'j', 'x']) await page.keyboard.press(key)
+  await expect(page.locator('[data-selection]')).toContainText('3 selected')
+  await expect(page.locator('[data-issue][aria-selected="true"]')).toHaveCount(3)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-issue][aria-selected="true"]')).toHaveCount(0)
+  await expect(page.locator('[data-selection]')).toHaveCount(0)
+
+  await box(page, a).click()
+  await box(page, c).click({ modifiers: ['Shift'] })
+  await expect(page.locator('[data-selection]')).toContainText('3 selected')
+
+  await row(page, b).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Project' }).click()
+  await page.getByLabel('Filter project').fill(name.slice(-8))
+  await page.getByRole('menuitemcheckbox', { name }).click()
+  await expect(page.getByText(`Set Project to ${name} on 3 issues`)).toBeVisible()
+  for (const id of [a, b, c]) {
+    await expect.poll(async () => (await issue(id)).project?.name).toBe(name)
+    expect((await edits(id)).filter((event) => event.detail.fields?.includes('project'))).toHaveLength(1)
+  }
+  expect((await issue(d)).project ?? null).toBeNull()
+
+  // A right-click on a row outside the selection acts on that row alone.
+  await row(page, d).click({ button: 'right' })
+  await expect(page.locator('[data-row-menu]')).toHaveAttribute('aria-label', `Change ${d}`)
+  await page.keyboard.press('Escape')
+
+  // `a` has idea already; adding it to a and b leaves one each, and a's ui label.
+  await box(page, c).click()
+  await expect(page.locator('[data-selection]')).toContainText('2 selected')
+  await page.keyboard.press('l')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'idea', exact: true })).toHaveAttribute('aria-checked', 'mixed')
+  await page.getByRole('menuitemcheckbox', { name: 'idea', exact: true }).click()
+  await expect(page.getByText('Added label idea on 2 issues')).toBeVisible()
+  await expect.poll(async () => (await issue(b)).labels).toEqual(['idea'])
+  expect((await issue(a)).labels).toEqual(['idea', 'ui'])
+  await page.keyboard.press('Escape')
+
+  // A refused edit: the row keeps its value and the toast names it.
+  await page.route(`**/api/issues/${b}`, (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 409, json: { code: 'locked', message: 'backlog is locked to people' } })
+      : route.continue(),
+  )
+  await page.keyboard.press('l')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'idea', exact: true })).toHaveAttribute('aria-checked', 'true')
+  await page.getByRole('menuitemcheckbox', { name: 'idea', exact: true }).click()
+  await expect(page.getByText(`1 updated; ${b} is in Backlog, locked`)).toBeVisible()
+  await expect(row(page, b).getByText('idea')).toBeVisible()
+  await expect(row(page, a).getByText('idea')).toHaveCount(0)
+  await expect.poll(async () => (await issue(a)).labels).toEqual(['ui'])
+  expect((await issue(b)).labels).toEqual(['idea'])
+})
+
+test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
+  page,
+  request,
+}) => {
+  // One claim only: the runs of earlier tests' claims may hold the workspace's `max_concurrent`.
+  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a person')
+  const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
+  const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
+    headers: bearer(agent_token),
+    data: { reason: 'The check is flaky.' },
+  })
+  expect(waiting.status()).toBe(204)
+  await ok(
+    await request.post(`/api/runs/${claim.run_id}/finish`, {
+      headers: bearer(runner),
+      data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+    }),
+  )
+  await signIn(page)
+  await page.goto(`/issues/${id}`)
+  const notice = page.locator('[data-notice="waiting"]')
+  await expect(notice).toContainText('Claude Code is waiting on a person: The check is flaky.')
+  await notice.locator('[data-run-again]').click()
+  await expect(notice).toHaveCount(0, { timeout: 2000 })
+  await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
+  await page.keyboard.press('Escape')
+  await expect(row(page, id).locator('[data-run]')).toHaveText('Queued')
 })

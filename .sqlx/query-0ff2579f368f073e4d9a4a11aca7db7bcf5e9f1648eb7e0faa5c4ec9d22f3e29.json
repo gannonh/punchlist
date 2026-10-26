@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, linear_id, pass_when FROM milestone\n             WHERE project_id = $1 AND (linear_id = $2 OR name = $3)",
+  "query": "SELECT id, linear_id, '' AS \"pass_when!\", false AS \"pass_when_edited!\" FROM project\n           WHERE workspace_id = $1 AND (linear_id = $2 OR name = $3)",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "milestone",
+            "table": "project",
             "name": "id"
           }
         }
@@ -20,21 +20,22 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "milestone",
+            "table": "project",
             "name": "linear_id"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "pass_when",
+        "name": "pass_when!",
         "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "milestone",
-            "name": "pass_when"
-          }
-        }
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "pass_when_edited!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -47,8 +48,9 @@
     "nullable": [
       false,
       true,
-      false
+      null,
+      null
     ]
   },
-  "hash": "852566eaa411cc2aaeaeb10a36d396e79c7796736f0ce631f1e942de87c47d4a"
+  "hash": "0ff2579f368f073e4d9a4a11aca7db7bcf5e9f1648eb7e0faa5c4ec9d22f3e29"
 }
