@@ -1,6 +1,6 @@
 // The issue page (the approved Sidebar prototype): spec, pull request, proof and activity in the main column;
 // status and moves, gates, runs and properties in a sticky rail that stacks above the main column on phones.
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { ArrowLeft, Bot, Clock, GitMerge, GitPullRequest, Lock, Paperclip, Server, HardDrive } from 'lucide-react'
@@ -19,12 +19,14 @@ import {
   useEventStream,
   useMove,
   useReadFromGithub,
+  useRunAgain,
 } from '@/lib/queries'
 import { age, agentName, assigneeView, pullRequestView, waitsOnMerge, type Actor, type WaitsOnMerge } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
 import {
   GATE_EVIDENCE,
   actorMark,
+  dependencies,
   duration,
   eventText,
   feedEntries,
@@ -42,11 +44,13 @@ import {
   threadView,
   tokens,
   cost,
+  waitingLine,
   type ActorMark,
   type AttemptInfo,
   type CheckRun,
   type Feed,
   type GateChecklist,
+  type Issue,
   type IssueEvent,
   type LogLine,
   type Proof,
@@ -323,6 +327,7 @@ export function IssueScreen({
 
           <div className="main">
             <Notice
+              id={id}
               moves={moves}
               viewer={viewer}
               waiting={data.waiting_on_person ?? null}
@@ -352,7 +357,15 @@ export function IssueScreen({
           <aside className="rail" aria-label="Status, gates and runs">
             <TransitionsPanel id={id} workspaceId={workspaceId} moves={moves} gates={gates.data} viewer={viewer} />
             <GatesPanel checklist={gates.data} />
-            <RunsPanel issueId={id} runs={runs.data ?? []} moves={moves} person={person} now={now} />
+            <RunsPanel
+              issueId={id}
+              runs={runs.data ?? []}
+              moves={moves}
+              person={person}
+              now={now}
+              waiting={waitingLine(data)}
+            />
+            <DependenciesPanel issue={data} />
             <Panel title="Properties" className="rail-only-wide">
               <dl className="m-0 grid grid-cols-[84px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5 text-meta">
                 <dt className="text-ink-3">Assignee</dt>
@@ -409,12 +422,78 @@ export function IssueScreen({
   )
 }
 
+// Unlike Properties, shown on phones too: what blocks the issue matters before its spec.
+function DependenciesPanel({ issue }: { issue: Issue }) {
+  const lists = dependencies(issue)
+  if (lists.length === 0) return null
+  return (
+    <Panel title="Dependencies">
+      <dl className="m-0 grid grid-cols-[84px_minmax(0,1fr)] gap-x-2.5 gap-y-1.5 text-meta" data-dependencies>
+        {lists.map(({ label, issues }) => (
+          <Fragment key={label}>
+            <dt className="text-ink-3">{label}</dt>
+            <dd className="m-0" data-linked={label === 'Blocks' ? 'blocks' : 'blocked-by'}>
+              {issues.length === 0 ? (
+                '—'
+              ) : (
+                <ul className="m-0 grid list-none gap-1 p-0">
+                  {issues.map((linked) => (
+                    <li key={linked.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5" data-linked-issue={linked.id}>
+                      <Link to="/issues/$id" params={{ id: linked.id }} className="font-mono text-primary hover:underline">
+                        {linked.id}
+                      </Link>
+                      <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-linked-status>
+                        <StatusDot status={linked.status} />
+                        {linked.status_name}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </dd>
+          </Fragment>
+        ))}
+      </dl>
+    </Panel>
+  )
+}
+
+/** A person gives an issue that waits on them another set of runs in its status. */
+function RunAgain({ id }: { id: string }) {
+  const runAgain = useRunAgain(id)
+  // `isPending` reaches the button after a render, which a double click's second click can beat.
+  const sent = useRef(false)
+  return (
+    <Button
+      variant="outline"
+      size="xs"
+      className="flex-none self-center"
+      data-run-again
+      disabled={runAgain.isPending}
+      aria-busy={runAgain.isPending}
+      onClick={() => {
+        if (sent.current) return
+        sent.current = true
+        runAgain.mutate(undefined, {
+          onSettled: () => {
+            sent.current = false
+          },
+        })
+      }}
+    >
+      Run again
+    </Button>
+  )
+}
+
 function Notice({
+  id,
   moves,
   viewer,
   waiting,
   usageLimit,
 }: {
+  id: string
   moves: TransitionList | undefined
   viewer: Actor
   waiting: string | null
@@ -446,9 +525,10 @@ function Notice({
     return (
       <div className="notice border-warn-line bg-warn-soft text-[#7c3a06]" data-notice="waiting" role="status">
         {lock}
-        <div>
+        <div className="min-w-0 flex-1">
           <strong className="text-warn">Waiting on a person:</strong> {waiting}.
         </div>
+        {viewer.role === 'person' && <RunAgain id={id} />}
       </div>
     )
   if (usageLimit)
@@ -1226,12 +1306,14 @@ function RunsPanel({
   moves,
   person,
   now,
+  waiting,
 }: {
   issueId: string
   runs: Run[]
   moves: TransitionList | undefined
   person: boolean
   now: Date
+  waiting: string | null
 }) {
   const status = moves?.status
   const count = runs.reduce((n, run) => n + (run.attempts ?? []).length, 0)
@@ -1253,6 +1335,11 @@ function RunsPanel({
         )
       }
     >
+      {waiting && (
+        <div className="mb-2 text-meta text-warn" data-waiting-to-run role="status">
+          {waiting}
+        </div>
+      )}
       {runs.length === 0 ? (
         <div className="text-meta text-ink-3">No runs yet.</div>
       ) : (

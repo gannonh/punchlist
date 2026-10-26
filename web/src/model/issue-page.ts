@@ -16,6 +16,7 @@ export type GateResult = Schemas['GateResult']
 export type TransitionList = Schemas['TransitionList']
 export type TransitionOption = Schemas['TransitionOption']
 export type LogLine = Schemas['LogLine']
+export type LinkedIssue = Schemas['LinkedIssue']
 
 export interface GateSummary {
   text: string
@@ -59,6 +60,28 @@ export const GATE_EVIDENCE: Readonly<Record<string, string>> = {
   proof_attached: 'proof',
 }
 
+type Links = Pick<Issue, 'blocked_by' | 'blocks'>
+
+export interface Dependency {
+  label: 'Blocked by' | 'Blocks'
+  issues: LinkedIssue[]
+}
+
+/** The rail's two dependency lists, or none when the issue neither blocks nor is blocked. */
+export function dependencies(issue: Links): Dependency[] {
+  const blockedBy = issue.blocked_by ?? []
+  const blocks = issue.blocks ?? []
+  if (blockedBy.length === 0 && blocks.length === 0) return []
+  return [
+    { label: 'Blocked by', issues: blockedBy },
+    { label: 'Blocks', issues: blocks },
+  ]
+}
+
+/** Whether `issue` blocks or is blocked by `id`: an event on either can change what the other's page shows. */
+export const linksTo = (issue: Links | undefined, id: string): boolean =>
+  issue !== undefined && [...(issue.blocked_by ?? []), ...(issue.blocks ?? [])].some((linked) => linked.id === id)
+
 export type Mark = 'person' | 'agent' | 'runner' | 'github' | 'server'
 
 export interface ActorMark {
@@ -80,7 +103,7 @@ const initials = (name: string): string =>
 
 /**
  * How an activity entry marks who wrote it. A refusal is the server's: it refused a move that GitHub's event
- * would have made, so the entry is marked as the server's and names GitHub in its text.
+ * would have made or an agent asked for, so the entry is marked as the server's and names that actor in its text.
  */
 export function actorMark(event: Pick<IssueEvent, 'actor' | 'detail'>): ActorMark {
   const { actor } = event
@@ -124,6 +147,8 @@ export function eventText(event: IssueEvent): string {
       return `refused ${event.actor.name}'s move to ${detail.to_name}: gate ${detail.gate} failed: ${detail.reason}`
     case 'comment':
       return detail.body
+    case 'run_again':
+      return `Run again in ${detail.status_name} (${detail.agent})`
     default:
       return detail.kind
   }
@@ -213,6 +238,10 @@ export function tokens(input: number | null | undefined, output: number | null |
   if (input === null || input === undefined || output === null || output === undefined) return '—'
   return `${count(input)} in · ${count(output)} out`
 }
+
+/** The runs rail's line for an issue that waits to be claimed, with the server's reason; null when it does not wait. */
+export const waitingLine = (issue: Pick<Issue, 'waiting_to_run'>): string | null =>
+  issue.waiting_to_run ? `Waiting: ${issue.waiting_to_run}` : null
 
 /**
  * The cost the agent reported, as the server stored it: no rounding, so no float. Null when it

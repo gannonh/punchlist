@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n               SELECT 1 FROM event e JOIN refusal r ON r.id = e.refusal_id\n               WHERE e.seq = (SELECT max(seq) FROM event\n                              WHERE issue_id = $1 AND kind IN ('refusal', 'transition'))\n                 AND e.issue_id = $1 AND e.kind = 'refusal' AND r.actor_id = $2\n                 AND r.from_status = $3 AND r.to_status = $4 AND r.gate = $5 AND r.reason = $6\n           ) AS \"repeats!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "repeats!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5056890b1870be32238f1dc6d6e6eefea6824cae27f45211b10a060975839089"
+}

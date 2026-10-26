@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT v.workflow_toml, v.prompts\n         FROM dispatch d JOIN transition t ON t.id = d.transition_id\n         JOIN workflow_version v ON v.workspace_id = $1 AND v.hash = t.workflow_version\n         WHERE d.issue_id = $2 AND d.run_id IS NULL",
+  "query": "SELECT v.workflow_toml, v.prompts\n         FROM dispatch d JOIN transition t ON t.id = d.transition_id\n         JOIN workflow_version v ON v.workspace_id = $1\n                                 AND v.hash = coalesce(d.workflow_version, t.workflow_version)\n         WHERE d.issue_id = $2 AND d.run_id IS NULL",
   "describe": {
     "columns": [
       {
@@ -37,5 +37,5 @@
       false
     ]
   },
-  "hash": "2a7b29ed28ee9d5b3c2305383390c1816d9fabed4ea80d55dfc3e9e0d560ef4e"
+  "hash": "b12ddfdb74ddf15639b5f98d17a6a12de815fee48635cf58ba3ed4abe148138c"
 }

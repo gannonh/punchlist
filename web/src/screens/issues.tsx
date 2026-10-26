@@ -14,6 +14,8 @@ import { BoardView, ListView } from '@/components/issue-views'
 import { IssueSheet } from '@/components/issue-sheet'
 import { NewIssue } from '@/components/new-issue'
 import { StatusMenu } from '@/components/status-menu'
+import { PICKERS, PickerMenu, RowMenu, type PickerContext, type PickerKind } from '@/components/bulk-menu'
+import { addRange, keepShown, toggle, type Selection } from '@/model/selection'
 import {
   AGENT_NAMES,
   distinctLabels,
@@ -27,7 +29,8 @@ import {
 } from '@/model/issues'
 import {
   useActors,
-  useEditIssue,
+  useBulkEdit,
+  useEditOne,
   useEventStream,
   useInbox,
   useIssues,
@@ -134,6 +137,9 @@ const SHORTCUTS: Record<Layout, [string, string][]> = {
     ['k', 'previous issue'],
     ['Enter', 'open issue'],
     ['s', 'change status'],
+    ['x', 'select'],
+    ['⇧j ⇧k', 'select range'],
+    ['a l ⇧p ⇧m', 'assignee, labels, project, milestone'],
     ['/', 'filter'],
     ['1 2', 'switch layout'],
     ['g p', 'pull requests'],
@@ -184,7 +190,8 @@ export function IssuesScreen({
   const workflow = useWorkflow(workspaceId)
   const actors = useActors(workspaceId)
   const projects = useProjects(workspaceId)
-  const edit = useEditIssue(workspaceId)
+  const edit = useEditOne(workspaceId)
+  const bulkEdit = useBulkEdit(workspaceId)
   const signOut = useSignOut()
   const navigate = useNavigate()
   const { transitions, request, dismiss } = useTransitions(workspaceId)
@@ -204,9 +211,13 @@ export function IssuesScreen({
     }),
     [local, url.project, url.milestone, url.label, url.status],
   )
+  // The list's checked rows; `selected` is the row the keys act on.
+  const [checked, setChecked] = useState<Selection>(() => new Set())
+  const anchor = useRef<string | null>(null)
   const onLayout = useCallback(
     (next: Layout) => {
       onSearch({ ...url, layout: next === 'board' ? 'board' : undefined })
+      setChecked(new Set())
     },
     [onSearch, url],
   )
@@ -214,6 +225,8 @@ export function IssuesScreen({
   const [column, setColumn] = useState<string | null>(null)
   const [sheet, setSheet] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ id: string; left: number; top: number } | null>(null)
+  const [picker, setPicker] = useState<{ kind: PickerKind; ids: string[]; left: number; top: number } | null>(null)
+  const [rowMenu, setRowMenu] = useState<{ ids: string[]; open: boolean }>({ ids: [], open: false })
   const [creating, setCreating] = useState(false)
   const [hideClosed, setHideClosed] = useState(true)
   const search = useRef<HTMLInputElement>(null)
@@ -239,6 +252,12 @@ export function IssuesScreen({
     [statuses, filter.statuses],
   )
   const groups = useMemo(() => groupByStatus(visible, columns), [visible, columns])
+  // A row a filter hides leaves the selection.
+  const shownChecked = keepShown(
+    checked,
+    visible.map((row) => row.issue.id),
+  )
+  if (shownChecked !== checked) setChecked(shownChecked)
   const labelOptions = useMemo(
     () => distinctLabels(rows).map((label) => ({ value: label, text: label })),
     [rows],
@@ -251,8 +270,10 @@ export function IssuesScreen({
   const statusByKey = useCallback((key: string | undefined) => statuses.find((s) => s.key === key), [statuses])
   const now = useNow()
   const currentRef = useRef(current)
+  const orderRef = useRef(order)
   useLayoutEffect(() => {
     currentRef.current = current
+    orderRef.current = order
   })
 
   useEffect(() => {
@@ -273,10 +294,28 @@ export function IssuesScreen({
     else setSelected(id)
   }, [])
 
-  const openMenu = useCallback((id: string) => {
+  const below = (id: string) => {
     const rect = document.querySelector(`[data-issue="${id}"]`)?.getBoundingClientRect()
-    setMenu({ id, left: (rect?.left ?? 20) + 12, top: rect?.bottom ?? 80 })
+    return { left: (rect?.left ?? 20) + 12, top: rect?.bottom ?? 80 }
+  }
+
+  const openMenu = useCallback((id: string) => {
+    setMenu({ id, ...below(id) })
   }, [])
+
+  // A click on a row's box toggles it; with Shift, or a Shift-click on the row, it adds the rows from the last one
+  // toggled (else the focused row) to it.
+  const check = useCallback((id: string, range: boolean) => {
+    const from = anchor.current ?? currentRef.current
+    setChecked((selection) => (range && from ? addRange(selection, orderRef.current, from, id) : toggle(selection, id)))
+    anchor.current = id
+  }, [])
+
+  // What the menu and the picker keys act on: the checked rows in list order, else the focused row.
+  const targets = useCallback(
+    () => (checked.size > 0 ? order.filter((id) => checked.has(id)) : current ? [current] : []),
+    [checked, order, current],
+  )
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -285,11 +324,20 @@ export function IssuesScreen({
         if (event.key === 'Escape') (event.target as HTMLElement).blur()
         return
       }
-      if (sheet || menu || creating) return
+      // A menu's Escape closes it in the capture phase, and the re-render can add this listener before the event
+      // bubbles here; the menu marks it handled.
+      if (event.defaultPrevented) return
+      if (sheet || menu || creating || picker || rowMenu.open) return
       const step = (delta: number) => {
         if (order.length === 0) return
         const index = Math.max(0, current ? order.indexOf(current) : 0)
-        setSelected(order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null)
+        const next = order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null
+        // Shift extends the selection from the focused row to the next.
+        if (event.shiftKey && layout === 'list' && current && next) {
+          setChecked((selection) => addRange(selection, order, current, next))
+          anchor.current = next
+        }
+        setSelected(next)
       }
       const shift = (delta: number) => {
         const row = rowById(current)
@@ -332,6 +380,32 @@ export function IssuesScreen({
             shift(1)
           },
         }),
+        ...(layout === 'list' && {
+          x: () => {
+            if (!current) return
+            setChecked((selection) => toggle(selection, current))
+            anchor.current = current
+          },
+          J: () => {
+            step(1)
+          },
+          K: () => {
+            step(-1)
+          },
+          Escape: () => {
+            setChecked(new Set())
+          },
+          ...Object.fromEntries(
+            PICKERS.map(({ kind, key }) => [
+              key,
+              () => {
+                const ids = targets()
+                const at = current ?? ids[0]
+                if (at) setPicker({ kind, ids, ...below(at) })
+              },
+            ]),
+          ),
+        }),
       }
       const action = keys[event.key]
       if (action) {
@@ -343,7 +417,7 @@ export function IssuesScreen({
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [sheet, menu, creating, order, current, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate])
+  }, [sheet, menu, creating, picker, rowMenu.open, order, current, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate, targets])
 
   const filtered = Object.values({ ...filter }).some((value) => value.length > 0)
   const projectList = projects.data ?? []
@@ -358,6 +432,12 @@ export function IssuesScreen({
   const strayMilestone = ref(filter.milestone) && !milestones.some((m) => m.id === filter.milestone)
   const menuRow = rowById(menu?.id ?? null)
   const sheetRow = rowById(sheet)
+  const rowsOf = (ids: readonly string[]) => ids.flatMap((id) => rowById(id) ?? [])
+  const pickerContext: PickerContext = {
+    actors: actors.data ?? [],
+    projects: projectList,
+    labels: labelOptions.map((option) => option.value),
+  }
   const viewProps = { groups, selected: current, transitions, snippets, now, onPick: pick, onDismiss: dismiss }
 
   return (
@@ -489,6 +569,21 @@ export function IssuesScreen({
           <span className="text-meta text-ink-3" data-count>
             {visible.length} of {rows.length}
           </span>
+          {checked.size > 0 && (
+            <span className="inline-flex items-center gap-1.5 text-meta font-medium" data-selection>
+              {checked.size} selected
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6.5 px-2 text-meta"
+                onClick={() => {
+                  setChecked(new Set())
+                }}
+              >
+                Clear
+              </Button>
+            </span>
+          )}
           <Button
             size="sm"
             className="h-7.5"
@@ -564,7 +659,21 @@ export function IssuesScreen({
             )}
           </section>
         ) : layout === 'list' ? (
-          <ListView {...viewProps} />
+          <RowMenu
+            targets={rowsOf(rowMenu.ids)}
+            context={pickerContext}
+            onTarget={(id) => {
+              if (!id) return false
+              setRowMenu({ ids: checked.has(id) ? targets() : [id], open: false })
+              return true
+            }}
+            onOpenChange={(open) => {
+              setRowMenu((state) => ({ ...state, open }))
+            }}
+            onApply={(action, edits, untouched) => void bulkEdit(action, edits, untouched)}
+          >
+            <ListView {...viewProps} checked={checked} onCheck={check} />
+          </RowMenu>
         ) : (
           <BoardView
             {...viewProps}
@@ -610,6 +719,19 @@ export function IssuesScreen({
         </StatusMenu>
       )}
 
+      {picker && (
+        <PickerMenu
+          kind={picker.kind}
+          at={picker}
+          targets={rowsOf(picker.ids)}
+          context={pickerContext}
+          onClose={() => {
+            setPicker(null)
+          }}
+          onApply={(action, edits, untouched) => void bulkEdit(action, edits, untouched)}
+        />
+      )}
+
       <IssueSheet
         workspaceId={workspaceId}
         row={sheetRow}
@@ -621,9 +743,7 @@ export function IssuesScreen({
         onClose={() => {
           setSheet(null)
         }}
-        onEdit={(change) => {
-          edit.mutate(change)
-        }}
+        onEdit={edit}
         onMove={(to) => {
           if (sheet) void move(sheet, to)
         }}

@@ -609,3 +609,46 @@ async fn a_state_that_stops_mapping_before_the_job_runs_fails_it_at_once(pool: P
     assert_eq!(attempts, 1);
     assert_eq!(counts(&pool).await[0], 0);
 }
+
+#[sqlx::test]
+async fn a_rerun_keeps_a_pass_when_edited_in_punchlist(pool: PgPool) {
+    let who = workspace(&pool, "PL").await;
+    let state = AppState::new(pool.clone());
+    let app = router(state.clone());
+    import(&state, &app, &who, snapshot()).await;
+    let (project, gate0) =
+        sqlx::query!("SELECT m.project_id, m.id FROM milestone m WHERE m.linear_id = 'm-gate0'")
+            .fetch_one(&pool)
+            .await
+            .map(|row| (row.project_id, row.id))
+            .unwrap();
+    let uri = format!("/api/projects/{project}/milestones/{gate0}");
+    let edit = json!({"pass_when": "Edited in Punchlist"});
+    let (status, answer) = call(&app, &who.token, "PATCH", &uri, Some(edit)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let mut changed = snapshot();
+    let milestones = changed["project"]["milestones"].as_array_mut().unwrap();
+    milestones[0]["description"] = json!("Changed in Linear");
+    milestones[1]["description"] = json!("Phase 1 from Linear");
+    let report = import(&state, &app, &who, changed).await;
+    assert_eq!(report["updated"]["milestones"], 1, "{report}");
+    assert_eq!(
+        report["notes"][0], "kept PASS when of milestone Gate 0 (edited in Punchlist)",
+        "{report}"
+    );
+    let milestones = sqlx::query!("SELECT name, pass_when FROM milestone ORDER BY name")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let milestones: Vec<(&str, &str)> = (milestones.iter())
+        .map(|m| (m.name.as_str(), m.pass_when.as_str()))
+        .collect();
+    assert_eq!(
+        milestones,
+        [
+            ("Gate 0", "Edited in Punchlist"),
+            ("Phase 1", "Phase 1 from Linear")
+        ]
+    );
+}

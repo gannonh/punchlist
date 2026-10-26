@@ -144,6 +144,7 @@ async fn create_show_move_and_refuse(pool: PgPool) {
         insta::assert_snapshot!(show.stdout, @r"
         PL-1  First
         Status: Start
+        waiting: no runner can run claude-code
 
         Body
 
@@ -402,6 +403,7 @@ async fn a_claimed_run_shows_on_the_issue_and_in_the_log(pool: PgPool) {
         insta::assert_snapshot!(show.stdout.replace(&long, "[200 x]"), @r"
         PL-1  Do it
         Status: In Progress
+        waiting: a runner has not claimed it yet
 
         Pull requests
           None linked.
@@ -723,7 +725,9 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
     assert_eq!(
         show.stdout,
         format!(
-            "Version   {}\nCommit    built-in\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n",
+            "Version   {}\nCommit    built-in\nStatuses  backlog, todo, start, in_progress, agent_review, human_review, merging, done, canceled\n\
+             Dispatch  in_progress: claude-code on the runner's model\n\
+             Dispatch  agent_review: codex on the runner's model\n",
             punchlist_core::default_workflow().version()
         )
     );
@@ -761,6 +765,66 @@ async fn workflow_show_transition_and_comment(pool: PgPool) {
     assert!(
         show.stdout
             .contains("Gannon (person)  commented:\n    Looks right.\n"),
+        "{}",
+        show.stdout
+    );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn an_issues_blockers_are_set_shown_both_ways_and_cleared(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    for title in ["Blocker", "Blocked", "Other"] {
+        pl.run(&["issue", "create", "--title", title]).await;
+    }
+    let edit = async |args: &[&str]| pl.run(&[&["issue", "edit"][..], args].concat()).await;
+    let set = edit(&["PL-2", "--blocked-by", "PL-1", "--blocked-by", "PL-3"]).await;
+    assert_eq!(
+        (set.code, set.stdout.as_str()),
+        (
+            0,
+            "PL-2  Blocked\n  labels none · parent none · project none · milestone none · blocked by PL-1, PL-3\n"
+        )
+    );
+    pl.run(&["issue", "move", "PL-3", "todo"]).await;
+    let show = pl.run(&["issue", "show", "PL-2"]).await;
+    assert!(
+        show.stdout.starts_with(
+            "PL-2  Blocked\nStatus: Backlog\nBlocked by: PL-1 (Backlog), PL-3 (Todo)\n\n"
+        ),
+        "{}",
+        show.stdout
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout
+            .starts_with("PL-1  Blocker\nStatus: Backlog\nBlocks: PL-2 (Backlog)\n\n"),
+        "{}",
+        show.stdout
+    );
+
+    let cycle = edit(&["PL-1", "--blocked-by", "PL-2"]).await;
+    assert_eq!(
+        (cycle.code, cycle.stderr.as_str()),
+        (
+            1,
+            "error: PL-1 cannot be blocked by PL-2: PL-2 is already blocked by PL-1 (PL-2 → PL-1) (422 Unprocessable Entity)\n"
+        )
+    );
+    let both = edit(&["PL-2", "--blocked-by", "PL-1", "--no-blockers"]).await;
+    assert_eq!(both.code, 2, "{}", both.stderr);
+
+    let cleared = edit(&["PL-2", "--no-blockers"]).await;
+    assert_eq!(cleared.code, 0, "{}", cleared.stderr);
+    let show = pl.run(&["issue", "show", "PL-2"]).await;
+    assert!(
+        show.stdout
+            .starts_with("PL-2  Blocked\nStatus: Backlog\n\n"),
+        "{}",
+        show.stdout
+    );
+    assert_eq!(
+        show.stdout.matches("edited blocked_by").count(),
+        2,
         "{}",
         show.stdout
     );
@@ -822,7 +886,7 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
         (placed.code, placed.stdout.as_str()),
         (
             0,
-            "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 0\n"
+            "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 0 · blocked by none\n"
         )
     );
     let show = pl.run(&["issue", "show", "PL-2"]).await;
@@ -854,12 +918,12 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
     let gate1 = edit(&["PL-2", "--milestone", "Gate 1"]).await;
     assert_eq!(
         gate1.stdout,
-        "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 1\n"
+        "PL-2  Slice\n  labels none · parent PL-1 · project Punchlist · milestone Gate 1 · blocked by none\n"
     );
     let moved = edit(&["PL-2", "--project", "Groundwork"]).await;
     assert_eq!(
         moved.stdout,
-        "PL-2  Slice\n  labels none · parent PL-1 · project Groundwork · milestone none\n"
+        "PL-2  Slice\n  labels none · parent PL-1 · project Groundwork · milestone none · blocked by none\n"
     );
 
     edit(&["PL-3", "--parent", "PL-2"]).await;
@@ -897,7 +961,7 @@ async fn projects_milestones_and_an_issues_parent_project_and_milestone(pool: Pg
         (cleared.code, cleared.stdout.as_str()),
         (
             0,
-            "PL-2  Slice\n  labels none · parent none · project none · milestone none\n"
+            "PL-2  Slice\n  labels none · parent none · project none · milestone none · blocked by none\n"
         )
     );
     let show = pl.run(&["issue", "show", "PL-2"]).await;
@@ -928,7 +992,7 @@ async fn edit_sets_title_body_and_labels(pool: PgPool) {
         (titled.code, titled.stdout.as_str()),
         (
             0,
-            "PL-1  New\n  labels none · parent none · project none · milestone none\n"
+            "PL-1  New\n  labels none · parent none · project none · milestone none · blocked by none\n"
         )
     );
 
@@ -964,7 +1028,7 @@ async fn edit_sets_title_body_and_labels(pool: PgPool) {
     let labeled = (pl.run(&["issue", "edit", "PL-1", "--label", "a", "--label", "b"])).await;
     assert_eq!(
         labeled.stdout,
-        "PL-1  New\n  labels a, b · parent none · project none · milestone none\n"
+        "PL-1  New\n  labels a, b · parent none · project none · milestone none · blocked by none\n"
     );
     let show = pl.run(&["issue", "show", "PL-1"]).await;
     assert!(
@@ -1999,4 +2063,167 @@ async fn one_config_reaches_each_workspace_of_the_account(pool: PgPool) {
     );
     let flag = pl.run(&["--workspace", "PL", "issue", "list"]).await;
     assert_eq!(flag.stdout, "PL-1  Backlog  In Punchlist\n");
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn projects_and_milestones_are_edited(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Slice"]).await;
+    for args in [
+        &["project", "create", "Punchlist"][..],
+        &[
+            "milestone",
+            "create",
+            "Gate 1",
+            "--project",
+            "Punchlist",
+            "--pass-when",
+            "Old",
+        ],
+        &[
+            "issue",
+            "edit",
+            "PL-1",
+            "--project",
+            "Punchlist",
+            "--milestone",
+            "Gate 1",
+        ],
+    ] {
+        let done = pl.run(args).await;
+        assert_eq!(done.code, 0, "{args:?}: {}", done.stderr);
+    }
+    let milestone = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 1",
+            "--project",
+            "Punchlist",
+            "--pass-when",
+            "New text",
+        ])
+        .await;
+    assert_eq!(
+        (milestone.code, milestone.stdout.as_str()),
+        (0, "Updated milestone Gate 1 in Punchlist.\n")
+    );
+    let project = pl
+        .run(&["project", "edit", "Punchlist", "--name", "Docs"])
+        .await;
+    assert_eq!(
+        (project.code, project.stdout.as_str()),
+        (0, "Updated project Docs.\n")
+    );
+    let renamed = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 1",
+            "--project",
+            "Docs",
+            "--name",
+            "Gate 2",
+            "--pass-when",
+            "",
+        ])
+        .await;
+    assert_eq!(renamed.stdout, "Updated milestone Gate 2 in Docs.\n");
+    let list = pl.run(&["project", "list"]).await;
+    assert_eq!(list.stdout, "Docs\n  Gate 2\n");
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        show.stdout.contains("Project: Docs\nMilestone: Gate 2\n"),
+        "{}",
+        show.stdout
+    );
+
+    let nothing = pl
+        .run(&["milestone", "edit", "Gate 2", "--project", "Docs"])
+        .await;
+    assert_eq!(nothing.code, 2, "{}", nothing.stderr);
+    assert!(
+        nothing
+            .stderr
+            .contains("the following required arguments were not provided"),
+        "{}",
+        nothing.stderr
+    );
+    let unknown = pl
+        .run(&[
+            "milestone",
+            "edit",
+            "Gate 9",
+            "--project",
+            "Docs",
+            "--name",
+            "x",
+        ])
+        .await;
+    assert_eq!(
+        (unknown.code, unknown.stderr.as_str()),
+        (1, "error: project Docs has no milestone named Gate 9\n")
+    );
+    let long = "x".repeat(101);
+    let refused = pl.run(&["project", "edit", "Docs", "--name", &long]).await;
+    assert_eq!(
+        (refused.code, refused.stderr.as_str()),
+        (
+            1,
+            "error: a project name is at most 100 characters (422 Unprocessable Entity)\n"
+        )
+    );
+}
+
+/// `pl issue retry` gives an issue whose three runs ended another set, and refuses one that
+/// does not wait on a person with the server's message.
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn issue_retry_queues_another_run_and_refuses_an_issue_not_waiting(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    pl.run(&["issue", "create", "--title", "Do it"]).await;
+    pl.run(&["issue", "move", "PL-1", "todo"]).await;
+    pl.run(&["issue", "move", "PL-1", "start"]).await;
+    let runner = register(&pl, "r1").await;
+    for _ in 0..3 {
+        let claim = runner.claim(0).await.unwrap().unwrap();
+        let finish = FinishRun {
+            attempt: claim.attempt,
+            outcome: RunOutcome::Succeeded,
+            reason: None,
+            duration_ms: 1,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            lost: false,
+            usage_limit: None,
+        };
+        let run = claim.run_id.to_string();
+        runner.finish_run(&run, &finish).await.unwrap();
+    }
+
+    let retried = pl.run(&["issue", "retry", "PL-1"]).await;
+    assert_eq!(
+        (retried.code, retried.stdout.as_str()),
+        (0, "PL-1: queued another claude-code run in In Progress\n")
+    );
+    let show = pl.run(&["issue", "show", "PL-1"]).await;
+    assert!(
+        !show.stdout.contains("waiting on a person"),
+        "{}",
+        show.stdout
+    );
+    assert!(
+        show.stdout
+            .contains("Gannon (person)  Run again in In Progress (claude-code)\n"),
+        "{}",
+        show.stdout
+    );
+
+    let again = pl.run(&["issue", "retry", "PL-1"]).await;
+    assert_eq!(again.code, 1);
+    assert!(
+        again.stderr.contains("PL-1 is not waiting on a person"),
+        "{}",
+        again.stderr
+    );
 }

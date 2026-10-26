@@ -68,9 +68,9 @@ fn parse_stored(
     Ok((workflow, invalid.map(|e| e.to_string())))
 }
 
-/// The workflow version the issue's waiting dispatch was queued under: the one its
-/// transition recorded. The dispatch's agent is that version's, so the run's prompt is too,
-/// whatever version has loaded since.
+/// The workflow version the issue's waiting dispatch was queued under: the one a Run again
+/// recorded on its round, else the one its transition recorded. The dispatch's agent is that
+/// version's, so the run's prompt is too, whatever version has loaded since.
 pub(crate) async fn dispatch_workflow(
     conn: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -79,7 +79,8 @@ pub(crate) async fn dispatch_workflow(
     let row = sqlx::query!(
         "SELECT v.workflow_toml, v.prompts
          FROM dispatch d JOIN transition t ON t.id = d.transition_id
-         JOIN workflow_version v ON v.workspace_id = $1 AND v.hash = t.workflow_version
+         JOIN workflow_version v ON v.workspace_id = $1
+                                 AND v.hash = coalesce(d.workflow_version, t.workflow_version)
          WHERE d.issue_id = $2 AND d.run_id IS NULL",
         workspace_id,
         issue_id,
@@ -342,6 +343,7 @@ pub(crate) async fn load(
 /// A status as the app reads it: its name, the roles it locks out, its dispatch, and whether
 /// any transition leaves it.
 pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
+    let dispatch = workflow.dispatch_for(status.as_str());
     StatusInfo {
         key: status.as_str().to_string(),
         name: status.display_name(),
@@ -349,9 +351,9 @@ pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
             .find(|(locked, _)| locked == status)
             .map(|(_, roles)| roles.clone())
             .unwrap_or_default(),
-        dispatch: workflow
-            .dispatch_for(status.as_str())
-            .map(|d| d.agent.clone()),
+        dispatch: dispatch.map(|d| d.agent.clone()),
+        dispatch_model: dispatch.and_then(|d| d.model.clone()),
+        dispatch_effort: dispatch.and_then(|d| d.effort.clone()),
         closed: !(workflow.transitions().iter()).any(|transition| transition.from.contains(status)),
         on_merge_to: workflow
             .on_merge_to(status.as_str())

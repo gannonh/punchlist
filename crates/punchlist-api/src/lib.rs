@@ -48,6 +48,12 @@ pub struct Issue {
     /// One of `project`'s milestones.
     #[serde(default)]
     pub milestone: Option<MilestoneRef>,
+    /// The issues that block this one, lowest number first.
+    #[serde(default)]
+    pub blocked_by: Vec<LinkedIssue>,
+    /// The issues this one blocks, lowest number first: `blocked_by` in reverse.
+    #[serde(default)]
+    pub blocks: Vec<LinkedIssue>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// Why the issue waits on a person, when it does: every run this entry into its status
@@ -60,6 +66,12 @@ pub struct Issue {
     /// `GET /api/issues/{id}` fills this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_usage_limit: Option<String>,
+    /// Why no runner has claimed the issue, when it waits to be claimed: in Start, behind a
+    /// waiting dispatch, or behind a run that lost its attempt. `no runner can run codex`,
+    /// `codex is at its limit of 2 running`. Computed at read time and never stored; `None`
+    /// whenever `waiting_on_person` is set. Only `GET /api/issues/{id}` fills this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_to_run: Option<String>,
     /// The Linear issue it was imported from; `None` for an issue made in Punchlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear: Option<LinearLink>,
@@ -76,6 +88,14 @@ pub struct LinearLink {
 pub struct ProjectRef {
     pub id: Uuid,
     pub name: String,
+}
+
+/// An issue another one names, with its status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinkedIssue {
+    pub id: String,
+    pub status: String,
+    pub status_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -218,6 +238,11 @@ pub struct UpdateIssue {
     )]
     #[schema(value_type = Option<Uuid>, nullable = true)]
     pub milestone: Option<Option<Uuid>>,
+    /// The issue ids of the workspace that block the issue, replacing the ones it has; `[]`
+    /// clears them. Not the issue itself, and none that the issue already blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub blocked_by: Option<Vec<String>>,
 }
 
 /// A field that is present, `null` or not, as `Some`; serde's default leaves an absent one
@@ -275,6 +300,18 @@ pub struct Workspace {
     pub repository: String,
 }
 
+/// An age in whole units: `4s`, `3m` or `2h`. A negative age is `0s`.
+pub fn format_age(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
+}
+
 /// A pull request's URL as GitHub sent it, when it is `https://github.com/<owner>/<name>/pull/<number>`
 /// for this pull request, in the plain alphabet; otherwise `None`, since it would sit outside
 /// the fence.
@@ -329,6 +366,13 @@ pub struct Moved {
     pub warning: Option<String>,
 }
 
+/// `POST /api/issues/{id}/retry`: the issue, and the `run_again` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunAgainResult {
+    pub issue: Issue,
+    pub event: Event,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Actor {
     pub id: Uuid,
@@ -373,8 +417,8 @@ pub enum EventDetail {
         /// Markdown.
         body: String,
     },
-    /// A transition that a GitHub event would have made and a gate refused. The issue
-    /// stayed in `from`.
+    /// A transition that a GitHub event would have made, or an agent asked for, and a gate
+    /// refused. The issue stayed in `from`.
     Refusal {
         from: String,
         /// `from` as people read it, such as `Merging`.
@@ -400,7 +444,7 @@ pub enum EventDetail {
         fields: Vec<String>,
     },
     /// A run of the issue was claimed or ended, or lost its attempt. This kind, `pull_request`,
-    /// `proof` and `workflow` say only that the issue's row changed: the event stream carries
+    /// `proof`, `workflow` and `project` say only that the issue's row changed: the event stream carries
     /// them, and an issue's timeline leaves them out.
     Run,
     /// GitHub evidence on the issue's pull requests was recorded: a pull request, the check
@@ -411,6 +455,17 @@ pub enum EventDetail {
     /// The workspace loaded a different workflow version, which can change the gates and status
     /// names every row shows.
     Workflow,
+    /// The issue's project or milestone was renamed.
+    Project,
+    /// A person gave the issue, whose runs in `status` had ended without moving it, another
+    /// set of runs there, the first of them queued for `agent`.
+    RunAgain {
+        status: String,
+        /// `status` as people read it, such as `In Progress`.
+        status_name: String,
+        /// The agent key of the active workflow's dispatch rule for `status`.
+        agent: String,
+    },
 }
 
 impl EventDetail {
@@ -442,6 +497,27 @@ pub struct CreateMilestone {
     /// What must be true for the milestone to pass.
     #[serde(default)]
     pub pass_when: String,
+}
+
+/// `PATCH /api/projects/{id}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateProject {
+    /// Trimmed, 1 to 100 characters, unique in the workspace. Required; a request without it
+    /// is refused as changing nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// `PATCH /api/projects/{id}/milestones/{milestone_id}`: at least one of the two.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateMilestone {
+    /// Trimmed, 1 to 100 characters, unique in the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What must be true for the milestone to pass; empty clears it. A later Linear import keeps
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_when: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -809,6 +885,14 @@ pub struct Claim {
     /// The attempt's agent session: `claude --session-id` on a fresh attempt, `--resume`
     /// on a resumed one.
     pub session_id: Uuid,
+    /// The model the attempt runs on: the dispatch rule's `model`, else the runner's flag
+    /// for the agent. `None`: the agent's own default.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Codex's reasoning effort from the dispatch rule's `effort`. `None`: the runner's
+    /// `--codex-effort`.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
     /// stored line on a resumed one.
     pub next_line: i64,
@@ -1205,6 +1289,29 @@ pub enum InboxItem {
         /// The caller has not opened the item since `since_seq`.
         unread: bool,
     },
+    /// An agent the caller owns asked to move the issue and a gate refused it. The issue is
+    /// still in `from`, with no transition since.
+    Refusal {
+        issue: PullRequestIssue,
+        /// The agent that asked.
+        agent: Actor,
+        from: String,
+        /// `from` as people read it, such as `In Progress`.
+        from_name: String,
+        to: String,
+        /// `to` as people read it.
+        to_name: String,
+        /// The gate that failed, such as `pr_open`.
+        gate: String,
+        /// Why it failed. It can name checks GitHub's users wrote: text from outside the team.
+        reason: String,
+        /// When the refusal was recorded.
+        since: DateTime<Utc>,
+        /// The refusal event's sequence number.
+        since_seq: i64,
+        /// The caller has not opened the item since `since_seq`.
+        unread: bool,
+    },
 }
 
 /// The kinds of inbox item, as `POST /api/inbox/read` names them.
@@ -1213,6 +1320,7 @@ pub enum InboxItem {
 pub enum InboxKind {
     Waiting,
     Run,
+    Refusal,
 }
 
 impl InboxKind {
@@ -1220,6 +1328,7 @@ impl InboxKind {
         match self {
             InboxKind::Waiting => "waiting",
             InboxKind::Run => "run",
+            InboxKind::Refusal => "refusal",
         }
     }
 }
@@ -1425,6 +1534,12 @@ pub struct StatusInfo {
     pub locked_to: Vec<Role>,
     /// The agent a runner starts when an issue enters it, such as `claude-code`.
     pub dispatch: Option<String>,
+    /// The model its dispatch rule names, such as `haiku`; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_model: Option<String>,
+    /// The Codex reasoning effort its dispatch rule names; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_effort: Option<String>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
     /// The status, as people read it (`Done`), that a merge of the issue's pull request

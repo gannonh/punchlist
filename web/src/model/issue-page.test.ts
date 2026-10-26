@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'vitest'
 import {
   actorMark,
+  dependencies,
+  linksTo,
   eventText,
   feedEntries,
   gateSummary,
@@ -17,6 +19,7 @@ import {
   tokens,
   cost,
   duration,
+  waitingLine,
   type GateChecklist,
   type IssueEvent,
   type TransitionOption,
@@ -69,7 +72,13 @@ const refused = event('github', 'gannonh', {
   workflow_version: 'sha256:1',
 })
 const edited = event('person', 'Gannon Hall', { kind: 'edited', fields: ['title', 'labels', 'assignee'] })
-const timeline = [created, comment, moved, refused, edited]
+const ranAgain = event('person', 'Gannon Hall', {
+  kind: 'run_again',
+  status: 'in_progress',
+  status_name: 'In Progress',
+  agent: 'claude-code',
+})
+const timeline = [created, comment, moved, refused, edited, ranAgain]
 
 describe('gateSummary', () => {
   test('counts the passing gates and names the first that fails', () => {
@@ -101,6 +110,7 @@ describe('actorMark', () => {
       { mark: 'runner', name: 'sartre', chip: 'runner', initials: '' },
       { mark: 'server', name: 'Punchlist', chip: 'server', initials: 'PL' },
       { mark: 'person', name: 'Gannon Hall', chip: null, initials: 'GH' },
+      { mark: 'person', name: 'Gannon Hall', chip: null, initials: 'GH' },
     ])
   })
 })
@@ -109,7 +119,7 @@ describe('feedEntries', () => {
   const seqs = (feed: Parameters<typeof feedEntries>[1]) => feedEntries(timeline, feed).map((e) => e.seq)
 
   test('All keeps every entry, Comments the comments, Transitions the moves and refusals', () => {
-    expect(seqs('all')).toEqual([created.seq, comment.seq, moved.seq, refused.seq, edited.seq])
+    expect(seqs('all')).toEqual([created.seq, comment.seq, moved.seq, refused.seq, edited.seq, ranAgain.seq])
     expect(seqs('comments')).toEqual([comment.seq])
     expect(seqs('transitions')).toEqual([moved.seq, refused.seq])
   })
@@ -121,6 +131,7 @@ describe('feedEntries', () => {
       'moved Start → In Progress',
       "refused gannonh's move to Done: gate pr_names_issue failed: pull request #7 names no issue",
       'edited the title, labels and assignee',
+      'Run again in In Progress (claude-code)',
     ])
   })
 })
@@ -393,5 +404,49 @@ describe('mergeNotice', () => {
     expect(mergeNotice('PL-3', 'Done', 'dirty')).toBe(
       'Waits on the merge. PL-3 moves to Done when GitHub reports it. The pull request has conflicts.',
     )
+  })
+})
+
+describe('dependencies', () => {
+  const backlog = (id: string) => ({ id, status: 'backlog', status_name: 'Backlog' })
+  test("lists both directions with each issue's status, and nothing when there are none", () => {
+    expect(
+      dependencies({ blocked_by: [{ id: 'PL-68', status: 'todo', status_name: 'Todo' }], blocks: [backlog('PL-79'), backlog('PL-83')] }),
+    ).toEqual([
+      { label: 'Blocked by', issues: [{ id: 'PL-68', status: 'todo', status_name: 'Todo' }] },
+      { label: 'Blocks', issues: [backlog('PL-79'), backlog('PL-83')] },
+    ])
+    expect(dependencies({ blocked_by: [], blocks: [backlog('PL-2')] })).toEqual([
+      { label: 'Blocked by', issues: [] },
+      { label: 'Blocks', issues: [backlog('PL-2')] },
+    ])
+    expect(dependencies({ blocked_by: [], blocks: [] })).toEqual([])
+    expect(dependencies({})).toEqual([])
+  })
+
+  test('an issue links to its blockers and to what it blocks', () => {
+    const issue = { blocked_by: [backlog('PL-1')], blocks: [backlog('PL-3')] }
+    expect(['PL-1', 'PL-2', 'PL-3'].map((id) => linksTo(issue, id))).toEqual([true, false, true])
+    expect(linksTo(undefined, 'PL-1')).toBe(false)
+  })
+})
+
+describe('waitingLine', () => {
+  test('says why the issue waits to be claimed, in the server\'s words', () => {
+    const reasons = [
+      'no runner can run claude-code',
+      'no runner that can run claude-code is heartbeating (last seen 2m ago)',
+      'the workspace is at its limit of 1 running',
+      'codex is at its limit of 1 running',
+      'a runner has not claimed it yet',
+    ]
+    expect(reasons.map((waiting_to_run) => waitingLine({ waiting_to_run }))).toEqual([
+      'Waiting: no runner can run claude-code',
+      'Waiting: no runner that can run claude-code is heartbeating (last seen 2m ago)',
+      'Waiting: the workspace is at its limit of 1 running',
+      'Waiting: codex is at its limit of 1 running',
+      'Waiting: a runner has not claimed it yet',
+    ])
+    expect(waitingLine({})).toBeNull()
   })
 })

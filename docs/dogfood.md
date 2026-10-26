@@ -1,6 +1,6 @@
 # Dogfood checklist
 
-Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive days, with no fallback to Linear. Groundwork joins once one sign-in can serve several workspaces. This page says how the instance on sartre is set up, what a day looks like, what to record, and what to do when the server is down.
+Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive days, with no fallback to Linear. Groundwork runs from the same instance since 2026-10-25 (PL-89), as a second workspace under Gannon's one sign-in. This page says how the instance on sartre is set up, what a day looks like, what to record, and what to do when the server is down.
 
 ## The instance
 
@@ -11,8 +11,8 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | Postgres | `127.0.0.1:5440` on sartre, volume `punchlist-host_db` |
 | Proof files | volume `punchlist-host_proof` |
 | Webhooks | `https://sartre.tail984796.ts.net:10000/api/github/webhook`, a Tailscale Funnel on that one path to the app |
-| GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` only. Runs act on GitHub as it: their pushes, pull requests, comments, thread replies and merges show as `punchlist-sartre[bot]`. It needs Contents and Pull requests: Read and write, Checks: Read |
-| Workspace | `Punchlist` (prefix `PL`, `gannonh/punchlist`) |
+| GitHub App | `punchlist-sartre` (id 5416434), installed on `gannonh/punchlist` and `gannonh/groundwork`. Runs act on GitHub as it: their pushes, pull requests, comments, thread replies and merges show as `punchlist-sartre[bot]`. It needs Contents and Pull requests: Read and write, Checks: Read |
+| Workspaces | `Punchlist` (prefix `PL`, `gannonh/punchlist`) and `Groundwork` (prefix `GW`, `gannonh/groundwork`, its workflow in that repository's `.punchlist/`) |
 | `pl` config | `~/.config/punchlist/config.toml` (Gannon's account; `pl --workspace PL` names the workspace), `~/.config/punchlist/orchestrator.toml` (the orchestrator) |
 
 Start or update it:
@@ -34,15 +34,16 @@ tailscale funnel --bg --https=10000 --set-path=/api/github/webhook \
 
 The `pl` config on sartre has `server_url = "http://127.0.0.1:7880"`.
 
-The workspace has one runner, in the pane `runner` of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runner again after a reboot:
+Each workspace has one runner, in the panes `runner` (Punchlist) and `runner-gw` (Groundwork) of the herdr workspace `punchlist-dogfood` on sartre. The instance itself runs in Docker, in no pane. Start the runners again after a reboot, one per pane:
 
 ```sh
 pl --workspace PL runner start --name sartre-punchlist --agents claude-code,codex
+pl --workspace GW runner start --name sartre-groundwork --agents claude-code,codex --max-concurrent 1
 ```
 
-A runner serves the one workspace it starts in. Groundwork gets a second process in a pane of its own, from the same config and state directory: `pl --workspace GW runner start --name sartre-groundwork --agents claude-code,codex`.
+A runner serves the one workspace it starts in; both share the config and state directory. Groundwork's runner takes one issue at a time (`--max-concurrent 1`) until its runs' load on sartre is known: its live checks run Playwright and share one Postgres container.
 
-The runner needs no `gh` login: each run gets an installation token of the App from the server, for `gannonh/punchlist` alone, and its agent sees no other GitHub credential. A run whose claim says the App cannot write the repository fails with that reason; accept the App's new permissions on the installation (GitHub, Settings, Applications, `punchlist-sartre`, Review request).
+The runner needs no `gh` login: each run gets an installation token of the App from the server, for its workspace's repository alone, and its agent sees no other GitHub credential. A run whose claim says the App cannot write the repository fails with that reason; accept the App's new permissions on the installation (GitHub, Settings, Applications, `punchlist-sartre`, Review request).
 
 The runner works on one issue at a time unless told otherwise, whatever the workflow's `[dispatch] max_concurrent`, which caps the whole workspace. The `pl` config sets it to three:
 

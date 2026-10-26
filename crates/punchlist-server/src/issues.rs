@@ -9,7 +9,8 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use punchlist_api::{
     CreateComment, CreateIssue, ErrorBody, Event, EventDetail, GateChecklist, Issue, IssueList,
-    IssueWritten, MoveIssue, Moved, TransitionList, TransitionOption, UpdateIssue, Verdict,
+    IssueWritten, MoveIssue, Moved, RunAgainResult, TransitionList, TransitionOption, UpdateIssue,
+    Verdict,
 };
 use punchlist_core::{
     CANCELED, DONE, Evidence, GateResult, IN_PROGRESS, ProofEvidence, ProofKind,
@@ -20,6 +21,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
+use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
 use crate::error::GateFailure;
 use crate::events::{events, next_event_seq, record_row_event};
@@ -28,7 +30,7 @@ use crate::github::{
     newest_check_runs, refresh_pull_requests, written_since,
 };
 use crate::rows::{issue, issue_rows};
-use crate::runs::RUNS_PER_ENTRY;
+use crate::runs::{RUNS_PER_ENTRY, why_unclaimed};
 use crate::workflow::{active_workflow, lock_workspace, status_info, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -40,6 +42,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(issue_events))
         .routes(routes!(issue_gates))
         .routes(routes!(add_comment))
+        .routes(routes!(run_again))
 }
 
 /// Create an issue in the workflow's first status, and its `created` event.
@@ -189,35 +192,7 @@ async fn get_issue(
     let mut issue = issue(&mut conn, actor.workspace_id, &id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    let ended = runs_ended(&mut conn, std::slice::from_ref(&id))
-        .await?
-        .remove(&id);
-    // A run of the entry said it waits on a person (`wait_for_person`), which
-    // `queue_redispatch` reads too: it is the entry's last, since its end dispatches nothing.
-    let waiting = sqlx::query!(
-        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
-           JOIN run r ON r.id = d.run_id
-           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
-             AND d.transition_id = (SELECT e.transition_id FROM event e
-                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                    ORDER BY e.seq DESC LIMIT 1)"#,
-        id,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    issue.waiting_on_person = match (waiting, ended) {
-        (Some(waiting), _) => Some(format!(
-            "{} is waiting on a person: {}",
-            agent_display_name(&waiting.agent),
-            waiting.waiting_reason
-        )),
-        (None, ended) => ended.map(|runs| {
-            format!(
-                "{runs} runs in {} ended without moving it",
-                issue.status_name
-            )
-        }),
-    };
+    issue.waiting_on_person = waiting_on_person(&mut conn, &issue).await?;
     // A run of the entry hit its agent's usage limit and gave its dispatch back to wait for
     // the reset (`queue_redispatch`).
     let limited = sqlx::query!(
@@ -234,22 +209,76 @@ async fn get_issue(
             limited.not_before.format("%Y-%m-%d %H:%M:%S UTC")
         )
     });
+    // Nothing is queued while the issue waits on a person.
+    if issue.waiting_on_person.is_none() {
+        let (workflow, _) = active_workflow(&mut conn, actor.workspace_id).await?;
+        issue.waiting_to_run = why_unclaimed(
+            &mut conn,
+            actor.workspace_id,
+            &workflow,
+            &issue,
+            state.lease,
+        )
+        .await?;
+    }
     Ok(Json(issue))
 }
 
-/// The issues in `ids` whose entry into their status has had its last run end, with that
-/// run's number: nothing dispatches them again. The same two rules as `queue_redispatch`, the
-/// latest transition and the limit; change them together. `get_issue` and the inbox read it.
+/// Why the issue waits on a person, as `get_issue` says it: a run of the entry's round said so
+/// (`wait_for_person`), or the round's last run ended. `queue_redispatch` reads the same rules
+/// to queue nothing more, and a Run again only an issue this names.
+async fn waiting_on_person(
+    conn: &mut sqlx::PgConnection,
+    issue: &Issue,
+) -> sqlx::Result<Option<String>> {
+    // The entry's last dispatch only: one before a Run again's is of an earlier round.
+    let waiting = sqlx::query!(
+        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        issue.id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(waiting) = waiting {
+        return Ok(Some(format!(
+            "{} is waiting on a person: {}",
+            agent_display_name(&waiting.agent),
+            waiting.waiting_reason
+        )));
+    }
+    let ended = runs_ended(conn, std::slice::from_ref(&issue.id)).await?;
+    Ok(ended.get(&issue.id).map(|runs| {
+        format!(
+            "{runs} runs in {} ended without moving it",
+            issue.status_name
+        )
+    }))
+}
+
+/// The issues in `ids` whose entry into their status has had the last run of its round end,
+/// with how many runs the round had: nothing dispatches them again. The same rules as
+/// `queue_redispatch`, the latest transition, its last dispatch and the limit; change them
+/// together. `get_issue` and the inbox read it.
 pub(crate) async fn runs_ended(
     conn: &mut sqlx::PgConnection,
     ids: &[String],
 ) -> sqlx::Result<HashMap<String, i32>> {
     let rows = sqlx::query!(
-        "SELECT d.issue_id, d.run_number FROM dispatch d JOIN run r ON r.id = d.run_id
-         WHERE d.issue_id = ANY($1) AND d.run_number >= $2 AND r.outcome <> 'running'
-           AND d.transition_id = (SELECT e.transition_id FROM event e
-                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                  ORDER BY e.seq DESC LIMIT 1)",
+        r#"SELECT d.issue_id, d.run_number - d.runs_before AS "runs!"
+           FROM dispatch d JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = ANY($1) AND d.run_number - d.runs_before >= $2
+             AND r.outcome <> 'running'
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
         ids,
         RUNS_PER_ENTRY,
     )
@@ -257,8 +286,114 @@ pub(crate) async fn runs_ended(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|row| (row.issue_id, row.run_number))
+        .map(|row| (row.issue_id, row.runs))
         .collect())
+}
+
+/// Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
+/// `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+/// starting a round (`runs_before`) under the active workflow's agent and version, and writes
+/// the person's `run_again` event, in one transaction. Person token.
+#[utoipa::path(
+    post,
+    path = "/api/issues/{id}/retry",
+    params(("id" = String, Path, description = "Issue id, such as PL-1")),
+    responses(
+        (status = 200, body = RunAgainResult),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "Not a person's token."),
+        (status = 404, body = ErrorBody),
+        (status = 409, body = ErrorBody,
+         description = "`locked`: the status is locked to the person, agents or runners. `not_waiting`: the issue does not wait on a person."),
+    )
+)]
+async fn run_again(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<String>,
+) -> Result<Json<RunAgainResult>, ApiError> {
+    person_only(&actor)?;
+    let mut tx = state.pool.begin().await?;
+    lock_workspace(&mut tx, actor.workspace_id).await?;
+    let status = sqlx::query_scalar!(
+        "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+        id,
+        actor.workspace_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
+    // No runner claims an issue in a status locked to agents or runners (`select_claimable`).
+    for role in [actor.role, Role::Agent, Role::Runner] {
+        workflow.check_unlocked(&status, role)?;
+    }
+    let not_waiting = || ApiError::NotWaiting(id.clone());
+    let rule = workflow.dispatch_for(&status).ok_or_else(not_waiting)?;
+    let issue = issue(&mut tx, actor.workspace_id, &id)
+        .await?
+        .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
+    // The agent that said it waits may still be running, and a second request finds the
+    // dispatch the first queued.
+    let busy = sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM run WHERE issue_id = $1 AND outcome = 'running')
+               OR EXISTS (SELECT 1 FROM dispatch WHERE issue_id = $1 AND run_id IS NULL)
+           AS "busy!""#,
+        id,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if busy || waiting_on_person(&mut tx, &issue).await?.is_none() {
+        return Err(not_waiting());
+    }
+    // Waiting on a person means the entry has a dispatch whose run ended.
+    sqlx::query!(
+        "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
+                               workflow_version)
+         SELECT d.issue_id, d.transition_id, $2, d.run_number + 1, d.run_number, $3
+         FROM dispatch d
+         WHERE d.issue_id = $1
+           AND d.transition_id = (SELECT e.transition_id FROM event e
+                                  WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                  ORDER BY e.seq DESC LIMIT 1)
+         ORDER BY d.run_number DESC LIMIT 1",
+        id,
+        rule.agent,
+        workflow.version(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    let seq = next_event_seq(&mut tx, actor.workspace_id).await?;
+    let created_at = sqlx::query_scalar!(
+        "INSERT INTO event (workspace_id, seq, issue_id, kind, actor_id, status, agent)
+         VALUES ($1, $2, $3, 'run_again', $4, $5, $6) RETURNING created_at",
+        actor.workspace_id,
+        seq,
+        id,
+        actor.id,
+        status,
+        rule.agent,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let agent = rule.agent.clone();
+    tx.commit().await?;
+    // Wake runners that are long-polling for work.
+    let _ = state.starts.send((actor.workspace_id, id.clone()));
+    Ok(Json(RunAgainResult {
+        event: Event {
+            seq,
+            issue_id: id,
+            actor: (&actor).into(),
+            created_at,
+            detail: EventDetail::RunAgain {
+                status_name: issue.status_name.clone(),
+                status,
+                agent,
+            },
+        },
+        issue,
+    }))
 }
 
 /// Move an issue to another status. The workflow's lock, role and gate rules are checked,
@@ -348,7 +483,34 @@ async fn request_move(
         tracing::info!(issue = id, "evidence changed after it was read from GitHub");
         return Err(ApiError::EvidenceChanged(id.to_string()));
     }
-    let gates = checked?;
+    // An agent's request a gate refuses goes on the timeline and in its owner's inbox, so a
+    // person sees an agent that keeps being refused. Every other refusal names no gate, and a
+    // person's is in the answer they got.
+    let gates = match checked {
+        Err(ApiError::GateFailed(failure)) if actor.role == Role::Agent => {
+            if let Refusal::GateFailed {
+                to, gate, reason, ..
+            } = &failure.refusal
+                && !repeats_refusal(&mut tx, actor, id, &from, to, gate, reason).await?
+            {
+                record_refusal(
+                    &mut tx,
+                    actor,
+                    id,
+                    &from,
+                    to,
+                    gate,
+                    reason,
+                    None,
+                    workflow.version(),
+                )
+                .await?;
+                tx.commit().await?;
+            }
+            return Err(ApiError::GateFailed(failure));
+        }
+        checked => checked?,
+    };
     let (mut moved, _, dispatched) = write_transition(
         &mut tx,
         actor,
@@ -370,6 +532,36 @@ async fn request_move(
         let _ = state.starts.send((actor.workspace_id, id.to_string()));
     }
     Ok(moved)
+}
+
+/// True when the issue's newest refusal, with no transition after it, is this one: an agent
+/// retrying gets the same answer, and the timeline says it once. A changed reason is new.
+async fn repeats_refusal(
+    tx: &mut sqlx::PgConnection,
+    actor: &Actor,
+    id: &str,
+    from: &str,
+    to: &str,
+    gate: &str,
+    reason: &str,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM event e JOIN refusal r ON r.id = e.refusal_id
+               WHERE e.seq = (SELECT max(seq) FROM event
+                              WHERE issue_id = $1 AND kind IN ('refusal', 'transition'))
+                 AND e.issue_id = $1 AND e.kind = 'refusal' AND r.actor_id = $2
+                 AND r.from_status = $3 AND r.to_status = $4 AND r.gate = $5 AND r.reason = $6
+           ) AS "repeats!""#,
+        id,
+        actor.id,
+        from,
+        to,
+        gate,
+        reason,
+    )
+    .fetch_one(&mut *tx)
+    .await
 }
 
 /// Before the issue is locked: if the move has gates, reads the issue's pull requests from
@@ -1049,8 +1241,8 @@ pub(crate) async fn record_comment(
     })
 }
 
-/// Writes the refusal of a transition that a GitHub event would have made, and its event:
-/// `gate` failed for `reason`, so the issue stays in `from`.
+/// Writes the refusal of a transition, one a GitHub event would have made or an agent asked
+/// for, and its event: `gate` failed for `reason`, so the issue stays in `from`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_refusal(
     tx: &mut sqlx::PgConnection,
@@ -1162,8 +1354,8 @@ const MAX_LABELS: usize = 20;
 const MAX_LABEL_CHARS: usize = 50;
 
 /// A `PATCH` request, parsed: the title trimmed and not empty, the labels trimmed, each
-/// neither empty nor too long, duplicates dropped in order, and the parent trimmed and not
-/// empty.
+/// neither empty nor too long, duplicates dropped in order, and the parent and the blockers
+/// trimmed and not empty, the blockers' duplicates dropped.
 #[derive(Debug, PartialEq)]
 struct Edit {
     title: Option<String>,
@@ -1173,6 +1365,7 @@ struct Edit {
     parent: Option<Option<String>>,
     project: Option<Option<Uuid>>,
     milestone: Option<Option<Uuid>>,
+    blocked_by: Option<Vec<String>>,
 }
 
 fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
@@ -1213,6 +1406,23 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         }
         parent => parent.map(|p| p.map(|p| p.trim().to_string())),
     };
+    let blocked_by = match request.blocked_by {
+        Some(raw) => {
+            let mut blockers: Vec<String> = Vec::new();
+            for blocker in raw.iter().map(|b| b.trim()) {
+                if blocker.is_empty() {
+                    return Err(ApiError::Invalid(
+                        "a blocker is an issue id such as PL-1".into(),
+                    ));
+                }
+                if !blockers.iter().any(|b| b == blocker) {
+                    blockers.push(blocker.to_string());
+                }
+            }
+            Some(blockers)
+        }
+        None => None,
+    };
     Ok(Edit {
         title,
         body: request.body,
@@ -1221,6 +1431,7 @@ fn parse_edit(request: UpdateIssue) -> Result<Edit, ApiError> {
         parent,
         project: request.project,
         milestone: request.milestone,
+        blocked_by,
     })
 }
 
@@ -1265,7 +1476,61 @@ async fn check_parent(
     Ok(())
 }
 
-/// Edit an issue's title, body, labels, assignee, parent, project or milestone. Only the
+/// Refuses blockers that are not issues of the workspace, that are the issue itself, or that
+/// the issue already blocks, directly or through others: the shortest such chain is named.
+/// The caller holds the workspace lock, as for `check_parent`.
+async fn check_blockers(
+    tx: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    id: &str,
+    blockers: &[String],
+) -> Result<(), ApiError> {
+    if blockers.iter().any(|b| b == id) {
+        return Err(ApiError::Invalid(format!(
+            "{id} cannot be blocked by itself"
+        )));
+    }
+    let found = sqlx::query_scalar!(
+        r#"SELECT id AS "id!" FROM issue WHERE id = ANY($1) AND workspace_id = $2"#,
+        blockers,
+        workspace_id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    if let Some(missing) = blockers.iter().find(|b| !found.contains(b)) {
+        return Err(ApiError::Invalid(format!(
+            "no issue {missing} in this workspace"
+        )));
+    }
+    // ponytail: walks every path from the blockers, so a dense graph of hundreds of relations
+    // costs paths, not edges. Upgrade path: a breadth-first walk keeping each issue once.
+    let chain = sqlx::query_scalar!(
+        r#"WITH RECURSIVE chain (id, path) AS (
+               SELECT b, ARRAY[b] FROM unnest($1::text[]) b
+               UNION ALL
+               SELECT ib.blocker_id, chain.path || ib.blocker_id
+               FROM issue_blocker ib JOIN chain ON ib.issue_id = chain.id
+               WHERE chain.id <> $2
+           ) CYCLE id SET looped USING visited
+           SELECT path AS "path!" FROM chain WHERE id = $2 AND NOT looped
+           ORDER BY cardinality(path), path LIMIT 1"#,
+        blockers,
+        id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(chain) = chain {
+        return Err(ApiError::Invalid(format!(
+            "{id} cannot be blocked by {}: {} is already blocked by {id} ({})",
+            chain[0],
+            chain[0],
+            chain.join(" → ")
+        )));
+    }
+    Ok(())
+}
+
+/// Edit an issue's title, body, labels, assignee, parent, project, milestone or blockers. Only the
 /// fields that change are written, with one `edited` event naming them; a request that
 /// changes nothing writes nothing and answers the workspace's latest sequence number. Nobody
 /// in a role the issue's status locks may edit it.
@@ -1280,7 +1545,7 @@ async fn check_parent(
         (status = 403, body = ErrorBody, description = "An agent edited another issue than its run's."),
         (status = 404, body = ErrorBody),
         (status = 409, body = ErrorBody, description = "The issue's status is locked to the actor's role."),
-        (status = 422, body = ErrorBody, description = "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project."),
+        (status = 422, body = ErrorBody, description = "An empty title, a bad label, an assignee that is not a person or agent of the workspace, a parent or a blocker that is not an issue of the workspace or would make a cycle, a project or milestone that is not the workspace's, or a milestone outside the issue's project."),
     )
 )]
 async fn update_issue(
@@ -1324,6 +1589,20 @@ async fn update_issue(
     if let Some(Some(parent)) = &edit.parent {
         check_parent(&mut tx, actor.workspace_id, &id, parent).await?;
     }
+    let current_blockers = sqlx::query_scalar!(
+        "SELECT blocker_id FROM issue_blocker WHERE issue_id = $1 ORDER BY blocker_id",
+        id,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let blocked_by = match edit.blocked_by {
+        Some(mut blockers) => {
+            check_blockers(&mut tx, actor.workspace_id, &id, &blockers).await?;
+            blockers.sort();
+            (blockers != current_blockers).then_some(blockers)
+        }
+        None => None,
+    };
     if let Some(Some(project)) = edit.project {
         let found = sqlx::query_scalar!(
             r#"SELECT EXISTS (SELECT 1 FROM project WHERE id = $1 AND workspace_id = $2)
@@ -1380,6 +1659,7 @@ async fn update_issue(
         ("parent", parent != current.parent_id),
         ("project", project != current.project_id),
         ("milestone", milestone != current.milestone_id),
+        ("blocked_by", blocked_by.is_some()),
     ]
     .into_iter()
     .filter_map(|(field, changed)| changed.then_some(field))
@@ -1410,6 +1690,20 @@ async fn update_issue(
         )
         .execute(&mut *tx)
         .await?;
+        if let Some(blockers) = &blocked_by {
+            sqlx::query!("DELETE FROM issue_blocker WHERE issue_id = $1", id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query!(
+                "INSERT INTO issue_blocker (workspace_id, issue_id, blocker_id)
+                 SELECT $1, $2, unnest($3::text[])",
+                actor.workspace_id,
+                id,
+                blockers,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
         record_event(&mut tx, &actor, &id, Some(&fields), None).await?
     };
     let written = written(&mut tx, &actor, &id, seq).await?;
@@ -1439,6 +1733,7 @@ mod tests {
                 parent: None,
                 project: None,
                 milestone: None,
+                blocked_by: None,
             }
         );
         let refused = |request: UpdateIssue| parse_edit(request).unwrap_err().to_string();

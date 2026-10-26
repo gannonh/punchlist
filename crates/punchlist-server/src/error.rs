@@ -41,6 +41,8 @@ pub enum ApiError {
     ProofNotFound(Uuid),
     #[error("project {0} not found")]
     ProjectNotFound(Uuid),
+    #[error("milestone {0} not found in this project")]
+    MilestoneNotFound(Uuid),
     #[error("import {0} not found in this workspace")]
     ImportNotFound(i64),
     #[error("workspace {0} not found")]
@@ -50,6 +52,10 @@ pub enum ApiError {
     WorkspaceNotNamed(String),
     #[error("{0}")]
     ClaimTaken(String),
+    /// A Run again for an issue that does not wait on a person: something is queued or
+    /// running, or nothing would dispatch it.
+    #[error("{0} is not waiting on a person")]
+    NotWaiting(String),
     #[error("{0}")]
     StaleAttempt(String),
     #[error("{0}")]
@@ -88,11 +94,14 @@ impl ApiError {
             | ApiError::RunnerNotFound(_)
             | ApiError::ProofNotFound(_)
             | ApiError::ProjectNotFound(_)
+            | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::WorkspaceNotNamed(_) => StatusCode::BAD_REQUEST,
-            ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) => StatusCode::CONFLICT,
+            ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) | ApiError::NotWaiting(_) => {
+                StatusCode::CONFLICT
+            }
             ApiError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Refused(_) | ApiError::GateFailed(_) => StatusCode::CONFLICT,
@@ -112,12 +121,14 @@ impl ApiError {
             | ApiError::RunnerNotFound(_)
             | ApiError::ProofNotFound(_)
             | ApiError::ProjectNotFound(_)
+            | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
             ApiError::WorkspaceNotNamed(_) => "workspace_not_named",
             ApiError::ClaimTaken(_) => "claim_taken",
             ApiError::StaleAttempt(_) => "stale_attempt",
+            ApiError::NotWaiting(_) => "not_waiting",
             ApiError::Invalid(_) => "invalid",
             ApiError::TooLarge(_) => "too_large",
             ApiError::Refused(refusal) => refusal.code(),
