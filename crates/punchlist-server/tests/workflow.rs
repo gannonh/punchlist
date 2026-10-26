@@ -1690,7 +1690,13 @@ async fn only_merging_waits_on_a_merge(pool: PgPool) {
     let s = setup(&pool).await;
     let (status, body) = call(&s.app, &s.person.token, "GET", "/api/workflow", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let status = |key: &str, name: &str, dispatch: Value| json!({"key": key, "name": name, "locked_to": [], "dispatch": dispatch, "closed": false});
+    let status = |key: &str, name: &str, dispatch: Value| {
+        let mut status = json!({"key": key, "name": name, "locked_to": [], "dispatch": dispatch, "closed": false});
+        if !dispatch.is_null() {
+            status["dispatch_runs_per_entry"] = json!(3);
+        }
+        status
+    };
     assert_eq!(
         body["statuses"],
         json!([

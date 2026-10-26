@@ -340,7 +340,7 @@ async fn a_failing_check_blocks_by_name_and_a_locked_status_locks_the_agent(pool
         list,
         json!({
             "status": {"key": "agent_review", "name": "Agent Review", "locked_to": [],
-                       "dispatch": "codex", "closed": false},
+                       "dispatch": "codex", "dispatch_runs_per_entry": 3, "closed": false},
             "viewer_locked": false,
             "transitions": [{
                 "to": {"key": "human_review", "name": "Human Review",
