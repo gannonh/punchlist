@@ -1132,6 +1132,74 @@ async fn an_issue_in_merging_with_its_pull_request_merged_moves_to_done_at_start
     assert_eq!(count(&pool, "transition").await, 1);
 }
 
+/// Makes Punchlist's own `.punchlist/workflow.toml` the workspace's active workflow.
+async fn use_punchlists_own_workflow(pool: &PgPool) {
+    let text = include_str!("../../../.punchlist/workflow.toml");
+    let prompts = json!({
+        "prompts/system.md": include_str!("../../../.punchlist/prompts/system.md"),
+        "prompts/in_progress.md": include_str!("../../../.punchlist/prompts/in_progress.md"),
+        "prompts/agent_review.md": include_str!("../../../.punchlist/prompts/agent_review.md"),
+        "prompts/merging.md": include_str!("../../../.punchlist/prompts/merging.md"),
+    });
+    sqlx::query(
+        "WITH v AS (
+            INSERT INTO workflow_version (workspace_id, hash, commit_sha, workflow_toml, prompts)
+            SELECT id, 'own', 'own', $1, $2 FROM workspace RETURNING id)
+         UPDATE workspace SET workflow_version_id = (SELECT id FROM v)",
+    )
+    .bind(text)
+    .bind(prompts)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn under_punchlists_workflow_a_merge_moves_a_backlog_issue_to_done(pool: PgPool) {
+    let s = setup(&pool).await;
+    use_punchlists_own_workflow(&pool).await;
+    let issue = create_issue(&s, "Fix the thing").await;
+    assert_eq!(status(&pool, &issue).await, "backlog");
+
+    deliver(&s, "pull_request", "delivery-merged", MERGED).await;
+
+    assert_eq!(status(&pool, &issue).await, "done");
+    assert_eq!(
+        transitions(&pool, &issue).await,
+        [row("backlog", "done", "github", "octocat")]
+    );
+    let uri = format!("/api/issues/{issue}/pull-requests");
+    let (_, pulls) = get(&s, &s.person.token, &uri).await;
+    assert_eq!(
+        (pulls[0]["number"].clone(), pulls[0]["state"].clone()),
+        (12.into(), "merged".into())
+    );
+}
+
+#[sqlx::test]
+async fn under_punchlists_workflow_a_childs_done_still_closes_its_backlog_parent(pool: PgPool) {
+    let s = setup(&pool).await;
+    use_punchlists_own_workflow(&pool).await;
+    // PL-1 is the child the merged pull request names; PL-2, its parent, has none.
+    let child = create_issue(&s, "Fix the thing").await;
+    let epic = create_issue(&s, "The epic").await;
+    sqlx::query("UPDATE issue SET parent_id = $2 WHERE id = $1")
+        .bind(&child)
+        .bind(&epic)
+        .execute(&pool)
+        .await
+        .unwrap();
+    force_status(&pool, &child, "merging").await;
+
+    deliver(&s, "pull_request", "delivery-merged", MERGED).await;
+
+    assert_eq!(status(&pool, &child).await, "done");
+    assert_eq!(
+        transitions(&pool, &epic).await,
+        [row("backlog", "done", "github", "Punchlist")]
+    );
+}
+
 /// A GET with a bearer token: the status and the JSON body.
 async fn get(s: &Setup, token: &str, uri: &str) -> (StatusCode, Value) {
     let request = Request::builder()
