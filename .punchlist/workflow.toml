@@ -52,9 +52,9 @@ to = "done"
 on = "pr_merged"
 
 [[transition]]
-from = ["backlog", "todo"]           # an epic: its children are all done or canceled
-to = "done"
-on = "children_done"
+from = ["backlog", "todo"]           # an epic: its children are all done or canceled; or work
+to = "done"                          # no run built, whose pull request merged
+on = ["children_done", "pr_merged"]
 
 [[transition]]
 from = ["in_progress", "agent_review"]
