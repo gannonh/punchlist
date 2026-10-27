@@ -4130,6 +4130,14 @@
             "type": "string",
             "format": "date-time"
           },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The most tokens, input plus output, the attempt may use: the dispatch rule's\n`max_tokens`. `None`: no budget."
+          },
           "merged_branches": {
             "type": "array",
             "items": {
@@ -4724,6 +4732,10 @@
               "null"
             ],
             "format": "int64"
+          },
+          "over_budget": {
+            "type": "boolean",
+            "description": "The runner stopped the agent when its tokens went over the run's `max_tokens`. Only\nwith `failed`. The run is not dispatched again: the issue waits on a person."
           },
           "reason": {
             "type": [

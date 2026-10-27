@@ -225,8 +225,9 @@ async fn get_issue(
 }
 
 /// Why the issue waits on a person, as `get_issue` says it: a run of the entry's round said so
-/// (`wait_for_person`), or the round's last run ended. `queue_redispatch` reads the same rules
-/// to queue nothing more, and a Run again only an issue this names.
+/// (`wait_for_person`), its last run went over its token budget, or the round's last run
+/// ended. `queue_redispatch` reads the same rules to queue nothing more, and a Run again only
+/// an issue this names.
 async fn waiting_on_person(
     conn: &mut sqlx::PgConnection,
     issue: &Issue,
@@ -236,6 +237,28 @@ async fn waiting_on_person(
         return Ok(Some(format!(
             "{} is waiting on a person: {reason}",
             agent_display_name(&agent)
+        )));
+    }
+    // The entry's last dispatch, as `waiting_reasons` reads it.
+    let over_budget = sqlx::query_scalar!(
+        r#"SELECT true AS "over_budget!" FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = $1 AND r.outcome <> 'running'
+             AND (SELECT over_budget FROM attempt WHERE run_id = r.id
+                  ORDER BY attempt DESC LIMIT 1)
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        issue.id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    if over_budget.is_some() {
+        return Ok(Some(format!(
+            "the run in {} went over its token budget",
+            issue.status_name
         )));
     }
     let ended = runs_ended(conn, ids).await?;

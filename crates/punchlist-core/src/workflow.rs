@@ -187,6 +187,8 @@ pub struct Dispatch {
     pub model: Option<String>,
     /// Codex's reasoning effort, such as `low`. `None`: the runner's `--codex-effort`.
     pub effort: Option<String>,
+    /// The most tokens, input plus output, an attempt may use before the runner stops it.
+    pub max_tokens: Option<i64>,
     /// The line of `agent` in the file, for an error about it.
     agent_line: usize,
     /// The line of `prompt` in the file, for an error about it.
@@ -284,6 +286,8 @@ pub enum Problem {
     BadSerial,
     #[error("`runs_per_entry` must be a whole number from 1 to {MAX_RUNS_PER_ENTRY}")]
     BadRunsPerEntry,
+    #[error("`max_tokens` must be at least 1")]
+    BadMaxTokens,
     #[error(
         "`model` is a model's name, such as `haiku`: not empty, no spaces, not starting with `-`"
     )]
@@ -691,6 +695,16 @@ impl Workflow {
                     }
                 },
             };
+            let max_tokens = match rule.max_tokens {
+                None => None,
+                Some(value) => match value.get_ref() {
+                    toml::Value::Integer(max) if *max >= 1 => Some(*max),
+                    _ => {
+                        let problem = Problem::BadMaxTokens;
+                        return Err(errors.at(value.span(), key("max_tokens"), problem));
+                    }
+                },
+            };
             // The runner passes each as one argument, such as `--model <model>`.
             let name = |field, problem, value: Option<Spanned<toml::Value>>| match value {
                 None => Ok(None),
@@ -718,6 +732,7 @@ impl Workflow {
                 prompt: rule.prompt.map(Spanned::into_inner),
                 serial,
                 runs_per_entry,
+                max_tokens,
             });
         }
 
@@ -1273,6 +1288,12 @@ struct RawDispatchRule {
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     effort: Option<Spanned<toml::Value>>,
+    /// The most tokens, input plus output as the run card counts them, an attempt may use:
+    /// the runner stops the agent at the first report over it, and the issue waits on a
+    /// person. Without it, no limit.
+    #[serde(default)]
+    #[schemars(with = "Option<i64>", range(min = 1))]
+    max_tokens: Option<Spanned<toml::Value>>,
 }
 
 // Schema-only types: the names a field accepts.
@@ -1860,6 +1881,21 @@ mod tests {
                 Workflow::from_toml(&text).unwrap_err().to_string(),
                 "line 4, `dispatch.status.a.runs_per_entry`: \
                  `runs_per_entry` must be a whole number from 1 to 20"
+            );
+        }
+    }
+
+    #[test]
+    fn max_tokens_is_kept() {
+        let text = |value: &str| format!("{}max_tokens = {value}\n", runnable(""));
+        let rule = Workflow::from_toml(&text("100000")).unwrap();
+        let max = |workflow: &Workflow| workflow.dispatch_for("in_progress").unwrap().max_tokens;
+        assert_eq!(max(&rule), Some(100000));
+        assert_eq!(max(&Workflow::from_toml(&runnable("")).unwrap()), None);
+        for value in ["0", "-5", "\"x\""] {
+            assert_eq!(
+                Workflow::from_toml(&text(value)).unwrap_err().to_string(),
+                "line 9, `dispatch.status.in_progress.max_tokens`: `max_tokens` must be at least 1"
             );
         }
     }
@@ -2505,6 +2541,9 @@ agent = "claude-code"
             (runs["minimum"].clone(), runs["maximum"].clone()),
             (1.into(), 20.into())
         );
+        let max_tokens = &schema["$defs"]["RawDispatchRule"]["properties"]["max_tokens"];
+        assert_eq!(max_tokens["type"], serde_json::json!(["integer", "null"]));
+        assert_eq!(max_tokens["minimum"], 1);
         for field in ["model", "effort"] {
             assert_eq!(
                 schema["$defs"]["RawDispatchRule"]["properties"][field]["type"],

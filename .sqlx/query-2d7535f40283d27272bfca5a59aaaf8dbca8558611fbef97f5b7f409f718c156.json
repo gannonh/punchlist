@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT status, waiting_reason FROM run WHERE id = $1",
+  "query": "SELECT status, waiting_reason,\n                  (SELECT over_budget FROM attempt WHERE run_id = $1\n                   ORDER BY attempt DESC LIMIT 1) AS \"over_budget!\"\n           FROM run WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,12 @@
             "name": "waiting_reason"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "over_budget!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -33,8 +39,9 @@
     },
     "nullable": [
       false,
-      true
+      true,
+      null
     ]
   },
-  "hash": "867cc86726c43385d88e4c8f460f6bd5d58784d7628394f2ff13a6defa9227f5"
+  "hash": "2d7535f40283d27272bfca5a59aaaf8dbca8558611fbef97f5b7f409f718c156"
 }
