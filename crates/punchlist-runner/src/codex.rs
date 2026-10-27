@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use chrono::DateTime;
+use chrono::{DateTime, Local, NaiveTime, TimeDelta, TimeZone, Utc};
 use punchlist_api::{Claim, RunOutcome, UsageLimit};
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -186,6 +186,42 @@ pub(crate) fn thread_params(
     })
 }
 
+/// The reset a usage-limit message gives with `try again at 5:38 PM` (or `17:38`), a time
+/// on the clock of `now`'s zone, since Codex formats it in the zone of the machine it runs
+/// on: today, or tomorrow once today's has passed. None for a message without one, or with
+/// more after the time (such as a date).
+fn try_again_at<Tz: TimeZone>(message: &str, now: &DateTime<Tz>) -> Option<DateTime<Utc>> {
+    let message = message.to_ascii_lowercase();
+    let (_, rest) = message.rsplit_once("try again at ")?;
+    let (hour, rest) = rest.split_once(':')?;
+    let (minute, rest) = (rest.get(..2)?, &rest[2..]);
+    let (hour, minute): (u32, u32) = (hour.parse().ok()?, minute.parse().ok()?);
+    let rest = rest.trim_start();
+    let (hour, rest) = match rest.get(..2) {
+        Some(meridiem @ ("am" | "pm")) if (1..=12).contains(&hour) => (
+            hour % 12 + if meridiem == "pm" { 12 } else { 0 },
+            &rest[2..],
+        ),
+        _ => (hour, rest),
+    };
+    if !(rest.is_empty() || rest.starts_with('.')) {
+        return None;
+    }
+    let time = NaiveTime::from_hms_opt(hour, minute, 0)?;
+    let today = now.date_naive();
+    [Some(today), today.succ_opt()]
+        .into_iter()
+        .flatten()
+        .filter_map(|day| {
+            now.timezone()
+                .from_local_datetime(&day.and_time(time))
+                .earliest()
+        })
+        // The message names the minute: a reset in the current one has not passed.
+        .find(|at| at.clone() + TimeDelta::minutes(1) > *now)
+        .map(|at| at.with_timezone(&Utc))
+}
+
 /// The app-server's stdio, the run log, and the tokens the thread has used so far.
 struct Session {
     stdin: ChildStdin,
@@ -195,8 +231,8 @@ struct Session {
     output_tokens: u64,
     /// The account's latest rate limits had a window at 100%: when the last of them resets.
     full: Option<UsageLimit>,
-    /// An error from Codex named the usage limit.
-    limit_named: bool,
+    /// An error from Codex named the usage limit, with the reset its message gave.
+    named: Option<UsageLimit>,
 }
 
 impl Session {
@@ -220,17 +256,26 @@ impl Session {
                     .or_else(|| payload.pointer("/params/turn/error"));
                 if let Some(error) = error {
                     let message = error["message"].as_str().unwrap_or_default();
-                    self.limit_named |= error["codexErrorInfo"] == "usageLimitExceeded"
-                        || message.to_ascii_lowercase().contains("usage limit");
+                    if error["codexErrorInfo"] == "usageLimitExceeded"
+                        || message.to_ascii_lowercase().contains("usage limit")
+                    {
+                        let resets_at = try_again_at(message, &Local::now())
+                            .or(self.named.as_ref().and_then(|named| named.resets_at));
+                        self.named = Some(UsageLimit { resets_at });
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    /// The usage limit a failed turn stopped on, if it did.
+    /// The usage limit a failed turn stopped on, if it did, with the windows' reset, else
+    /// the error message's.
     fn usage_limit(&self) -> Option<UsageLimit> {
-        (self.full.clone()).or_else(|| self.limit_named.then_some(UsageLimit { resets_at: None }))
+        let reset = |limit: &Option<UsageLimit>| limit.as_ref().and_then(|l| l.resets_at);
+        (self.full.is_some() || self.named.is_some()).then(|| UsageLimit {
+            resets_at: reset(&self.full).or(reset(&self.named)),
+        })
     }
 
     /// JSON-encode `message`, append a newline, and write to subprocess stdin.
@@ -534,7 +579,7 @@ pub(crate) async fn run_codex(
         input_tokens: 0,
         output_tokens: 0,
         full: None,
-        limit_named: false,
+        named: None,
     };
 
     let turn = tokio::select! {
@@ -969,6 +1014,109 @@ done"#
         assert_eq!(
             reason(&exit),
             (Some("codex turn failed: something went wrong".into()), None)
+        );
+    }
+
+    /// The error Codex 0.163.0 sent on 2026-10-27 at a usage limit with no `resetsAt`, as
+    /// `usage_limit.jsonl` recorded it from PL-174's run on sartre.
+    fn recorded_limit_message() -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/codex/usage_limit.jsonl"
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let line = text
+            .lines()
+            .find(|line| line.contains(r#""method":"error""#));
+        let error: Value = serde_json::from_str(line.unwrap()).unwrap();
+        error["params"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_usage_limit_message_gives_its_reset_on_the_runners_clock() {
+        let pdt = chrono::FixedOffset::west_opt(7 * 3600).unwrap();
+        let at = |h, m, s| pdt.with_ymd_and_hms(2026, 10, 27, h, m, s).unwrap();
+        let utc = |text: &str| Some(text.parse::<DateTime<Utc>>().unwrap());
+        let message = recorded_limit_message();
+        assert!(message.ends_with("try again at 5:38 PM."), "{message}");
+
+        assert_eq!(
+            try_again_at(&message, &at(14, 49, 0)),
+            utc("2026-10-28T00:38:00Z")
+        );
+        assert_eq!(
+            try_again_at(&message, &at(18, 0, 0)),
+            utc("2026-10-29T00:38:00Z")
+        );
+        assert_eq!(
+            try_again_at(&message, &at(17, 38, 30)),
+            utc("2026-10-28T00:38:00Z")
+        );
+        assert_eq!(
+            try_again_at(&message, &at(17, 39, 0)),
+            utc("2026-10-29T00:38:00Z")
+        );
+        assert_eq!(
+            try_again_at("Usage limit reached; try again at 17:38.", &at(14, 49, 0)),
+            utc("2026-10-28T00:38:00Z")
+        );
+        assert_eq!(
+            try_again_at(
+                "You've hit your usage limit. Try again at 12:05 am",
+                &at(14, 49, 0)
+            ),
+            utc("2026-10-28T07:05:00Z")
+        );
+        assert_eq!(
+            try_again_at(
+                "You've hit your usage limit. Try again at 12:05 PM",
+                &at(11, 0, 0)
+            ),
+            utc("2026-10-27T19:05:00Z")
+        );
+
+        for message in [
+            "You have hit your usage limit.",
+            "You've hit your usage limit. Try again at 5:38 PM on Oct 30th.",
+            "You've hit your usage limit. Try again at 13:38 PM.",
+            "You've hit your usage limit. Try again at 25:00.",
+            "You've hit your usage limit. Try again at 5:3 PM.",
+        ] {
+            assert_eq!(try_again_at(message, &at(14, 49, 0)), None, "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_error_with_only_its_message_time_pauses_until_that_time() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/codex/usage_limit.jsonl"
+        );
+        let script = format!(
+            r#"while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) echo '{{"id":1,"result":{{}}}}' ;;
+    *'"method":"skills/list"'*) echo '{{"id":4,"result":{{"data":[]}}}}' ;;
+    *'"method":"thread/start"'*) echo '{{"id":2,"result":{{"thread":{{"id":"t1"}}}}}}' ;;
+    *'"method":"turn/start"'*) echo '{{"id":3,"result":{{"turn":{{"id":"u1"}}}}}}'; cat {fixture} ;;
+  esac
+done"#
+        );
+        let (exit, _, _temp) = run_fake(&script).await;
+        let AgentExit::Finished(result) = exit else {
+            panic!("stopped")
+        };
+        let expected = try_again_at(&recorded_limit_message(), &Local::now());
+        assert!(expected.is_some());
+        assert_eq!(result.reason.as_deref(), Some("usage limit"));
+        assert_eq!(
+            result.usage_limit,
+            Some(UsageLimit {
+                resets_at: expected
+            })
         );
     }
 
