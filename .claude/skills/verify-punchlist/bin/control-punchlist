@@ -78,7 +78,8 @@ start_server() { # start_server DIR DATABASE_URL HOST PORT
   echo "$pgid" >"$dir/server.pgid"
   for _ in $(seq 1 120); do
     grep -q "listening on" "$dir/server.log" 2>/dev/null && break
-    kill -0 -- "-$pgid" 2>/dev/null || break
+    # The pid, not the group: the group exists only once the subshell reaches setsid.
+    kill -0 "$pgid" 2>/dev/null || break
     sleep 0.5
   done
   grep -q "listening on" "$dir/server.log" || { tail -20 "$dir/server.log" >&2; die "server did not start"; }
@@ -129,7 +130,9 @@ ENV
 
   (cd "$REPO" && docker compose up -d --wait db) >/dev/null
   psql "$ADMIN_URL" -qc "CREATE DATABASE $db" >/dev/null
-  (cd "$REPO" && SQLX_OFFLINE=true cargo build -q -p punchlist-server -p punchlist-cli)
+  # Apart, as `pnpm dev` builds the server: built together, their features unify and `cargo run`
+  # recompiles sqlx and the server inside start_server's wait.
+  (cd "$REPO" && SQLX_OFFLINE=true cargo build -q -p punchlist-server && SQLX_OFFLINE=true cargo build -q -p punchlist-cli)
 
   # The webhook secret: the environment's (`with-env $C up` brings the GitHub App's, so real
   # deliveries verify), else a random one for this run. It lives in a 0600 file, never in
@@ -263,7 +266,7 @@ cmd_runner() {
   echo "$pgid" >"$pidfile"
   for _ in $(seq 1 60); do
     grep -qi "registered" "$log" 2>/dev/null && break
-    kill -0 -- "-$pgid" 2>/dev/null || break
+    kill -0 "$pgid" 2>/dev/null || break
     sleep 0.5
   done
   grep -qi "registered" "$log" || {
