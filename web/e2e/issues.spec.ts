@@ -911,3 +911,32 @@ test('the issue page, the list row and the side sheet show an issue waiting on a
   await page.keyboard.press('Enter')
   await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
 })
+
+test('the side sheet\'s fields and body share the header\'s left edge and width, at 1280 and 390 px', async ({
+  page,
+  request,
+}) => {
+  const { row: created } = await ok<{ row: { issue: { id: string } } }>(
+    await request.post('/api/issues', { headers: bearer(personToken()), data: { title: 'One-word body', body: 'Waits.' } }),
+  )
+  const id = created.issue.id
+  await signIn(page)
+  for (const width of ['1280', '390']) {
+    await page.setViewportSize({ width: Number(width), height: 800 })
+    const sheet = await openSheet(page, id)
+    // Measure once the sheet has slid in, so every box is read at one position.
+    await sheet.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+    const box = async (part: string) => {
+      const found = await sheet.locator(part).boundingBox()
+      if (!found) throw new Error(`no ${part} in the sheet at ${width} px`)
+      return found
+    }
+    const header = await box('h2')
+    for (const part of ['dl', 'text=Waits.']) {
+      const { x, width: partWidth } = await box(part)
+      expect(Math.abs(x - header.x), `${part}'s left edge at ${width} px`).toBeLessThanOrEqual(1)
+      expect(Math.abs(partWidth - header.width), `${part}'s width at ${width} px`).toBeLessThanOrEqual(2)
+    }
+    await page.keyboard.press('Escape')
+  }
+})
