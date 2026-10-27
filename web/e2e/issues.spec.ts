@@ -105,7 +105,7 @@ test('a run ending, the next claim and a pull request turning ready show on the 
   await expect(run).toHaveAttribute('data-run', 'running', live)
 
   await deliverPullRequest(request, id, 'opened')
-  await expect(pr).toHaveText('#7 draft', live)
+  await expect(pr).toHaveText('#7 drafty', live)
   await deliverPullRequest(request, id, 'ready_for_review')
   await expect(pr).toHaveText('#7 open', live)
   await expect(row(page, id).locator('[data-gates]')).toHaveAttribute('data-gates', '3/3', live)
