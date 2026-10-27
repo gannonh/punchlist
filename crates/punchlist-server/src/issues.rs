@@ -231,34 +231,47 @@ async fn waiting_on_person(
     conn: &mut sqlx::PgConnection,
     issue: &Issue,
 ) -> sqlx::Result<Option<String>> {
-    // The entry's last dispatch only: one before a Run again's is of an earlier round.
-    let waiting = sqlx::query!(
-        r#"SELECT d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
-           JOIN run r ON r.id = d.run_id
-           WHERE d.issue_id = $1 AND r.waiting_reason IS NOT NULL
-             AND d.run_number = (SELECT max(run_number) FROM dispatch
-                                 WHERE transition_id = d.transition_id)
-             AND d.transition_id = (SELECT e.transition_id FROM event e
-                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
-                                    ORDER BY e.seq DESC LIMIT 1)"#,
-        issue.id,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    if let Some(waiting) = waiting {
+    let ids = std::slice::from_ref(&issue.id);
+    if let Some((agent, reason)) = waiting_reasons(conn, ids).await?.remove(&issue.id) {
         return Ok(Some(format!(
-            "{} is waiting on a person: {}",
-            agent_display_name(&waiting.agent),
-            waiting.waiting_reason
+            "{} is waiting on a person: {reason}",
+            agent_display_name(&agent)
         )));
     }
-    let ended = runs_ended(conn, std::slice::from_ref(&issue.id)).await?;
+    let ended = runs_ended(conn, ids).await?;
     Ok(ended.get(&issue.id).map(|runs| {
         format!(
             "{runs} runs in {} ended without moving it",
             issue.status_name
         )
     }))
+}
+
+/// The issues in `ids` whose entry's round has a run whose agent said it waits on a person
+/// (`wait_for_person`), with that dispatch's agent and the reason, running or not. The entry's
+/// last dispatch only: one before a Run again's is of an earlier round. `get_issue` and the
+/// inbox read it.
+pub(crate) async fn waiting_reasons(
+    conn: &mut sqlx::PgConnection,
+    ids: &[String],
+) -> sqlx::Result<HashMap<String, (String, String)>> {
+    let rows = sqlx::query!(
+        r#"SELECT d.issue_id, d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = ANY($1) AND r.waiting_reason IS NOT NULL
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        ids,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.issue_id, (row.agent, row.waiting_reason)))
+        .collect())
 }
 
 /// The issues in `ids` whose entry into their status has had the last run of its round end,

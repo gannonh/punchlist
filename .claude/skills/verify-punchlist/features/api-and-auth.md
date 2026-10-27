@@ -21,7 +21,7 @@ The server publishes its OpenAPI document at `GET /api/openapi.json` (no token n
 
 Preconditions:
 
-- Baseline run `$RUN`; `source /tmp/punchlist-verify/$RUN/run.env`.
+- Baseline run `$RUN`; `source $TMPDIR/punchlist-verify/$RUN/run.env`.
 
 - **Document.** Run `curl -s "$SERVER_URL/api/openapi.json" | python3 -c 'import json,sys; print(sorted(json.load(sys.stdin)["paths"]))'`. The list includes `/api/actors`, `/api/issues`, `/api/issues/{id}`, `/api/issues/{id}/events`, `/api/issues/{id}/transitions`, `/api/proof/{id}`, `/api/projects`, `/api/session` and `/api/workflow`, and not `/api/openapi.json`. Assert membership, not the exact list: it grows with each slice.
 - **No token.** Run `curl -s -w ' %{http_code}' "$SERVER_URL/api/issues"`, then the same with `-H 'Authorization: Bearer plt_bad'`. Both: body `{"code":"unauthorized","message":"missing or unknown bearer token"}`, status `401`.

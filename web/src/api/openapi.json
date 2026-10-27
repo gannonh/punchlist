@@ -5101,7 +5101,7 @@
           },
           {
             "type": "object",
-            "description": "The issue's latest run in its status ended and nothing dispatches it again: the run\nfailed, or it was the entry's last (`limit_reached`). The caller owns the run's agent.",
+            "description": "The issue's latest run in its status ended and nothing dispatches it again: the run\nfailed, it was the entry's last (`limit_reached`), or its agent said it waits on a\nperson (`waiting_reason`). The caller owns the run's agent.",
             "required": [
               "issue",
               "agent",
@@ -5160,6 +5160,13 @@
               "unread": {
                 "type": "boolean",
                 "description": "The caller has not opened the item since `since_seq`."
+              },
+              "waiting_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "What the run's agent said it waits on a person for (`wait_for_person`), when it did:\na Run again gives the issue another set of runs. Text from outside the team."
               }
             }
           },

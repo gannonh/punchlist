@@ -1299,7 +1299,8 @@ pub enum InboxItem {
         unread: bool,
     },
     /// The issue's latest run in its status ended and nothing dispatches it again: the run
-    /// failed, or it was the entry's last (`limit_reached`). The caller owns the run's agent.
+    /// failed, it was the entry's last (`limit_reached`), or its agent said it waits on a
+    /// person (`waiting_reason`). The caller owns the run's agent.
     Run {
         issue: PullRequestIssue,
         /// The run's agent kind, such as `claude-code`.
@@ -1310,6 +1311,9 @@ pub enum InboxItem {
         last_outcome: RunOutcome,
         /// The last attempt's failure reason, when the run failed. Text from outside the team.
         reason: Option<String>,
+        /// What the run's agent said it waits on a person for (`wait_for_person`), when it did:
+        /// a Run again gives the issue another set of runs. Text from outside the team.
+        waiting_reason: Option<String>,
         /// The entry's runs are used up: `<runs> runs in <status> ended without moving it`.
         limit_reached: bool,
         /// When the run's end was recorded.

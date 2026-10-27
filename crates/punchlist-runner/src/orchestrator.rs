@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::RunnerConfig;
 use crate::agent::{
     ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
-    kill_runner, run_claude, write_mcp_config,
+    kill_runner, megabytes, remove_attempt_tmp, run_claude, write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
@@ -256,6 +256,7 @@ pub(crate) async fn run_with_worktrees(
     if left > 0 {
         tracing::info!("killed {left} process(es) left from before the restart");
     }
+    let mut resumed = Vec::new();
     match ctx.client.leases(&runner_id).await {
         Ok(leases) => {
             for lease in leases {
@@ -275,6 +276,7 @@ pub(crate) async fn run_with_worktrees(
                 };
                 match ctx.client.resume_run(&run_id, lease.attempt).await {
                     Ok(claim) => {
+                        resumed.push(format!("{}-{}", claim.run_id, claim.attempt));
                         let ctx = ctx.clone();
                         let stop = Arc::new(watch::channel(false).0);
                         let key = (claim.run_id, claim.attempt);
@@ -295,6 +297,22 @@ pub(crate) async fn run_with_worktrees(
             }
         }
         Err(e) => tracing::warn!("cannot read this runner's leases: {e}; they will expire"),
+    }
+    // Every other attempt's temporary directory goes: those just reported lost, and those
+    // whose lease lapsed while the runner was down.
+    let tmp = attempt_tmp(&ctx.config.state_dir, &runner_id);
+    for entry in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if resumed.contains(&name) {
+            continue;
+        }
+        match remove_attempt_tmp(&entry.path()) {
+            Ok(size) => tracing::info!(
+                "removed the temporary directory of attempt {name}, which this runner no longer holds ({})",
+                megabytes(size)
+            ),
+            Err(e) => tracing::warn!("cannot remove {}: {e}", entry.path().display()),
+        }
     }
 
     loop {
@@ -363,6 +381,12 @@ pub(crate) async fn run_with_worktrees(
         );
     }
     Ok(())
+}
+
+/// The directory of a runner's attempts' temporary directories, each `<run id>-<attempt>`.
+/// The runner's id keeps apart two runners that share a state directory.
+fn attempt_tmp(state_dir: &Path, runner_id: &str) -> PathBuf {
+    state_dir.join("tmp").join(runner_id)
 }
 
 /// Reports a held attempt this runner cannot carry on after a restart as lost, once. A
@@ -574,6 +598,14 @@ async fn run_attempt(
             .map_err(|e| format!("cannot write the run's GitHub token: {e}")),
         (None, None) => Ok(None),
     };
+    // The agent's `TMPDIR`, on disk and the attempt's alone, removed when the attempt ends.
+    let attempt_id = format!("{run_id}-{attempt}");
+    let tmp = attempt_tmp(&ctx.config.state_dir, &ctx.runner_id).join(&attempt_id);
+    let github = github.and_then(|access| {
+        std::fs::create_dir_all(&tmp)
+            .map(|()| access)
+            .map_err(|e| format!("cannot make {}: {e}", tmp.display()))
+    });
     let refresher = match (&github, &claim.github) {
         (Ok(Some(access)), Some(token)) => Some(tokio::spawn(refresh_github_token(
             ctx.client.clone(),
@@ -589,8 +621,10 @@ async fn run_attempt(
         Ok(Some(access)) => access.env(),
         _ => Vec::new(),
     };
-    let attempt_id = format!("{run_id}-{attempt}");
     env.push((ATTEMPT_MARKER, Some(attempt_id.clone().into())));
+    env.push(("TMPDIR", Some(tmp.clone().into())));
+    // Cargo builds in the worktree, which the next attempt reuses.
+    env.push(("CARGO_TARGET_DIR", None));
     // Stopping the runner drops the preparation, which kills the git command it is running.
     let exit = match (resume_in, prompt) {
         _ if github.is_err() => {
@@ -657,9 +691,16 @@ async fn run_attempt(
     };
     // Before the outcome, so the next run of the issue finds its ports free.
     let (processes, containers) = end_attempt(&attempt_id, ATTEMPT_GRACE).await;
-    let line = format!(
-        "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left"
-    );
+    let line = match remove_attempt_tmp(&tmp) {
+        Ok(size) => format!(
+            "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left, and its temporary directory ({})",
+            megabytes(size)
+        ),
+        Err(e) => format!(
+            "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left; cannot remove {}: {e}",
+            tmp.display()
+        ),
+    };
     tracing::info!("run {run_id}: {line}");
     let _ = lines_tx.send(line).await;
     if let Some(refresher) = refresher {
@@ -1393,27 +1434,61 @@ mod tests {
         let argv = temp.path().join("argv");
         let github = temp.path().join("github");
         let detached = temp.path().join("detached");
+        let tmpdirs = temp.path().join("tmpdirs");
         let bin = temp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
+        // Temporary directories from before the restart: the resumed attempt's, the lost
+        // one's, one whose lease lapsed while the runner was down, and another runner's.
+        let tmp = root.join("tmp");
+        let ours = tmp.join(RUNNER.to_string());
+        let other = tmp
+            .join(Uuid::from_u128(2).to_string())
+            .join(format!("{FRESH}-1"));
+        for (dir, file) in [
+            (ours.join(format!("{RESUMED}-1")), "kept"),
+            (ours.join(format!("{MISSING}-1")), "lost"),
+            (ours.join(format!("{}-2", Uuid::from_u128(0xd))), "lapsed"),
+            (other.clone(), "theirs"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        let resumed_tmp = ours.join(format!("{RESUMED}-1"));
+        let fresh_tmp = ours.join(format!("{FRESH}-1"));
         // Each agent also leaves a `sleep` outside its process group, as `setsid pnpm dev`
-        // does, and records its pid and attempt.
+        // does, and records its pid and attempt. Each writes a file to its `TMPDIR`; the
+        // resumed one ends once the fresh one has written its file, and the fresh one then
+        // waits for the resumed one's directory to go and lists its own.
         let claude = crate::agent::tests::fake_agent(
             &bin,
             &format!(
-                r#"echo "$@" >> {}
-test "$1" = --probe || echo "${{GH_TOKEN-unset}} $(cat "$PUNCHLIST_GITHUB_TOKEN_FILE") $GIT_AUTHOR_NAME" >> {}
+                r#"echo "$@" >> {argv}
+test "$1" = --probe || echo "${{GH_TOKEN-unset}} $(cat "$PUNCHLIST_GITHUB_TOKEN_FILE") $GIT_AUTHOR_NAME" >> {github}
 setsid sleep 300 </dev/null >/dev/null 2>&1 &
-echo "$! $PUNCHLIST_ATTEMPT" >> {}
+echo "$! $PUNCHLIST_ATTEMPT" >> {detached}
+if [ "$1" != --probe ]; then
+  echo "$PUNCHLIST_ATTEMPT $TMPDIR ${{CARGO_TARGET_DIR-unset}} files:$(ls -A "$TMPDIR" | paste -sd,)" >> {tmpdirs}
+  echo data > "$TMPDIR/file"
+  i=0
+  case " $* " in
+    *" --resume "*) until [ -f {fresh_tmp}/file ] || [ $i -ge 200 ]; do sleep 0.05; i=$((i+1)); done ;;
+    *) while [ -d {resumed_tmp} ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+       echo "survived files:$(ls -A "$TMPDIR" | paste -sd,)" >> {tmpdirs} ;;
+  esac
+fi
 cat > /dev/null
 echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
-                argv.display(),
-                github.display(),
-                detached.display()
+                argv = argv.display(),
+                github = github.display(),
+                detached = detached.display(),
+                tmpdirs = tmpdirs.display(),
+                fresh_tmp = fresh_tmp.display(),
+                resumed_tmp = resumed_tmp.display(),
             ),
         );
         let seen: Seen = Arc::default();
         let url = fake_server(seen.clone(), false).await;
-        let config = fake_config(url, root, claude);
+        let config = fake_config(url, root.clone(), claude);
         let finished = |seen: &Seen, run: Uuid| {
             let path = format!("/api/runs/{run}/finish");
             seen.lock().unwrap().iter().any(|(_, p, _)| *p == path)
@@ -1490,6 +1565,23 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
                 "sleep {pid} still runs: {stat}"
             );
         }
+
+        // Each agent's `TMPDIR` was its attempt's, with no `CARGO_TARGET_DIR`; the restart
+        // kept the resumed attempt's file, and the fresh attempt's file outlived the resumed
+        // attempt's end. Every directory of this runner is gone, and the other runner's stays.
+        let mut lines: Vec<String> = (std::fs::read_to_string(&tmpdirs).unwrap().lines())
+            .map(String::from)
+            .collect();
+        lines.sort();
+        let mut expected = vec![
+            format!("{RESUMED}-1 {} unset files:kept", resumed_tmp.display()),
+            format!("{FRESH}-1 {} unset files:", fresh_tmp.display()),
+            "survived files:file".to_string(),
+        ];
+        expected.sort();
+        assert_eq!(lines, expected);
+        assert_eq!(std::fs::read_dir(&ours).unwrap().count(), 0);
+        assert_eq!(std::fs::read_to_string(other.join("theirs")).unwrap(), "x");
 
         // Both agents, resumed and fresh, had the claim's GitHub token and no other.
         assert_eq!(

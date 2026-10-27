@@ -26,7 +26,7 @@ import {
 } from '@/model/issues'
 import { linksTo, proofType, type GateChecklist, type Issue } from '@/model/issue-page'
 import type { InboxItem } from '@/model/inbox'
-import { bulkSummary, refusedText } from '@/model/selection'
+import { bulkSummary, moveSummary, refusedText, type MoveResult } from '@/model/selection'
 
 export const sessionQuery = queryOptions({
   queryKey: ['session'],
@@ -399,7 +399,7 @@ export function useTransitions(workspaceId: string) {
   }, [])
 
   const request = useCallback(
-    async (id: string, to: StatusInfo): Promise<boolean> => {
+    async (id: string, to: StatusInfo): Promise<MoveResult> => {
       set(id, { state: 'pending', to: to.key, toName: to.name })
       try {
         const moved = await call(
@@ -408,14 +408,27 @@ export function useTransitions(workspaceId: string) {
         setIssues(client, workspaceId, (cache) => applyMove(cache, moved))
         set(id, undefined)
         if (moved.warning) toast.warning(moved.warning)
-        return true
-      } catch (error) {
-        const text = error instanceof ApiError ? refusalText(error.body) : String(error)
-        set(id, { state: 'refused', to: to.key, toName: to.name, text })
-        return false
+        return { id }
+      } catch (caught) {
+        const error = caught instanceof ApiError ? caught.body : { code: 'error', message: String(caught) }
+        set(id, { state: 'refused', to: to.key, toName: to.name, text: refusalText(error) })
+        return { id, error }
       }
     },
     [client, set, workspaceId],
+  )
+
+  /** A move of several issues: one request each, each pending on its row, and one toast. True when all moved. */
+  const requestAll = useCallback(
+    async (ids: readonly string[], to: StatusInfo): Promise<boolean> => {
+      const results = await Promise.all(ids.map((id) => request(id, to)))
+      const text = moveSummary(to.name, results)
+      const moved = results.every((result) => !result.error)
+      if (moved) toast.success(text)
+      else toast.error(text)
+      return moved
+    },
+    [request],
   )
 
   const dismiss = useCallback(
@@ -425,7 +438,7 @@ export function useTransitions(workspaceId: string) {
     [set],
   )
 
-  return { transitions, request, dismiss }
+  return { transitions, request, requestAll, dismiss }
 }
 
 export const useWorkspaces = () => useQuery(workspacesQuery)

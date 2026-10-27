@@ -23,7 +23,7 @@ A signed-in person opens `/w/<prefix>/projects` and sees each project of the wor
 
 Preconditions:
 
-- `pnpm build`, a run started with `RUN=$($C up)` (the built-in workflow), `source /tmp/punchlist-verify/$RUN/run.env`, and a headless Chromium on sartre (Playwright from `node_modules/.pnpm/node_modules/playwright`, launched with `ignoreDefaultArgs: ['--disable-dev-shm-usage']`) signed in through `$C sign-in-url "$RUN"`.
+- `pnpm build`, a run started with `RUN=$($C up)` (the built-in workflow), `source $TMPDIR/punchlist-verify/$RUN/run.env`, and a headless Chromium on sartre (Playwright from `node_modules/.pnpm/node_modules/playwright`, launched with `ignoreDefaultArgs: ['--disable-dev-shm-usage']`) signed in through `$C sign-in-url "$RUN"`.
 
 - **Setup.** `$C pl "$RUN" project create Punchlist`; `$C pl "$RUN" milestone create "Gate 1" --project Punchlist --pass-when $'Line one\nLine two'`; `$C pl "$RUN" milestone create "Gate 2" --project Punchlist`; `$C pl "$RUN" issue create --title <title>` four times (PL-1 to PL-4); `$C pl "$RUN" issue edit PL-<n> --project Punchlist --milestone "Gate 1"` for PL-1, PL-2 and PL-3; then `$C sql "$RUN" "UPDATE issue SET status = 'done' WHERE id = 'PL-1'"` and `... 'canceled' WHERE id = 'PL-3'` (no workflow path reaches them without GitHub).
 - **Order.** `$C sql "$RUN" "SELECT m.name FROM milestone m ORDER BY created_at"` against `[...document.querySelectorAll('[data-milestone] button[aria-expanded]')].map(b => b.textContent)`.

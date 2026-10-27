@@ -34,13 +34,19 @@ describe('countText', () => {
   })
 })
 
-const run = (last_outcome: RunItem['last_outcome'], reason: string | null, limit_reached: boolean): RunItem => ({
+const run = (
+  last_outcome: RunItem['last_outcome'],
+  reason: string | null,
+  limit_reached: boolean,
+  waiting_reason: string | null = null,
+): RunItem => ({
   kind: 'run',
   issue: { id: 'PL-7', title: 'Issue PL-7', status: 'in_progress', status_name: 'In Progress' },
   agent: 'claude-code',
   runs: limit_reached ? 3 : 1,
   last_outcome,
   reason,
+  waiting_reason,
   limit_reached,
   since: '2026-10-24T11:00:00Z',
   since_seq: 9,
@@ -59,6 +65,16 @@ describe('runLines', () => {
 
   it('says a run failed before the limit', () => {
     expect(runLines(run('failed', 'lease expired', false))).toEqual(['Run failed: lease expired'])
+  })
+
+  it('says the agent waits on a person, with its reason as the characters it has', () => {
+    expect(runLines(run('succeeded', null, false, '<b>bold</b> *star*'))).toEqual([
+      'Claude Code is waiting on a person: <b>bold</b> *star*',
+    ])
+    expect(runLines(run('failed', 'agent crashed', true, 'Needs a key.'))).toEqual([
+      'Claude Code is waiting on a person: Needs a key.',
+      'Run failed: agent crashed',
+    ])
   })
 })
 
@@ -93,15 +109,17 @@ describe('refusalParts', () => {
 })
 
 describe('canRunAgain', () => {
-  it('is true for a run item whose entry used its last run, and for nothing else', () => {
+  it('is true for a run item whose entry used its last run or whose agent waits on a person, and for nothing else', () => {
     expect(
       [
         run('succeeded', null, true),
         run('failed', 'agent crashed', true),
+        run('succeeded', null, false, 'Needs a key.'),
+        run('failed', 'agent crashed', false, 'Needs a key.'),
         run('failed', 'lease expired', false),
         item('PL-1', 'todo', 'Todo', '2026-10-24T11:56:00Z', 5),
         refusal('1 of 6 checks failed on 3f2a1c4: test'),
       ].map(canRunAgain),
-    ).toEqual([true, true, false, false, false])
+    ).toEqual([true, true, true, true, false, false, false])
   })
 })
