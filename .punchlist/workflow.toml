@@ -15,6 +15,11 @@ to = "backlog"
 by = ["person", "agent"]         # not ready to run alongside the rest of Todo after all
 
 [[transition]]
+from = "done"
+to = "backlog"
+by = ["person", "agent"]         # reopen: an epic closed before its later slices were filed, or a mistaken close
+
+[[transition]]
 from = "todo"
 to = "start"
 by = ["person"]                  # start signal
