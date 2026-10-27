@@ -34,7 +34,7 @@ export type AssigneeView =
   | { kind: 'agent'; label: string; name: string }
 
 export interface RunView {
-  state: RunState
+  state: RunState | 'waiting'
   label: string
   detail: string | null
 }
@@ -98,7 +98,10 @@ export function age(at: string, now: Date): string {
   return `${String(Math.floor(seconds / 86400))}d`
 }
 
-export function runView(run: IssueRow['run'], now: Date): RunView {
+/** `waiting` is the issue's `waiting_on_person`: once no run is running or queued, the list says so to its person. */
+export function runView(run: IssueRow['run'], now: Date, waiting?: string | null): RunView {
+  if (waiting && (run.state === 'idle' || run.state === 'failed'))
+    return { state: 'waiting', label: 'Waiting on you', detail: waiting }
   switch (run.state) {
     case 'idle':
       return { state: 'idle', label: 'Idle', detail: null }
@@ -157,7 +160,7 @@ export function rowView(row: IssueRow, now: Date, status?: StatusInfo): RowView 
     statusName: issue.status_name,
     labels: issue.labels ?? [],
     assignee: assigneeView(issue.assignee),
-    run: runView(row.run, now),
+    run: runView(row.run, now, issue.waiting_on_person),
     pullRequest,
     gates: gateView(row.gates),
     waitsOnMerge: waitsOnMerge(pullRequest, status),

@@ -8,7 +8,7 @@ import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests } fro
 import { ageText, canRunAgain, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
 import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
-import { RunAgain } from '@/screens/issue'
+import { RunAgain } from '@/components/waiting-notice'
 import { useNow } from '@/screens/issues'
 
 /** Records a `pl:render` measure for each commit of the page with its items, as the list does. */

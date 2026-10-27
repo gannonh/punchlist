@@ -825,16 +825,14 @@ test('move three selected rows to Todo from the right-click menu, then a selecti
   await expect(page.locator('[data-selection]')).toContainText('2 selected')
 })
 
-test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
-  page,
-  request,
-}) => {
+/** An issue in In Progress whose agent called `wait_for_person` and finished. */
+async function waitingOnPerson(request: APIRequestContext, title: string, reason: string): Promise<string> {
   // One claim only: the runs of earlier tests' claims may hold the workspace's `max_concurrent`.
-  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a person')
+  const { id, runner, claim } = await claimedInProgress(request, title)
   const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
   const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
     headers: bearer(agent_token),
-    data: { reason: 'The check is flaky.' },
+    data: { reason },
   })
   expect(waiting.status()).toBe(204)
   await ok(
@@ -843,6 +841,14 @@ test('Run again on the waiting notice queues another run, and the notice goes wi
       data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
     }),
   )
+  return id
+}
+
+test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
+  page,
+  request,
+}) => {
+  const id = await waitingOnPerson(request, 'Waits on a person', 'The check is flaky.')
   await signIn(page)
   await page.goto(`/issues/${id}`)
   const notice = page.locator('[data-notice="waiting"]')
@@ -852,4 +858,22 @@ test('Run again on the waiting notice queues another run, and the notice goes wi
   await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
   await page.keyboard.press('Escape')
   await expect(row(page, id).locator('[data-run]')).toHaveText('Queued')
+})
+
+test('the list row and the side sheet show an issue waiting on a person, and Run again from the sheet', async ({
+  page,
+  request,
+}) => {
+  const id = await waitingOnPerson(request, 'Waits in the sheet', 'Pick a <b>name</b>.')
+  await signIn(page)
+  const reason = 'Claude Code is waiting on a person: Pick a <b>name</b>.'
+  const run = row(page, id).locator('[data-run]')
+  await expect(run).toHaveText('Waiting on you')
+  await expect(run).toHaveAttribute('title', reason)
+  const notice = (await openSheet(page, id)).locator('[data-notice="waiting"]')
+  await expect(notice).toContainText(`Waiting on a person: ${reason}.`)
+  await expect(notice.locator('b')).toHaveCount(0)
+  await notice.locator('[data-run-again]').click()
+  await expect(notice).toHaveCount(0, { timeout: 2000 })
+  await expect(run).toHaveText('Queued')
 })

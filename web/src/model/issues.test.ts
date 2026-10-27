@@ -101,6 +101,19 @@ describe('rowView', () => {
     expect(rowView(row('PL-3'), now).pullRequest.label).toBe('no PR')
   })
 
+  test('an issue waiting on a person reads "Waiting on you" with the reason as its title, unless a run is going', () => {
+    const waiting_on_person = 'Codex is waiting on a person: The check is flaky.'
+    expect(rowView(row('PL-1', { waiting_on_person }), now).run).toEqual({
+      state: 'waiting',
+      label: 'Waiting on you',
+      detail: 'Codex is waiting on a person: The check is flaky.',
+    })
+    const failed = { state: 'failed', agent: 'codex', at: now.toISOString(), reason: 'lost' } as const
+    expect(rowView(row('PL-2', { waiting_on_person }, { run: failed }), now).run.label).toBe('Waiting on you')
+    expect(rowView(row('PL-3', { waiting_on_person }, { run: RUNNING }), now).run.label).toBe('Running · 1h')
+    expect(rowView(row('PL-4', { waiting_on_person: null }), now).run.label).toBe('Idle')
+  })
+
   test('an issue in Merging with an open pull request waits on the merge', () => {
     const merging: StatusInfo = { key: 'merging', name: 'Merging', locked_to: [], closed: false, on_merge_to: 'Done' }
     const url = 'https://github.com/gannonh/punchlist/pull/7'
