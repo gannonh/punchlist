@@ -520,3 +520,59 @@ async fn an_agents_request_a_gate_refuses_is_recorded_once(pool: PgPool) {
     assert_eq!(gates, ["pr_open", "pr_ready"]);
     assert_eq!(refusal_events(&pool).await, 2);
 }
+
+#[sqlx::test]
+async fn the_database_refuses_to_rewrite_or_remove_an_event(pool: PgPool) {
+    let (app, person) = setup(&pool).await;
+    call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/issues",
+        Some(json!({"title": "First"})),
+    )
+    .await;
+    let (status, moved) = call(
+        &app,
+        &person.token,
+        "POST",
+        "/api/issues/PL-1/transitions",
+        Some(json!({"to": "todo"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let seq = moved["event"]["seq"].as_i64().unwrap();
+    let row = "SELECT kind, actor_id::text, created_at::text FROM event WHERE seq = $1";
+    let before: (String, String, String) = sqlx::query_as(row)
+        .bind(seq)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before.0, "transition");
+
+    for statement in [
+        "UPDATE event SET kind = 'comment', created_at = now() + interval '1 day' WHERE seq = $1",
+        "DELETE FROM event WHERE seq = $1",
+        "TRUNCATE event",
+    ] {
+        let mut query = sqlx::query(statement);
+        if statement.contains("$1") {
+            query = query.bind(seq);
+        }
+        let error = query.execute(&pool).await.unwrap_err();
+        let message = error.as_database_error().unwrap().message().to_owned();
+        assert_eq!(message, "event is append-only", "{statement}");
+    }
+
+    let after: (String, String, String) = sqlx::query_as(row)
+        .bind(seq)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
