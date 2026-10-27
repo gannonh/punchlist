@@ -48,6 +48,22 @@ test('the header counts what waits on the person live, and opening an item reads
   await expect(item.locator('[data-age]')).toHaveText(/^\d+[smhd] ago$/)
   await expect(page.locator('header [aria-current=page]')).toHaveText(/^Inbox/)
 
+  // Esc on a menu item closes the workspace menu and the page stays.
+  await page.locator('[data-workspace-menu]').focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('menuitemradio').first()).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/w\/PL\/inbox$/)
+  await expect(page.locator('[data-workspace-menu]')).toBeFocused()
+  // The account menu's Sessions dialog too, with focus on no control: Radix closes it before the page's Esc runs.
+  await page.locator('[data-account-menu]').click()
+  await page.locator('[data-sessions-item]').click()
+  await page.locator('[data-sessions]').getByRole('heading', { name: 'Sessions' }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-sessions]')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/w\/PL\/inbox$/)
+
   await item.focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${id}$`))

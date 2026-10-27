@@ -117,7 +117,7 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || inField(event.target)) return
-      if (document.querySelector('[role="dialog"], [role="menu"]')) return
+      if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]')) return
       event.preventDefault()
       void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
     }
