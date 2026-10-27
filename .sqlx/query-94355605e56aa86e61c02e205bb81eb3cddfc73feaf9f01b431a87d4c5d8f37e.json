@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO actor (workspace_id, name, role, account_id)\n             SELECT workspace_id, $2, 'person', $3 FROM invite WHERE id = ANY($1)\n             ON CONFLICT ON CONSTRAINT actor_account_membership DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "94355605e56aa86e61c02e205bb81eb3cddfc73feaf9f01b431a87d4c5d8f37e"
+}

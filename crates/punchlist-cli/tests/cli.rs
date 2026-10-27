@@ -2377,3 +2377,52 @@ async fn a_denied_auth_login_writes_nothing(pool: PgPool) {
     );
     assert!(!config.exists());
 }
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn invite_create_list_and_revoke(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let create = pl
+        .run(&["--workspace", "pl", "invite", "create", "octo-cat"])
+        .await;
+    assert_eq!((create.code, create.stderr.as_str()), (0, ""));
+    let id: sqlx::types::Uuid = sqlx::query_scalar("SELECT id FROM invite")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        create.stdout,
+        format!(
+            "Invited octo-cat: their next sign-in with GitHub joins this workspace. Invite {id}.\n"
+        )
+    );
+
+    let list = pl.run(&["invite", "list"]).await;
+    insta::with_settings!({filters => vec![(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", "[time]"), (r"[0-9a-f]{8}-[0-9a-f-]{27}", "[id]")]}, {
+        insta::assert_snapshot!(list.stdout, @"[id]  octo-cat  invited by Gannon [time]");
+    });
+
+    let refused = pl.run(&["invite", "create", "octo--cat"]).await;
+    assert_eq!(
+        (refused.code, refused.stderr.as_str()),
+        (
+            1,
+            "error: `octo--cat` is not a GitHub login: letters, digits and single hyphens, at most 39 characters (422 Unprocessable Entity)\n"
+        )
+    );
+
+    let revoke = pl.run(&["invite", "revoke", &id.to_string()]).await;
+    assert_eq!(
+        (revoke.code, revoke.stdout.as_str()),
+        (0, format!("Revoked invite {id}.\n").as_str())
+    );
+    let list = pl.run(&["invite", "list"]).await;
+    assert_eq!(list.stdout, "No open invites.\n");
+    let again = pl.run(&["invite", "revoke", &id.to_string()]).await;
+    assert_eq!(
+        (again.code, again.stderr),
+        (
+            1,
+            format!("error: no open invite {id} in this workspace (404 Not Found)\n")
+        )
+    );
+}

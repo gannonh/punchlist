@@ -29,7 +29,8 @@ async fn workspace(pool: &PgPool, prefix: &str) -> Bootstrapped {
     bootstrap(pool, &input).await.unwrap()
 }
 
-/// GitHub's two OAuth endpoints and `GET /user`, for the users `octocat` and `stranger`.
+/// GitHub's two OAuth endpoints and `GET /user`, for the users `octocat`, `octo-cat` and
+/// `stranger`.
 async fn fake_github() -> String {
     async fn access_token(Json(body): Json<Value>) -> Json<Value> {
         let login = (body["code"].as_str()).and_then(|code| code.strip_prefix("code-"));
@@ -50,7 +51,10 @@ async fn fake_github() -> String {
         let token = headers["authorization"].to_str().unwrap();
         match token.strip_prefix("Bearer token-") {
             Some("octocat") => Ok(Json(json!({"id": 583231, "login": "octocat", "name": "x"}))),
-            Some("stranger") => Ok(Json(json!({"id": 9001, "login": "stranger"}))),
+            Some("octo-cat") => Ok(Json(
+                json!({"id": 1234, "login": "octo-cat", "name": "Octo Cat"}),
+            )),
+            Some("stranger") => Ok(Json(json!({"id": 9001, "login": "stranger", "name": null}))),
             _ => Err(StatusCode::UNAUTHORIZED),
         }
     }
@@ -568,4 +572,272 @@ async fn without_the_apps_client_there_is_no_github_sign_in(pool: PgPool) {
         let (status, _, body) = send(&app, browser("GET", uri, &[], None)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     }
+}
+
+/// A person's request with their token.
+fn with_token(method: &str, uri: &str, token: &str, body: Option<Value>) -> Request<Body> {
+    let bearer = format!("Bearer {token}");
+    browser(method, uri, &[("authorization", &bearer)], body)
+}
+
+async fn invite(app: &Router, person: &Bootstrapped, login: &str) -> (StatusCode, Value) {
+    let uri = format!("/api/workspaces/{}/invites", person.workspace_id);
+    let body = Some(json!({"github_login": login}));
+    let (status, _, body) = send(app, with_token("POST", &uri, &person.token, body)).await;
+    (status, body)
+}
+
+/// Each account: name, whether it holds a token, GitHub id and login, oldest first.
+async fn accounts(pool: &PgPool) -> Vec<(String, bool, Option<i64>, Option<String>)> {
+    sqlx::query_as(
+        "SELECT name, token_hash IS NOT NULL, github_user_id, github_login FROM account
+         ORDER BY created_at, name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Each person of an account: their workspace's prefix and their name, oldest workspace first.
+async fn people_of(pool: &PgPool, github_login: &str) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT w.issue_prefix, a.name FROM actor a
+         JOIN account acc ON acc.id = a.account_id JOIN workspace w ON w.id = a.workspace_id
+         WHERE acc.github_login = $1 AND a.role = 'person' ORDER BY w.created_at",
+    )
+    .bind(github_login)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Each invite: login, accepted, revoked, oldest first.
+async fn invites(pool: &PgPool) -> Vec<(String, bool, bool)> {
+    sqlx::query_as(
+        "SELECT github_login::text, accepted_at IS NOT NULL, revoked_at IS NOT NULL
+         FROM invite ORDER BY created_at",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn an_invited_github_users_first_sign_in_creates_their_account_and_membership(pool: PgPool) {
+    let person = workspace(&pool, "PL").await;
+    let app = app_with_github(&pool).await;
+    // Logins match in any case.
+    let (status, created) = invite(&app, &person, "Octo-Cat").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["github_login"], "Octo-Cat");
+    assert_eq!(created["invited_by"], "Gannon");
+    let list = format!("/api/workspaces/{}/invites", person.workspace_id);
+    let (_, _, open) = send(&app, with_token("GET", &list, &person.token, None)).await;
+    assert_eq!(open, json!([created]));
+
+    let (status, headers, body) = github_flow(&app, "", false, "octo-cat").await;
+    assert_eq!(
+        (status, &headers["location"]),
+        (StatusCode::SEE_OTHER, &"/".parse().unwrap()),
+        "{body}"
+    );
+    assert_eq!(
+        accounts(&pool).await,
+        [
+            ("Gannon".into(), true, None, None),
+            (
+                "Octo Cat".into(),
+                false,
+                Some(1234),
+                Some("octo-cat".into())
+            ),
+        ]
+    );
+    assert_eq!(
+        people_of(&pool, "octo-cat").await,
+        [("PL".into(), "Octo Cat".into())]
+    );
+    assert_eq!(invites(&pool).await, [("Octo-Cat".into(), true, false)]);
+    let cookie = format!("punchlist_session={}", session_of(&headers));
+    let (status, _, session) = send(
+        &app,
+        browser("GET", "/api/session", &[("cookie", &cookie)], None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session["workspace_id"], json!(person.workspace_id));
+    assert_eq!(session["account"]["github_login"], "octo-cat");
+    let (_, _, open) = send(&app, with_token("GET", &list, &person.token, None)).await;
+    assert_eq!(open, json!([]));
+
+    // The next sign-in finds the account and creates nothing.
+    let (status, headers, _) = github_flow(&app, "", false, "octo-cat").await;
+    assert_eq!(
+        (status, &headers["location"]),
+        (StatusCode::SEE_OTHER, &"/".parse().unwrap())
+    );
+    assert_eq!(accounts(&pool).await.len(), 2);
+    assert_eq!(people_of(&pool, "octo-cat").await.len(), 1);
+}
+
+#[sqlx::test]
+async fn a_linked_account_gains_the_workspaces_of_its_open_invites(pool: PgPool) {
+    let first = workspace(&pool, "PL").await;
+    let second = workspace(&pool, "GW").await;
+    let app = app_with_github(&pool).await;
+    let cookie = sign_in(&app, &first.token).await;
+    github_flow(&app, &cookie, true, "octocat").await;
+    assert_eq!(
+        people_of(&pool, "octocat").await,
+        [("PL".into(), "Gannon".into())]
+    );
+
+    assert_eq!(
+        invite(&app, &second, "octocat").await.0,
+        StatusCode::CREATED
+    );
+    let (status, headers, _) = github_flow(&app, "", false, "octocat").await;
+    assert_eq!(
+        (status, &headers["location"]),
+        (StatusCode::SEE_OTHER, &"/".parse().unwrap())
+    );
+    assert_eq!(
+        people_of(&pool, "octocat").await,
+        [
+            ("PL".into(), "Gannon".into()),
+            ("GW".into(), "Gannon".into())
+        ]
+    );
+    assert_eq!(invites(&pool).await, [("octocat".into(), true, false)]);
+    let cookie = format!("punchlist_session={}", session_of(&headers));
+    let (_, _, workspaces) = send(
+        &app,
+        browser("GET", "/api/workspaces", &[("cookie", &cookie)], None),
+    )
+    .await;
+    let prefixes: Vec<&str> = (workspaces.as_array().unwrap().iter())
+        .map(|w| w["issue_prefix"].as_str().unwrap())
+        .collect();
+    assert_eq!(prefixes, ["PL", "GW"]);
+}
+
+#[sqlx::test]
+async fn a_revoked_invite_or_none_signs_nobody_in_and_creates_nothing(pool: PgPool) {
+    let person = workspace(&pool, "PL").await;
+    let app = app_with_github(&pool).await;
+    let (_, created) = invite(&app, &person, "octo-cat").await;
+    let revoke = format!(
+        "/api/workspaces/{}/invites/{}",
+        person.workspace_id,
+        created["id"].as_str().unwrap()
+    );
+    let (status, _, _) = send(&app, with_token("DELETE", &revoke, &person.token, None)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, body) = send(&app, with_token("DELETE", &revoke, &person.token, None)).await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::NOT_FOUND,
+            json!({"code": "not_found", "message": format!("no open invite {} in this workspace", created["id"].as_str().unwrap())})
+        )
+    );
+
+    for login in ["octo-cat", "stranger"] {
+        let (status, headers, _) = github_flow(&app, "", false, login).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers["location"], format!("/sign-in?unlinked={login}"));
+        assert!(set_cookies(&headers, "punchlist_session").is_empty());
+    }
+    assert_eq!(accounts(&pool).await, [("Gannon".into(), true, None, None)]);
+    assert_eq!(sessions(&pool).await, 0);
+    assert_eq!(invites(&pool).await, [("octo-cat".into(), false, true)]);
+}
+
+#[sqlx::test]
+async fn an_invite_refuses_a_malformed_login_a_member_and_an_agent(pool: PgPool) {
+    let person = workspace(&pool, "PL").await;
+    let other = workspace(&pool, "GW").await;
+    let app = app_with_github(&pool).await;
+    let forty = "a".repeat(40);
+    for login in ["octo--cat", forty.as_str(), "-x"] {
+        let (status, body) = invite(&app, &person, login).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!({"code": "invalid", "message": format!("`{login}` is not a GitHub login: letters, digits and single hyphens, at most 39 characters")})
+            )
+        );
+    }
+
+    let cookie = sign_in(&app, &person.token).await;
+    github_flow(&app, &cookie, true, "octocat").await;
+    assert_eq!(
+        invite(&app, &person, "OctoCat").await,
+        (
+            StatusCode::CONFLICT,
+            json!({"code": "conflict", "message": "OctoCat is a member of this workspace already"})
+        )
+    );
+    assert_eq!(
+        invite(&app, &person, "octo-cat").await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        invite(&app, &person, "OCTO-CAT").await,
+        (
+            StatusCode::CONFLICT,
+            json!({"code": "conflict", "message": "OCTO-CAT has an open invite already"})
+        )
+    );
+    // Another workspace's person can invite the same login there.
+    assert_eq!(
+        invite(&app, &other, "octo-cat").await.0,
+        StatusCode::CREATED
+    );
+
+    let (_, _, agent) = send(
+        &app,
+        with_token(
+            "POST",
+            "/api/actors",
+            &person.token,
+            Some(json!({"kind": "claude-code"})),
+        ),
+    )
+    .await;
+    let agent = Bootstrapped {
+        token: agent["token"].as_str().unwrap().into(),
+        ..person.clone()
+    };
+    let list = format!("/api/workspaces/{}/invites", person.workspace_id);
+    for request in [
+        with_token("GET", &list, &agent.token, None),
+        with_token(
+            "DELETE",
+            &format!("{list}/{}", Uuid::nil()),
+            &agent.token,
+            None,
+        ),
+    ] {
+        assert_eq!(send(&app, request).await.0, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        invite(&app, &agent, "someone").await,
+        (
+            StatusCode::FORBIDDEN,
+            json!({"code": "forbidden", "message": "an agent acts only on the workspace's issues"})
+        )
+    );
+    // A person's token reaches no other workspace's invites.
+    let theirs = format!("/api/workspaces/{}/invites", other.workspace_id);
+    let (status, _, _) = send(&app, with_token("GET", &theirs, &person.token, None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        invites(&pool).await,
+        [
+            ("octo-cat".into(), false, false),
+            ("octo-cat".into(), false, false)
+        ]
+    );
 }

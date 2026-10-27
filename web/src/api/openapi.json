@@ -122,7 +122,7 @@
     },
     "/api/auth/github/callback": {
       "get": {
-        "summary": "GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.\nA link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of\nthe account linked to the user and goes to `/`, or, with none linked, goes to\n`/sign-in?unlinked=<login>`.",
+        "summary": "GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.\nA link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of\nthe account linked to the user, or one an open invite creates (`accept_invites`), and goes\nto `/`, or, with neither, goes to `/sign-in?unlinked=<login>`.",
         "operationId": "callback",
         "parameters": [
           {
@@ -3438,6 +3438,213 @@
         }
       }
     },
+    "/api/workspaces/{id}/invites": {
+      "get": {
+        "summary": "The workspace's open invites, oldest first. Person token.",
+        "operationId": "list_invites",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Invite"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Invite a GitHub user to the workspace. Person token.",
+        "operationId": "create_invite",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invite"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The login is a member already, or has an open invite.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a GitHub login.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspaces/{id}/invites/{invite}": {
+      "delete": {
+        "summary": "Revoke an open invite: the GitHub user's sign-in no longer joins the workspace. Person\ntoken.",
+        "operationId": "revoke_invite",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The token's workspace",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "invite",
+            "in": "path",
+            "description": "The invite's id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not the token's workspace, or no open invite of that id in it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/workspaces/{id}/issues": {
       "get": {
         "summary": "List the workspace's issues, oldest first, each with its run, newest pull request and\nnext gated transition's gates.",
@@ -4589,6 +4796,19 @@
           }
         }
       },
+      "CreateInvite": {
+        "type": "object",
+        "description": "`POST /api/workspaces/{id}/invites`: the GitHub user to invite to the workspace.",
+        "required": [
+          "github_login"
+        ],
+        "properties": {
+          "github_login": {
+            "type": "string",
+            "description": "Letters, digits and single hyphens, at most 39 characters, in any case."
+          }
+        }
+      },
       "CreateIssue": {
         "type": "object",
         "description": "`POST /api/issues`.",
@@ -5637,6 +5857,33 @@
             "type": "integer",
             "format": "int64",
             "description": "How many of `items` are unread."
+          }
+        }
+      },
+      "Invite": {
+        "type": "object",
+        "description": "An open invite: the GitHub user's next sign-in with GitHub makes them a person in the\nworkspace, creating their account when they have none.",
+        "required": [
+          "id",
+          "github_login",
+          "invited_by",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "github_login": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "invited_by": {
+            "type": "string",
+            "description": "The name of the person who invited them."
           }
         }
       },

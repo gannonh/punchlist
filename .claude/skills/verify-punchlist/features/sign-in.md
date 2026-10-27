@@ -17,7 +17,7 @@ A person signs in at `/sign-in` with a token or with GitHub. Either starts a ser
 
 - A signed-out browser opens `/sign-in`. A signed-in one opens the account menu in the header.
 - Token sign-in: `URL=$($C sign-in-url "$RUN")`, or paste the token into the field.
-- GitHub: with `$C fake-github "$RUN"` run, `Sign in with GitHub` and `Link GitHub` open the fake's authorize page, which has an `Authorize as <login>` button per user (`octocat` id 583231, `stranger` id 9001).
+- GitHub: with `$C fake-github "$RUN"` run, `Sign in with GitHub` and `Link GitHub` open the fake's authorize page, which has an `Authorize as <login>` button per user (`octocat` id 583231, `octo-cat` id 1234 named `Octo Cat`, `stranger` id 9001).
 
 ## Driving it with control-punchlist
 
@@ -31,6 +31,7 @@ Preconditions:
 - **Link.** Signed in with a token, open the account menu, `Link GitHub`, `Authorize as octocat`: back on `/`, the menu shows `GitHub: octocat`, and `$C sql "$RUN" "SELECT github_user_id, github_login FROM account"` is `583231 | octocat`.
 - **GitHub sign-in.** In a fresh context, `/sign-in`, `Sign in with GitHub`, `Authorize as octocat`: it lands on `/` signed in as the same person, and a second `session` row exists.
 - **Unknown user.** In a fresh context, `Sign in with GitHub`, `Authorize as stranger`: the URL is `/sign-in?unlinked=stranger`, `[data-unlinked]` holds the sentence with `stranger`, and `SELECT count(*) FROM session` did not change.
+- **Invite.** `$C pl "$RUN" invite create octo-cat`, then in a fresh context `Sign in with GitHub`, `Authorize as octo-cat`: it lands on `/w/PL`, `$C sql "$RUN" "SELECT name, github_login, token_hash IS NULL FROM account"` adds `Octo Cat | octo-cat | t`, and `SELECT name, role FROM actor WHERE account_id IS NOT NULL` adds `Octo Cat | person`. `pl invite revoke <id>` before the sign-in leaves it at `/sign-in?unlinked=octo-cat` with nothing written.
 - **Bad state.** `curl -s -i "$SERVER_URL/api/auth/github/callback?code=code-octocat&state=tampered"` answers 400 `bad_request`, and no `session` row is added.
 - **Cross-site write.** `curl -s -o /dev/null -w '%{http_code}' -X POST "$SERVER_URL/api/issues" -H 'Cookie: punchlist_session=<id>' -H 'Origin: https://example.com' -H 'Content-Type: application/json' -d '{"title":"x"}'` is `403` and `SELECT count(*) FROM issue` is unchanged; the same with `-H "Origin: $SERVER_URL"` is `201`.
 - **Phone.** At 390 px the sign-in page and the account menu fit: `document.documentElement.scrollWidth <= document.documentElement.clientWidth`.
