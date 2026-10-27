@@ -327,13 +327,14 @@ sys.stdout.write("<!doctype html><meta charset=utf-8><title>Signing in</title><s
 }
 
 # A fake GitHub (bin/fake-github) on a free port of the server's host, recorded in run.env as
-# FAKE_GITHUB_URL, then the server restarted with sign-in with GitHub pointing at it.
+# FAKE_GITHUB_URL, then the server restarted with sign-in with GitHub pointing at it. Like the
+# App, the fake sends every sign-in to the run's /api/auth/github/callback.
 cmd_fake_github() {
   load "${1:-}"
   [ -z "${FAKE_GITHUB_URL:-}" ] || die "run $RUN_ID already has a fake GitHub at $FAKE_GITHUB_URL"
   local host="${SERVER_URL#http://}"; host="${host%:*}"
   local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
-  (exec setsid "$(dirname "$0")/fake-github" "$port" "$host" </dev/null >"$EVIDENCE/fake-github.log" 2>&1) &
+  (exec setsid "$(dirname "$0")/fake-github" "$port" "$host" "$SERVER_URL/api/auth/github/callback" </dev/null >"$EVIDENCE/fake-github.log" 2>&1) &
   echo "$!" >"$RUN_DIR/fake-github.pgid"
   for _ in $(seq 1 40); do curl -s -o /dev/null "http://$host:$port/user" && break; sleep 0.25; done
   echo "FAKE_GITHUB_URL=http://$host:$port" >>"$RUN_DIR/run.env"
