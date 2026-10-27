@@ -287,6 +287,16 @@ pub struct Session {
 pub struct Account {
     pub id: Uuid,
     pub name: String,
+    /// The GitHub user the account signs in as, once linked (ADR 0013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_login: Option<String>,
+}
+
+/// `GET /api/auth`: the ways the sign-in page offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignInOptions {
+    /// Sign-in with GitHub is configured: the server has the GitHub App's client id and secret.
+    pub github: bool,
 }
 
 /// One of `GET /api/workspaces`: a workspace the account belongs to.

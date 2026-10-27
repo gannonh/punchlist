@@ -36,6 +36,9 @@ Compose reads these variables from the environment it runs in:
 | `GITHUB_APP_ID` | none | The GitHub App's id; with the key, the server reads `.punchlist/` and pull requests |
 | `GITHUB_APP_PRIVATE_KEY` | none | The App's private key, as PEM. A secret |
 | `GITHUB_WEBHOOK_SECRET` | none | The App's webhook secret; without it the webhook route answers 503. A secret |
+| `GITHUB_APP_CLIENT_ID` | none | The App's OAuth client id; with the secret, people sign in with GitHub |
+| `GITHUB_APP_CLIENT_SECRET` | none | The App's OAuth client secret. A secret |
+| `PUNCHLIST_PUBLIC_URL` | none | The origin browsers reach the app on, such as `https://host:7880`: GitHub's callback goes to `/api/auth/github/callback` there, and a browser's writes must come from it. Without it, the request's host |
 | `PUNCHLIST_PROOF_MAX_BYTES` | `104857600` | The largest proof file accepted |
 | `RUST_LOG` | `info,sqlx=warn` | Log filter |
 

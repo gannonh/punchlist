@@ -6,6 +6,8 @@ C=.claude/skills/verify-punchlist/bin/control-punchlist
 pnpm build
 RUN=$($C up "e2e-$(date +%Y%m%d-%H%M%S)-$$")
 trap '$C down "$RUN"' EXIT
+# Sign-in with GitHub against bin/fake-github (web/e2e/sign-in.spec.ts).
+$C fake-github "$RUN"
 # shellcheck disable=SC1090
 source "${TMPDIR:-/tmp}/punchlist-verify/$RUN/run.env"
 E2E_BASE_URL="$SERVER_URL" E2E_CONFIG="$CONFIG" E2E_WEBHOOK_SECRET_FILE="$RUN_DIR/webhook-secret" E2E_DATABASE_URL="$DATABASE_URL" \

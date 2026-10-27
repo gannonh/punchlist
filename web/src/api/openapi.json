@@ -100,6 +100,142 @@
         }
       }
     },
+    "/api/auth": {
+      "get": {
+        "summary": "The ways the sign-in page offers.",
+        "operationId": "options",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInOptions"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/auth/github/callback": {
+      "get": {
+        "summary": "GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.\nA link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of\nthe account linked to the user and goes to `/`, or, with none linked, goes to\n`/sign-in?unlinked=<login>`.",
+        "operationId": "callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "To the app, or to the sign-in page when no account is linked."
+          },
+          "400": {
+            "description": "A wrong or missing `state` or code.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The GitHub user is linked to another account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "GitHub refused the code or could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/auth/github/start": {
+      "get": {
+        "summary": "Sends the browser to GitHub to authorize the App, with a fresh `state` kept in a cookie for\nten minutes.",
+        "operationId": "start",
+        "parameters": [
+          {
+            "name": "link",
+            "in": "path",
+            "description": "`1` links GitHub to the signed-in account instead of signing in.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "To GitHub's authorization page."
+          },
+          "401": {
+            "description": "A link without a session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Sign-in with GitHub is not configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
     "/api/github/webhook": {
       "post": {
         "summary": "Receive a GitHub webhook delivery. The signature is checked, the payload parsed, and a\njob queued to record it; the answer does not wait for the job. Unauthenticated: GitHub\nsigns the body instead of sending a bearer token.",
@@ -2361,7 +2497,7 @@
         }
       },
       "post": {
-        "summary": "Sign in with a person's token: the answer sets the session cookie to it, which reaches every\nworkspace of the person's account (ADR 0011).",
+        "summary": "Sign in with a person's token: the answer sets the session cookie to a new session of the\ntoken's account, which reaches every workspace of the account (ADR 0011, 0013).",
         "operationId": "sign_in",
         "requestBody": {
           "content": {
@@ -2407,11 +2543,11 @@
         ]
       },
       "delete": {
-        "summary": "Sign out: the answer clears the session cookie.",
+        "summary": "Sign out: the answer deletes the cookie's session and clears the cookie.",
         "operationId": "sign_out",
         "responses": {
           "204": {
-            "description": "The session cookie is cleared."
+            "description": "The session is deleted and its cookie cleared."
           }
         },
         "security": [
@@ -3492,6 +3628,13 @@
           "name"
         ],
         "properties": {
+          "github_login": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GitHub user the account signs in as, once linked (ADR 0013)."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -6719,6 +6862,19 @@
           "token": {
             "type": "string",
             "description": "A person's bearer token."
+          }
+        }
+      },
+      "SignInOptions": {
+        "type": "object",
+        "description": "`GET /api/auth`: the ways the sign-in page offers.",
+        "required": [
+          "github"
+        ],
+        "properties": {
+          "github": {
+            "type": "boolean",
+            "description": "Sign-in with GitHub is configured: the server has the GitHub App's client id and secret."
           }
         }
       },

@@ -8,6 +8,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { AccountMenu } from '@/components/account-menu'
 import { AppHeader, inField } from '@/components/app-header'
 import type { Workspace } from '@/model/workspaces'
 import { BoardView, ListView } from '@/components/issue-views'
@@ -37,7 +38,6 @@ import {
   useProjects,
   usePullRequests,
   useSearch,
-  useSignOut,
   useTransitions,
   useWorkflow,
 } from '@/lib/queries'
@@ -192,7 +192,6 @@ export function IssuesScreen({
   const projects = useProjects(workspaceId)
   const edit = useEditOne(workspaceId)
   const bulkEdit = useBulkEdit(workspaceId)
-  const signOut = useSignOut()
   const navigate = useNavigate()
   const { transitions, request, dismiss } = useTransitions(workspaceId)
   useEventStream(workspaceId, issues.isSuccess)
@@ -593,16 +592,7 @@ export function IssuesScreen({
           >
             <Plus /> New issue
           </Button>
-          <button
-            type="button"
-            className="cursor-pointer text-meta text-ink-3 hover:text-foreground"
-            title={`Signed in as ${me}`}
-            onClick={() => {
-              signOut.mutate(undefined, { onSuccess: () => void navigate({ to: '/sign-in' }) })
-            }}
-          >
-            Sign out
-          </button>
+          <AccountMenu me={me} />
         </div>
       </AppHeader>
 

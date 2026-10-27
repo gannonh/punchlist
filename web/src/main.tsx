@@ -31,13 +31,19 @@ const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   ),
 })
 
-const signIn = createRoute({ getParentRoute: () => root, path: '/sign-in', component: SignInScreen })
-
 const id = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
 const ids = (value: unknown) => {
   const list = [value].flat().filter((item): item is string => typeof item === 'string' && item !== '')
   return list.length > 0 ? list : undefined
 }
+
+const signIn = createRoute({
+  getParentRoute: () => root,
+  path: '/sign-in',
+  // `unlinked`: the GitHub login the server found no account for.
+  validateSearch: (search: Record<string, unknown>): { unlinked?: string } => ({ unlinked: id(search.unlinked) }),
+  component: SignInScreen,
+})
 
 // Search values are plain strings, and a list is the key repeated: `?label=idea&label=ui`.
 function parseSearch(text: string): Record<string, string | string[]> {

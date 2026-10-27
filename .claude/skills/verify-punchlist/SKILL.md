@@ -127,6 +127,8 @@ What an agent's `get_issue` prints, without a model: `$C get-issue "$RUN" PL-1` 
 
 Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
+`$C fake-github "$RUN"` starts `bin/fake-github` and restarts the run's server with GitHub sign-in on, so the web app's `Sign in with GitHub` and `Link GitHub` can be driven ([features/sign-in.md](features/sign-in.md)).
+
 `pl import linear` reads Linear with `LINEAR_API_KEY` (run it under `with-env`); `bin/fake-linear` stands in for Linear when the key cannot reach it ([features/linear-import.md](features/linear-import.md)).
 
 The feature map in `features/` has a recipe per feature. Read `features/README.md` first.

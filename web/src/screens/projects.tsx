@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useState } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { cn } from 'cn'
 import { ApiError } from '@/api/client'
+import { AccountMenu } from '@/components/account-menu'
 import { AppHeader, inField } from '@/components/app-header'
 import { StatusDot } from '@/components/atoms'
 import { Button } from '@/components/ui/button'
@@ -14,7 +15,6 @@ import {
   useProjects,
   usePullRequests,
   useSaveProject,
-  useSignOut,
   useWorkflow,
 } from '@/lib/queries'
 import { milestoneProgress, type Milestone, type Progress, type Project } from '@/model/projects'
@@ -292,7 +292,6 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
   const inbox = useInbox(workspace.id, issues.isSuccess)
   const projects = useProjects(workspace.id)
   const workflow = useWorkflow(workspace.id)
-  const signOut = useSignOut()
   const navigate = useNavigate()
   const [open, setOpen] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
@@ -324,16 +323,7 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
         pullRequests={pullRequests.data?.length}
         inbox={inbox.data?.unread}
       >
-        <button
-          type="button"
-          className="ml-auto cursor-pointer text-meta text-ink-3 hover:text-foreground"
-          title={`Signed in as ${me}`}
-          onClick={() => {
-            signOut.mutate(undefined, { onSuccess: () => void navigate({ to: '/sign-in' }) })
-          }}
-        >
-          Sign out
-        </button>
+        <AccountMenu me={me} className="ml-auto" />
       </AppHeader>
 
       <main className="mx-auto grid w-full max-w-320 flex-1 content-start gap-3 px-3 py-2 sm:px-4 sm:py-3" aria-live="polite">

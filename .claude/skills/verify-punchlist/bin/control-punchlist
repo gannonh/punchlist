@@ -14,6 +14,7 @@
 #   control-punchlist runner-stop RUN_ID NAME       stop that runner
 #   control-punchlist runner-signal RUN_ID NAME SIG send SIG (KILL, STOP, CONT) to that runner's process group
 #   control-punchlist sign-in-url RUN_ID  print a URL that signs a browser in as the run's person, for 2 minutes
+#   control-punchlist fake-github RUN_ID  start bin/fake-github and restart the server with sign-in with GitHub on it
 #   control-punchlist down RUN_ID         stop runners and the server, drop the database; keep evidence
 #   control-punchlist sandbox-token       print an installation token for the sandbox alone (under with-env)
 #   control-punchlist gh ARGS...          run `gh ARGS...` with that token as GH_TOKEN
@@ -60,6 +61,11 @@ start_server() { # start_server DIR DATABASE_URL HOST PORT
   # With the App's private key (`with-env $C up`), the server reads `.punchlist/` from the
   # sandbox's default branch as the Punchlist App.
   if [ -n "${GITHUB_APP_PRIVATE_KEY:-}" ]; then export GITHUB_APP_ID="${GITHUB_APP_ID:-5254938}"; fi
+  # After `fake-github`, sign-in with GitHub goes to the run's fake GitHub.
+  if [ -n "${FAKE_GITHUB_URL:-}" ]; then
+    export GITHUB_APP_CLIENT_ID=fake-client-id GITHUB_APP_CLIENT_SECRET=fake-client-secret \
+      GITHUB_OAUTH_URL="$FAKE_GITHUB_URL" GITHUB_API_URL="$FAKE_GITHUB_URL"
+  fi
 
   # pnpm dev in its own process group so `down` stops exactly this tree.
   # PUNCHLIST_DEV_VITE=0: the server serves the build; no Vite dev server per run.
@@ -320,6 +326,22 @@ sys.stdout.write("<!doctype html><meta charset=utf-8><title>Signing in</title><s
   echo "$SERVER_URL/$name"
 }
 
+# A fake GitHub (bin/fake-github) on a free port of the server's host, recorded in run.env as
+# FAKE_GITHUB_URL, then the server restarted with sign-in with GitHub pointing at it. Like the
+# App, the fake sends every sign-in to the run's /api/auth/github/callback.
+cmd_fake_github() {
+  load "${1:-}"
+  [ -z "${FAKE_GITHUB_URL:-}" ] || die "run $RUN_ID already has a fake GitHub at $FAKE_GITHUB_URL"
+  local host="${SERVER_URL#http://}"; host="${host%:*}"
+  local port; port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+  (exec setsid "$(dirname "$0")/fake-github" "$port" "$host" "$SERVER_URL/api/auth/github/callback" </dev/null >"$EVIDENCE/fake-github.log" 2>&1) &
+  echo "$!" >"$RUN_DIR/fake-github.pgid"
+  for _ in $(seq 1 40); do curl -s -o /dev/null "http://$host:$port/user" && break; sleep 0.25; done
+  echo "FAKE_GITHUB_URL=http://$host:$port" >>"$RUN_DIR/run.env"
+  cmd_restart "$RUN_ID"
+  echo "fake GitHub at http://$host:$port; users octocat (583231) and stranger (9001)" >&2
+}
+
 # The server down and up again on the same database and port, as after a crash or a deploy.
 # Under `with-env` it starts with the GitHub App's credentials, as `up` does.
 cmd_restart() {
@@ -348,6 +370,7 @@ cmd_down() {
     [ -f "$file" ] && { kill -CONT -- "-$(cat "$file")" 2>/dev/null || true; stop_group "$(cat "$file")"; }
   done
   stop_server
+  [ -f "$RUN_DIR/fake-github.pgid" ] && kill -- "-$(cat "$RUN_DIR/fake-github.pgid")" 2>/dev/null || true
   cp "$RUN_DIR"/server.log* "$EVIDENCE/" 2>/dev/null || true
   psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $DB WITH (FORCE)" >/dev/null 2>&1 || true
   rm -rf "$RUN_DIR"
@@ -393,9 +416,10 @@ case "${1:-}" in
   runner-stop) shift; cmd_runner_stop "$@" ;;
   runner-signal) shift; cmd_runner_signal "$@" ;;
   sign-in-url) shift; cmd_sign_in_url "$@" ;;
+  fake-github) shift; cmd_fake_github "$@" ;;
   down) shift; cmd_down "$@" ;;
   sandbox-token) sandbox_token ;;
   gh) shift; cmd_gh "$@" ;;
   git) shift; cmd_git "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

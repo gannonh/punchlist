@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""A stand-in for GitHub's OAuth pages and `GET /user`, for sign-in with GitHub without GitHub.
+
+    fake-github PORT [HOST] [CALLBACK]     serve on HOST (default 127.0.0.1)
+
+CALLBACK is the App's registered callback URL (default http://127.0.0.1:7878/api/auth/github/callback,
+`pnpm dev`'s server; `control-punchlist fake-github` passes the run's). As GitHub does, the authorize
+page sends the browser there when the request has no `redirect_uri`, and refuses one that differs.
+
+Start the server with GITHUB_APP_CLIENT_ID=fake-client-id GITHUB_APP_CLIENT_SECRET=fake-client-secret
+and GITHUB_OAUTH_URL and GITHUB_API_URL both at http://HOST:PORT (`control-punchlist fake-github` does).
+The authorize page offers one button per user; each sends the browser back with that user's code:
+
+    octocat   id 583231
+    stranger  id 9001
+"""
+
+import html
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlencode, urlparse
+
+CLIENT_ID, CLIENT_SECRET = "fake-client-id", "fake-client-secret"
+USERS = {"octocat": 583231, "stranger": 9001}
+CALLBACK = sys.argv[3] if len(sys.argv) > 3 else "http://127.0.0.1:7878/api/auth/github/callback"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def answer(self, status, body, kind="application/json", headers=()):
+        data = (json.dumps(body) if kind == "application/json" else body).encode()
+        self.send_response(status)
+        self.send_header("content-type", kind)
+        self.send_header("content-length", str(len(data)))
+        for name, value in headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        query = {key: values[0] for key, values in parse_qs(url.query).items()}
+        if url.path == "/login/oauth/authorize":
+            if query.get("client_id") != CLIENT_ID:
+                return self.answer(400, "unknown client_id", "text/plain")
+            if query.get("redirect_uri", CALLBACK) != CALLBACK:
+                return self.answer(400, "The redirect_uri is not associated with this application.", "text/plain")
+            buttons = "".join(
+                f'<p><a role="button" href="{html.escape(CALLBACK + "?" + urlencode({"code": f"code-{login}", "state": query.get("state", "")}))}">'
+                f"Authorize as {login}</a></p>"
+                for login in USERS)
+            page = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                    f"<title>Fake GitHub</title><h1>Authorize Punchlist</h1>{buttons}")
+            return self.answer(200, page, "text/html")
+        if url.path == "/user":
+            token = self.headers.get("authorization", "").split(" ")[-1]
+            login = token.removeprefix("gho_fake_")
+            if not token.startswith("gho_fake_") or login not in USERS:
+                return self.answer(401, {"message": "Bad credentials"})
+            return self.answer(200, {"id": USERS[login], "login": login})
+        self.answer(404, {"message": "Not Found"})
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/login/oauth/access_token":
+            return self.answer(404, {"message": "Not Found"})
+        raw = self.rfile.read(int(self.headers.get("content-length", 0))).decode()
+        body = (json.loads(raw) if self.headers.get("content-type", "").startswith("application/json")
+                else {key: values[0] for key, values in parse_qs(raw).items()})
+        sys.stderr.write("fake-github: token exchange " + json.dumps(
+            {key: "<redacted>" if key == "client_secret" else value for key, value in body.items()}) + "\n")
+        if body.get("client_id") != CLIENT_ID or body.get("client_secret") != CLIENT_SECRET:
+            return self.answer(200, {"error": "incorrect_client_credentials"})
+        login = str(body.get("code", "")).removeprefix("code-")
+        if login not in USERS:
+            return self.answer(200, {"error": "bad_verification_code"})
+        self.answer(200, {"access_token": f"gho_fake_{login}", "token_type": "bearer", "scope": ""})
+
+    def log_message(self, format, *args):
+        sys.stderr.write("fake-github: " + format % args + "\n")
+
+
+if __name__ == "__main__":
+    HTTPServer((sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
