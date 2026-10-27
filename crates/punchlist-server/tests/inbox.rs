@@ -344,6 +344,7 @@ async fn the_owner_of_a_runs_agent_sees_an_issue_nothing_dispatches_again(pool: 
             "runs": 3,
             "last_outcome": "succeeded",
             "reason": null,
+            "waiting_reason": null,
             "limit_reached": true,
             "since": limit["since"],
             "since_seq": newest_run_event(&pool, "PL-1").await,
@@ -587,4 +588,128 @@ async fn run_again_takes_the_issue_out_of_the_inbox_until_its_next_round_runs_ou
         (&again["runs"], &again["limit_reached"]),
         (&json!(3), &json!(true))
     );
+}
+
+/// Claims PL-`n`'s run, has its agent call `wait_for_person` with `reason`, and asserts the
+/// owner's inbox lists nothing for the issue while the run runs; then finishes it with
+/// `outcome`.
+async fn wait_then_finish(
+    app: &Router,
+    a: &str,
+    runner: &str,
+    id: &str,
+    reason: &str,
+    outcome: Value,
+) {
+    let body = json!({"wait_seconds": 0});
+    let (status, claimed) = call(app, Some(runner), "POST", "/api/runs/claim", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["issue"]["id"], id);
+    let run_id = claimed["run_id"].as_str().unwrap();
+    let (status, body) = call(
+        app,
+        claimed["agent_token"].as_str(),
+        "POST",
+        &format!("/api/runs/{run_id}/waiting"),
+        Some(json!({"reason": reason})),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(runs_of(&inbox(app, a).await, id), 0);
+    let mut finish = json!({"attempt": 1, "duration_ms": 1});
+    finish
+        .as_object_mut()
+        .unwrap()
+        .extend(outcome.as_object().unwrap().clone());
+    let uri = format!("/api/runs/{run_id}/finish");
+    let (status, body) = call(app, Some(runner), "POST", &uri, Some(finish)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn the_owner_sees_a_run_whose_agent_waits_on_a_person_once_it_ends(pool: PgPool) {
+    let app = router(AppState::new(pool.clone()));
+    let first = workspace(&pool, "PL").await;
+    let a = first.token.as_str();
+    let b = "plt_second";
+    second_person(&pool, first.workspace_id).await;
+    let (status, runner) = call(
+        &app,
+        Some(a),
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r", "agents": ["claude-code"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    let r = runner["token"].as_str().unwrap();
+    for title in ["Succeeds", "Fails"] {
+        let (status, body) = call(
+            &app,
+            Some(a),
+            "POST",
+            "/api/issues",
+            Some(json!({"title": title})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = if title == "Succeeds" { "PL-1" } else { "PL-2" };
+        move_to(&app, a, id, "todo").await;
+        move_to(&app, a, id, "start").await;
+    }
+
+    let reason = "<b>bold</b> *star*";
+    wait_then_finish(&app, a, r, "PL-1", reason, succeeded()).await;
+    let waits = item(&app, a, "PL-1").await;
+    assert_eq!(
+        waits,
+        json!({
+            "kind": "run",
+            "issue": {"id": "PL-1", "title": "Succeeds", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": "claude-code",
+            "runs": 1,
+            "last_outcome": "succeeded",
+            "reason": null,
+            "waiting_reason": "<b>bold</b> *star*",
+            "limit_reached": false,
+            "since": waits["since"],
+            "since_seq": newest_run_event(&pool, "PL-1").await,
+            "unread": true,
+        })
+    );
+    let (_, issue) = call(&app, Some(a), "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(
+        issue["waiting_on_person"],
+        "Claude Code is waiting on a person: <b>bold</b> *star*"
+    );
+
+    wait_then_finish(&app, a, r, "PL-2", "Needs a key.", crashed()).await;
+    let failed = item(&app, a, "PL-2").await;
+    assert_eq!(
+        (
+            &failed["last_outcome"],
+            &failed["reason"],
+            &failed["waiting_reason"],
+            &failed["runs"],
+            &failed["limit_reached"]
+        ),
+        (
+            &json!("failed"),
+            &json!("agent crashed"),
+            &json!("Needs a key."),
+            &json!(1),
+            &json!(false)
+        )
+    );
+    assert_eq!(
+        inbox(&app, a).await,
+        (vec!["PL-2".into(), "PL-1".into()], 2)
+    );
+    assert_eq!(inbox(&app, b).await, (vec![], 0));
+
+    // Run again queues a run and the item leaves.
+    let (status, body) = call(&app, Some(a), "POST", "/api/issues/PL-1/retry", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(inbox(&app, a).await, (vec!["PL-2".into()], 1));
 }

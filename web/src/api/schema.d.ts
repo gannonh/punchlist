@@ -1714,6 +1714,11 @@ export interface components {
             since_seq: number;
             /** @description The caller has not opened the item since `since_seq`. */
             unread: boolean;
+            /**
+             * @description What the run's agent said it waits on a person for (`wait_for_person`), when it did:
+             *     a Run again gives the issue another set of runs. Text from outside the team.
+             */
+            waiting_reason?: string | null;
         } | {
             /** @description The agent that asked. */
             agent: components["schemas"]["Actor"];
