@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,\n                duration_ms = $6, input_tokens = $7, output_tokens = $8,\n                cost_usd = $9::text::numeric\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now()\n         RETURNING id",
+  "query": "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,\n                duration_ms = $6, input_tokens = $7, output_tokens = $8,\n                cost_usd = $9::text::numeric, over_budget = $10\n         WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'\n             AND lease_expires_at > now()\n         RETURNING id",
   "describe": {
     "columns": [
       {
@@ -25,12 +25,13 @@
         "Int8",
         "Int8",
         "Int8",
-        "Text"
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "7b955249141266ea12b005b3c5af5043913c74c12258072f39fb879142fc60fa"
+  "hash": "55c5541707d4a3d3ad4c9b2fa156e5cf37d4cdad2614f0bfd6b080b129971c0f"
 }

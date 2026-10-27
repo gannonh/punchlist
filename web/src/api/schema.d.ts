@@ -1426,6 +1426,12 @@ export interface components {
             /** Format: date-time */
             lease_expires_at: string;
             /**
+             * Format: int64
+             * @description The most tokens, input plus output, the attempt may use: the dispatch rule's
+             *     `max_tokens`. `None`: no budget.
+             */
+            max_tokens?: number | null;
+            /**
              * @description The issue's branches with a merged pull request and no open one, sorted. The runner
              *     replaces a worktree it still has on one of them. Empty when no earlier branch of the
              *     issue has merged.
@@ -1707,6 +1713,11 @@ export interface components {
             outcome: components["schemas"]["RunOutcome"];
             /** Format: int64 */
             output_tokens?: number | null;
+            /**
+             * @description The runner stopped the agent when its tokens went over the run's `max_tokens`. Only
+             *     with `failed`. The run is not dispatched again: the issue waits on a person.
+             */
+            over_budget?: boolean;
             /** @description Why the attempt failed. Required when the outcome is `failed`. */
             reason?: string | null;
             usage_limit?: components["schemas"]["UsageLimit"] | null;

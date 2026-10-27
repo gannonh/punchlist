@@ -3017,3 +3017,72 @@ async fn an_entry_keeps_the_runs_per_entry_of_the_version_it_was_queued_under(po
         ("in_progress".into(), 5)
     );
 }
+
+async fn runs_and_dispatches(pool: &PgPool, issue: &str) -> (i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM run WHERE issue_id = $1),
+                (SELECT count(*) FROM dispatch WHERE issue_id = $1)",
+    )
+    .bind(issue)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_run_over_its_token_budget_ends_and_the_issue_waits_on_a_person(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    set_dispatch_models(&pool, "max_tokens = 1000", "").await;
+    let runner = register(&app, &person.token, "r1", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    let (status, claimed) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["max_tokens"], 1000);
+    let run_id = claimed["run_id"].as_str().unwrap();
+    let (status, resumed) = call(
+        &app,
+        &runner.token,
+        "POST",
+        &format!("/api/runs/{run_id}/resume"),
+        Some(json!({"attempt": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["max_tokens"], 1000);
+
+    let body = json!({"attempt": 1, "outcome": "succeeded", "duration_ms": 1, "over_budget": true});
+    let (status, refused) = finish(&app, &runner, run_id, body).await;
+    assert_eq!(
+        (status, refused["message"].as_str()),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Some("only a failed attempt can be over budget")
+        )
+    );
+    let body = json!({"attempt": 1, "outcome": "failed", "duration_ms": 1,
+                      "reason": "over budget: 1200 tokens of 1000",
+                      "input_tokens": 1100, "output_tokens": 100, "over_budget": true});
+    let (status, run) = finish(&app, &runner, run_id, body).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(run["outcome"], "failed");
+    assert_eq!(run["failure_reason"], "over budget: 1200 tokens of 1000");
+    assert_eq!(runs_and_dispatches(&pool, "PL-1").await, (1, 1));
+    let (_, issue) = call(&app, &person.token, "GET", "/api/issues/PL-1", None).await;
+    assert_eq!(
+        issue["waiting_on_person"],
+        "the run in In Progress went over its token budget"
+    );
+    assert_eq!(issue["waiting_to_run"], Value::Null);
+    let (status, _) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // An ordinary failure under the same budget is followed by the run's next.
+    create_and_move(&app, &person.token, "Other", &["todo", "start"]).await;
+    let (status, other) = claim(&app, &runner, 0).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let body = json!({"attempt": 1, "outcome": "failed", "duration_ms": 1,
+                      "reason": "claude exited with code 1"});
+    let (status, run) = finish(&app, &runner, other["run_id"].as_str().unwrap(), body).await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(runs_and_dispatches(&pool, "PL-2").await, (1, 2));
+}

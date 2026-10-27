@@ -977,6 +977,10 @@ pub struct Claim {
     /// `--codex-effort`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// The most tokens, input plus output, the attempt may use: the dispatch rule's
+    /// `max_tokens`. `None`: no budget.
+    #[serde(default)]
+    pub max_tokens: Option<i64>,
     /// The number of the attempt's next log line: 1 on a fresh attempt, one past the last
     /// stored line on a resumed one.
     pub next_line: i64,
@@ -1124,6 +1128,10 @@ pub struct FinishRun {
     /// claims for that agent, waits for the reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_limit: Option<UsageLimit>,
+    /// The runner stopped the agent when its tokens went over the run's `max_tokens`. Only
+    /// with `failed`. The run is not dispatched again: the issue waits on a person.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub over_budget: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

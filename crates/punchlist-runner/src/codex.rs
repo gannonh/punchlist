@@ -30,7 +30,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, USAGE_LIMIT, kill_group, read_record,
+    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, USAGE_LIMIT, kill_group, over_budget,
+    read_record,
 };
 
 const INITIALIZE_ID: u64 = 1;
@@ -359,13 +360,14 @@ impl Session {
     }
 
     /// Run a single agent turn: send `turn/start`, then stream messages until the turn
-    /// completes, fails or times out.
+    /// completes, fails or times out, or the thread's tokens go over `max_tokens`.
     async fn run_turn(
         &mut self,
         thread_id: &str,
         worktree: &Path,
         prompt: &str,
-    ) -> Result<(), String> {
+        max_tokens: Option<i64>,
+    ) -> Result<Turn, String> {
         self.send(&json!({
             "method": "turn/start",
             "id": TURN_START_ID,
@@ -393,6 +395,10 @@ impl Session {
                     };
                     self.input_tokens = total("inputTokens").unwrap_or(self.input_tokens);
                     self.output_tokens = total("outputTokens").unwrap_or(self.output_tokens);
+                    let used = self.input_tokens.saturating_add(self.output_tokens);
+                    if max_tokens.is_some_and(|max| used > max.max(0) as u64) {
+                        return Ok(Turn::OverBudget);
+                    }
                 }
                 Some("turn/completed") => {
                     // Check if turn/completed carries a failure status
@@ -401,7 +407,7 @@ impl Session {
                         .and_then(Value::as_str)
                         .unwrap_or("completed");
                     if status == "completed" {
-                        return Ok(());
+                        return Ok(Turn::Completed);
                     }
                     let message = (payload.pointer("/params/turn/error/message"))
                         .and_then(Value::as_str)
@@ -450,11 +456,20 @@ impl Session {
     }
 }
 
+/// How a turn that did not fail ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Turn {
+    Completed,
+    /// The thread's tokens went over the run's `max_tokens`; the runner ends the turn.
+    OverBudget,
+}
+
 /// Runs one Codex turn in `worktree` with `prompt`, with `home` (a `CodexHome`) as its
 /// `CODEX_HOME` and `thread_params` (from `thread_params`) for its thread. The app-server's
 /// messages go to `lines` as they arrive, without the streaming deltas; its stderr lines go
 /// there prefixed with `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
-/// when the turn ends and when `stop` becomes true, and that returns `Stopped`.
+/// when the turn ends and when `stop` becomes true, and that returns `Stopped`. The turn ends
+/// at the first token report over `max_tokens`, as `run_claude` does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_codex(
     codex_command: &Path,
@@ -463,6 +478,7 @@ pub(crate) async fn run_codex(
     thread_params: Value,
     worktree: &Path,
     prompt: &str,
+    max_tokens: Option<i64>,
     marker: &str,
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
@@ -498,6 +514,7 @@ pub(crate) async fn run_codex(
                 output_tokens: None,
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             });
         }
     };
@@ -523,7 +540,7 @@ pub(crate) async fn run_codex(
     let turn = tokio::select! {
         turn = async {
             let thread_id = session.start_thread(thread_params).await?;
-            session.run_turn(&thread_id, worktree, prompt).await
+            session.run_turn(&thread_id, worktree, prompt, max_tokens).await
         } => Some(turn),
         _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => None,
     };
@@ -535,6 +552,11 @@ pub(crate) async fn run_codex(
     let Some(turn) = turn else {
         return AgentExit::Stopped;
     };
+    let input_tokens = session.input_tokens.min(i64::MAX as u64) as i64;
+    let output_tokens = session.output_tokens.min(i64::MAX as u64) as i64;
+    if let (Ok(Turn::OverBudget), Some(max)) = (&turn, max_tokens) {
+        return AgentExit::Finished(over_budget(input_tokens, output_tokens, max));
+    }
     let usage_limit = turn.is_err().then(|| session.usage_limit()).flatten();
     let reason = match turn {
         Err(_) if usage_limit.is_some() => Some(USAGE_LIMIT.to_string()),
@@ -547,10 +569,11 @@ pub(crate) async fn run_codex(
             RunOutcome::Failed
         },
         reason,
-        input_tokens: Some(session.input_tokens.min(i64::MAX as u64) as i64),
-        output_tokens: Some(session.output_tokens.min(i64::MAX as u64) as i64),
+        input_tokens: Some(input_tokens),
+        output_tokens: Some(output_tokens),
         usage_limit,
         cost_usd: None,
+        over_budget: false,
     })
 }
 
@@ -587,6 +610,13 @@ done"#
     }
 
     async fn run_fake(script: &str) -> (AgentExit, Vec<String>, tempfile::TempDir) {
+        run_fake_with_budget(script, None).await
+    }
+
+    async fn run_fake_with_budget(
+        script: &str,
+        max_tokens: Option<i64>,
+    ) -> (AgentExit, Vec<String>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let command = fake_agent(temp.path(), script);
         let (tx, mut rx) = mpsc::channel(10_000);
@@ -600,6 +630,7 @@ done"#
             thread_params(Some("gpt-6-luna"), "low", mcp, temp.path()),
             temp.path(),
             "Review the pull request.",
+            max_tokens,
             "test",
             tx,
             stop_rx,
@@ -610,6 +641,41 @@ done"#
             out.push(line);
         }
         (exit, out, temp)
+    }
+
+    #[tokio::test]
+    async fn the_turn_ends_at_the_first_token_report_over_the_budget() {
+        let over = |reason: &str, input, output| {
+            AgentExit::Finished(AgentResult {
+                outcome: RunOutcome::Failed,
+                reason: Some(reason.into()),
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                usage_limit: None,
+                cost_usd: None,
+                over_budget: true,
+            })
+        };
+        // The recording's second report is 43 779 in and 288 out.
+        let (exit, lines, _temp) = run_fake_with_budget(&replay(), Some(30_000)).await;
+        assert_eq!(
+            exit,
+            over("over budget: 44067 tokens of 30000", 43_779, 288)
+        );
+        let reports = lines
+            .iter()
+            .filter(|line| line.contains("thread/tokenUsage/updated"))
+            .count();
+        assert_eq!(reports, 2);
+        assert!(!lines.iter().any(|line| line.contains("turn/completed")));
+        // A total equal to the budget is within it.
+        let (exit, _, _temp) = run_fake_with_budget(&replay(), Some(44_067)).await;
+        assert_eq!(
+            exit,
+            over("over budget: 67296 tokens of 44067", 66_761, 535)
+        );
+        let (exit, _, _temp) = run_fake_with_budget(&replay(), Some(10_000_000)).await;
+        assert!(matches!(exit, AgentExit::Finished(ref r) if r.outcome == RunOutcome::Succeeded));
     }
 
     #[tokio::test]
@@ -625,6 +691,7 @@ done"#
                 output_tokens: Some(RECORDED_OUTPUT_TOKENS),
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             })
         );
 
@@ -849,6 +916,7 @@ done"#;
                 output_tokens: Some(9),
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             })
         );
         assert_eq!(lines.len(), 8);
@@ -965,6 +1033,7 @@ done"#;
                 json!({}),
                 &dir,
                 "p",
+                None,
                 "test",
                 tx,
                 stop_rx,

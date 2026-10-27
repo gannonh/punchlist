@@ -5118,3 +5118,38 @@ async fn a_run_that_hits_the_usage_limit_waits_for_the_reset_and_uses_no_run(poo
         .unwrap();
     assert_eq!(runs, 4);
 }
+
+#[sqlx::test]
+async fn a_run_over_its_token_budget_waits_on_a_person_until_the_issue_moves(pool: PgPool) {
+    let s = setup(&pool).await;
+    load_a_workflow_a_person_can_move_through(&s, &pool).await;
+    let (_, claude_runner, first) = claimed_by_runner(&s).await;
+    person_moves(&s, "agent_review").await;
+    finish(&s, &claude_runner, &first).await;
+    let codex_runner = register(&s, "r2", &["codex"]).await;
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    let over = json!({"attempt": 1, "outcome": "failed", "duration_ms": 1,
+                      "reason": "over budget: 44067 tokens of 30000",
+                      "input_tokens": 43779, "output_tokens": 288, "over_budget": true});
+    finish_on(&s, &codex_runner, &claimed, over).await;
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, false)]);
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "the run in Agent Review went over its token budget"
+    );
+
+    // Out and in again: a new entry, dispatched as usual, and the text is gone.
+    person_moves(&s, "in_progress").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    person_moves(&s, "agent_review").await;
+    assert_eq!(waiting_on_person(&s).await, Value::Null);
+    let (status, claimed) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    finish(&s, &codex_runner, &claimed).await;
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (1, false), (2, true)]
+    );
+}

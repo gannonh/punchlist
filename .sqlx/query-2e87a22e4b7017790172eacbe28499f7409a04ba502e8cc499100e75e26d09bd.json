@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at, model)\n         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5),\n                 (SELECT coalesce(r.model, n.models ->> r.agent)\n                  FROM runner n, run r WHERE n.id = $3 AND r.id = $1))\n         RETURNING lease_expires_at, session_id, model,\n                   (SELECT effort FROM run WHERE id = $1)",
+  "query": "INSERT INTO attempt (run_id, issue_id, runner_id, attempt, lease_expires_at, model)\n         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5),\n                 (SELECT coalesce(r.model, n.models ->> r.agent)\n                  FROM runner n, run r WHERE n.id = $3 AND r.id = $1))\n         RETURNING lease_expires_at, session_id, model,\n                   (SELECT effort FROM run WHERE id = $1),\n                   (SELECT max_tokens FROM run WHERE id = $1)",
   "describe": {
     "columns": [
       {
@@ -41,6 +41,12 @@
         "name": "effort",
         "type_info": "Text",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -56,8 +62,9 @@
       false,
       false,
       true,
+      null,
       null
     ]
   },
-  "hash": "bb68a5a73f08f5e76e07bb20d0a622b4b5b073ac5a2cb1d84bd899308f1eed41"
+  "hash": "2e87a22e4b7017790172eacbe28499f7409a04ba502e8cc499100e75e26d09bd"
 }
