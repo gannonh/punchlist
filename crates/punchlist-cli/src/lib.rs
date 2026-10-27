@@ -15,7 +15,7 @@ use punchlist_api::DEFAULT_RUNS_PER_ENTRY;
 use punchlist_api::{
     ActorInfo, ChecksState, CliLoginToken, CreateAgent, CreateIssue, CreateMilestone,
     CreateProject, CreatedAgent, Event, EventDetail, GateChecklist, ImportReport, ImportState,
-    ImportStatus, Issue, Project, Proof, ProofKind, PullRequest, Run, RunOutcome, Runner,
+    ImportStatus, Invite, Issue, Project, Proof, ProofKind, PullRequest, Run, RunOutcome, Runner,
     SearchResults, SessionInfo, UpdateIssue, UpdateMilestone, UpdateProject, WorkflowInfo,
     Workspace, format_age, gate_lines,
 };
@@ -50,6 +50,10 @@ pub enum Command {
     /// List and end your account's sessions: browsers, and `pl` signed in with `pl auth login`.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Invite a person to the workspace by GitHub login: their next sign-in with GitHub makes
+    /// them a person there, creating their account when they have none.
+    #[command(subcommand)]
+    Invite(InviteCommand),
     /// Work with issues.
     #[command(subcommand)]
     Issue(IssueCommand),
@@ -130,6 +134,22 @@ pub enum AuthCommand {
 pub enum WorkspaceCommand {
     /// Print each workspace's prefix, name and repository, with `*` on the one `pl` uses.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InviteCommand {
+    /// Invite a GitHub user to the workspace.
+    Create {
+        /// Their GitHub login, such as `octocat`, in any case.
+        github_login: String,
+    },
+    /// Print the workspace's open invites: id, login, who invited them and when.
+    List,
+    /// Revoke an open invite: that GitHub user's sign-in no longer joins the workspace.
+    Revoke {
+        /// The invite's id, from `pl invite list`.
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -536,6 +556,25 @@ async fn with_config(cli: Cli, path: &Path, out: &mut dyn Write) -> anyhow::Resu
             writeln!(out, "Signed out {revoked} session{plural}.")?;
             Ok(())
         }
+        Command::Invite(InviteCommand::Create { github_login }) => {
+            let invite = client.create_invite(workspace(), &github_login).await?;
+            writeln!(
+                out,
+                "Invited {}: their next sign-in with GitHub joins this workspace. Invite {}.",
+                invite.github_login, invite.id
+            )?;
+            Ok(())
+        }
+        Command::Invite(InviteCommand::List) => {
+            let invites = client.list_invites(workspace()).await?;
+            write!(out, "{}", render_invites(&invites))?;
+            Ok(())
+        }
+        Command::Invite(InviteCommand::Revoke { id }) => {
+            client.revoke_invite(workspace(), &id).await?;
+            writeln!(out, "Revoked invite {id}.")?;
+            Ok(())
+        }
         Command::Issue(command) => issue(&client, command, out).await,
         Command::Actor(ActorCommand::Create {
             agent: _,
@@ -734,6 +773,7 @@ fn workspace_level(command: &Command) -> bool {
             matches!(command, IssueCommand::Create { .. } | IssueCommand::List)
         }
         Command::Actor(_)
+        | Command::Invite(_)
         | Command::Runner(_)
         | Command::PullRequest(_)
         | Command::Project(_)
@@ -1207,6 +1247,24 @@ fn actor_marking(actor: &punchlist_api::Actor) -> String {
 }
 
 /// `pl session list`: id, device, last use and sign-in, `*` on the current one.
+fn render_invites(invites: &[Invite]) -> String {
+    if invites.is_empty() {
+        return "No open invites.\n".to_string();
+    }
+    let login_width = (invites.iter().map(|i| i.github_login.len()).max()).unwrap_or(0);
+    (invites.iter())
+        .map(|i| {
+            format!(
+                "{}  {:login_width$}  invited by {} {}\n",
+                i.id,
+                i.github_login,
+                i.invited_by,
+                i.created_at.format("%Y-%m-%d %H:%M UTC"),
+            )
+        })
+        .collect()
+}
+
 fn render_sessions(sessions: &[SessionInfo], now: DateTime<Utc>) -> String {
     if sessions.is_empty() {
         return "No sessions.\n".to_string();

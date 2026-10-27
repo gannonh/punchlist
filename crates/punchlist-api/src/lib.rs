@@ -313,6 +313,24 @@ pub struct SessionsRevoked {
     pub revoked: u64,
 }
 
+/// `POST /api/workspaces/{id}/invites`: the GitHub user to invite to the workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateInvite {
+    /// Letters, digits and single hyphens, at most 39 characters, in any case.
+    pub github_login: String,
+}
+
+/// An open invite: the GitHub user's next sign-in with GitHub makes them a person in the
+/// workspace, creating their account when they have none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Invite {
+    pub id: Uuid,
+    pub github_login: String,
+    /// The name of the person who invited them.
+    pub invited_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// `POST /api/cli-logins`: a `pl auth login` waiting for a person to approve it in a browser.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CliLogin {

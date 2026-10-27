@@ -1,6 +1,7 @@
 //! Sign-in with GitHub (ADR 0013): the workspace's GitHub App authorizes the browser's GitHub
 //! user, and the server links that user to the signed-in account, or signs in the account
-//! linked to it. The user's token is used for one `GET /user` and dropped.
+//! linked to it, which the user's open invites can create (PL-169). The user's token is used
+//! for one `GET /user` and dropped.
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -11,6 +12,7 @@ use punchlist_api::{ErrorBody, SignInOptions};
 use serde::Deserialize;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
+use uuid::Uuid;
 
 use crate::auth::{hash_token, request_cookie, session_account, session_id};
 use crate::session::{cookie, https, random_id, start_session};
@@ -116,12 +118,14 @@ struct AccessToken {
 struct GithubUser {
     id: i64,
     login: String,
+    /// The user's display name, when they set one.
+    name: Option<String>,
 }
 
 /// GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.
 /// A link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of
-/// the account linked to the user and goes to `/`, or, with none linked, goes to
-/// `/sign-in?unlinked=<login>`.
+/// the account linked to the user, or one an open invite creates (`accept_invites`), and goes
+/// to `/`, or, with neither, goes to `/sign-in?unlinked=<login>`.
 #[utoipa::path(
     get,
     path = "/api/auth/github/callback",
@@ -193,15 +197,7 @@ async fn callback(
         };
         return Ok(redirect("/", [clear]));
     }
-    // A GitHub user can rename itself: the stored login follows the id.
-    let account = sqlx::query_scalar!(
-        "UPDATE account SET github_login = $2 WHERE github_user_id = $1 RETURNING id",
-        user.id,
-        user.login,
-    )
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some(account) = account else {
+    let Some(account) = accept_invites(&state, &user).await? else {
         // The login is letters, digits and hyphens (`github_user`), so it needs no escaping.
         return Ok(redirect(
             &format!("/sign-in?unlinked={}", user.login),
@@ -210,6 +206,71 @@ async fn callback(
     };
     let session = start_session(&state, account, &uri, &headers).await?;
     Ok(redirect("/", [clear, session]))
+}
+
+/// The account linked to the GitHub user, created when there is none and an open invite names
+/// the user's login, with a person in each workspace an open invite names, those invites
+/// accepted. None when no account is linked and no invite is open.
+async fn accept_invites(state: &AppState, user: &GithubUser) -> Result<Option<Uuid>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    // Locked first, so a second sign-in of the same user waits here and then finds the
+    // account this one creates, with no invite left.
+    let invites = sqlx::query_scalar!(
+        "SELECT id FROM invite
+         WHERE github_login = $1::text::citext AND accepted_at IS NULL AND revoked_at IS NULL
+         FOR UPDATE",
+        user.login,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    // A GitHub user can rename itself: the stored login follows the id.
+    let linked = sqlx::query!(
+        "UPDATE account SET github_login = $2 WHERE github_user_id = $1 RETURNING id, name",
+        user.id,
+        user.login,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (account, name) = match linked {
+        Some(account) => (account.id, account.name),
+        None if invites.is_empty() => return Ok(None),
+        None => {
+            let name = (user.name.as_deref().map(str::trim))
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&user.login)
+                .to_string();
+            let id = sqlx::query_scalar!(
+                "INSERT INTO account (name, github_user_id, github_login) VALUES ($1, $2, $3)
+                 RETURNING id",
+                name,
+                user.id,
+                user.login,
+            )
+            .fetch_one(&mut *tx)
+            .await?;
+            (id, name)
+        }
+    };
+    if !invites.is_empty() {
+        sqlx::query!(
+            "INSERT INTO actor (workspace_id, name, role, account_id)
+             SELECT workspace_id, $2, 'person', $3 FROM invite WHERE id = ANY($1)
+             ON CONFLICT ON CONSTRAINT actor_account_membership DO NOTHING",
+            &invites,
+            name,
+            account,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "UPDATE invite SET accepted_at = now() WHERE id = ANY($1)",
+            &invites,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(account))
 }
 
 /// Exchanges the code for the user's token and reads who the user is with it. The token goes
