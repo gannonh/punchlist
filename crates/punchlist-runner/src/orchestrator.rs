@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::RunnerConfig;
 use crate::agent::{
     ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
-    kill_runner, megabytes, remove_attempt_tmp, run_claude, write_mcp_config,
+    kill_runner, megabytes, remove_attempt_docker, remove_attempt_tmp, run_claude,
+    write_mcp_config,
 };
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
@@ -271,6 +272,11 @@ pub(crate) async fn run_with_worktrees(
                 };
                 let permit = permits.clone().try_acquire_owned().ok();
                 let (Some(worktree), Some(permit)) = (worktree, permit) else {
+                    let attempt_id = format!("{run_id}-{}", lease.attempt);
+                    let docker = remove_attempt_docker(&attempt_id).await;
+                    if docker != Default::default() {
+                        tracing::info!("run {run_id}: removed {docker} attempt {attempt_id} left");
+                    }
                     release_lost(&ctx.client, &lease).await;
                     continue;
                 };
@@ -692,14 +698,14 @@ async fn run_attempt(
         }
     };
     // Before the outcome, so the next run of the issue finds its ports free.
-    let (processes, containers) = end_attempt(&attempt_id, ATTEMPT_GRACE).await;
+    let (processes, docker) = end_attempt(&attempt_id, ATTEMPT_GRACE).await;
     let line = match remove_attempt_tmp(&tmp) {
         Ok(size) => format!(
-            "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left, and its temporary directory ({})",
+            "attempt {attempt_id} ended: removed {processes} process(es), {docker} it left, and its temporary directory ({})",
             megabytes(size)
         ),
         Err(e) => format!(
-            "attempt {attempt_id} ended: removed {processes} process(es) and {containers} container(s) it left; cannot remove {}: {e}",
+            "attempt {attempt_id} ended: removed {processes} process(es), {docker} it left; cannot remove {}: {e}",
             tmp.display()
         ),
     };
