@@ -37,8 +37,9 @@ test('a person signs a phone out from the Sessions list and the phone lands on t
   expect((await revoked).status()).toBe(204)
   expect((await phone.request.get('/api/session')).status()).toBe(401)
 
-  // The phone's next request in the app answers 401 and shows the sign-in page, with no reload.
-  await phone.getByRole('link', { name: /^Inbox/ }).click()
+  // The phone's next request in the app answers 401 and shows the sign-in page, with no reload. That request may be a
+  // read another spec's event starts before this one opens the inbox, so the key waits for no link to be there.
+  await phone.keyboard.press('i')
   await expect(phone).toHaveURL(/\/sign-in$/)
   await expect(phone.getByLabel('Token')).toBeVisible()
   // This browser is still signed in.
