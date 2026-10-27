@@ -1,0 +1,24 @@
+PL-153 live checks, 2026-10-27T17:10:06.205Z, http://127.0.0.1:59749
+
+PASS  1 main inbox: Sessions dialog, Esc  (closed=true url=/w/PL, expected /w/PL)
+PASS  1 main inbox: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/inbox)
+PASS  1 main pull-requests: Sessions dialog, Esc  (closed=true url=/w/PL, expected /w/PL)
+PASS  1 main pull-requests: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/pull-requests)
+PASS  1 branch inbox: Sessions dialog, Esc  (closed=true url=/w/PL/inbox, expected /w/PL/inbox)
+PASS  1 branch inbox: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/inbox)
+PASS  1 branch pull-requests: Sessions dialog, Esc  (closed=true url=/w/PL/pull-requests, expected /w/PL/pull-requests)
+PASS  1 branch pull-requests: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/pull-requests)
+PASS  2 inbox: nothing open, Esc  (url=/w/PL)
+PASS  3 inbox: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/inbox)
+PASS  3 inbox: account menu item, Esc  (focus on menuitem closed=true url=/w/PL/inbox)
+PASS  3 inbox: Sessions dialog (heading clicked), Esc  (closed=true url=/w/PL/inbox)
+PASS  3 inbox: Sessions dialog (focus on its control), Esc  (focus in dialog=true closed=true url=/w/PL/inbox)
+PASS  4 inbox: Tab x1, Enter, Esc  (focus on menuitemradio, closed=true, focus back on button=true, url=/w/PL/inbox)
+PASS  2 pull-requests: nothing open, Esc  (url=/w/PL)
+PASS  3 pull-requests: workspace menu item, Esc  (focus on menuitemradio closed=true url=/w/PL/pull-requests)
+PASS  3 pull-requests: account menu item, Esc  (focus on menuitem closed=true url=/w/PL/pull-requests)
+PASS  3 pull-requests: Sessions dialog (heading clicked), Esc  (closed=true url=/w/PL/pull-requests)
+PASS  3 pull-requests: Sessions dialog (focus on its control), Esc  (focus in dialog=true closed=true url=/w/PL/pull-requests)
+PASS  4 pull-requests: Tab x1, Enter, Esc  (focus on menuitemradio, closed=true, focus back on button=true, url=/w/PL/pull-requests)
+
+all passed
