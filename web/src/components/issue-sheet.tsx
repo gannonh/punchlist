@@ -279,7 +279,8 @@ function SheetBody({
           {passWhen && <div className="text-meta text-ink-3">PASS when {passWhen}</div>}
         </Field>
         <Field label="Run">
-          <Run view={view.run} detail />
+          {/* The waiting notice above says why. */}
+          <Run view={view.run} detail={view.run.state !== 'waiting'} />
         </Field>
         <Field label="Pull request">
           <PullRequest view={view.pullRequest} link />
