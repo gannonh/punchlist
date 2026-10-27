@@ -1,0 +1,217 @@
+{
+ "short@1280": {
+  "header": {
+   "left": 819,
+   "width": 443
+  },
+  "notice": null,
+  "dl": {
+   "left": 819,
+   "width": 443
+  },
+  "body": {
+   "left": 819,
+   "width": 443
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 321px",
+  "sheetScroll": {
+   "scrollWidth": 479,
+   "clientWidth": 479
+  },
+  "pageScrollWidth": 1280
+ },
+ "long@1280": {
+  "header": {
+   "left": 819,
+   "width": 443
+  },
+  "notice": null,
+  "dl": {
+   "left": 819,
+   "width": 443
+  },
+  "body": {
+   "left": 819,
+   "width": 443
+  },
+  "bodyText": "word0 word1 word2 wo",
+  "afterDl": 1,
+  "dlColumns": "110px 321px",
+  "sheetScroll": {
+   "scrollWidth": 479,
+   "clientWidth": 479
+  },
+  "pageScrollWidth": 1280
+ },
+ "waiting@1280": {
+  "header": {
+   "left": 819,
+   "width": 443
+  },
+  "notice": {
+   "left": 819,
+   "width": 443
+  },
+  "dl": {
+   "left": 819,
+   "width": 443
+  },
+  "body": {
+   "left": 819,
+   "width": 443
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 321px",
+  "sheetScroll": {
+   "scrollWidth": 479,
+   "clientWidth": 479
+  },
+  "pageScrollWidth": 1280
+ },
+ "empty@1280": {
+  "header": {
+   "left": 819,
+   "width": 443
+  },
+  "notice": null,
+  "dl": {
+   "left": 819,
+   "width": 443
+  },
+  "body": {
+   "left": 1248,
+   "width": 16
+  },
+  "bodyText": "Close",
+  "afterDl": 0,
+  "dlColumns": "110px 321px",
+  "sheetScroll": {
+   "scrollWidth": 479,
+   "clientWidth": 479
+  },
+  "pageScrollWidth": 1280
+ },
+ "short@390": {
+  "header": {
+   "left": 19,
+   "width": 353
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 353
+  },
+  "body": {
+   "left": 19,
+   "width": 353
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 231px",
+  "sheetScroll": {
+   "scrollWidth": 389,
+   "clientWidth": 389
+  },
+  "pageScrollWidth": 390
+ },
+ "long@390": {
+  "header": {
+   "left": 19,
+   "width": 353
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 353
+  },
+  "body": {
+   "left": 19,
+   "width": 353
+  },
+  "bodyText": "word0 word1 word2 wo",
+  "afterDl": 1,
+  "dlColumns": "110px 231px",
+  "sheetScroll": {
+   "scrollWidth": 389,
+   "clientWidth": 389
+  },
+  "pageScrollWidth": 390
+ },
+ "waiting@390": {
+  "header": {
+   "left": 19,
+   "width": 353
+  },
+  "notice": {
+   "left": 19,
+   "width": 353
+  },
+  "dl": {
+   "left": 19,
+   "width": 353
+  },
+  "body": {
+   "left": 19,
+   "width": 353
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 231px",
+  "sheetScroll": {
+   "scrollWidth": 389,
+   "clientWidth": 389
+  },
+  "pageScrollWidth": 390
+ },
+ "empty@390": {
+  "header": {
+   "left": 19,
+   "width": 353
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 353
+  },
+  "body": {
+   "left": 358,
+   "width": 16
+  },
+  "bodyText": "Close",
+  "afterDl": 0,
+  "dlColumns": "110px 231px",
+  "sheetScroll": {
+   "scrollWidth": 389,
+   "clientWidth": 389
+  },
+  "pageScrollWidth": 390
+ },
+ "edit": {
+  "titlePatchStatus": 200,
+  "title": "Edited in the sheet",
+  "header": {
+   "left": 819,
+   "width": 443
+  },
+  "notice": null,
+  "dl": {
+   "left": 819,
+   "width": 443
+  },
+  "body": {
+   "left": 819,
+   "width": 443
+  },
+  "bodyText": "After the edit, a bo",
+  "afterDl": 1,
+  "dlColumns": "110px 321px",
+  "sheetScroll": {
+   "scrollWidth": 479,
+   "clientWidth": 479
+  },
+  "pageScrollWidth": 1280
+ }
+}

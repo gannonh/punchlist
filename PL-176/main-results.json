@@ -1,0 +1,217 @@
+{
+ "short@1280": {
+  "header": {
+   "left": 925.5,
+   "width": 229
+  },
+  "notice": null,
+  "dl": {
+   "left": 861,
+   "width": 358
+  },
+  "body": {
+   "left": 1021.5,
+   "width": 37
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 236px",
+  "sheetScroll": {
+   "scrollWidth": 478,
+   "clientWidth": 478
+  },
+  "pageScrollWidth": 1280
+ },
+ "long@1280": {
+  "header": {
+   "left": 975.5,
+   "width": 129
+  },
+  "notice": null,
+  "dl": {
+   "left": 861,
+   "width": 358
+  },
+  "body": {
+   "left": 819,
+   "width": 442
+  },
+  "bodyText": "word0 word1 word2 wo",
+  "afterDl": 1,
+  "dlColumns": "110px 236px",
+  "sheetScroll": {
+   "scrollWidth": 478,
+   "clientWidth": 478
+  },
+  "pageScrollWidth": 1280
+ },
+ "waiting@1280": {
+  "header": {
+   "left": 952,
+   "width": 176
+  },
+  "notice": {
+   "left": 819,
+   "width": 442
+  },
+  "dl": {
+   "left": 861,
+   "width": 358
+  },
+  "body": {
+   "left": 1021.5,
+   "width": 37
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 236px",
+  "sheetScroll": {
+   "scrollWidth": 478,
+   "clientWidth": 478
+  },
+  "pageScrollWidth": 1280
+ },
+ "empty@1280": {
+  "header": {
+   "left": 968.5,
+   "width": 143
+  },
+  "notice": null,
+  "dl": {
+   "left": 861,
+   "width": 358
+  },
+  "body": {
+   "left": 1247,
+   "width": 16
+  },
+  "bodyText": "Close",
+  "afterDl": 0,
+  "dlColumns": "110px 236px",
+  "sheetScroll": {
+   "scrollWidth": 478,
+   "clientWidth": 478
+  },
+  "pageScrollWidth": 1280
+ },
+ "short@390": {
+  "header": {
+   "left": 80.5,
+   "width": 229
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 352
+  },
+  "body": {
+   "left": 176.5,
+   "width": 37
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 230px",
+  "sheetScroll": {
+   "scrollWidth": 388,
+   "clientWidth": 388
+  },
+  "pageScrollWidth": 390
+ },
+ "long@390": {
+  "header": {
+   "left": 130.5,
+   "width": 129
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 352
+  },
+  "body": {
+   "left": 19,
+   "width": 352
+  },
+  "bodyText": "word0 word1 word2 wo",
+  "afterDl": 1,
+  "dlColumns": "110px 230px",
+  "sheetScroll": {
+   "scrollWidth": 388,
+   "clientWidth": 388
+  },
+  "pageScrollWidth": 390
+ },
+ "waiting@390": {
+  "header": {
+   "left": 107,
+   "width": 176
+  },
+  "notice": {
+   "left": 19,
+   "width": 352
+  },
+  "dl": {
+   "left": 19,
+   "width": 352
+  },
+  "body": {
+   "left": 176.5,
+   "width": 37
+  },
+  "bodyText": "Waits.",
+  "afterDl": 1,
+  "dlColumns": "110px 230px",
+  "sheetScroll": {
+   "scrollWidth": 388,
+   "clientWidth": 388
+  },
+  "pageScrollWidth": 390
+ },
+ "empty@390": {
+  "header": {
+   "left": 123.5,
+   "width": 143
+  },
+  "notice": null,
+  "dl": {
+   "left": 19,
+   "width": 352
+  },
+  "body": {
+   "left": 357,
+   "width": 16
+  },
+  "bodyText": "Close",
+  "afterDl": 0,
+  "dlColumns": "110px 230px",
+  "sheetScroll": {
+   "scrollWidth": 388,
+   "clientWidth": 388
+  },
+  "pageScrollWidth": 390
+ },
+ "edit": {
+  "titlePatchStatus": 200,
+  "title": "Edited in the sheet",
+  "header": {
+   "left": 949.5,
+   "width": 181
+  },
+  "notice": null,
+  "dl": {
+   "left": 861,
+   "width": 358
+  },
+  "body": {
+   "left": 819,
+   "width": 442
+  },
+  "bodyText": "After the edit, a bo",
+  "afterDl": 1,
+  "dlColumns": "110px 236px",
+  "sheetScroll": {
+   "scrollWidth": 478,
+   "clientWidth": 478
+  },
+  "pageScrollWidth": 1280
+ }
+}
