@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT agent, branch, prompt, effort FROM run WHERE id = $1",
+  "query": "SELECT agent, branch, prompt, effort, max_tokens FROM run WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -46,6 +46,17 @@
             "name": "effort"
           }
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "max_tokens",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "max_tokens"
+          }
+        }
       }
     ],
     "parameters": {
@@ -57,8 +68,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "eadf99b0ea85a6aed097b3152129519f5b3222d17a08d3e87bd4ca1669196c5d"
+  "hash": "dcc668821661948235d0069ddf11b2cb6e343a1da1d5c0c0b1be1b4e2e64b9a3"
 }

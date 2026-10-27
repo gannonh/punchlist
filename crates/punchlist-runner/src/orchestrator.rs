@@ -403,6 +403,7 @@ async fn release_lost(client: &Client, lease: &Lease) {
         cost_usd: None,
         lost: true,
         usage_limit: None,
+        over_budget: false,
     };
     match client.finish_run(&run_id, &request).await {
         Ok(_) => tracing::info!(
@@ -587,6 +588,7 @@ async fn run_attempt(
             output_tokens: None,
             usage_limit: None,
             cost_usd: None,
+            over_budget: false,
         })
     };
     // The run acts on GitHub as the workspace's App when the server minted it a token; a
@@ -728,6 +730,7 @@ async fn run_attempt(
                 output_tokens: None,
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             },
             true,
         ),
@@ -756,6 +759,7 @@ async fn run_attempt(
         cost_usd: result.cost_usd,
         lost,
         usage_limit: result.usage_limit,
+        over_budget: result.over_budget,
     };
     finish_with_retry(
         &ctx.client,
@@ -838,6 +842,7 @@ async fn run_agent(
             output_tokens: None,
             usage_limit: None,
             cost_usd: None,
+            over_budget: false,
         })
     };
     let marker = &ctx.runner_id;
@@ -863,6 +868,7 @@ async fn run_agent(
                 params,
                 worktree,
                 prompt,
+                claim.max_tokens,
                 marker,
                 lines,
                 stop,
@@ -889,6 +895,7 @@ async fn run_agent(
                 env,
                 worktree,
                 prompt,
+                claim.max_tokens,
                 marker,
                 lines,
                 stop,
@@ -989,6 +996,7 @@ mod tests {
             cost_usd: None,
             lost: false,
             usage_limit: None,
+            over_budget: false,
         }
     }
 
@@ -1213,6 +1221,7 @@ mod tests {
             session_id,
             model: None,
             effort: None,
+            max_tokens: None,
             next_line,
             github: Some(punchlist_api::GithubToken {
                 token: "ghs_run".into(),

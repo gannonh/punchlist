@@ -1,6 +1,6 @@
 //! `/api/issues`: create, list, show and move issues, and read their timelines.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -227,15 +227,16 @@ async fn get_issue(
 }
 
 /// Why each of `issues` that waits on a person does, as `get_issue` and the list's rows say
-/// it: a run of the entry's round said so (`wait_for_person`), or the round's last run ended.
-/// `queue_redispatch` reads the same rules to queue nothing more, and a Run again only an
-/// issue this names.
+/// it: a run of the entry's round said so (`wait_for_person`), its last run went over its
+/// token budget, or the round's last run ended. `queue_redispatch` reads the same rules to
+/// queue nothing more, and a Run again only an issue this names.
 pub(crate) async fn waiting_on_person(
     conn: &mut sqlx::PgConnection,
     issues: &[&Issue],
 ) -> sqlx::Result<HashMap<String, String>> {
     let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
     let reasons = waiting_reasons(conn, &ids).await?;
+    let over_budget = over_budget(conn, &ids).await?;
     let ended = runs_ended(conn, &ids).await?;
     Ok((issues.iter())
         .filter_map(|issue| {
@@ -243,6 +244,10 @@ pub(crate) async fn waiting_on_person(
                 (Some((agent, reason)), _) => format!(
                     "{} is waiting on a person: {reason}",
                     agent_display_name(agent)
+                ),
+                _ if over_budget.contains(&issue.id) => format!(
+                    "the run in {} went over its token budget",
+                    issue.status_name
                 ),
                 (None, Some(runs)) => format!(
                     "{runs} runs in {} ended without moving it",
@@ -253,6 +258,30 @@ pub(crate) async fn waiting_on_person(
             Some((issue.id.clone(), why))
         })
         .collect())
+}
+
+/// The issues in `ids` whose entry's last dispatch ran a run that ended with its last attempt
+/// over its token budget, as `waiting_reasons` reads the entry.
+async fn over_budget(
+    conn: &mut sqlx::PgConnection,
+    ids: &[String],
+) -> sqlx::Result<HashSet<String>> {
+    let rows = sqlx::query_scalar!(
+        r#"SELECT d.issue_id FROM dispatch d
+           JOIN run r ON r.id = d.run_id
+           WHERE d.issue_id = ANY($1) AND r.outcome <> 'running'
+             AND (SELECT over_budget FROM attempt WHERE run_id = r.id
+                  ORDER BY attempt DESC LIMIT 1)
+             AND d.run_number = (SELECT max(run_number) FROM dispatch
+                                 WHERE transition_id = d.transition_id)
+             AND d.transition_id = (SELECT e.transition_id FROM event e
+                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
+                                    ORDER BY e.seq DESC LIMIT 1)"#,
+        ids,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 /// The issues in `ids` whose entry's round has a run whose agent said it waits on a person

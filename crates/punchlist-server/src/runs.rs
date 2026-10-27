@@ -296,7 +296,8 @@ async fn try_claim(
                  (SELECT coalesce(r.model, n.models ->> r.agent)
                   FROM runner n, run r WHERE n.id = $3 AND r.id = $1))
          RETURNING lease_expires_at, session_id, model,
-                   (SELECT effort FROM run WHERE id = $1)",
+                   (SELECT effort FROM run WHERE id = $1),
+                   (SELECT max_tokens FROM run WHERE id = $1)",
         run_id,
         id,
         runner.id,
@@ -329,6 +330,7 @@ async fn try_claim(
         session_id: leased.session_id,
         model: leased.model,
         effort: leased.effort,
+        max_tokens: leased.max_tokens,
         next_line: 1,
         github: None,
         github_error: None,
@@ -492,7 +494,9 @@ async fn new_run(
         let rule = queued_under.dispatch_for(&from).cloned();
         (from, issue, prompt, rule)
     };
-    let (model, effort) = rule.map_or((None, None), |rule| (rule.model, rule.effort));
+    let (model, effort, max_tokens) = rule.map_or((None, None, None), |rule| {
+        (rule.model, rule.effort, rule.max_tokens)
+    });
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
     // a retry, because nothing has merged on the branch it was given. A run dispatched in a
@@ -506,8 +510,9 @@ async fn new_run(
         branch = format!("{base}-{lifecycle}");
     }
     let run_id = sqlx::query_scalar!(
-        "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt, model, effort)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt, model, effort,
+                          max_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
         actor.workspace_id,
         id,
         status,
@@ -516,6 +521,7 @@ async fn new_run(
         prompt,
         model,
         effort,
+        max_tokens,
     )
     .fetch_one(&mut *tx)
     .await
@@ -890,6 +896,11 @@ async fn finish_run(
                 "only a failed attempt can be lost".into(),
             ));
         }
+        RunOutcome::Succeeded if request.over_budget => {
+            return Err(ApiError::Invalid(
+                "only a failed attempt can be over budget".into(),
+            ));
+        }
         RunOutcome::Succeeded if request.usage_limit.is_some() => {
             return Err(ApiError::Invalid(
                 "only a failed attempt can hit the usage limit".into(),
@@ -939,7 +950,7 @@ async fn finish_run(
     let updated = sqlx::query_scalar!(
         "UPDATE attempt SET state = $4, finished_at = now(), failure_reason = $5,
                 duration_ms = $6, input_tokens = $7, output_tokens = $8,
-                cost_usd = $9::text::numeric
+                cost_usd = $9::text::numeric, over_budget = $10
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
              AND lease_expires_at > now()
          RETURNING id",
@@ -952,6 +963,7 @@ async fn finish_run(
         request.input_tokens,
         request.output_tokens,
         request.cost_usd,
+        request.over_budget,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -1047,7 +1059,7 @@ async fn resume_run(
         return Err(stale(id, request.attempt));
     };
     let run = sqlx::query!(
-        "SELECT agent, branch, prompt, effort FROM run WHERE id = $1",
+        "SELECT agent, branch, prompt, effort, max_tokens FROM run WHERE id = $1",
         id
     )
     .fetch_one(&mut *tx)
@@ -1081,6 +1093,7 @@ async fn resume_run(
         session_id: held.session_id,
         model: held.model,
         effort: run.effort,
+        max_tokens: run.max_tokens,
         next_line,
         github: None,
         github_error: None,
@@ -1276,10 +1289,11 @@ async fn settle_run(
 /// without a dispatch, an issue that moved, a status the active workflow now locks to agents
 /// or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or run
 /// `dispatch.runs_per_entry` of the round (a Run again starts the next, `runs_before`), or a run whose
-/// agent said it waits on a person (`wait_for_person`): that issue waits on a person. Nor when
-/// the active workflow cannot be read, which is logged. `waiting_on_person` reads the same
-/// three rules, the latest transition, the limit and the waiting reason, to say so; change
-/// them together.
+/// agent said it waits on a person (`wait_for_person`), or a run whose last attempt went over
+/// its token budget (the same budget would stop the next run too): that issue waits on a
+/// person. Nor when the active workflow cannot be read, which is logged. `waiting_on_person`
+/// reads the same rules, the latest transition, the limit, the waiting reason and the budget,
+/// to say so; change them together.
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
@@ -1294,12 +1308,15 @@ async fn queue_redispatch(
     resets_at: Option<DateTime<Utc>>,
 ) -> sqlx::Result<()> {
     let run = sqlx::query!(
-        "SELECT status, waiting_reason FROM run WHERE id = $1",
+        r#"SELECT status, waiting_reason,
+                  (SELECT over_budget FROM attempt WHERE run_id = $1
+                   ORDER BY attempt DESC LIMIT 1) AS "over_budget!"
+           FROM run WHERE id = $1"#,
         run_id
     )
     .fetch_one(&mut *tx)
     .await?;
-    if run.waiting_reason.is_some() {
+    if run.waiting_reason.is_some() || run.over_budget {
         return Ok(());
     }
     let status = run.status;

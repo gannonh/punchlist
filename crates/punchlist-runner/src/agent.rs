@@ -3,6 +3,7 @@
 //! cost.
 //! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -16,7 +17,7 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// The prompt for one issue: where the agent is, the workflow's prompt for the status, then
 /// the issue. The issue's title and body are text from outside the team, so they sit inside
@@ -159,10 +160,31 @@ pub struct AgentResult {
     // only, not the one before the restart. Upgrade: keep a running total per attempt, which
     // needs the agent to report during the run.
     pub cost_usd: Option<String>,
+    /// The runner stopped the agent when its tokens went over the run's `max_tokens`.
+    pub over_budget: bool,
 }
 
 /// The reason of an attempt whose agent stopped on its account's usage limit.
 pub(crate) const USAGE_LIMIT: &str = "usage limit";
+
+/// The attempt the runner stopped at the first token report over `max`, with the tokens of
+/// that report.
+// ponytail: the stop comes after the report that crossed the line, so a run overshoots by up
+// to one model call; a total only the final `result` line reports is not checked, since the
+// run is over by then; and a resumed Claude Code attempt counts from the restart only.
+// Upgrade path: the server sums the attempt's earlier tokens and the runner starts there.
+pub(crate) fn over_budget(input_tokens: i64, output_tokens: i64, max: i64) -> AgentResult {
+    let used = input_tokens.saturating_add(output_tokens);
+    AgentResult {
+        outcome: RunOutcome::Failed,
+        reason: Some(format!("over budget: {used} tokens of {max}")),
+        input_tokens: Some(input_tokens),
+        output_tokens: Some(output_tokens),
+        usage_limit: None,
+        cost_usd: None,
+        over_budget: true,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentExit {
@@ -282,12 +304,9 @@ fn plain_decimal(number: &str) -> Option<String> {
     (text.len() <= 30).then_some(text)
 }
 
-fn parse_result_line(line: &str) -> Option<ResultLine> {
-    let value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type")?.as_str()? != "result" {
-        return None;
-    }
-    let usage = value.get("usage");
+/// The input tokens of a `usage`: Claude Code's new, cache-written and cache-read input, as
+/// the run card counts them; and its output tokens.
+fn usage_counts(usage: Option<&Value>) -> (Option<i64>, Option<i64>) {
     let count = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_i64);
     let input = [
         "input_tokens",
@@ -301,6 +320,30 @@ fn parse_result_line(line: &str) -> Option<ResultLine> {
         (sum, None) => sum,
         (Some(a), Some(b)) => Some(a + b),
     });
+    (input, count("output_tokens"))
+}
+
+/// An `assistant` event's message id and its usage's input and output tokens. Claude Code
+/// prints one event per content block of a message, each with the usage seen so far.
+fn assistant_usage(line: &str) -> Option<(String, i64, i64)> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type")?.as_str()? != "assistant" {
+        return None;
+    }
+    let message = value.get("message")?;
+    let id = message.get("id")?.as_str()?.to_string();
+    match usage_counts(message.get("usage")) {
+        (None, None) => None,
+        (input, output) => Some((id, input.unwrap_or(0), output.unwrap_or(0))),
+    }
+}
+
+fn parse_result_line(line: &str) -> Option<ResultLine> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type")?.as_str()? != "result" {
+        return None;
+    }
+    let (input, output) = usage_counts(value.get("usage"));
     Some(ResultLine {
         is_error: value
             .get("is_error")
@@ -312,7 +355,7 @@ fn parse_result_line(line: &str) -> Option<ResultLine> {
             .and_then(Value::as_str)
             .map(String::from),
         input_tokens: input,
-        output_tokens: count("output_tokens"),
+        output_tokens: output,
         cost_usd: serde_json::from_str::<Cost>(line)
             .ok()
             .and_then(|cost| cost.total_cost_usd)
@@ -331,12 +374,19 @@ fn rejected_rate_limit(line: &str) -> Option<UsageLimit> {
     })
 }
 
-/// What the runner reads from Claude Code's output: the last `result` line, and the last
-/// rate limit that refused the session.
+/// What the runner reads from Claude Code's output: the last `result` line, the last rate
+/// limit that refused the session, and the tokens of each message so far.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Stream {
     result: Option<ResultLine>,
     rejected: Option<UsageLimit>,
+    /// Per message id, the input and output tokens of its last `assistant` event.
+    // ponytail: an `assistant` event carries the usage of its message's start, so the output
+    // counted here is below the true output (16 + 3 against 71 in
+    // `tests/fixtures/claude/session.jsonl`); the input is exact and dominates the total.
+    // Upgrade path: `--include-partial-messages` adds each message's final `message_delta`,
+    // with every text delta, which the log would then have to drop.
+    messages: HashMap<String, (i64, i64)>,
 }
 
 impl Stream {
@@ -345,14 +395,25 @@ impl Stream {
             self.result = Some(result);
         } else if let Some(rejected) = rejected_rate_limit(line) {
             self.rejected = Some(rejected);
+        } else if let Some((id, input, output)) = assistant_usage(line) {
+            self.messages.insert(id, (input, output));
         }
+    }
+
+    /// The input and output tokens of the session's messages so far.
+    fn tokens(&self) -> (i64, i64) {
+        (self.messages.values()).fold((0, 0), |(input, output), (i, o)| {
+            (input.saturating_add(*i), output.saturating_add(*o))
+        })
     }
 }
 
 /// A failed session stopped on the usage limit when its result or a rate limit event says
 /// so: then the reason is `usage limit`, with the reset time when the event gave one.
 fn outcome_of(exit_code: Option<i32>, stream: Stream) -> AgentResult {
-    let Stream { result, rejected } = stream;
+    let Stream {
+        result, rejected, ..
+    } = stream;
     let (input_tokens, output_tokens, cost_usd) = result
         .as_ref()
         .map(|r| (r.input_tokens, r.output_tokens, r.cost_usd.clone()))
@@ -385,6 +446,7 @@ fn outcome_of(exit_code: Option<i32>, stream: Stream) -> AgentResult {
         output_tokens,
         usage_limit,
         cost_usd,
+        over_budget: false,
     }
 }
 
@@ -393,7 +455,9 @@ fn outcome_of(exit_code: Option<i32>, stream: Stream) -> AgentResult {
 /// server slows the agent rather than growing the runner's memory. The agent runs in its own
 /// process group; when `stop` becomes true the whole group is killed and this returns
 /// `Stopped`. Anything left in the group after the agent exits is killed too. `env` goes over
-/// the runner's environment; `None` removes a variable.
+/// the runner's environment; `None` removes a variable. At the first `assistant` event that
+/// takes the session's tokens over `max_tokens`, the group is killed and the attempt fails
+/// over budget (`over_budget`).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_claude(
     claude_command: &Path,
@@ -401,6 +465,7 @@ pub async fn run_claude(
     env: &[(&'static str, Option<OsString>)],
     worktree: &Path,
     prompt: &str,
+    max_tokens: Option<i64>,
     marker: &str,
     lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
@@ -413,6 +478,7 @@ pub async fn run_claude(
             output_tokens: None,
             usage_limit: None,
             cost_usd: None,
+            over_budget: false,
         })
     };
     let mut command = Command::new(claude_command);
@@ -444,12 +510,21 @@ pub async fn run_claude(
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let stdout_lines = lines.clone();
+    // The tokens of the event that went over the budget.
+    let (over_tx, mut over_rx) = oneshot::channel::<(i64, i64)>();
     let mut stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut stream = Stream::default();
+        let mut over_tx = Some(over_tx);
         while let Ok(Some(line)) = read_record(&mut reader, MAX_RECORD_BYTES).await {
             stream.read(&line);
             let _ = stdout_lines.send(line).await;
+            let (input, output) = stream.tokens();
+            if max_tokens.is_some_and(|max| input.saturating_add(output) > max)
+                && let Some(over_tx) = over_tx.take()
+            {
+                let _ = over_tx.send((input, output));
+            }
         }
         stream
     });
@@ -461,8 +536,15 @@ pub async fn run_claude(
         }
     });
 
+    let mut over = None;
     let status = tokio::select! {
         status = child.wait() => status,
+        Ok(tokens) = &mut over_rx => {
+            kill_group(group);
+            let _ = child.kill().await;
+            over = Some(tokens);
+            child.wait().await
+        }
         _ = async { let _ = stop.wait_for(|stopped| *stopped).await; } => {
             kill_group(group);
             let _ = child.kill().await;
@@ -488,6 +570,9 @@ pub async fn run_claude(
         stderr_task.abort();
         return AgentExit::Stopped;
     };
+    if let (Some((input, output)), Some(max)) = (over, max_tokens) {
+        return AgentExit::Finished(over_budget(input, output, max));
+    }
     match status {
         Ok(status) => AgentExit::Finished(outcome_of(status.code(), result)),
         Err(e) => failed(format!("cannot wait for claude: {e}")),
@@ -874,6 +959,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             &[],
             temp.path(),
             "p",
+            None,
             "test",
             tx,
             stop_rx,
@@ -888,6 +974,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 output_tokens: Some(7),
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             })
         );
         assert_eq!(drain.await.unwrap(), 31);
@@ -950,6 +1037,14 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
     }
 
     async fn run_fake(script: &str, prompt: &str) -> (AgentExit, Vec<String>) {
+        run_fake_with_budget(script, prompt, None).await
+    }
+
+    async fn run_fake_with_budget(
+        script: &str,
+        prompt: &str,
+        max_tokens: Option<i64>,
+    ) -> (AgentExit, Vec<String>) {
         let temp = tempfile::tempdir().unwrap();
         let command = fake_agent(temp.path(), script);
         // Drained only after the agent exits, so big enough for a whole run.
@@ -961,6 +1056,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             &[],
             temp.path(),
             prompt,
+            max_tokens,
             "test",
             tx,
             stop_rx,
@@ -1015,6 +1111,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 output_tokens: Some(42),
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             })
         );
         let nonce = lines
@@ -1107,6 +1204,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 output_tokens: None,
                 usage_limit: None,
                 cost_usd: None,
+                over_budget: false,
             })
         );
         assert_eq!(lines, ["stderr: oops"]);
@@ -1138,6 +1236,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                     resets_at: DateTime::from_timestamp(1_792_779_600, 0),
                 }),
                 cost_usd: Some("0".into()),
+                over_budget: false,
             })
         );
         assert_eq!(lines.len(), 3);
@@ -1197,6 +1296,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                 output_tokens: Some(2),
                 usage_limit: None,
                 cost_usd: Some("0.25".into()),
+                over_budget: false,
             })
         );
     }
@@ -1261,6 +1361,7 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
             &[],
             temp.path(),
             "p",
+            None,
             "test",
             tx,
             stop_rx,
@@ -1286,6 +1387,7 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
                 &[],
                 temp.path(),
                 "p",
+                None,
                 "test",
                 tx,
                 stop_rx,
@@ -1333,6 +1435,7 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
                 &[],
                 &dir,
                 "p",
+                None,
                 "test",
                 tx,
                 stop_rx,
@@ -1367,5 +1470,87 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
         assert!(matches!(exit, AgentExit::Finished(ref r) if r.outcome == RunOutcome::Succeeded));
         let pid = std::fs::read_to_string(&pidfile).unwrap();
         assert_dies(pid.trim()).await;
+    }
+
+    const SESSION: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/claude/session.jsonl"
+    );
+
+    /// `tests/fixtures/claude/session.jsonl` is the stdout of Claude Code 2.1.308 on haiku
+    /// reading one file and answering, without its `system` lines.
+    #[test]
+    fn the_messages_input_sums_to_the_results_and_their_output_is_below_it() {
+        let mut stream = Stream::default();
+        for line in std::fs::read_to_string(SESSION).unwrap().lines() {
+            stream.read(line);
+        }
+        let result = stream.result.clone().unwrap();
+        assert_eq!(stream.messages.len(), 2);
+        assert_eq!(stream.tokens(), (67_746, 19));
+        assert_eq!(
+            (result.input_tokens, result.output_tokens),
+            (Some(67_746), Some(71))
+        );
+    }
+
+    fn over(reason: &str, input: i64, output: i64) -> AgentExit {
+        AgentExit::Finished(AgentResult {
+            outcome: RunOutcome::Failed,
+            reason: Some(reason.into()),
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            usage_limit: None,
+            cost_usd: None,
+            over_budget: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_agent_is_killed_at_the_first_message_over_the_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let pidfile = temp.path().join("agent.pid");
+        let script = format!("echo $$ > {}\ncat {SESSION}\nsleep 30", pidfile.display());
+        let started = std::time::Instant::now();
+        let (exit, lines) = run_fake_with_budget(&script, "p", Some(30_000)).await;
+        // The first message: 2 + 22 590 + 11 228 in, 16 out.
+        assert_eq!(exit, over("over budget: 33836 tokens of 30000", 33_820, 16));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(r#""type":"assistant""#))
+        );
+        assert_dies(std::fs::read_to_string(&pidfile).unwrap().trim()).await;
+        // A total equal to the budget is within it; the second message goes over.
+        let (exit, _) = run_fake_with_budget(&script, "p", Some(33_836)).await;
+        assert_eq!(exit, over("over budget: 67765 tokens of 33836", 67_746, 19));
+    }
+
+    #[tokio::test]
+    async fn a_run_within_its_budget_or_with_usage_only_in_its_result_is_not_stopped() {
+        let assistant = |id: &str, input: i64, output: i64| {
+            format!(
+                r#"echo '{{"type":"assistant","message":{{"id":"{id}","usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}'"#
+            )
+        };
+        // 900 tokens: the second event of `a` replaces its first.
+        let script = [
+            assistant("a", 100, 1),
+            assistant("a", 100, 50),
+            assistant("b", 700, 50),
+            ECHO_THEN_RESULT.into(),
+        ]
+        .join("\n");
+        let (exit, _) = run_fake_with_budget(&script, "p\n", Some(900)).await;
+        assert!(
+            matches!(exit, AgentExit::Finished(ref r) if r.outcome == RunOutcome::Succeeded && !r.over_budget),
+            "{exit:?}"
+        );
+        let (exit, _) = run_fake_with_budget(ECHO_THEN_RESULT, "p\n", Some(1)).await;
+        assert!(
+            matches!(exit, AgentExit::Finished(ref r) if r.outcome == RunOutcome::Succeeded),
+            "{exit:?}"
+        );
     }
 }
