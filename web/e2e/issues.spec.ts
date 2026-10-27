@@ -624,10 +624,15 @@ test('Enter opens the issue page, and a comment from its composer shows in the f
   )
   const id = created.issue.id
   await signIn(page)
-  await row(page, id).click()
+  // Enter opens the focused row. Clicking a row that is already focused (the first row of a fresh list) opens
+  // its sheet instead, which takes the Enter, so click only to focus it.
+  if ((await row(page, id).getAttribute('data-focused')) === null) await row(page, id).click()
+  await expect(row(page, id)).toHaveAttribute('data-focused', '')
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${id}$`))
   const text = `Commented from the page ${randomUUID()}`
+  // `c` focuses the composer only once the issue has loaded and enabled it.
+  await expect(page.getByLabel('New comment')).toBeEnabled()
   await page.keyboard.press('c')
   await expect(page.getByLabel('New comment')).toBeFocused()
   await page.keyboard.type(text)
