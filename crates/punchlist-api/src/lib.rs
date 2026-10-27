@@ -313,6 +313,59 @@ pub struct SessionsRevoked {
     pub revoked: u64,
 }
 
+/// `POST /api/cli-logins`: a `pl auth login` waiting for a person to approve it in a browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CliLogin {
+    /// 8 letters the person checks against the approval page.
+    pub code: String,
+    /// The approval page, `<public url>/cli-login?code=<code>`.
+    pub url: String,
+    /// The secret `pl` polls with. Only `pl` holds it.
+    pub device_secret: String,
+    /// Seconds until the login expires.
+    pub expires_in: u64,
+}
+
+/// `POST /api/cli-logins/token`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CliLoginPoll {
+    pub device_secret: String,
+}
+
+/// What a poll of a `pl auth login` answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CliLoginToken {
+    /// No one has approved or denied it yet.
+    Pending,
+    /// Approved: `token` is the new CLI session's id, answered once, which `pl` sends as its
+    /// bearer value.
+    Approved {
+        token: String,
+    },
+    Denied,
+    Expired,
+}
+
+/// Where a `pl auth login` stands, as its approval page shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CliLoginState {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+/// `GET /api/cli-logins/{code}`: the login a person is asked to approve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CliLoginInfo {
+    pub code: String,
+    /// The `pl` that asked, such as `pl on sartre`, else `pl on a terminal`.
+    pub device: String,
+    pub state: CliLoginState,
+}
+
 /// `GET /api/auth`: the ways the sign-in page offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SignInOptions {

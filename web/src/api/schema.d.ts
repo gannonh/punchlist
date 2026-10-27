@@ -88,6 +88,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cli-logins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Starts a `pl auth login`. No token: this is how `pl` gets one. */
+        post: operations["create_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli-logins/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * `pl`'s poll: an approved login answers its new CLI session once, which expires 90 days
+         *     after its last use.
+         */
+        post: operations["poll_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli-logins/{code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The login the approval page asks a person about. */
+        get: operations["show_login"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli-logins/{code}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve: `pl`'s next poll gets a session of the person's account. */
+        post: operations["approve_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cli-logins/{code}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Deny: `pl`'s next poll says so, and no session is made. */
+        post: operations["deny_login"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/github/webhook": {
         parameters: {
             query?: never;
@@ -1378,6 +1466,51 @@ export interface components {
              *     answering 204.
              */
             wait_seconds?: number;
+        };
+        /** @description `POST /api/cli-logins`: a `pl auth login` waiting for a person to approve it in a browser. */
+        CliLogin: {
+            /** @description 8 letters the person checks against the approval page. */
+            code: string;
+            /** @description The secret `pl` polls with. Only `pl` holds it. */
+            device_secret: string;
+            /**
+             * Format: int64
+             * @description Seconds until the login expires.
+             */
+            expires_in: number;
+            /** @description The approval page, `<public url>/cli-login?code=<code>`. */
+            url: string;
+        };
+        /** @description `GET /api/cli-logins/{code}`: the login a person is asked to approve. */
+        CliLoginInfo: {
+            code: string;
+            /** @description The `pl` that asked, such as `pl on sartre`, else `pl on a terminal`. */
+            device: string;
+            state: components["schemas"]["CliLoginState"];
+        };
+        /** @description `POST /api/cli-logins/token`. */
+        CliLoginPoll: {
+            device_secret: string;
+        };
+        /**
+         * @description Where a `pl auth login` stands, as its approval page shows it.
+         * @enum {string}
+         */
+        CliLoginState: "pending" | "approved" | "denied" | "expired";
+        /** @description What a poll of a `pl auth login` answers. */
+        CliLoginToken: {
+            /** @enum {string} */
+            state: "pending";
+        } | {
+            /** @enum {string} */
+            state: "approved";
+            token: string;
+        } | {
+            /** @enum {string} */
+            state: "denied";
+        } | {
+            /** @enum {string} */
+            state: "expired";
         };
         /**
          * @description `POST /api/actors`, with a person's token. Mints an agent actor that acts through its own
@@ -2844,6 +2977,196 @@ export interface operations {
             };
             /** @description Sign-in with GitHub is not configured. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliLogin"];
+                };
+            };
+        };
+    };
+    poll_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CliLoginPoll"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliLoginToken"];
+                };
+            };
+            /** @description No login has this secret. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The login's session was already answered. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    show_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CliLoginInfo"];
+                };
+            };
+            /** @description Not a person. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    approve_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a person. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Already approved or denied, or expired. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deny_login: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Denied. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a person. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Already approved or denied, or expired. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

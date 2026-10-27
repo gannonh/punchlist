@@ -67,3 +67,24 @@ export async function signIn(page: Page) {
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page).toHaveURL(/\/w\/PL$/)
 }
+
+export interface Inbox {
+  items: { issue: { id: string; status: string }; unread: boolean }[]
+  unread: number
+}
+
+export const inbox = async (request: APIRequestContext) =>
+  ok<Inbox>(await request.get('/api/inbox', { headers: bearer(personToken()) }))
+
+// Other spec files move issues meanwhile, so the header is checked against the inbox as the server has it then.
+export async function headerMatches(page: Page, request: APIRequestContext) {
+  await expect
+    .poll(
+      async () => {
+        const [shown, now] = [await page.locator('[data-inbox-count]').textContent(), await inbox(request)]
+        return shown === String(now.unread)
+      },
+      { timeout: 2000 },
+    )
+    .toBe(true)
+}

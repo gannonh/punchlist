@@ -48,6 +48,10 @@ enum Command {
         /// it is minted, instead of GitHub's hour, so runners refresh it sooner.
         #[arg(long, env = "PUNCHLIST_GITHUB_TOKEN_LIFETIME", hide = true)]
         github_token_lifetime: Option<u64>,
+        /// A test setting: a `pl auth login` expires this many seconds after it starts,
+        /// instead of 600.
+        #[arg(long, env = "PUNCHLIST_CLI_LOGIN_LIFETIME", hide = true)]
+        cli_login_lifetime: Option<u64>,
         /// The directory proof files are kept in. A leading `~/` is the home directory.
         #[arg(
             long,
@@ -155,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
             github_app_id,
             github_app_private_key,
             github_token_lifetime,
+            cli_login_lifetime,
             proof_dir,
             proof_max_bytes,
             web_dir,
@@ -207,6 +212,9 @@ async fn main() -> anyhow::Result<()> {
                     max_bytes: proof_max_bytes,
                 })
                 .with_shutdown(stopping);
+            if let Some(seconds) = cli_login_lifetime {
+                state = state.with_cli_login_lifetime(std::time::Duration::from_secs(seconds));
+            }
             // An empty secret is no secret: anyone could sign with it.
             match github_webhook_secret.filter(|secret| !secret.is_empty()) {
                 Some(secret) => state = state.with_github_webhook_secret(secret),

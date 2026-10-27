@@ -18,6 +18,7 @@ import { IssueScreen } from '@/screens/issue'
 import { IssuesScreen, type ListSearch } from '@/screens/issues'
 import { ProjectsScreen } from '@/screens/projects'
 import { PullRequestsScreen } from '@/screens/pull-requests'
+import { CliLoginScreen } from '@/screens/cli-login'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
 
@@ -105,6 +106,26 @@ const rememberWorkspace = (prefix: string) => {
   }
 }
 
+// A page that needs a sign-in sends the browser back to itself after it, through `/`, where both the token's and
+// GitHub's sign-in land.
+const AFTER_SIGN_IN = 'punchlist:after-sign-in'
+const rememberAfterSignIn = (href: string) => {
+  try {
+    sessionStorage.setItem(AFTER_SIGN_IN, href)
+  } catch {
+    // The browser lands on its list instead.
+  }
+}
+const takeAfterSignIn = () => {
+  try {
+    const href = sessionStorage.getItem(AFTER_SIGN_IN)
+    sessionStorage.removeItem(AFTER_SIGN_IN)
+    return href?.startsWith('/') && !href.startsWith('//') ? href : null
+  } catch {
+    return null
+  }
+}
+
 // `/` and the paths from before workspaces were in the URL open the last workspace used, else the oldest.
 const toWorkspace = async (queryClient: QueryClient) => {
   await signedIn(queryClient)
@@ -117,7 +138,30 @@ const home = createRoute({
   getParentRoute: () => root,
   path: '/',
   beforeLoad: async ({ context, search }) => {
+    await signedIn(context.queryClient)
+    const back = takeAfterSignIn()
+    if (back) throw redirect({ href: back })
     throw redirect({ to: '/w/$prefix', params: { prefix: await toWorkspace(context.queryClient) }, search })
+  },
+})
+
+// The approval page of `pl auth login` (PL-170). Signed out, it goes through `/sign-in` and back.
+const cliLogin = createRoute({
+  getParentRoute: () => root,
+  path: '/cli-login',
+  validateSearch: (search: Record<string, unknown>): { code?: string } => ({ code: id(search.code) }),
+  beforeLoad: async ({ context, location }) => {
+    const session = await context.queryClient.query(sessionQuery)
+    if (!session) {
+      rememberAfterSignIn(location.href)
+      throw redirect({ to: '/sign-in' })
+    }
+    return { session }
+  },
+  component: function CliLogin() {
+    const { session } = cliLogin.useRouteContext()
+    const { code } = cliLogin.useSearch()
+    return <CliLoginScreen code={code ?? ''} account={session.account?.name ?? session.actor.name} />
   },
 })
 
@@ -246,6 +290,7 @@ const router = createRouter({
   routeTree: root.addChildren([
     signIn,
     home,
+    cliLogin,
     oldPullRequests,
     oldInbox,
     oldProjects,

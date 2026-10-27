@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH found AS (\n               SELECT id, account_id, last_used_at, kind FROM session\n               WHERE id = $1 AND kind = $2 AND expires_at > now()\n           ), touched AS (\n               UPDATE session\n               SET last_used_at = now(),\n                   expires_at = now() + CASE found.kind WHEN 'cli' THEN interval '90 days'\n                                                        ELSE interval '30 days' END\n               FROM found\n               WHERE session.id = found.id AND found.last_used_at < now() - interval '1 minute'\n           )\n           SELECT account_id FROM found",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "account_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "81d367e7c3b6ef34dc0403294d0569d64b7b9089be30bc80fafb848611733f76"
+}

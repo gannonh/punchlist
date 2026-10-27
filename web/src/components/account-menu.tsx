@@ -93,7 +93,8 @@ function SessionsDialog() {
     <DialogContent className="bg-card" data-sessions>
       <DialogTitle className="text-title">Sessions</DialogTitle>
       <DialogDescription className="text-meta text-ink-3">
-        The browsers your account is signed in on. Signing one out ends it on its next request.
+        The browsers and terminals running pl your account is signed in on. Signing one out ends it on its next
+        request.
       </DialogDescription>
       {sessions.isPending ? (
         <p className="text-meta text-ink-3">Loading…</p>

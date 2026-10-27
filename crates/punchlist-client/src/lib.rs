@@ -2,14 +2,15 @@
 //! server.
 
 use punchlist_api::{
-    ActorList, AppendLog, Claim, ClaimRequest, CreateAgent, CreateComment, CreateIssue,
-    CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event, FinishRun, GateChecklist,
-    GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus, Issue, IssueList,
-    IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
-    Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
-    RegisterRunner, RegisteredRunner, ResumeRun, Run, RunAgainResult, RunLog, RunnerList,
-    SearchResults, Session, SessionInfo, SessionsRevoked, UpdateIssue, UpdateMilestone,
-    UpdateProject, WaitForPerson, WorkflowInfo, Workspace, proof_type_by_extension,
+    ActorList, AppendLog, Claim, ClaimRequest, CliLogin, CliLoginPoll, CliLoginToken, CreateAgent,
+    CreateComment, CreateIssue, CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event,
+    FinishRun, GateChecklist, GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus,
+    Issue, IssueList, IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved,
+    OpenPullRequest, PROOF_TYPES, Project, ProjectList, Proof, ProofKind, PullRequest,
+    PullRequestsNow, RefreshGithubToken, RegisterRunner, RegisteredRunner, ResumeRun, Run,
+    RunAgainResult, RunLog, RunnerList, SearchResults, Session, SessionInfo, SessionsRevoked,
+    UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson, WorkflowInfo, Workspace,
+    proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -121,6 +122,24 @@ impl Client {
     /// so it ends them all.
     pub async fn revoke_other_sessions(&self) -> Result<SessionsRevoked, ClientError> {
         self.send::<(), _>(Method::DELETE, &["sessions"], None)
+            .await
+    }
+
+    /// Starts a `pl auth login`, as the `pl` its `user_agent` names (`pl/0.1.0 (sartre)`).
+    /// Needs no token.
+    pub async fn start_cli_login(&self, user_agent: &str) -> Result<CliLogin, ClientError> {
+        let request = self.builder(Method::POST, &["cli-logins"])?;
+        let response = Self::respond(request.header(reqwest::header::USER_AGENT, user_agent));
+        Ok(response.await?.json().await?)
+    }
+
+    /// Whether a person has approved the login yet: once approved, its CLI session. Needs no
+    /// token.
+    pub async fn poll_cli_login(&self, device_secret: &str) -> Result<CliLoginToken, ClientError> {
+        let poll = CliLoginPoll {
+            device_secret: device_secret.to_string(),
+        };
+        self.send(Method::POST, &["cli-logins", "token"], Some(&poll))
             .await
     }
 
@@ -482,7 +501,7 @@ impl Client {
         }
     }
 
-    /// A request to `/api/<path>` with the token.
+    /// A request to `/api/<path>` with the token, if the client has one.
     fn builder(&self, method: Method, path: &[&str]) -> Result<RequestBuilder, ClientError> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
@@ -490,7 +509,11 @@ impl Client {
             .pop_if_empty()
             .push("api")
             .extend(path);
-        Ok(self.http.request(method, url).bearer_auth(&self.token))
+        let request = self.http.request(method, url);
+        Ok(match self.token.as_str() {
+            "" => request,
+            token => request.bearer_auth(token),
+        })
     }
 
     /// Sends the request; an error status is a `ClientError`.

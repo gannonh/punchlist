@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT public_id, user_agent, created_at, last_used_at,\n                  COALESCE(id = $2, false) AS \"current!\"\n           FROM session\n           WHERE account_id = $1 AND expires_at > now()\n           ORDER BY last_used_at DESC, created_at DESC, public_id",
+  "query": "SELECT public_id, user_agent, kind, created_at, last_used_at,\n                  COALESCE(id = $2, false) AS \"current!\"\n           FROM session\n           WHERE account_id = $1 AND expires_at > now()\n           ORDER BY last_used_at DESC, created_at DESC, public_id",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "session",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -37,7 +48,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "last_used_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "current!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -65,8 +76,9 @@
       true,
       false,
       false,
+      false,
       null
     ]
   },
-  "hash": "8c0689e67bb08f3f46b7aed88ecf5612ad09cdef16407259484b2d2ec8a46797"
+  "hash": "148993ff5c87211629cd97d8a93634f197ca57d01ae13046c5166c6fb539ee11"
 }

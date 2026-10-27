@@ -236,6 +236,222 @@
         ]
       }
     },
+    "/api/cli-logins": {
+      "post": {
+        "summary": "Starts a `pl auth login`. No token: this is how `pl` gets one.",
+        "operationId": "create_login",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliLogin"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/cli-logins/token": {
+      "post": {
+        "summary": "`pl`'s poll: an approved login answers its new CLI session once, which expires 90 days\nafter its last use.",
+        "operationId": "poll_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CliLoginPoll"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliLoginToken"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No login has this secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The login's session was already answered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/cli-logins/{code}": {
+      "get": {
+        "summary": "The login the approval page asks a person about.",
+        "operationId": "show_login",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliLoginInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a person.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli-logins/{code}/approve": {
+      "post": {
+        "summary": "Approve: `pl`'s next poll gets a session of the person's account.",
+        "operationId": "approve_login",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Approved."
+          },
+          "403": {
+            "description": "Not a person.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already approved or denied, or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli-logins/{code}/deny": {
+      "post": {
+        "summary": "Deny: `pl`'s next poll says so, and no session is made.",
+        "operationId": "deny_login",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Denied."
+          },
+          "403": {
+            "description": "Not a person.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already approved or denied, or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/github/webhook": {
       "post": {
         "summary": "Receive a GitHub webhook delivery. The signature is checked, the payload parsed, and a\njob queued to record it; the answer does not wait for the job. Unauthenticated: GitHub\nsigns the body instead of sending a bearer token.",
@@ -4186,6 +4402,146 @@
             "minimum": 0
           }
         }
+      },
+      "CliLogin": {
+        "type": "object",
+        "description": "`POST /api/cli-logins`: a `pl auth login` waiting for a person to approve it in a browser.",
+        "required": [
+          "code",
+          "url",
+          "device_secret",
+          "expires_in"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "8 letters the person checks against the approval page."
+          },
+          "device_secret": {
+            "type": "string",
+            "description": "The secret `pl` polls with. Only `pl` holds it."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the login expires.",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "description": "The approval page, `<public url>/cli-login?code=<code>`."
+          }
+        }
+      },
+      "CliLoginInfo": {
+        "type": "object",
+        "description": "`GET /api/cli-logins/{code}`: the login a person is asked to approve.",
+        "required": [
+          "code",
+          "device",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "device": {
+            "type": "string",
+            "description": "The `pl` that asked, such as `pl on sartre`, else `pl on a terminal`."
+          },
+          "state": {
+            "$ref": "#/components/schemas/CliLoginState"
+          }
+        }
+      },
+      "CliLoginPoll": {
+        "type": "object",
+        "description": "`POST /api/cli-logins/token`.",
+        "required": [
+          "device_secret"
+        ],
+        "properties": {
+          "device_secret": {
+            "type": "string"
+          }
+        }
+      },
+      "CliLoginState": {
+        "type": "string",
+        "description": "Where a `pl auth login` stands, as its approval page shows it.",
+        "enum": [
+          "pending",
+          "approved",
+          "denied",
+          "expired"
+        ]
+      },
+      "CliLoginToken": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No one has approved or denied it yet.",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Approved: `token` is the new CLI session's id, answered once, which `pl` sends as its\nbearer value.",
+            "required": [
+              "token",
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "approved"
+                ]
+              },
+              "token": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "denied"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "expired"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What a poll of a `pl auth login` answers."
       },
       "CreateAgent": {
         "type": "object",

@@ -2230,3 +2230,150 @@ async fn issue_retry_queues_another_run_and_refuses_an_issue_not_waiting(pool: P
         again.stderr
     );
 }
+
+/// Runs `pl auth login` with the config at `config`, answering the login it prints with
+/// `decision` (`approve` or `deny`) as the person: its output, and the URL and code it printed.
+async fn auth_login(pl: &Pl, config: &std::path::Path, decision: &str) -> (Output, String) {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("pl"))
+        .env("PUNCHLIST_CONFIG", config)
+        .args(["auth", "login", "--server", &pl.url])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (printed, rest) = tokio::task::spawn_blocking(move || {
+        let mut lines = std::io::BufReader::new(stdout).lines();
+        let mut printed = String::new();
+        for line in lines.by_ref() {
+            let line = line.unwrap();
+            printed.push_str(&line);
+            printed.push('\n');
+            if line.starts_with("Waiting") {
+                break;
+            }
+        }
+        (printed, lines)
+    })
+    .await
+    .unwrap();
+    let code = printed
+        .lines()
+        .find_map(|line| line.strip_prefix("Code: "))
+        .unwrap()
+        .to_string();
+    let answer = reqwest::Client::new()
+        .post(format!("{}/api/cli-logins/{code}/{decision}", pl.url))
+        .bearer_auth(&pl.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), reqwest::StatusCode::NO_CONTENT);
+    let output = tokio::task::spawn_blocking(move || {
+        let rest: Vec<String> = rest.map(Result::unwrap).collect();
+        let output = child.wait_with_output().unwrap();
+        Output {
+            code: output.status.code().unwrap(),
+            stdout: printed + &rest.join("\n"),
+            stderr: String::from_utf8(output.stderr).unwrap(),
+        }
+    })
+    .await
+    .unwrap();
+    (output, code)
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn auth_login_writes_a_cli_session_and_logout_ends_it(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let config = pl.dir.path().join("fresh/config.toml");
+    let (login, code) = auth_login(&pl, &config, "approve").await;
+    assert_eq!(login.code, 0, "{}", login.stderr);
+    assert_eq!(
+        login.stdout,
+        format!(
+            "Open this URL in a browser signed in to Punchlist and approve the code:\n\n  {}/cli-login?code={code}\n\nCode: {code}\nWaiting for approval…\nSigned in as Gannon. Wrote {}.",
+            pl.url,
+            config.display()
+        )
+    );
+    let written = std::fs::read_to_string(&config).unwrap();
+    let token = written
+        .lines()
+        .find_map(|line| line.strip_prefix("token = \""))
+        .unwrap()
+        .trim_end_matches('"');
+    assert_ne!(token, pl.token);
+    let kind: String = sqlx::query_scalar("SELECT kind FROM session")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "cli");
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&config).unwrap().permissions())
+            & 0o777,
+        0o600
+    );
+
+    let session = Pl {
+        config: config.clone(),
+        url: pl.url.clone(),
+        token: token.to_string(),
+        account_id: pl.account_id,
+        dir: tempfile::tempdir().unwrap(),
+    };
+    let list = session.run(&["issue", "list"]).await;
+    assert_eq!((list.code, list.stderr.as_str()), (0, ""));
+    let host = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string());
+    if let Some(host) = host.ok().filter(|h| !h.is_empty()) {
+        let sessions = session.run(&["session", "list"]).await;
+        assert!(
+            sessions.stdout.contains(&format!("pl on {host}")),
+            "{}",
+            sessions.stdout
+        );
+    }
+
+    let logout = session.run(&["auth", "logout"]).await;
+    assert_eq!(logout.code, 0, "{}", logout.stderr);
+    assert!(
+        logout.stdout.starts_with("Signed out pl on "),
+        "{}",
+        logout.stdout
+    );
+    assert!(
+        logout
+            .stdout
+            .ends_with(". Run pl auth login to sign in again.\n")
+    );
+    let after = session.run(&["issue", "list"]).await;
+    assert_eq!(after.code, 1);
+    assert_eq!(
+        after.stderr,
+        "error: the server refused pl's token or session; run pl auth login: missing or unknown bearer token (401 Unauthorized)\n"
+    );
+
+    // With the account's token there is no session to end.
+    let with_token = pl.run(&["auth", "logout"]).await;
+    assert_eq!(with_token.code, 1);
+    assert!(
+        with_token
+            .stderr
+            .contains("not a session from pl auth login")
+    );
+}
+
+#[sqlx::test(migrator = "punchlist_server::MIGRATOR")]
+async fn a_denied_auth_login_writes_nothing(pool: PgPool) {
+    let pl = Pl::start(&pool).await;
+    let config = pl.dir.path().join("denied/config.toml");
+    let (login, _) = auth_login(&pl, &config, "deny").await;
+    assert_eq!(
+        (login.code, login.stderr.as_str()),
+        (1, "error: the login was denied; nothing was written\n")
+    );
+    assert!(!config.exists());
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO cli_login (code, secret_hash, user_agent, expires_at)\n             VALUES ($1, $2, $3, now() + make_interval(secs => $4))\n             ON CONFLICT (code) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef10b383ae5e43188976d48cb466bf448ae79057891b1763629046be5531b7f2"
+}
