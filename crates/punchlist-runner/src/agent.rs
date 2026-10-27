@@ -929,10 +929,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// Starts `sh -c script` with `var=value`, and returns once its environment shows it:
-    /// `spawn` returns once the child has forked, before `execve` has replaced its
-    /// environment, so `/proc/<pid>/environ` reads empty, then holds the test's own
-    /// environment, and only then the marker.
+    /// Starts a script ending in `exec sleep` with `var=value`, and waits for that exec
+    /// and its environment. Seeing the shell's marker alone is not enough: its later
+    /// exec can briefly make `/proc/<pid>/environ` unreadable during cleanup's scan.
     fn spawn_marked(var: &str, value: &str, script: &str) -> std::process::Child {
         let child = std::process::Command::new("sh")
             .args(["-c", script])
@@ -940,12 +939,15 @@ pub(crate) mod tests {
             .spawn()
             .unwrap();
         let environ = format!("/proc/{}/environ", child.id());
+        let exe = format!("/proc/{}/exe", child.id());
         let wanted = format!("{var}={value}").into_bytes();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !std::fs::read(&environ)
-            .unwrap_or_default()
-            .split(|&b| b == 0)
-            .any(|var| var == wanted.as_slice())
+        while !std::fs::read_link(&exe)
+            .is_ok_and(|path| path.file_name().is_some_and(|name| name == "sleep"))
+            || !std::fs::read(&environ)
+                .unwrap_or_default()
+                .split(|&b| b == 0)
+                .any(|var| var == wanted.as_slice())
         {
             assert!(std::time::Instant::now() < deadline, "no marker");
             std::thread::sleep(Duration::from_millis(5));
