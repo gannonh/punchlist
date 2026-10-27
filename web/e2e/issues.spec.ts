@@ -825,7 +825,7 @@ test('move three selected rows to Todo from the right-click menu, then a selecti
   await expect(page.locator('[data-selection]')).toContainText('2 selected')
 })
 
-test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
+test('the issue page, the list row and the side sheet show an issue waiting on a person; Run again from the sheet', async ({
   page,
   request,
 }) => {
@@ -834,7 +834,7 @@ test('Run again on the waiting notice queues another run, and the notice goes wi
   const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
   const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
     headers: bearer(agent_token),
-    data: { reason: 'The check is flaky.' },
+    data: { reason: 'Pick a <b>name</b>.' },
   })
   expect(waiting.status()).toBe(204)
   await ok(
@@ -843,13 +843,23 @@ test('Run again on the waiting notice queues another run, and the notice goes wi
       data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
     }),
   )
+  const reason = 'Claude Code is waiting on a person: Pick a <b>name</b>.'
   await signIn(page)
   await page.goto(`/issues/${id}`)
-  const notice = page.locator('[data-notice="waiting"]')
-  await expect(notice).toContainText('Claude Code is waiting on a person: The check is flaky.')
+  await expect(page.locator('[data-notice="waiting"]')).toContainText(reason)
+  await expect(page.locator('[data-notice="waiting"] [data-run-again]')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  const run = row(page, id).locator('[data-run]')
+  await expect(run).toHaveText('Waiting on you')
+  await expect(run).toHaveAttribute('title', reason)
+  const notice = (await openSheet(page, id)).locator('[data-notice="waiting"]')
+  await expect(notice).toContainText(`Waiting on a person: ${reason}.`)
+  await expect(notice.locator('b')).toHaveCount(0)
   await notice.locator('[data-run-again]').click()
   await expect(notice).toHaveCount(0, { timeout: 2000 })
-  await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
+  await expect(run).toHaveText('Queued')
   await page.keyboard.press('Escape')
-  await expect(row(page, id).locator('[data-run]')).toHaveText('Queued')
+  await page.keyboard.press('Enter')
+  await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
 })

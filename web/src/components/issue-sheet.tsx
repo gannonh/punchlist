@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { Assignee, Gates, LockBadge, PullRequest, Run, StatusDot, TransitionNote } from '@/components/atoms'
 import { StatusMenu } from '@/components/status-menu'
+import { WaitingNotice } from '@/components/waiting-notice'
 import {
   agentName,
   age,
@@ -151,6 +152,12 @@ function SheetBody({
     <>
       <SheetDescription className="font-mono text-meta text-ink-3">{view.id}</SheetDescription>
       <SheetTitle className="mt-1.5 mb-3 pr-8 text-title">{view.title}</SheetTitle>
+      {/* Only people reach the list. */}
+      {issue.waiting_on_person && (
+        <div className="mb-3">
+          <WaitingNotice id={view.id} waiting={issue.waiting_on_person} person />
+        </div>
+      )}
       <dl className="m-0 grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-2">
         <Field label="Title">
           <SavedInput
@@ -272,7 +279,8 @@ function SheetBody({
           {passWhen && <div className="text-meta text-ink-3">PASS when {passWhen}</div>}
         </Field>
         <Field label="Run">
-          <Run view={view.run} detail />
+          {/* The waiting notice above says why. */}
+          <Run view={view.run} detail={view.run.state !== 'waiting'} />
         </Field>
         <Field label="Pull request">
           <PullRequest view={view.pullRequest} link />

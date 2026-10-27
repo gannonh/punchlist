@@ -56,9 +56,10 @@ pub struct Issue {
     pub blocks: Vec<LinkedIssue>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Why the issue waits on a person, when it does: every run this entry into its status
-    /// gets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;
-    /// every other response that carries an issue leaves it out.
+    /// Why the issue waits on a person, when it does: its agent called `wait_for_person`, or
+    /// every run this entry into its status gets has ended and the issue has not moved.
+    /// `GET /api/issues/{id}` and the issue's row (`IssueRow`, so the list and the event
+    /// stream) fill this; every other response that carries an issue leaves it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on_person: Option<String>,
     /// That the issue's next run waits for its agent's usage limit to reset, and when:

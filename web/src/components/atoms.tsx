@@ -85,12 +85,14 @@ export function Assignee({ view, short = false }: { view: AssigneeView; short?: 
   }
 }
 
+const RUN_COLOR: Partial<Record<RunView['state'], string>> = { running: 'text-ok', failed: 'text-bad', waiting: 'text-warn' }
+
 export function Run({ view, detail = false }: { view: RunView; detail?: boolean }) {
   return (
     <span
       className={cn(
         `run-${view.state} inline-flex items-center gap-1.5 truncate text-meta whitespace-nowrap`,
-        view.state === 'running' ? 'text-ok' : view.state === 'failed' ? 'text-bad' : 'text-muted-foreground',
+        RUN_COLOR[view.state] ?? 'text-muted-foreground',
       )}
       data-run={view.state}
       title={view.detail ?? view.label}

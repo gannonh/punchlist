@@ -192,7 +192,9 @@ async fn get_issue(
     let mut issue = issue(&mut conn, actor.workspace_id, &id)
         .await?
         .ok_or_else(|| ApiError::IssueNotFound(id.clone()))?;
-    issue.waiting_on_person = waiting_on_person(&mut conn, &issue).await?;
+    issue.waiting_on_person = waiting_on_person(&mut conn, &[&issue])
+        .await?
+        .remove(&issue.id);
     // A run of the entry hit its agent's usage limit and gave its dispatch back to wait for
     // the reset (`queue_redispatch`).
     let limited = sqlx::query!(
@@ -224,27 +226,33 @@ async fn get_issue(
     Ok(Json(issue))
 }
 
-/// Why the issue waits on a person, as `get_issue` says it: a run of the entry's round said so
-/// (`wait_for_person`), or the round's last run ended. `queue_redispatch` reads the same rules
-/// to queue nothing more, and a Run again only an issue this names.
-async fn waiting_on_person(
+/// Why each of `issues` that waits on a person does, as `get_issue` and the list's rows say
+/// it: a run of the entry's round said so (`wait_for_person`), or the round's last run ended.
+/// `queue_redispatch` reads the same rules to queue nothing more, and a Run again only an
+/// issue this names.
+pub(crate) async fn waiting_on_person(
     conn: &mut sqlx::PgConnection,
-    issue: &Issue,
-) -> sqlx::Result<Option<String>> {
-    let ids = std::slice::from_ref(&issue.id);
-    if let Some((agent, reason)) = waiting_reasons(conn, ids).await?.remove(&issue.id) {
-        return Ok(Some(format!(
-            "{} is waiting on a person: {reason}",
-            agent_display_name(&agent)
-        )));
-    }
-    let ended = runs_ended(conn, ids).await?;
-    Ok(ended.get(&issue.id).map(|runs| {
-        format!(
-            "{runs} runs in {} ended without moving it",
-            issue.status_name
-        )
-    }))
+    issues: &[&Issue],
+) -> sqlx::Result<HashMap<String, String>> {
+    let ids: Vec<String> = issues.iter().map(|issue| issue.id.clone()).collect();
+    let reasons = waiting_reasons(conn, &ids).await?;
+    let ended = runs_ended(conn, &ids).await?;
+    Ok((issues.iter())
+        .filter_map(|issue| {
+            let why = match (reasons.get(&issue.id), ended.get(&issue.id)) {
+                (Some((agent, reason)), _) => format!(
+                    "{} is waiting on a person: {reason}",
+                    agent_display_name(agent)
+                ),
+                (None, Some(runs)) => format!(
+                    "{runs} runs in {} ended without moving it",
+                    issue.status_name
+                ),
+                (None, None) => return None,
+            };
+            Some((issue.id.clone(), why))
+        })
+        .collect())
 }
 
 /// The issues in `ids` whose entry's round has a run whose agent said it waits on a person
@@ -355,7 +363,11 @@ async fn run_again(
     )
     .fetch_one(&mut *tx)
     .await?;
-    if busy || waiting_on_person(&mut tx, &issue).await?.is_none() {
+    if busy
+        || !waiting_on_person(&mut tx, &[&issue])
+            .await?
+            .contains_key(&id)
+    {
         return Err(not_waiting());
     }
     // Waiting on a person means the entry has a dispatch whose run ended.
