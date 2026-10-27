@@ -588,6 +588,8 @@ test('an issue in Merging waits on the merge, and its pull request links open Gi
   const chip = merging.locator('a[data-pr-link]')
   await expect(chip).toHaveAttribute('aria-label', `Open on GitHub: pull request #${String(head.number)}`)
   const selected = await merging.getAttribute('aria-selected')
+  // The generated repository is a fixture. Keep popup navigation independent of GitHub and the network.
+  await page.context().route(url, (route) => route.fulfill({ contentType: 'text/html', body: '<title>Pull request</title>' }))
   const popup = page.waitForEvent('popup')
   await chip.click()
   expect((await popup).url()).toContain(`/pull/${String(head.number)}`)
