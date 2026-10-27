@@ -224,6 +224,28 @@ export function useSignOut() {
   })
 }
 
+/** A `pl auth login` the signed-in person is asked to approve (PL-170). */
+export const cliLoginQuery = (code: string) =>
+  queryOptions({
+    queryKey: ['cli-login', code],
+    queryFn: () => call(api.GET('/api/cli-logins/{code}', { params: { path: { code } } })),
+    retry: false,
+  })
+
+/** Approves or denies a `pl auth login`, once. */
+export function useDecideCliLogin(code: string) {
+  return useMutation({
+    mutationFn: (decision: 'approve' | 'deny'): Promise<unknown> => {
+      const params = { params: { path: { code } } }
+      return call(
+        decision === 'approve'
+          ? api.POST('/api/cli-logins/{code}/approve', params)
+          : api.POST('/api/cli-logins/{code}/deny', params),
+      )
+    },
+  })
+}
+
 type SessionInfo = components['schemas']['SessionInfo']
 
 /** The account's browser sessions, newest use first. Read again each time the list opens. */

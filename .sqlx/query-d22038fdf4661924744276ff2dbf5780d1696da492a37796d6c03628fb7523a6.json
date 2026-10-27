@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM cli_login WHERE expires_at < now() - interval '1 day'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d22038fdf4661924744276ff2dbf5780d1696da492a37796d6c03628fb7523a6"
+}

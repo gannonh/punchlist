@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE cli_login SET state = 'used' WHERE code = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "008de59aa40af3a6df5b212c301414d50dc52f9610378c91447073b6db8dd731"
+}

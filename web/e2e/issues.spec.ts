@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-import { bearer, deliver, deliverPullRequest, fixture, ok, personToken, signIn } from './support'
+import { bearer, deliver, deliverPullRequest, fixture, headerMatches, inbox, ok, personToken, signIn } from './support'
 
 interface Claimed {
   id: string
@@ -79,6 +79,8 @@ async function openSheet(page: Page, id: string) {
   return page.getByRole('dialog')
 }
 
+// Every test that claims runs is in this file, which one worker runs in order: a claim takes any waiting work, so
+// a test in another file would take the dispatch a test here waits to show as queued.
 // First in the file: its runner claims the dispatch its own run's end queues, before another test's runner could.
 test('a run ending, the next claim and a pull request turning ready show on the open list', async ({
   page,
@@ -111,6 +113,52 @@ test('a run ending, the next claim and a pull request turning ready show on the 
   await expect(row(page, id).locator('[data-gates]')).toHaveAttribute('data-gates', '3/3', live)
   // The same document all along: a reload would have a new time origin.
   expect(await page.evaluate(() => sessionStorage.getItem('loaded') === String(performance.timeOrigin))).toBe(true)
+})
+
+test('Run again on a run item whose runs are used up queues a run, and the item leaves without opening the issue', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const { row } = await ok<{ row: { issue: { id: string } } }>(
+    await request.post('/api/issues', { headers: person, data: { title: 'Ran out of runs', body: '' } }),
+  )
+  const id = row.issue.id
+  for (const to of ['todo', 'start'])
+    await ok(await request.post(`/api/issues/${id}/transitions`, { headers: person, data: { to } }))
+  // The person registers the runner, so the runs' agents are theirs and the item is in their inbox.
+  const runner = await ok<{ token: string }>(
+    await request.post('/api/runners', { headers: person, data: { name: `e2e-${id}`, agents: ['claude-code'] } }),
+  )
+  // Three runs in In Progress that end without moving it. Claims go in issue order, so an earlier test's waiting
+  // work can come first: this runner takes it too, and claims again.
+  for (let runs = 0; runs < 3; runs++) {
+    let claim: { run_id: string; attempt: number; issue: { id: string } }
+    do {
+      claim = await ok(await request.post('/api/runs/claim', { headers: bearer(runner.token), data: {} }))
+    } while (claim.issue.id !== id)
+    await ok(
+      await request.post(`/api/runs/${claim.run_id}/finish`, {
+        headers: bearer(runner.token),
+        data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+      }),
+    )
+  }
+  expect((await inbox(request)).items.find((item) => item.issue.id === id)).toMatchObject({ kind: 'run' })
+
+  await signIn(page)
+  await page.goto('/w/PL/inbox')
+  await expect(page.locator(`[data-item="${id}"]`)).toContainText('3 runs in In Progress ended without moving it')
+  await expect(page.locator('[data-section="waiting"] [data-run-again]')).toHaveCount(0)
+  const retries: string[] = []
+  page.on('request', (sent) => {
+    if (sent.method() === 'POST' && sent.url().endsWith('/retry')) retries.push(sent.url())
+  })
+  await page.getByRole('button', { name: `Run again ${id}` }).click()
+  await expect(page.locator(`[data-item="${id}"]`)).toHaveCount(0, { timeout: 2000 })
+  expect(new URL(page.url()).pathname).toBe('/w/PL/inbox')
+  expect(retries).toEqual([expect.stringContaining(`/api/issues/${id}/retry`)])
+  await headerMatches(page, request)
 })
 
 test('create, edit, roll back a refused edit, and show a refused transition as pending then refused', async ({
