@@ -15,8 +15,8 @@ use punchlist_api::DEFAULT_RUNS_PER_ENTRY;
 use punchlist_api::{
     ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
     Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
-    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, UpdateIssue,
-    UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, format_age, gate_lines,
+    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, SessionInfo,
+    UpdateIssue, UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, format_age, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -43,6 +43,9 @@ pub enum Command {
     /// List the workspaces of your account.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// List and end your account's browser sessions.
+    #[command(subcommand)]
+    Session(SessionCommand),
     /// Work with issues.
     #[command(subcommand)]
     Issue(IssueCommand),
@@ -109,6 +112,21 @@ pub enum ImportCommand {
 pub enum WorkspaceCommand {
     /// Print each workspace's prefix, name and repository, with `*` on the one `pl` uses.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// Print each browser your account is signed in on: its id, device and last use.
+    List,
+    /// Sign a browser out: its next request is refused and it shows the sign-in page.
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["id", "all_others"])))]
+    Revoke {
+        /// The session's id, from `pl session list`.
+        id: Option<String>,
+        /// End every session. `pl` signs in with a token, which is no session, so none is kept.
+        #[arg(long)]
+        all_others: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -461,6 +479,28 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
     let workspace = || workspace.as_deref().expect("a workspace-level command");
     match cli.command {
         Command::Workspace(_) => unreachable!("handled above"),
+        Command::Session(SessionCommand::List) => {
+            write!(
+                out,
+                "{}",
+                render_sessions(&client.sessions().await?, Utc::now())
+            )?;
+            Ok(())
+        }
+        Command::Session(SessionCommand::Revoke {
+            id: Some(id),
+            all_others: false,
+        }) => {
+            client.revoke_session(&id).await?;
+            writeln!(out, "Signed out session {id}.")?;
+            Ok(())
+        }
+        Command::Session(SessionCommand::Revoke { .. }) => {
+            let revoked = client.revoke_other_sessions().await?.revoked;
+            let plural = if revoked == 1 { "" } else { "s" };
+            writeln!(out, "Signed out {revoked} session{plural}.")?;
+            Ok(())
+        }
         Command::Issue(command) => issue(&client, command, out).await,
         Command::Actor(ActorCommand::Create {
             agent: _,
@@ -666,7 +706,11 @@ fn workspace_level(command: &Command) -> bool {
         | Command::Workflow(_)
         | Command::Import(_)
         | Command::Search { .. } => true,
-        Command::Workspace(_) | Command::Run(_) | Command::Proof(_) | Command::Mcp(_) => false,
+        Command::Workspace(_)
+        | Command::Session(_)
+        | Command::Run(_)
+        | Command::Proof(_)
+        | Command::Mcp(_) => false,
     }
 }
 
@@ -1004,6 +1048,26 @@ fn actor_marking(actor: &punchlist_api::Actor) -> String {
         Some(kind) => format!("{} ({}, {kind})", actor.name, actor.role),
         None => format!("{} ({})", actor.name, actor.role),
     }
+}
+
+/// `pl session list`: id, device, last use and sign-in, `*` on the current one.
+fn render_sessions(sessions: &[SessionInfo], now: DateTime<Utc>) -> String {
+    if sessions.is_empty() {
+        return "No sessions.\n".to_string();
+    }
+    let device_width = sessions.iter().map(|s| s.device.len()).max().unwrap_or(0);
+    (sessions.iter())
+        .map(|s| {
+            format!(
+                "{} {}  {:device_width$}  last used {} ago  signed in {}\n",
+                if s.current { '*' } else { ' ' },
+                s.id,
+                s.device,
+                format_age((now - s.last_used_at).num_seconds()),
+                s.created_at.format("%Y-%m-%d %H:%M UTC"),
+            )
+        })
+        .collect()
 }
 
 fn render_runners(runners: &[Runner], now: DateTime<Utc>) -> String {
@@ -2268,6 +2332,27 @@ mod tests {
             render_workspaces(&both, Some(&both[0])),
             "* GW  Groundwork  gannonh/groundwork\n  PL  Punchlist   gannonh/punchlist\n"
         );
+    }
+
+    #[test]
+    fn session_list_marks_the_current_one() {
+        let at = |text: &str| text.parse::<DateTime<Utc>>().unwrap();
+        let session = |id: u8, device: &str, used: &str, current| SessionInfo {
+            id: format!("00000000-0000-0000-0000-{id:012}").parse().unwrap(),
+            device: device.into(),
+            created_at: at("2026-10-20T09:30:00Z"),
+            last_used_at: at(used),
+            current,
+        };
+        let sessions = [
+            session(1, "Chrome on macOS", "2026-10-27T11:58:00Z", true),
+            session(2, "Safari on iPhone", "2026-10-27T09:00:00Z", false),
+        ];
+        assert_eq!(
+            render_sessions(&sessions, at("2026-10-27T12:00:00Z")),
+            "* 00000000-0000-0000-0000-000000000001  Chrome on macOS   last used 2m ago  signed in 2026-10-20 09:30 UTC\n  00000000-0000-0000-0000-000000000002  Safari on iPhone  last used 3h ago  signed in 2026-10-20 09:30 UTC\n"
+        );
+        assert_eq!(render_sessions(&[], Utc::now()), "No sessions.\n");
     }
 
     #[test]

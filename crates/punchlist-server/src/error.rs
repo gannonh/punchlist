@@ -47,6 +47,8 @@ pub enum ApiError {
     ImportNotFound(i64),
     #[error("workspace {0} not found")]
     WorkspaceNotFound(Uuid),
+    #[error("session {0} not found")]
+    SessionNotFound(Uuid),
     /// A person's request without a workspace in its path, from an account in several.
     #[error("this account is in several workspaces ({0}); name one with /api/workspaces/{{id}}/")]
     WorkspaceNotNamed(String),
@@ -107,6 +109,7 @@ impl ApiError {
             | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_)
+            | ApiError::SessionNotFound(_)
             | ApiError::NotConfigured(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::WorkspaceNotNamed(_) | ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -137,6 +140,7 @@ impl ApiError {
             | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_)
+            | ApiError::SessionNotFound(_)
             | ApiError::NotConfigured(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
             ApiError::BadRequest(_) => "bad_request",

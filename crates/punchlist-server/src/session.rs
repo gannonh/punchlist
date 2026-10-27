@@ -1,15 +1,16 @@
 //! `/api/session`: a person signs in from the browser with their token, which starts a
 //! server-side session held by the session cookie (`auth::SESSION_COOKIE`), and signs out.
-//! Sign-in with GitHub (`github_sign_in`) starts one the same way (ADR 0013).
+//! Sign-in with GitHub (`github_sign_in`) starts one the same way (ADR 0013). `/api/sessions`
+//! lists the account's sessions and ends them, from any of its browsers or with its token.
 
 use axum::Json;
-use axum::extract::State;
-use axum::http::header::{SET_COOKIE, USER_AGENT};
+use axum::extract::{Path, State};
+use axum::http::header::{AUTHORIZATION, SET_COOKIE, USER_AGENT};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use punchlist_api::{Account, ErrorBody, Session, SignIn};
+use punchlist_api::{Account, ErrorBody, Session, SessionInfo, SessionsRevoked, SignIn};
 use punchlist_core::Role;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -19,7 +20,10 @@ use crate::auth::{Actor, SESSION_COOKIE, hash_token, session_id};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(sign_in, show_session, sign_out))
+    OpenApiRouter::new()
+        .routes(routes!(sign_in, show_session, sign_out))
+        .routes(routes!(list_sessions, revoke_other_sessions))
+        .routes(routes!(revoke_session))
 }
 
 /// 32 random bytes, base64url: a session id or an OAuth `state`.
@@ -175,4 +179,180 @@ async fn sign_out(
     let https = https(&state, &uri, &headers);
     let cookie = cookie(SESSION_COOKIE, "", "/", "; Max-Age=0", https);
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]).into_response())
+}
+
+/// The account of a person's request, by its token or its session; agents and runners have
+/// no sessions.
+fn account_of(actor: &Actor) -> Result<Uuid, ApiError> {
+    (actor.account.as_ref())
+        .map(|account| account.id)
+        .ok_or_else(|| ApiError::Forbidden("only a person has sessions".into()))
+}
+
+/// The hash of the session the request came with: none for a request with a token.
+fn current_session(headers: &HeaderMap) -> Option<String> {
+    if headers.contains_key(AUTHORIZATION) {
+        return None;
+    }
+    session_id(headers).map(hash_token)
+}
+
+/// The account's live sessions, newest use first.
+#[utoipa::path(
+    get,
+    path = "/api/sessions",
+    responses(
+        (status = 200, body = Vec<SessionInfo>),
+        (status = 401, body = ErrorBody),
+        (status = 403, body = ErrorBody, description = "An agent's or a runner's token."),
+    )
+)]
+async fn list_sessions(
+    State(state): State<AppState>,
+    actor: Actor,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SessionInfo>>, ApiError> {
+    let rows = sqlx::query!(
+        r#"SELECT public_id, user_agent, created_at, last_used_at,
+                  COALESCE(id = $2, false) AS "current!"
+           FROM session
+           WHERE account_id = $1 AND expires_at > now()
+           ORDER BY last_used_at DESC, created_at DESC, public_id"#,
+        account_of(&actor)?,
+        current_session(&headers),
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let sessions = (rows.into_iter())
+        .map(|row| SessionInfo {
+            id: row.public_id,
+            device: device(row.user_agent.as_deref().unwrap_or_default()),
+            created_at: row.created_at,
+            last_used_at: row.last_used_at,
+            current: row.current,
+        })
+        .collect();
+    Ok(Json(sessions))
+}
+
+/// Ends one of the account's sessions: that browser's next request answers 401.
+#[utoipa::path(
+    delete,
+    path = "/api/sessions/{id}",
+    params(("id" = Uuid, Path, description = "The session's `id` in `GET /api/sessions`.")),
+    responses(
+        (status = 204, description = "The session is ended."),
+        (status = 403, body = ErrorBody),
+        (status = 404, body = ErrorBody, description = "No such session of this account."),
+    )
+)]
+async fn revoke_session(
+    State(state): State<AppState>,
+    actor: Actor,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let deleted = sqlx::query!(
+        "DELETE FROM session WHERE public_id = $1 AND account_id = $2",
+        id,
+        account_of(&actor)?,
+    )
+    .execute(&state.pool)
+    .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::SessionNotFound(id));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends every session of the account but the one the request came with; with a token, every
+/// session.
+#[utoipa::path(
+    delete,
+    path = "/api/sessions",
+    responses((status = 200, body = SessionsRevoked), (status = 403, body = ErrorBody))
+)]
+async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    actor: Actor,
+    headers: HeaderMap,
+) -> Result<Json<SessionsRevoked>, ApiError> {
+    let deleted = sqlx::query!(
+        "DELETE FROM session WHERE account_id = $1 AND id IS DISTINCT FROM $2",
+        account_of(&actor)?,
+        current_session(&headers),
+    )
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(SessionsRevoked {
+        revoked: deleted.rows_affected(),
+    }))
+}
+
+/// The browser and OS a user agent names, such as `Safari on iPhone`; one of them when the
+/// other is unknown, else `Unknown device`. Order matters: Edge's and Chrome on iOS's agents
+/// name Safari and Chrome too, and Android's names Linux.
+// ponytail: a substring table, not a user-agent database; an uncommon browser shows as the
+// engine it claims, or as its OS alone.
+fn device(user_agent: &str) -> String {
+    const BROWSERS: [(&str, &str); 8] = [
+        ("Edg/", "Edge"),
+        ("EdgiOS/", "Edge"),
+        ("OPR/", "Opera"),
+        ("Firefox/", "Firefox"),
+        ("FxiOS/", "Firefox"),
+        ("CriOS/", "Chrome"),
+        ("Chrome/", "Chrome"),
+        ("Safari/", "Safari"),
+    ];
+    const SYSTEMS: [(&str, &str); 8] = [
+        ("iPhone", "iPhone"),
+        ("iPad", "iPad"),
+        ("Android", "Android"),
+        ("CrOS", "ChromeOS"),
+        ("Windows", "Windows"),
+        ("Mac OS X", "macOS"),
+        ("Macintosh", "macOS"),
+        ("Linux", "Linux"),
+    ];
+    let find = |table: &[(&str, &'static str)]| {
+        (table.iter()).find_map(|(needle, name)| user_agent.contains(needle).then_some(*name))
+    };
+    match (find(&BROWSERS), find(&SYSTEMS)) {
+        (Some(browser), Some(system)) => format!("{browser} on {system}"),
+        (Some(name), None) | (None, Some(name)) => name.to_string(),
+        (None, None) => "Unknown device".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device;
+
+    #[test]
+    fn device_names_the_browser_and_os() {
+        let cases = [
+            (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+                "Safari on iPhone",
+            ),
+            (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+                "Chrome on Android",
+            ),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Chrome on macOS",
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+                "Edge on Windows",
+            ),
+            ("curl/8.0", "Unknown device"),
+            ("<b>x</b>", "Unknown device"),
+            ("", "Unknown device"),
+        ];
+        for (user_agent, expected) in cases {
+            assert_eq!(device(user_agent), expected, "{user_agent}");
+        }
+    }
 }

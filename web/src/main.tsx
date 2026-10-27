@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createRootRouteWithContext,
   createRoute,
@@ -9,6 +9,7 @@ import {
   redirect,
   RouterProvider,
 } from '@tanstack/react-router'
+import { ApiError } from '@/api/client'
 import { Toaster } from '@/components/ui/sonner'
 import { sessionQuery, workspacesQuery } from '@/lib/queries'
 import { issuePrefix, pickWorkspace } from '@/model/workspaces'
@@ -20,7 +21,24 @@ import { PullRequestsScreen } from '@/screens/pull-requests'
 import { SignInScreen } from '@/screens/sign-in'
 import './styles.css'
 
-const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } })
+const unauthorized = (error: unknown) => error instanceof ApiError && error.status === 401
+
+// A 401 means the session ended: signed out here, elsewhere (`Sessions`) or expired. Any read or write that gets one
+// shows the sign-in page, as a reload would.
+const toSignIn = (error: unknown) => {
+  if (!unauthorized(error) || router.state.location.pathname === '/sign-in') return
+  queryClient.clear()
+  queryClient.setQueryData(sessionQuery.queryKey, null)
+  void router.navigate({ to: '/sign-in' })
+}
+
+const queryClient = new QueryClient({
+  queryCache: new QueryCache({ onError: toSignIn }),
+  mutationCache: new MutationCache({ onError: toSignIn }),
+  defaultOptions: {
+    queries: { retry: (failures, error) => failures < 1 && !unauthorized(error), refetchOnWindowFocus: false },
+  },
+})
 
 const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   component: () => (

@@ -320,6 +320,8 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
             "/api/runs/{id}/waiting",
             "/api/search",
             "/api/session",
+            "/api/sessions",
+            "/api/sessions/{id}",
             "/api/workflow",
             "/api/workflow/schema.json",
             "/api/workspaces",

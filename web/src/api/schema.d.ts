@@ -774,6 +774,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The account's live sessions, newest use first. */
+        get: operations["list_sessions"];
+        put?: never;
+        post?: never;
+        /**
+         * Ends every session of the account but the one the request came with; with a token, every
+         *     session.
+         */
+        delete: operations["revoke_other_sessions"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Ends one of the account's sessions: that browser's next request answers 401. */
+        delete: operations["revoke_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workflow": {
         parameters: {
             query?: never;
@@ -2379,6 +2417,30 @@ export interface components {
             actor: components["schemas"]["Actor"];
             /** Format: uuid */
             workspace_id: string;
+        };
+        /** @description One of `GET /api/sessions`: a browser the account is signed in on. */
+        SessionInfo: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description The session the request came with. */
+            current: boolean;
+            /**
+             * @description The browser and OS its user agent names, such as `Safari on iPhone`, else
+             *     `Unknown device`.
+             */
+            device: string;
+            /**
+             * Format: uuid
+             * @description The id to revoke it by, which is not its cookie's value.
+             */
+            id: string;
+            /** Format: date-time */
+            last_used_at: string;
+        };
+        /** @description `DELETE /api/sessions`: how many sessions it ended. */
+        SessionsRevoked: {
+            /** Format: int64 */
+            revoked: number;
         };
         /** @description `POST /api/session`. */
         SignIn: {
@@ -4719,6 +4781,107 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    list_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionInfo"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description An agent's or a runner's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_other_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionsRevoked"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The session's `id` in `GET /api/sessions`. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session is ended. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such session of this account. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
             };
         };
     };

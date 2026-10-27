@@ -8,8 +8,8 @@ use punchlist_api::{
     IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved, OpenPullRequest, PROOF_TYPES,
     Project, ProjectList, Proof, ProofKind, PullRequest, PullRequestsNow, RefreshGithubToken,
     RegisterRunner, RegisteredRunner, ResumeRun, Run, RunAgainResult, RunLog, RunnerList,
-    SearchResults, Session, UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson,
-    WorkflowInfo, Workspace, proof_type_by_extension,
+    SearchResults, Session, SessionInfo, SessionsRevoked, UpdateIssue, UpdateMilestone,
+    UpdateProject, WaitForPerson, WorkflowInfo, Workspace, proof_type_by_extension,
 };
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::Serialize;
@@ -103,6 +103,25 @@ impl Client {
     /// Who the token belongs to, and its workspace.
     pub async fn session(&self) -> Result<Session, ClientError> {
         self.send::<(), _>(Method::GET, &["session"], None).await
+    }
+
+    /// The account's browser sessions, newest use first.
+    pub async fn sessions(&self) -> Result<Vec<SessionInfo>, ClientError> {
+        self.send::<(), _>(Method::GET, &["sessions"], None).await
+    }
+
+    /// Ends one of the account's sessions.
+    pub async fn revoke_session(&self, id: &str) -> Result<(), ClientError> {
+        self.send_optional::<(), serde_json::Value>(Method::DELETE, &["sessions", id], None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Ends every session of the account but the request's own; a token's request has none,
+    /// so it ends them all.
+    pub async fn revoke_other_sessions(&self) -> Result<SessionsRevoked, ClientError> {
+        self.send::<(), _>(Method::DELETE, &["sessions"], None)
+            .await
     }
 
     /// Queues an import of a Linear project into the workspace.
