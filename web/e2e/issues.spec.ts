@@ -100,7 +100,7 @@ test('a run ending, the next claim and a pull request turning ready show on the 
       data: { attempt: claim.attempt, outcome: 'failed', reason: 'e2e', duration_ms: 1 },
     }),
   )
-  await expect(run).toHaveText('Queued', live)
+  await expect(run).toHaveText('Deliberately broken PL-152 verification', live)
   await ok(await request.post('/api/runs/claim', { headers: bearer(runner), data: {} }))
   await expect(run).toHaveAttribute('data-run', 'running', live)
 
