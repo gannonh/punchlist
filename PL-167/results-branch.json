@@ -1,0 +1,183 @@
+[
+  {
+    "check": "5 inbox",
+    "pass": true,
+    "detail": {
+      "items": [
+        "PL-2",
+        "PL-1"
+      ],
+      "afterTap1": "PL-2",
+      "afterTap2": "PL-1",
+      "url": "/issues/PL-1",
+      "inboxUnread": false
+    }
+  },
+  {
+    "check": "1 branch",
+    "pass": true,
+    "detail": {
+      "order": [
+        "PL-3",
+        "PL-4",
+        "PL-5"
+      ],
+      "start": "PL-3",
+      "afterTap1": "PL-4",
+      "afterTap2": "PL-5",
+      "url": "/issues/PL-5"
+    }
+  },
+  {
+    "check": "2 status by tap",
+    "pass": false,
+    "detail": {
+      "issue": "PL-7",
+      "focusedByTap": "PL-7",
+      "status": "todo",
+      "transitions": []
+    }
+  },
+  {
+    "check": "3 disabled",
+    "pass": true,
+    "detail": {
+      "status": [
+        true,
+        "Focus an issue first"
+      ],
+      "assignee": [
+        true,
+        "Focus an issue first"
+      ],
+      "labels": [
+        true,
+        "Focus an issue first"
+      ],
+      "project": [
+        true,
+        "Focus an issue first"
+      ],
+      "milestone": [
+        true,
+        "Focus an issue first"
+      ]
+    }
+  },
+  {
+    "check": "4 selection by tap",
+    "pass": true,
+    "detail": {
+      "order": [
+        "PL-8",
+        "PL-9",
+        "PL-10",
+        "PL-11"
+      ],
+      "rangePressed": "true",
+      "header": "3 selected\nClear",
+      "selected": [
+        "PL-8",
+        "PL-9",
+        "PL-10"
+      ],
+      "patchRequests": 3,
+      "patched": [
+        "PL-8",
+        "PL-9",
+        "PL-10"
+      ],
+      "toast": "Added label c4-extra on 3 issues",
+      "focusAfterLabels": {
+        "tag": "DIV",
+        "label": "Labels of 3 issues",
+        "typing": false
+      }
+    }
+  },
+  {
+    "check": "6 pull requests and issue page",
+    "pass": true,
+    "detail": {
+      "escUrl": "/w/PL",
+      "gates": {
+        "top": 62,
+        "viewport": 844,
+        "inside": true
+      },
+      "activity": {
+        "top": 473,
+        "viewport": 844,
+        "inside": true
+      }
+    }
+  },
+  {
+    "check": "7 keyboard only for typing",
+    "pass": true,
+    "detail": {
+      "typingAfter": [
+        "list:filter",
+        "issue:comment"
+      ],
+      "taps": 20
+    }
+  },
+  {
+    "check": "8 nothing hidden",
+    "pass": true,
+    "detail": {
+      "rows": 60,
+      "lastBottom": 764,
+      "stripTop": 787,
+      "minButton": 44,
+      "buttons": 16,
+      "stripScrollWidth": 1822,
+      "stripClientWidth": 390,
+      "pageOverflow": false
+    }
+  },
+  {
+    "check": "9 desktop unchanged",
+    "pass": false,
+    "detail": {
+      "listDiff": {
+        "width": 1280,
+        "height": 800,
+        "differing": 0
+      },
+      "issueDiff": {
+        "width": 1280,
+        "height": 800,
+        "differing": 300
+      },
+      "sameKeys": true,
+      "keys": {
+        "start": "PL-15",
+        "j": "PL-16",
+        "k": "PL-15",
+        "x": [
+          "PL-15"
+        ],
+        "shiftJ": [
+          "PL-15",
+          "PL-16",
+          "PL-17"
+        ],
+        "esc": 0,
+        "s": "Change status of PL-17",
+        "slash": "Filter issues",
+        "enter": "/issues/PL-15",
+        "g": true,
+        "t": true,
+        "c": "New comment",
+        "escPage": "/w/PL",
+        "order": [
+          "PL-15",
+          "PL-16",
+          "PL-17"
+        ]
+      }
+    }
+  }
+]

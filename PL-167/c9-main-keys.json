@@ -1,0 +1,26 @@
+{
+  "start": "PL-15",
+  "j": "PL-16",
+  "k": "PL-15",
+  "x": [
+    "PL-15"
+  ],
+  "shiftJ": [
+    "PL-15",
+    "PL-16",
+    "PL-17"
+  ],
+  "esc": 0,
+  "s": "Change status of PL-17",
+  "slash": "Filter issues",
+  "enter": "/issues/PL-15",
+  "g": true,
+  "t": true,
+  "c": "New comment",
+  "escPage": "/w/PL",
+  "order": [
+    "PL-15",
+    "PL-16",
+    "PL-17"
+  ]
+}

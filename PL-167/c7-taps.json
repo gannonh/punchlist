@@ -1,0 +1,142 @@
+[
+  {
+    "where": "list",
+    "action": "next",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "previous",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "open",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "status",
+    "active": "DIV",
+    "label": "Change status of PL-13",
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "select",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "range",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "assignee",
+    "active": "DIV",
+    "label": "Assignee of PL-13",
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "labels",
+    "active": "DIV",
+    "label": "Labels of PL-13",
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "project",
+    "active": "DIV",
+    "label": "Project of PL-13",
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "milestone",
+    "active": "DIV",
+    "label": "Milestone of PL-13",
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "filter",
+    "active": "INPUT",
+    "label": "Filter issues",
+    "typing": true
+  },
+  {
+    "where": "list",
+    "action": "list",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "board",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "pull-requests",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "projects",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "list",
+    "action": "close",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "issue",
+    "action": "gates",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "issue",
+    "action": "activity",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  },
+  {
+    "where": "issue",
+    "action": "comment",
+    "active": "TEXTAREA",
+    "label": "New comment",
+    "typing": true
+  },
+  {
+    "where": "issue",
+    "action": "issues",
+    "active": "BODY",
+    "label": null,
+    "typing": false
+  }
+]
