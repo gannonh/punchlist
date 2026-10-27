@@ -49,6 +49,8 @@ pub enum ApiError {
     WorkspaceNotFound(Uuid),
     #[error("session {0} not found")]
     SessionNotFound(Uuid),
+    #[error("no open invite {0} in this workspace")]
+    InviteNotFound(Uuid),
     /// No `pl auth login` has this code or secret.
     #[error("{0}")]
     CliLoginNotFound(String),
@@ -113,6 +115,7 @@ impl ApiError {
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_)
             | ApiError::SessionNotFound(_)
+            | ApiError::InviteNotFound(_)
             | ApiError::CliLoginNotFound(_)
             | ApiError::NotConfigured(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
@@ -145,6 +148,7 @@ impl ApiError {
             | ApiError::ImportNotFound(_)
             | ApiError::WorkspaceNotFound(_)
             | ApiError::SessionNotFound(_)
+            | ApiError::InviteNotFound(_)
             | ApiError::CliLoginNotFound(_)
             | ApiError::NotConfigured(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",

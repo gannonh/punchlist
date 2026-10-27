@@ -56,8 +56,8 @@ export interface paths {
         /**
          * GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.
          *     A link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of
-         *     the account linked to the user and goes to `/`, or, with none linked, goes to
-         *     `/sign-in?unlinked=<login>`.
+         *     the account linked to the user, or one an open invite creates (`accept_invites`), and goes
+         *     to `/`, or, with neither, goes to `/sign-in?unlinked=<login>`.
          */
         get: operations["callback"];
         put?: never;
@@ -1106,6 +1106,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{id}/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's open invites, oldest first. Person token. */
+        get: operations["list_invites"];
+        put?: never;
+        /** Invite a GitHub user to the workspace. Person token. */
+        post: operations["create_invite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{id}/invites/{invite}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke an open invite: the GitHub user's sign-in no longer joins the workspace. Person
+         *     token.
+         */
+        delete: operations["revoke_invite"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{id}/issues": {
         parameters: {
             query?: never;
@@ -1538,6 +1576,11 @@ export interface components {
             /** @description Markdown. */
             body: string;
         };
+        /** @description `POST /api/workspaces/{id}/invites`: the GitHub user to invite to the workspace. */
+        CreateInvite: {
+            /** @description Letters, digits and single hyphens, at most 39 characters, in any case. */
+            github_login: string;
+        };
         /** @description `POST /api/issues`. */
         CreateIssue: {
             /** @description Markdown. */
@@ -1945,6 +1988,19 @@ export interface components {
              * @description How many of `items` are unread.
              */
             unread: number;
+        };
+        /**
+         * @description An open invite: the GitHub user's next sign-in with GitHub makes them a person in the
+         *     workspace, creating their account when they have none.
+         */
+        Invite: {
+            /** Format: date-time */
+            created_at: string;
+            github_login: string;
+            /** Format: uuid */
+            id: string;
+            /** @description The name of the person who invited them. */
+            invited_by: string;
         };
         Issue: {
             assignee?: components["schemas"]["Actor"] | null;
@@ -5671,6 +5727,172 @@ export interface operations {
                 };
             };
             /** @description No such issue in the workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_invites: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Invite"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInvite"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Invite"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The login is a member already, or has an open invite. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a GitHub login. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_invite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token's workspace */
+                id: string;
+                /** @description The invite's id */
+                invite: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not a person's token. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not the token's workspace, or no open invite of that id in it. */
             404: {
                 headers: {
                     [name: string]: unknown;

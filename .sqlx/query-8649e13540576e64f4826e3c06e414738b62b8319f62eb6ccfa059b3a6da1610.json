@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM actor a JOIN account acc ON acc.id = a.account_id\n                          WHERE a.workspace_id = $1 AND lower(acc.github_login) = lower($2))\n           AS \"member!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "member!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8649e13540576e64f4826e3c06e414738b62b8319f62eb6ccfa059b3a6da1610"
+}

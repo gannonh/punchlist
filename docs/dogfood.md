@@ -25,6 +25,14 @@ Sign in with GitHub needs the App's OAuth client, which Gannon sets up once:
 
 `scripts/dogfood.sh` sets `PUNCHLIST_PUBLIC_URL=https://sartre.tail984796.ts.net:7880`. Browsers must open the app at that URL: the server refuses a write whose `Origin` is another one. Without the two variables GitHub sign-in is off and the token field is the only way in. A person links GitHub once, from a token sign-in, with `Link GitHub` in the account menu. The upgrade that added sessions signs every browser out once; each signs in again.
 
+To add a person, invite their GitHub login to each workspace they join. Their first sign-in with GitHub creates their account and a person in each workspace with an open invite; they need no token. A person who already has an account gets the new workspace at their next sign-in with GitHub.
+
+```sh
+pl --workspace PL invite create octo-cat   # Invited octo-cat: …
+pl --workspace PL invite list              # open invites, with their ids
+pl --workspace PL invite revoke <id>       # before they sign in
+```
+
 Start or update it:
 
 ```sh
