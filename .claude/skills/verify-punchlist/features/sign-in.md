@@ -23,7 +23,7 @@ A person signs in at `/sign-in` with a token or with GitHub. Either starts a ser
 
 Preconditions:
 
-- A run started with `RUN=$(PUNCHLIST_VERIFY_HOST=<host> $C up)` and `source /tmp/punchlist-verify/$RUN/run.env`; `pnpm build` done; a headless Chromium on sartre (as in [projects.md](projects.md)). For GitHub: `$C fake-github "$RUN"` once, then `source` run.env again for `FAKE_GITHUB_URL`.
+- A run started with `RUN=$(PUNCHLIST_VERIFY_HOST=<host> $C up)` and `source $TMPDIR/punchlist-verify/$RUN/run.env`; `pnpm build` done; a headless Chromium on sartre (as in [projects.md](projects.md)). For GitHub: `$C fake-github "$RUN"` once, then `source` run.env again for `FAKE_GITHUB_URL`.
 
 - **Token session.** `$C sign-in-url "$RUN"` in a fresh browser context: it lands on `/` signed in. `$C sql "$RUN" "SELECT count(*) FROM session"` is `1`; the cookie `punchlist_session` is `HttpOnly`, `SameSite=Lax`, and `GET $SERVER_URL/api/session` with it answers the person.
 - **Cookie holds no token.** With the cookie value `<v>` from the browser: `$C sql "$RUN" "SELECT count(*) FROM account WHERE token_hash = encode(sha256(convert_to('<v>', 'UTF8')), 'hex')"` is `0`, and `SELECT count(*) FROM session WHERE id = encode(sha256(convert_to('<v>', 'UTF8')), 'hex')` is `1`. Then `$C sql "$RUN" "DELETE FROM session"` (the one write a check may make, standing in for expiry) and the next `curl -s -o /dev/null -w '%{http_code}' -H 'Cookie: punchlist_session=<v>' "$SERVER_URL/api/session"` is `401`.

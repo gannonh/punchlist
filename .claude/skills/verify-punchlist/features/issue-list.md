@@ -30,7 +30,7 @@ Preconditions:
   PL-2  Backlog  Second
   ```
 
-- **Sequence.** `source /tmp/punchlist-verify/$RUN/run.env` and `$C curl "$RUN" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":4` (two `created` events and two `transition` events).
+- **Sequence.** `source $TMPDIR/punchlist-verify/$RUN/run.env` and `$C curl "$RUN" "$SERVER_URL/api/issues"`. JSON has `"last_event_seq":4` (two `created` events and two `transition` events).
 
 - **Search.** Create `Gate the transition` with body `The runner restarts and leaks ci_green on every retry.`, `Reword ci_green` with body `Plain.` and `Docs pass` with a comment `We saw 100% of retries pass.`. `$C pl "$RUN" search ci_green` prints:
 

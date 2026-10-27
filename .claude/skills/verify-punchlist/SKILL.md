@@ -13,6 +13,7 @@ Everything here runs from the repository root on sartre.
 
 - **Sandbox repository:** `gannonh/punchlist-sandbox` (private, default branch `main`). Live checks that open branches or pull requests use this repository, never `gannonh/punchlist` or any other real repository.
 - **Live-check models:** Claude Code runs in live checks use the `haiku` alias (`--model haiku`), which tracks the newest Haiku and is Haiku 5.5 (`claude-haiku-5-5`) on the Anthropic API; on Bedrock, Vertex, Foundry and Claude Platform on AWS it is still Haiku 4.5, and it needs Claude Code 2.1.293 or later. A run's log shows the model it resolved to (`"model":"claude-haiku-5-5"`); a live check on a Haiku older than 5.5 does not count. Codex runs use GPT-6 Luna, `gpt-6-luna` (`-m gpt-6-luna`), which OpenAI documents without an alias, so it is the model's own slug; not the older `gpt-5.6-luna`. Use no other model for a live check. Make a live model call only inside a named live check. `$C runner` passes both: `--model haiku --codex-model gpt-6-luna`. A Codex run's log shows the model its thread started with (`"model":"gpt-6-luna"` in the `thread/started` line).
+- **Scratch files:** every file a check writes outside `verify-artifacts/` goes under `$TMPDIR`, never a fixed `/tmp/...` path: the instance, sandbox clones, the `main` worktree and harness output. In a runner's attempt `$TMPDIR` is the attempt's own directory on disk, `<state dir>/tmp/<runner id>/<run id>-<attempt>`, and the runner removes it when the attempt ends; `/tmp` on sartre is a tmpfs held in memory. Outside a run, set it first: `export TMPDIR=${TMPDIR:-/tmp}`.
 - **Secrets:** nothing goes in a `.env` file. A command that needs a secret (GitHub App credentials, `LINEAR_API_KEY`) runs under `with-env`, which loads the Punchlist 1Password Environment for that one process: `with-env <command>`. `with-env --names` lists the variable names. Never print secret values. Fixture webhook deliveries need no secret from 1Password: `up` generates a random webhook secret per run. Real GitHub deliveries need the GitHub App's secret, and loading `.punchlist/` from the sandbox needs its private key, so start those runs under `with-env $C up`.
 
 ## Sandbox GitHub
@@ -22,11 +23,11 @@ A run's own `gh` and git act as the workspace's GitHub App with a token for `gan
 ```sh
 with-env $C gh pr list --repo gannonh/punchlist-sandbox        # gh with GH_TOKEN set to the sandbox token
 with-env $C gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<id>"}) { thread { isResolved } } }'
-with-env $C git clone https://github.com/gannonh/punchlist-sandbox.git /tmp/sandbox-$RUN
-with-env $C git -C /tmp/sandbox-$RUN push -u origin <branch>   # the token is git's credential for the sandbox's URL only
+with-env $C git clone https://github.com/gannonh/punchlist-sandbox.git $TMPDIR/sandbox-$RUN
+with-env $C git -C $TMPDIR/sandbox-$RUN push -u origin <branch>   # the token is git's credential for the sandbox's URL only
 ```
 
-`with-env` picks the 1Password Environment by the current repository, so run these from this checkout's root and point git at a sandbox clone with `-C`; from inside the clone `with-env` answers `no Environment for 'punchlist-sandbox'`. The token lasts an hour and is cached in `/tmp/punchlist-verify/sandbox-token.json` (0600); a call mints a new one when it has under 10 minutes left. Nothing prints it except `with-env $C sandbox-token`, so never run that into evidence. The token cannot write to `gannonh/punchlist` (a write answers 403; the repository is public, so reads answer as they would for anyone). `with-env bin/check-sandbox-token` checks all of this.
+`with-env` picks the 1Password Environment by the current repository, so run these from this checkout's root and point git at a sandbox clone with `-C`; from inside the clone `with-env` answers `no Environment for 'punchlist-sandbox'`. The token lasts an hour and is cached in `$TMPDIR/punchlist-verify/sandbox-token.json` (0600); a call mints a new one when it has under 10 minutes left. Nothing prints it except `with-env $C sandbox-token`, so never run that into evidence. The token cannot write to `gannonh/punchlist` (a write answers 403; the repository is public, so reads answer as they would for anyone). `with-env bin/check-sandbox-token` checks all of this.
 
 ## Launch
 
@@ -46,7 +47,7 @@ It:
 5. Waits for `listening on http://127.0.0.1:<port>` in the server log (up to 60 s).
 6. Runs `punchlist-server bootstrap --person "Verify Person" --repository gannonh/punchlist-sandbox`, which creates workspace `Punchlist` (prefix `PL`), the sandbox repository and one person actor, and writes the `pl` config with that person's token.
 
-Instance state lives in `/tmp/punchlist-verify/<RUN_ID>/` (`run.env`, `config.toml`, `server.log`, `server.pgid`, `proof/`). `source /tmp/punchlist-verify/$RUN/run.env` gives `SERVER_URL`, `DATABASE_URL`, `CONFIG` and `EVIDENCE`.
+Instance state lives in `$TMPDIR/punchlist-verify/<RUN_ID>/` (`run.env`, `config.toml`, `server.log`, `server.pgid`, `proof/`). `source $TMPDIR/punchlist-verify/$RUN/run.env` gives `SERVER_URL`, `DATABASE_URL`, `CONFIG` and `EVIDENCE`.
 
 A live check that says "start with `pnpm dev`" is satisfied by `up`: it launches through `pnpm dev`, with only the database and port overridden for isolation. If a check needs the default dev instance itself (`127.0.0.1:7878`, database `punchlist`), first make sure nobody else is using it: `ss -ltnp | grep 7878` must show nothing.
 
@@ -119,13 +120,13 @@ $C pl "$RUN" run log <run-id>
 $C runner-stop "$RUN" r1         # SIGINT; running attempts finish failed, "runner stopped"
 ```
 
-The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its state directory, with its clones and worktrees, is `/tmp/punchlist-verify/<RUN_ID>/runner/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
+The runner's own log is `verify-artifacts/<RUN_ID>/runner-<name>.log`. Its state directory, with its clones and worktrees, is `$TMPDIR/punchlist-verify/<RUN_ID>/runner/<name>/`. Recipes, including two runners racing for one issue, are in [features/runner.md](features/runner.md).
 
 A GitHub delivery, signed with the run's webhook secret: `$C webhook "$RUN" pull_request payload.json [DELIVERY_ID]` prints the HTTP status and records it in the transcript. Recipes are in [features/github.md](features/github.md).
 
 What an agent's `get_issue` prints, without a model: `$C get-issue "$RUN" PL-1` calls the MCP tool through `pl mcp` with the run's person token and records the text ([features/workflow-and-gates.md](features/workflow-and-gates.md)).
 
-Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
+Raw HTTP, for API checks: `source $TMPDIR/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
 
 `$C fake-github "$RUN"` starts `bin/fake-github` and restarts the run's server with GitHub sign-in on, so the web app's `Sign in with GitHub` and `Link GitHub` can be driven ([features/sign-in.md](features/sign-in.md)).
 
@@ -152,16 +153,16 @@ Proof standards:
 $C down "$RUN"
 ```
 
-It stops the run's runners and its own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `/tmp/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running until the attempt ends (outside a run, stop it with `docker compose down` only if you started it and nothing else uses it). Run `down` after a failed run too, so no server or database is left behind.
+It stops the run's runners and its own process group (`pnpm dev`, cargo and the server; never anything by name), drops the run's database, deletes `$TMPDIR/punchlist-verify/<RUN_ID>/`, and leaves `verify-artifacts/<RUN_ID>/` in place. The shared Postgres container keeps running until the attempt ends (outside a run, stop it with `docker compose down` only if you started it and nothing else uses it). Run `down` after a failed run too, so no server or database is left behind.
 
 ## Main versus branch
 
 Check 1 of every PR runs the same flow on `main` and on the branch. Use a separate worktree for `main` so the branch checkout is untouched:
 
 ```sh
-git worktree add /tmp/punchlist-main origin/main
-(cd /tmp/punchlist-main && <the same command>)
-git worktree remove /tmp/punchlist-main
+git worktree add $TMPDIR/punchlist-main origin/main
+(cd $TMPDIR/punchlist-main && <the same command>)
+git worktree remove $TMPDIR/punchlist-main
 ```
 
 On `main` before Slice 1 merges there are no crates, so cargo commands there fail; quote that failure as the `main` half.
