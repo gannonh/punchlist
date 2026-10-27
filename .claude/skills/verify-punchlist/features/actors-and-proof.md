@@ -21,14 +21,14 @@ A person mints a standalone agent actor with `pl actor create` and sees its toke
 
 Preconditions:
 
-- Baseline run `$RUN`, `source /tmp/punchlist-verify/$RUN/run.env`, and `PL-1` created. No model calls and no GitHub writes.
+- Baseline run `$RUN`, `source $TMPDIR/punchlist-verify/$RUN/run.env`, and `PL-1` created. No model calls and no GitHub writes.
 
-- **Mint.** `$C pl "$RUN" actor create --agent --kind claude-code --model haiku > /tmp/punchlist-verify/$RUN/agent.out`. Exit `0`; the file holds `Created agent Claude Code`, `Kind   claude-code`, `Model  haiku`, `Owner  Verify Person`, a `Token  plt_…` line and `The token is shown once; only its hash is stored.` Read the token with `AG=$(sed -n 's/^Token *//p' /tmp/punchlist-verify/$RUN/agent.out)`.
+- **Mint.** `$C pl "$RUN" actor create --agent --kind claude-code --model haiku > $TMPDIR/punchlist-verify/$RUN/agent.out`. Exit `0`; the file holds `Created agent Claude Code`, `Kind   claude-code`, `Model  haiku`, `Owner  Verify Person`, a `Token  plt_…` line and `The token is shown once; only its hash is stored.` Read the token with `AG=$(sed -n 's/^Token *//p' $TMPDIR/punchlist-verify/$RUN/agent.out)`.
 - **Bad kind and owner.** `$C pl "$RUN" actor create --agent --kind gpt` exits `1` with ``error: unknown agent kind `gpt`; the kinds are claude-code, codex, opencode, pi, cursor (422 Unprocessable Entity)``. `--kind codex --owner Nobody` exits `1` with ``error: no person named `Nobody` in this workspace (422 Unprocessable Entity)``.
 - **List.** `$C pl "$RUN" actor list` has a `Verify Person  person  -  -  -` row and a `Claude Code  agent  claude-code  haiku  Verify Person` row. Rows: `$C sql "$RUN" "SELECT name, role, kind, model FROM actor ORDER BY created_at"`.
 - **Scope.** `curl -s -w ' %{http_code}' -H "Authorization: Bearer $AG" -X POST "$SERVER_URL/api/projects" -H 'content-type: application/json' -d '{"name":"p"}'` answers `{"code":"forbidden","message":"an agent acts only on the workspace's issues"} 403`; `GET` on `$SERVER_URL/api/actors` and `$SERVER_URL/api/issues/PL-1` answers 200, and on `$SERVER_URL/api/session` 200 with `{"actor":{…,"name":"Claude Code","role":"agent","kind":"claude-code"},"workspace_id":…}`. `PUNCHLIST_AGENT_TOKEN=$AG $C request-transition "$RUN" <an In Progress issue> agent_review` is refused at a gate, not for the agent ([issue-refusals.md](issue-refusals.md)).
 - **Attach.** `printf 'ok\n' > $EVIDENCE/p.txt; $C pl "$RUN" proof attach PL-1 $EVIDENCE/p.txt --title Log`. Exit `0`, stdout `Attached <uuid>: report "Log" (3 B) to PL-1 for attempt 0`.
-- **List and rows.** `$C pl "$RUN" proof list PL-1` prints one line ending `report  "Log"  3 B  Verify Person (person)  <uuid>`, and `pl issue show PL-1` has it under `Proof`. `$C sql "$RUN" "SELECT kind, title, content_type, size, attempt FROM proof"` is `report | Log | text/plain | 3 | 0`. The file is under `/tmp/punchlist-verify/$RUN/proof/`.
+- **List and rows.** `$C pl "$RUN" proof list PL-1` prints one line ending `report  "Log"  3 B  Verify Person (person)  <uuid>`, and `pl issue show PL-1` has it under `Proof`. `$C sql "$RUN" "SELECT kind, title, content_type, size, attempt FROM proof"` is `report | Log | text/plain | 3 | 0`. The file is under `$TMPDIR/punchlist-verify/$RUN/proof/`.
 - **Serve.** `$C curl "$RUN" -i "$SERVER_URL/api/proof/<uuid>"` answers `HTTP/1.1 200 OK`, `content-type: text/plain`, `x-content-type-options: nosniff`, `content-security-policy: sandbox` and body `ok`. With `-H "Authorization: Bearer $AG"` through plain `curl` it answers 200 and `ok` too.
 - **Refusals.** `cp $EVIDENCE/p.txt $EVIDENCE/x.exe; $C pl "$RUN" proof attach PL-1 $EVIDENCE/x.exe --title t` exits `1` with `error: <path> is not a file proof can be; use one of .png, .jpg, .jpeg, .gif, .webp, .mp4, .webm, .mov, .txt, .log, .md, .xml, .pdf`. `proof attach PL-1 $EVIDENCE/p.txt --title t --kind image` exits `1` with ``error: `text/plain` is report proof, not `image` (422 Unprocessable Entity)``. `SELECT count(*) FROM proof` is still `1`.
 
@@ -36,5 +36,5 @@ Preconditions:
 
 - `$C pl` records stdout, so `actor create`'s token is in `transcript.txt` even when stdout is redirected. The token is only good against the run's database, which `down` drops; still, never quote that transcript entry.
 - Proof's `attempt` counts the issue's moves from Start to In Progress (0 before the first), not the `attempt` table's per-run number.
-- `up` stores each run's uploads under `/tmp/punchlist-verify/<RUN_ID>/proof`, which `down` deletes. A server started another way writes to `~/.local/share/punchlist/proof`.
+- `up` stores each run's uploads under `$TMPDIR/punchlist-verify/<RUN_ID>/proof`, which `down` deletes. A server started another way writes to `~/.local/share/punchlist/proof`.
 - A run's own agent token works on any issue in the workspace, and on run logs, while the run runs; a standalone agent's works on any issue in the workspace and does not lapse.

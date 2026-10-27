@@ -22,7 +22,7 @@ A signed-in person's inbox lists the workspace's issues in a status only a perso
 
 Preconditions:
 
-- A run started with `RUN=$($C up)` (the built-in workflow), `source /tmp/punchlist-verify/$RUN/run.env`, and `pnpm build` for the screen.
+- A run started with `RUN=$($C up)` (the built-in workflow), `source $TMPDIR/punchlist-verify/$RUN/run.env`, and `pnpm build` for the screen.
 
 - **Setup.** `$C pl "$RUN" issue create --title One` four times (PL-1 to PL-4); `$C pl "$RUN" issue move PL-1 todo`; `$C sql "$RUN" "UPDATE issue SET status = 'human_review' WHERE id = 'PL-3'"` and `... 'merging' WHERE id = 'PL-4'`, since only an agent and GitHub reach them.
 - **A second person.** Persons hold no token since accounts (ADR 0011); a second person is an account and its actor: `TOKEN=plt_second_$RANDOM; $C sql "$RUN" "WITH acc AS (INSERT INTO account (name, token_hash) VALUES ('Second', encode(sha256('$TOKEN'), 'hex')) RETURNING id) INSERT INTO actor (workspace_id, name, role, account_id) SELECT (SELECT workspace_id FROM actor WHERE role = 'person' LIMIT 1), 'Second', 'person', id FROM acc RETURNING id"`. Call as them with `curl -s -H "Authorization: Bearer $TOKEN" "$SERVER_URL/api/inbox"`.

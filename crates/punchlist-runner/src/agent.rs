@@ -613,6 +613,40 @@ async fn remove_containers(attempt: &str) -> usize {
     if removed.is_some() { count } else { 0 }
 }
 
+/// Removes an attempt's temporary directory, `TMPDIR` to its agent, and returns the size of
+/// the files it held. Each directory in it is made writable first, so one the agent made
+/// read-only goes too; a symbolic link is removed, never followed. A directory that is not
+/// there held nothing.
+pub(crate) fn remove_attempt_tmp(dir: &Path) -> std::io::Result<u64> {
+    use std::os::unix::fs::PermissionsExt;
+    fn unlock(dir: &Path) -> std::io::Result<u64> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        let mut size = 0;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            // `DirEntry::metadata` does not follow a symbolic link.
+            let meta = entry.metadata()?;
+            size += if meta.is_dir() {
+                unlock(&entry.path())?
+            } else {
+                meta.len()
+            };
+        }
+        Ok(size)
+    }
+    let size = match unlock(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        size => size?,
+    };
+    std::fs::remove_dir_all(dir)?;
+    Ok(size)
+}
+
+/// `104.9 MB`: a size for the runner's log, in powers of 1000.
+pub(crate) fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1e6)
+}
+
 /// Gives `command` the agent's whole environment: the runner's, without any `PUNCHLIST_*`
 /// variable, then each `Some` variable of `env` set and each `None` one removed. The agent
 /// reads untrusted text, so it gets only the `PUNCHLIST_*` variables the runner sets, never
@@ -713,6 +747,28 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         child
+    }
+
+    /// A read-only directory goes, and a link to a file outside is removed, not followed.
+    #[test]
+    fn remove_attempt_tmp_removes_a_read_only_tree_and_not_what_a_link_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, "keep me").unwrap();
+        let tmp = temp.path().join("tmp");
+        let locked = tmp.join("cache/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("big"), vec![0u8; 1_500_000]).unwrap();
+        std::fs::write(tmp.join("small"), "abc").unwrap();
+        std::os::unix::fs::symlink(&outside, tmp.join("link")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let size = remove_attempt_tmp(&tmp).unwrap();
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me");
+        let link_len = outside.to_string_lossy().len() as u64;
+        assert_eq!(size, 1_500_003 + link_len);
+        assert_eq!(megabytes(size), "1.5 MB");
+        assert_eq!(remove_attempt_tmp(&tmp).unwrap(), 0, "gone already");
     }
 
     #[test]
