@@ -48,7 +48,7 @@ export function ShortcutStrip({
         aria-pressed={item.toggle ? range : undefined}
         disabled={!item.toggle && !run}
         title={!item.toggle && !run ? why : undefined}
-        className="inline-flex cursor-pointer items-center gap-1.25 rounded-sm whitespace-nowrap hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:hover:text-inherit aria-pressed:bg-foreground aria-pressed:px-1 aria-pressed:text-card pointer-coarse:min-h-11 pointer-coarse:rounded-md pointer-coarse:border pointer-coarse:px-2 pointer-coarse:disabled:opacity-50"
+        className="inline-flex cursor-pointer items-center gap-1.25 rounded-sm whitespace-nowrap hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-default disabled:hover:text-inherit aria-pressed:bg-foreground aria-pressed:px-1 aria-pressed:text-card aria-pressed:[&_kbd]:border-white/35 aria-pressed:[&_kbd]:bg-transparent aria-pressed:[&_kbd]:text-card pointer-coarse:min-h-11 pointer-coarse:rounded-md pointer-coarse:border pointer-coarse:px-2 pointer-coarse:disabled:opacity-50"
         onMouseDown={(event) => {
           event.preventDefault()
         }}
