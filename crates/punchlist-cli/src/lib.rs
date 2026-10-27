@@ -13,10 +13,11 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use punchlist_api::DEFAULT_RUNS_PER_ENTRY;
 use punchlist_api::{
-    ActorInfo, ChecksState, CreateAgent, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
-    Event, EventDetail, GateChecklist, ImportReport, ImportState, ImportStatus, Issue, Project,
-    Proof, ProofKind, PullRequest, Run, RunOutcome, Runner, SearchResults, SessionInfo,
-    UpdateIssue, UpdateMilestone, UpdateProject, WorkflowInfo, Workspace, format_age, gate_lines,
+    ActorInfo, ChecksState, CliLoginToken, CreateAgent, CreateIssue, CreateMilestone,
+    CreateProject, CreatedAgent, Event, EventDetail, GateChecklist, ImportReport, ImportState,
+    ImportStatus, Issue, Project, Proof, ProofKind, PullRequest, Run, RunOutcome, Runner,
+    SearchResults, SessionInfo, UpdateIssue, UpdateMilestone, UpdateProject, WorkflowInfo,
+    Workspace, format_age, gate_lines,
 };
 use punchlist_client::{Client, ClientError};
 use serde::Deserialize;
@@ -40,10 +41,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Sign `pl` in through the browser, or sign it out.
+    #[command(subcommand)]
+    Auth(AuthCommand),
     /// List the workspaces of your account.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
-    /// List and end your account's browser sessions.
+    /// List and end your account's sessions: browsers, and `pl` signed in with `pl auth login`.
     #[command(subcommand)]
     Session(SessionCommand),
     /// Work with issues.
@@ -109,6 +113,20 @@ pub enum ImportCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Sign `pl` in: open the URL it prints in a browser signed in to Punchlist and approve
+    /// the code. `pl` writes a session of its own to its config as `token`.
+    Login {
+        /// The server, such as `https://sartre.tail984796.ts.net:7880`; else the config's
+        /// `server_url`.
+        #[arg(long)]
+        server: Option<String>,
+    },
+    /// End the session `pl auth login` wrote: the next call answers 401.
+    Logout,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
     /// Print each workspace's prefix, name and repository, with `*` on the one `pl` uses.
     List,
@@ -116,14 +134,14 @@ pub enum WorkspaceCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
-    /// Print each browser your account is signed in on: its id, device and last use.
+    /// Print each browser and `pl` your account is signed in on: its id, device and last use.
     List,
     /// Sign a browser out: its next request is refused and it shows the sign-in page.
     #[command(group(clap::ArgGroup::new("which").required(true).args(["id", "all_others"])))]
     Revoke {
         /// The session's id, from `pl session list`.
         id: Option<String>,
-        /// End every session. `pl` signs in with a token, which is no session, so none is kept.
+        /// End every session but this `pl`'s own, from `pl auth login`; with a token, every one.
         #[arg(long)]
         all_others: bool,
     },
@@ -444,11 +462,28 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
         let client = Client::new(&args.server_url, &args.token)?;
         return punchlist_mcp::serve_stdio(client, args.issue, args.run).await;
     }
-    let path = match cli.config {
+    let path = match cli.config.clone() {
         Some(path) => path,
         None => Config::default_path()?,
     };
-    let config = Config::load(&path)?;
+    if let Command::Auth(command) = cli.command {
+        return auth(command, &path, out).await;
+    }
+    with_config(cli, &path, out).await.map_err(|error| {
+        let refused = matches!(
+            error.downcast_ref::<ClientError>(),
+            Some(ClientError::Api { status, .. }) if *status == reqwest::StatusCode::UNAUTHORIZED
+        );
+        match refused {
+            true => error.context("the server refused pl's token or session; run pl auth login"),
+            false => error,
+        }
+    })
+}
+
+/// Every command but `pl mcp` and `pl auth`, with the config at `path`.
+async fn with_config(cli: Cli, path: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    let config = Config::load(path)?;
     let client = Client::new(&config.server_url, &config.token)?;
     let named = cli.workspace.or_else(|| config.workspace.clone());
     let workspace = match &cli.command {
@@ -478,7 +513,7 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> anyhow::Result<()> {
     };
     let workspace = || workspace.as_deref().expect("a workspace-level command");
     match cli.command {
-        Command::Workspace(_) => unreachable!("handled above"),
+        Command::Workspace(_) | Command::Auth(_) => unreachable!("handled above"),
         Command::Session(SessionCommand::List) => {
             write!(
                 out,
@@ -707,6 +742,7 @@ fn workspace_level(command: &Command) -> bool {
         | Command::Import(_)
         | Command::Search { .. } => true,
         Command::Workspace(_)
+        | Command::Auth(_)
         | Command::Session(_)
         | Command::Run(_)
         | Command::Proof(_)
@@ -905,13 +941,133 @@ fn current_user() -> String {
 }
 
 fn hostname() -> String {
+    host().unwrap_or_else(|| "runner".to_string())
+}
+
+/// This machine's name: `/etc/hostname`, else `HOSTNAME`, else what `hostname` prints (macOS
+/// has no `/etc/hostname`).
+fn host() -> Option<String> {
     let from_file = std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|h| h.trim().to_string());
     from_file
         .filter(|h| !h.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
-        .unwrap_or_else(|| "runner".to_string())
+        .or_else(|| {
+            let output = std::process::Command::new("hostname").output().ok()?;
+            let name = String::from_utf8(output.stdout).ok()?.trim().to_string();
+            (output.status.success() && !name.is_empty()).then_some(name)
+        })
+}
+
+/// How often `pl auth login` asks whether the login was approved.
+const LOGIN_POLL: Duration = Duration::from_secs(2);
+
+/// `pl auth login` and `pl auth logout`.
+async fn auth(command: AuthCommand, path: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    // The rest of the config, such as `workspace` and `[runner]`, is kept as it is.
+    let mut table: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text)
+            .with_context(|| format!("invalid config in {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let configured = table.get("server_url").and_then(|url| url.as_str());
+    match command {
+        AuthCommand::Login { server } => {
+            let server = (server.as_deref().or(configured))
+                .context("name the server: pl auth login --server <url>")?
+                .trim_end_matches('/')
+                .to_string();
+            let anonymous = Client::new(&server, "")?;
+            let user_agent = match host() {
+                Some(host) => format!("pl/{} ({host})", env!("CARGO_PKG_VERSION")),
+                None => format!("pl/{}", env!("CARGO_PKG_VERSION")),
+            };
+            let login = anonymous.start_cli_login(&user_agent).await?;
+            writeln!(
+                out,
+                "Open this URL in a browser signed in to Punchlist and approve the code:\n\n  {}\n\nCode: {}\nWaiting for approval…",
+                login.url, login.code
+            )?;
+            out.flush()?;
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                open_in_browser(&login.url);
+            }
+            // The server says when the login expires; this bounds the wait if it never does.
+            let deadline = std::time::Instant::now() + Duration::from_secs(login.expires_in + 30);
+            let token = loop {
+                tokio::time::sleep(LOGIN_POLL).await;
+                match anonymous.poll_cli_login(&login.device_secret).await? {
+                    CliLoginToken::Approved { token } => break token,
+                    CliLoginToken::Denied => {
+                        anyhow::bail!("the login was denied; nothing was written")
+                    }
+                    CliLoginToken::Expired => {
+                        anyhow::bail!("the login expired; run pl auth login again")
+                    }
+                    CliLoginToken::Pending if std::time::Instant::now() > deadline => {
+                        anyhow::bail!("the login expired; run pl auth login again")
+                    }
+                    CliLoginToken::Pending => {}
+                }
+            };
+            let session = Client::new(&server, &token)?.session().await?;
+            table.insert("server_url".into(), server.into());
+            table.insert("token".into(), token.into());
+            write_config(path, &toml::to_string(&table)?)?;
+            let name = session.account.map_or(session.actor.name, |a| a.name);
+            writeln!(out, "Signed in as {name}. Wrote {}.", path.display())?;
+            Ok(())
+        }
+        AuthCommand::Logout => {
+            let config = Config::load(path)?;
+            let client = Client::new(&config.server_url, &config.token)?;
+            let current = (client.sessions().await?.into_iter())
+                .find(|session| session.current)
+                .context("pl signs in with a token here, not a session from pl auth login, so there is no session to end")?;
+            client.revoke_session(&current.id.to_string()).await?;
+            writeln!(
+                out,
+                "Signed out {}. Run pl auth login to sign in again.",
+                current.device
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Opens `url` in the default browser, if the platform has an opener; the URL is printed
+/// either way.
+fn open_in_browser(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Writes the config, readable by its owner alone since it holds the session.
+fn write_config(path: &Path, text: &str) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = (options.open(path)).with_context(|| format!("write {}", path.display()))?;
+    // `mode` applies only to a new file.
+    #[cfg(unix)]
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    file.write_all(text.as_bytes())?;
+    Ok(())
 }
 
 /// Expands a leading `~` to `home`.

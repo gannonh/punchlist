@@ -59,24 +59,35 @@ pub fn session_id(headers: &HeaderMap) -> Option<&str> {
     request_cookie(headers, SESSION_COOKIE)
 }
 
-/// The account of a live session, by the hash of its id. A use pushes its expiry 30 days out,
-/// written at most once a minute.
+/// The request's `Authorization: Bearer` value.
+pub fn bearer(headers: &HeaderMap) -> Option<&str> {
+    (headers.get(AUTHORIZATION)?.to_str().ok())?.strip_prefix("Bearer ")
+}
+
+/// The account of a live session of `kind`, by the hash of its id: a browser's (`browser`)
+/// comes as a cookie, `pl`'s (`cli`) as a bearer value, and neither the other way. A use
+/// pushes its expiry out, 30 days for a browser's and 90 for `pl`'s, written at most once a
+/// minute.
 pub async fn session_account(
     pool: &sqlx::PgPool,
     session_hash: &str,
+    kind: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar!(
         r#"WITH found AS (
-               SELECT id, account_id, last_used_at FROM session
-               WHERE id = $1 AND expires_at > now()
+               SELECT id, account_id, last_used_at, kind FROM session
+               WHERE id = $1 AND kind = $2 AND expires_at > now()
            ), touched AS (
                UPDATE session
-               SET last_used_at = now(), expires_at = now() + interval '30 days'
+               SET last_used_at = now(),
+                   expires_at = now() + CASE found.kind WHEN 'cli' THEN interval '90 days'
+                                                        ELSE interval '30 days' END
                FROM found
                WHERE session.id = found.id AND found.last_used_at < now() - interval '1 minute'
            )
            SELECT account_id FROM found"#,
         session_hash,
+        kind,
     )
     .fetch_optional(pool)
     .await
@@ -226,18 +237,20 @@ impl FromRequestParts<AppState> for Actor {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Actor, ApiError> {
-        // A bearer token is a person's account's, else an agent's or a runner's. A session
-        // cookie is an account's.
+        // A bearer value is a CLI session of an account (`pl auth login`), else a person's
+        // account's token, else an agent's or a runner's. A session cookie is a browser
+        // session of an account.
         let (token_hash, session) = match parts.headers.get(AUTHORIZATION) {
-            Some(value) => {
-                let token = (value.to_str().ok())
-                    .and_then(|value| value.strip_prefix("Bearer "))
-                    .ok_or(ApiError::Unauthorized)?;
-                (Some(hash_token(token)), None)
+            Some(_) => {
+                let hash = hash_token(bearer(&parts.headers).ok_or(ApiError::Unauthorized)?);
+                match session_account(&state.pool, &hash, "cli").await? {
+                    Some(account) => (None, Some(account)),
+                    None => (Some(hash), None),
+                }
             }
             None => {
                 let id = session_id(&parts.headers).ok_or(ApiError::Unauthorized)?;
-                let account = session_account(&state.pool, &hash_token(id))
+                let account = session_account(&state.pool, &hash_token(id), "browser")
                     .await?
                     .ok_or(ApiError::Unauthorized)?;
                 (None, Some(account))
@@ -284,6 +297,7 @@ impl FromRequestParts<AppState> for Actor {
                         || path == "/api/session"
                         || path == "/api/sessions"
                         || path.starts_with("/api/sessions/")
+                        || path.starts_with("/api/cli-logins/")
                         || path == "/api/workspaces" =>
                 {
                     oldest

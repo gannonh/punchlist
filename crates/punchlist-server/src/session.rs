@@ -1,7 +1,8 @@
 //! `/api/session`: a person signs in from the browser with their token, which starts a
 //! server-side session held by the session cookie (`auth::SESSION_COOKIE`), and signs out.
 //! Sign-in with GitHub (`github_sign_in`) starts one the same way (ADR 0013). `/api/sessions`
-//! lists the account's sessions and ends them, from any of its browsers or with its token.
+//! lists the account's sessions, the CLI sessions of `pl auth login` (`cli_login`) among them,
+//! and ends them, from any of its browsers, with its token or from `pl`.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -16,7 +17,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 
-use crate::auth::{Actor, SESSION_COOKIE, hash_token, session_id};
+use crate::auth::{Actor, SESSION_COOKIE, bearer, hash_token, session_id};
 use crate::{ApiError, AppState};
 
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -65,15 +66,12 @@ pub async fn start_session(
         .execute(&state.pool)
         .await?;
     let id = random_id();
-    let user_agent = (headers.get(USER_AGENT))
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().take(500).collect::<String>());
     sqlx::query!(
         "INSERT INTO session (id, account_id, expires_at, user_agent)
          VALUES ($1, $2, now() + interval '30 days', $3)",
         hash_token(&id),
         account_id,
-        user_agent,
+        user_agent(headers),
     )
     .execute(&state.pool)
     .await?;
@@ -84,6 +82,13 @@ pub async fn start_session(
         "",
         https(state, uri, headers),
     ))
+}
+
+/// The request's `User-Agent`, its first 500 characters.
+pub fn user_agent(headers: &HeaderMap) -> Option<String> {
+    (headers.get(USER_AGENT))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(500).collect())
 }
 
 /// Deletes the session the request's cookie holds, if any.
@@ -183,16 +188,17 @@ async fn sign_out(
 
 /// The account of a person's request, by its token or its session; agents and runners have
 /// no sessions.
-fn account_of(actor: &Actor) -> Result<Uuid, ApiError> {
+pub fn account_of(actor: &Actor) -> Result<Uuid, ApiError> {
     (actor.account.as_ref())
         .map(|account| account.id)
         .ok_or_else(|| ApiError::Forbidden("only a person has sessions".into()))
 }
 
-/// The hash of the session the request came with: none for a request with a token.
+/// The hash of the session the request came with: its bearer value's, a CLI session's or a
+/// token's, which no session has, else its cookie's.
 fn current_session(headers: &HeaderMap) -> Option<String> {
     if headers.contains_key(AUTHORIZATION) {
-        return None;
+        return bearer(headers).map(hash_token);
     }
     session_id(headers).map(hash_token)
 }
@@ -213,7 +219,7 @@ async fn list_sessions(
     headers: HeaderMap,
 ) -> Result<Json<Vec<SessionInfo>>, ApiError> {
     let rows = sqlx::query!(
-        r#"SELECT public_id, user_agent, created_at, last_used_at,
+        r#"SELECT public_id, user_agent, kind, created_at, last_used_at,
                   COALESCE(id = $2, false) AS "current!"
            FROM session
            WHERE account_id = $1 AND expires_at > now()
@@ -226,7 +232,10 @@ async fn list_sessions(
     let sessions = (rows.into_iter())
         .map(|row| SessionInfo {
             id: row.public_id,
-            device: device(row.user_agent.as_deref().unwrap_or_default()),
+            device: match row.kind.as_str() {
+                "cli" => cli_device(row.user_agent.as_deref()),
+                _ => device(row.user_agent.as_deref().unwrap_or_default()),
+            },
             created_at: row.created_at,
             last_used_at: row.last_used_at,
             current: row.current,
@@ -288,6 +297,18 @@ async fn revoke_other_sessions(
     }))
 }
 
+/// The `pl` a CLI session or login is for, by the host its user agent names
+/// (`pl/0.1.0 (sartre)`): `pl on sartre`, else `pl on a terminal`.
+pub fn cli_device(user_agent: Option<&str>) -> String {
+    let host = (user_agent.and_then(|agent| agent.strip_prefix("pl/")))
+        .and_then(|rest| rest.split_once(" (")?.1.strip_suffix(')'))
+        .filter(|host| {
+            (1..=63).contains(&host.len())
+                && (host.bytes()).all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        });
+    format!("pl on {}", host.unwrap_or("a terminal"))
+}
+
 /// The browser and OS a user agent names, such as `Safari on iPhone`; one of them when the
 /// other is unknown, else `Unknown device`. Order matters: Edge's and Chrome on iOS's agents
 /// name Safari and Chrome too, and Android's names Linux.
@@ -326,7 +347,22 @@ fn device(user_agent: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::device;
+    use super::{cli_device, device};
+
+    #[test]
+    fn cli_device_names_the_host() {
+        let cases = [
+            (Some("pl/0.1.0 (sartre)"), "pl on sartre"),
+            (Some("pl/0.1.0 (mini.local)"), "pl on mini.local"),
+            (Some("pl/0.1.0 (<b>x</b>)"), "pl on a terminal"),
+            (Some("pl/0.1.0"), "pl on a terminal"),
+            (Some("curl/8.0 (x)"), "pl on a terminal"),
+            (None, "pl on a terminal"),
+        ];
+        for (user_agent, expected) in cases {
+            assert_eq!(cli_device(user_agent), expected, "{user_agent:?}");
+        }
+    }
 
     #[test]
     fn device_names_the_browser_and_os() {

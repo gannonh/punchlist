@@ -81,7 +81,7 @@ async fn start(
     let session = match query.link.as_deref() {
         Some("1") => {
             let hash = hash_token(session_id(&headers).ok_or(ApiError::Unauthorized)?);
-            session_account(&state.pool, &hash)
+            session_account(&state.pool, &hash, "browser")
                 .await?
                 .ok_or(ApiError::Unauthorized)?;
             hash
@@ -163,7 +163,7 @@ async fn callback(
                 return Err(expired());
             }
             Some(
-                session_account(&state.pool, link)
+                session_account(&state.pool, link, "browser")
                     .await?
                     .ok_or_else(expired)?,
             )

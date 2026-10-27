@@ -3,6 +3,7 @@
 mod actors;
 mod auth;
 mod bootstrap;
+mod cli_login;
 mod error;
 mod events;
 mod github;
@@ -73,6 +74,8 @@ pub struct AppState {
     /// callback's and the only `Origin` a browser's write may come from. Without it both come
     /// from the request's `Host` (or `X-Forwarded-Host`).
     pub public_url: Option<std::sync::Arc<str>>,
+    /// How long a `pl auth login` waits for a person's approval: 10 minutes.
+    pub cli_login_lifetime: std::time::Duration,
 }
 
 /// Proof files on local disk, each named by its storage key.
@@ -98,6 +101,7 @@ impl AppState {
             shutdown: tokio::sync::watch::channel(false).1,
             github_sign_in: None,
             public_url: None,
+            cli_login_lifetime: std::time::Duration::from_secs(600),
         }
     }
 
@@ -109,6 +113,11 @@ impl AppState {
     /// `url` is an origin, such as `https://example.com:7880`, with no path.
     pub fn with_public_url(mut self, url: &str) -> AppState {
         self.public_url = Some(url.trim_end_matches('/').into());
+        self
+    }
+
+    pub fn with_cli_login_lifetime(mut self, lifetime: std::time::Duration) -> AppState {
+        self.cli_login_lifetime = lifetime;
         self
     }
 
@@ -154,6 +163,7 @@ struct ApiDoc;
 fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(actors::routes())
+        .merge(cli_login::routes())
         .merge(events::routes())
         .merge(github::routes())
         .merge(inbox::routes())

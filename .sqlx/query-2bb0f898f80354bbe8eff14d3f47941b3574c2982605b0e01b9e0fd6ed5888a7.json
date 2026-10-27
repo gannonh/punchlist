@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE cli_login SET state = $2, account_id = $3\n         WHERE code = $1 AND state = 'pending' AND expires_at > now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2bb0f898f80354bbe8eff14d3f47941b3574c2982605b0e01b9e0fd6ed5888a7"
+}
