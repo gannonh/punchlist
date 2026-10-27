@@ -1,0 +1,49 @@
+[
+  {
+    "seq": 3,
+    "issue_id": "PL-2",
+    "actor": {
+      "id": "56643d02-5eac-49bc-b4be-9ed3cdedac5a",
+      "name": "Verify Person",
+      "role": "person"
+    },
+    "created_at": "2026-10-27T21:16:33.944121Z",
+    "detail": {
+      "kind": "created"
+    }
+  },
+  {
+    "seq": 4,
+    "issue_id": "PL-2",
+    "actor": {
+      "id": "56643d02-5eac-49bc-b4be-9ed3cdedac5a",
+      "name": "Verify Person",
+      "role": "person"
+    },
+    "created_at": "2026-10-27T21:16:33.961923Z",
+    "detail": {
+      "kind": "edited",
+      "fields": [
+        "labels"
+      ]
+    }
+  },
+  {
+    "seq": 7,
+    "issue_id": "PL-2",
+    "actor": {
+      "id": "56643d02-5eac-49bc-b4be-9ed3cdedac5a",
+      "name": "Verify Person",
+      "role": "person"
+    },
+    "created_at": "2026-10-27T21:16:37.846256Z",
+    "detail": {
+      "kind": "transition",
+      "from": "backlog",
+      "from_name": "Backlog",
+      "to": "todo",
+      "to_name": "Todo",
+      "workflow_version": "sha256:5c2a23effebcc35a855e4cb7000f9eb0f7e116d382e5bdd501ade03ad784f5cb"
+    }
+  }
+]
