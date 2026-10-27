@@ -1,6 +1,6 @@
 // What the inbox shows, as pure functions over the API's types. No React here.
 import type { components } from '@/api/schema'
-import { age } from '@/model/issues'
+import { age, agentName } from '@/model/issues'
 
 export type InboxList = components['schemas']['InboxList']
 export type InboxItem = components['schemas']['InboxItem']
@@ -18,19 +18,26 @@ export const ordered = (items: readonly InboxItem[]): InboxItem[] =>
 export type RunItem = Extract<InboxItem, { kind: 'run' }>
 
 /**
- * What a run item says, a line each: the server's sentence when the entry's runs are used up, then
- * `Run failed` with its reason when the run failed. The reason is text from outside the team.
+ * What a run item says, a line each: why it waits on a person, as the issue page says it (the agent's
+ * `wait_for_person` reason, else the entry's runs used up), then `Run failed` with its reason when the run failed.
+ * Both reasons are text from outside the team.
  */
 export const runLines = (item: RunItem): string[] => [
-  ...(item.limit_reached ? [`${String(item.runs)} runs in ${item.issue.status_name} ended without moving it`] : []),
+  ...(item.waiting_reason
+    ? [`${agentName(item.agent)} is waiting on a person: ${item.waiting_reason}`]
+    : item.limit_reached
+      ? [`${String(item.runs)} runs in ${item.issue.status_name} ended without moving it`]
+      : []),
   ...(item.last_outcome === 'failed' ? [item.reason ? `Run failed: ${item.reason}` : 'Run failed'] : []),
 ]
 
 /**
- * A person can give the item's issue another set of runs (`POST /api/issues/{id}/retry`): its entry's runs are used up.
- * A run that failed with runs left is not waiting on a person, and a waiting item's status dispatches nothing.
+ * A person can give the item's issue another set of runs (`POST /api/issues/{id}/retry`): its entry's runs are used up,
+ * or its agent said it waits on a person. A run that failed with runs left is not waiting on a person, and a waiting
+ * item's status dispatches nothing.
  */
-export const canRunAgain = (item: InboxItem): item is RunItem => item.kind === 'run' && item.limit_reached
+export const canRunAgain = (item: InboxItem): item is RunItem =>
+  item.kind === 'run' && (item.limit_reached || Boolean(item.waiting_reason))
 
 export type RefusalItem = Extract<InboxItem, { kind: 'refusal' }>
 

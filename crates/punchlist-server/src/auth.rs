@@ -278,10 +278,12 @@ impl FromRequestParts<AppState> for Actor {
                 })?,
                 Named::Row(Some(id)) => member(id).unwrap_or(oldest),
                 Named::Issue(None) | Named::Row(None) => oldest,
-                // Who is signed in, and where they belong, needs no workspace.
+                // Who is signed in, where they belong and their sessions need no workspace.
                 Named::Nothing
                     if memberships.len() == 1
                         || path == "/api/session"
+                        || path == "/api/sessions"
+                        || path.starts_with("/api/sessions/")
                         || path == "/api/workspaces" =>
                 {
                     oldest

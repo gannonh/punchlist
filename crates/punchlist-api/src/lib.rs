@@ -292,6 +292,26 @@ pub struct Account {
     pub github_login: Option<String>,
 }
 
+/// One of `GET /api/sessions`: a browser the account is signed in on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SessionInfo {
+    /// The id to revoke it by, which is not its cookie's value.
+    pub id: Uuid,
+    /// The browser and OS its user agent names, such as `Safari on iPhone`, else
+    /// `Unknown device`.
+    pub device: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+    /// The session the request came with.
+    pub current: bool,
+}
+
+/// `DELETE /api/sessions`: how many sessions it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SessionsRevoked {
+    pub revoked: u64,
+}
+
 /// `GET /api/auth`: the ways the sign-in page offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SignInOptions {
@@ -1279,7 +1299,8 @@ pub enum InboxItem {
         unread: bool,
     },
     /// The issue's latest run in its status ended and nothing dispatches it again: the run
-    /// failed, or it was the entry's last (`limit_reached`). The caller owns the run's agent.
+    /// failed, it was the entry's last (`limit_reached`), or its agent said it waits on a
+    /// person (`waiting_reason`). The caller owns the run's agent.
     Run {
         issue: PullRequestIssue,
         /// The run's agent kind, such as `claude-code`.
@@ -1290,6 +1311,9 @@ pub enum InboxItem {
         last_outcome: RunOutcome,
         /// The last attempt's failure reason, when the run failed. Text from outside the team.
         reason: Option<String>,
+        /// What the run's agent said it waits on a person for (`wait_for_person`), when it did:
+        /// a Run again gives the issue another set of runs. Text from outside the team.
+        waiting_reason: Option<String>,
         /// The entry's runs are used up: `<runs> runs in <status> ended without moving it`.
         limit_reached: bool,
         /// When the run's end was recorded.
