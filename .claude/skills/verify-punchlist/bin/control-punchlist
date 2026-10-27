@@ -342,7 +342,7 @@ cmd_fake_github() {
   for _ in $(seq 1 40); do curl -s -o /dev/null "http://$host:$port/user" && break; sleep 0.25; done
   echo "FAKE_GITHUB_URL=http://$host:$port" >>"$RUN_DIR/run.env"
   cmd_restart "$RUN_ID"
-  echo "fake GitHub at http://$host:$port; users octocat (583231) and stranger (9001)" >&2
+  echo "fake GitHub at http://$host:$port; users octocat (583231), octo-cat (1234) and stranger (9001)" >&2
 }
 
 # The server down and up again on the same database and port, as after a crash or a deploy.

@@ -3,12 +3,12 @@
 
 use punchlist_api::{
     ActorList, AppendLog, Claim, ClaimRequest, CliLogin, CliLoginPoll, CliLoginToken, CreateAgent,
-    CreateComment, CreateIssue, CreateMilestone, CreateProject, CreatedAgent, ErrorBody, Event,
-    FinishRun, GateChecklist, GithubToken, Heartbeat, HeartbeatReply, ImportRun, ImportStatus,
-    Issue, IssueList, IssueWritten, Lease, LinearImport, Milestone, MoveIssue, Moved,
-    OpenPullRequest, PROOF_TYPES, Project, ProjectList, Proof, ProofKind, PullRequest,
-    PullRequestsNow, RefreshGithubToken, RegisterRunner, RegisteredRunner, ResumeRun, Run,
-    RunAgainResult, RunLog, RunnerList, SearchResults, Session, SessionInfo, SessionsRevoked,
+    CreateComment, CreateInvite, CreateIssue, CreateMilestone, CreateProject, CreatedAgent,
+    ErrorBody, Event, FinishRun, GateChecklist, GithubToken, Heartbeat, HeartbeatReply, ImportRun,
+    ImportStatus, Invite, Issue, IssueList, IssueWritten, Lease, LinearImport, Milestone,
+    MoveIssue, Moved, OpenPullRequest, PROOF_TYPES, Project, ProjectList, Proof, ProofKind,
+    PullRequest, PullRequestsNow, RefreshGithubToken, RegisterRunner, RegisteredRunner, ResumeRun,
+    Run, RunAgainResult, RunLog, RunnerList, SearchResults, Session, SessionInfo, SessionsRevoked,
     UpdateIssue, UpdateMilestone, UpdateProject, WaitForPerson, WorkflowInfo, Workspace,
     proof_type_by_extension,
 };
@@ -162,6 +162,33 @@ impl Client {
     pub async fn import_status(&self, workspace_id: &str) -> Result<ImportStatus, ClientError> {
         let path = ["workspaces", workspace_id, "imports"];
         self.send::<(), _>(Method::GET, &path, None).await
+    }
+
+    /// Invites a GitHub user to the workspace: their next sign-in with GitHub makes them a
+    /// person there.
+    pub async fn create_invite(
+        &self,
+        workspace_id: &str,
+        github_login: &str,
+    ) -> Result<Invite, ClientError> {
+        let request = CreateInvite {
+            github_login: github_login.to_string(),
+        };
+        let path = ["workspaces", workspace_id, "invites"];
+        self.send(Method::POST, &path, Some(&request)).await
+    }
+
+    /// The workspace's open invites, oldest first.
+    pub async fn list_invites(&self, workspace_id: &str) -> Result<Vec<Invite>, ClientError> {
+        let path = ["workspaces", workspace_id, "invites"];
+        self.send::<(), _>(Method::GET, &path, None).await
+    }
+
+    pub async fn revoke_invite(&self, workspace_id: &str, id: &str) -> Result<(), ClientError> {
+        let path = ["workspaces", workspace_id, "invites", id];
+        self.send_optional::<(), serde_json::Value>(Method::DELETE, &path, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn list_projects(&self) -> Result<ProjectList, ClientError> {

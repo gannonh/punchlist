@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE account SET github_login = $2 WHERE github_user_id = $1 RETURNING id",
+  "query": "INSERT INTO account (name, github_user_id, github_login) VALUES ($1, $2, $3)\n                 RETURNING id",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,7 @@
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Int8",
         "Text"
       ]
@@ -25,5 +26,5 @@
       false
     ]
   },
-  "hash": "992a3f3293109a6482c561373e39e509e50e11ed04d7c8194cf764db35f11ee8"
+  "hash": "d7eb5c36b7f70f3bc7819ef450df3b54936f45b3d12198a3144214f444e4b206"
 }

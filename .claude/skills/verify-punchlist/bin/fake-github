@@ -12,6 +12,7 @@ and GITHUB_OAUTH_URL and GITHUB_API_URL both at http://HOST:PORT (`control-punch
 The authorize page offers one button per user; each sends the browser back with that user's code:
 
     octocat   id 583231
+    octo-cat  id 1234, named Octo Cat (PL-169's invites)
     stranger  id 9001
 """
 
@@ -22,7 +23,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 CLIENT_ID, CLIENT_SECRET = "fake-client-id", "fake-client-secret"
-USERS = {"octocat": 583231, "stranger": 9001}
+USERS = {"octocat": 583231, "octo-cat": 1234, "stranger": 9001}
+NAMES = {"octo-cat": "Octo Cat"}
 CALLBACK = sys.argv[3] if len(sys.argv) > 3 else "http://127.0.0.1:7878/api/auth/github/callback"
 
 
@@ -57,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
             login = token.removeprefix("gho_fake_")
             if not token.startswith("gho_fake_") or login not in USERS:
                 return self.answer(401, {"message": "Bad credentials"})
-            return self.answer(200, {"id": USERS[login], "login": login})
+            return self.answer(200, {"id": USERS[login], "login": login, "name": NAMES.get(login)})
         self.answer(404, {"message": "Not Found"})
 
     def do_POST(self):
