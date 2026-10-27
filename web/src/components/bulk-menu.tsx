@@ -1,6 +1,6 @@
 // The list's menu for a selection: a right-click opens it with a picker per property in a submenu, and a key
 // opens one picker at the focused row. Both pick through the same `Picker`, or for Status `StatusPicker`.
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react'
+import { memo, useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react'
 import { useQueries } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
@@ -377,6 +377,15 @@ function Choose({
   )
 }
 
+/**
+ * A closing menu's content as it last was. The menu fades out for a moment after a choice, and a move of many rows
+ * answers within it: re-rendering the pickers for each answer would double each row's render.
+ */
+const WhileOpen = memo(
+  ({ children }: { open: boolean; children: ReactNode }) => children,
+  (_, next) => !next.open,
+)
+
 const targetName = (targets: readonly IssueRow[]) =>
   targets.length === 1 ? (targets[0]?.issue.id ?? '') : `${String(targets.length)} issues`
 
@@ -391,22 +400,31 @@ export function RowMenu({
   onOpenChange,
   onApply,
   onMove,
+  narrow,
   children,
 }: {
   targets: readonly IssueRow[]
   context: PickerContext
+  /** A phone's width, where a menu and its 16 rem submenu do not fit side by side. */
+  narrow: boolean
   onTarget: (id: string | null) => boolean
   onOpenChange: (open: boolean) => void
   onApply: Apply
   onMove: Move
   children: ReactNode
 }) {
+  const [open, setOpen] = useState(false)
   const target = (event: SyntheticEvent) => {
     const id = (event.target as Element).closest('[data-issue]')?.getAttribute('data-issue') ?? null
     if (!onTarget(id)) event.preventDefault()
   }
   return (
-    <ContextMenu onOpenChange={onOpenChange}>
+    <ContextMenu
+      onOpenChange={(next) => {
+        setOpen(next)
+        onOpenChange(next)
+      }}
+    >
       <ContextMenuTrigger
         asChild
         onContextMenu={target}
@@ -424,43 +442,48 @@ export function RowMenu({
         data-row-menu
         onKeyDown={tabThrough}
       >
-        <ContextMenuLabel className="text-caption font-normal text-ink-3">{targetName(targets)}</ContextMenuLabel>
-        {PICKERS.map(({ kind, name, hint }) => (
-          <ContextMenuSub key={kind}>
-            <ContextMenuSubTrigger className="text-body [&>svg:last-child]:ml-1">
-              {name}
-              <ContextMenuShortcut>{hint}</ContextMenuShortcut>
-            </ContextMenuSubTrigger>
-            <ContextMenuSubContent
-              className="max-h-80 w-64 overflow-y-auto"
-              aria-label={name}
-              collisionPadding={12}
-              onKeyDown={tabThrough}
-            >
-              <Choose
-                kind={kind}
-                targets={targets}
-                context={context}
-                parts={CONTEXT_PARTS}
-                onApply={onApply}
-                onMove={onMove}
-              />
-            </ContextMenuSubContent>
-          </ContextMenuSub>
-        ))}
-        <ContextMenuSeparator />
-        <ContextMenuItem
-          className="text-body"
-          onSelect={() => {
-            const ids = targets.map((row) => row.issue.id).join(', ')
-            navigator.clipboard.writeText(ids).then(
-              () => toast.success(`Copied ${ids}`),
-              () => toast.error('The browser did not allow copying.'),
-            )
-          }}
-        >
-          Copy ID
-        </ContextMenuItem>
+        <WhileOpen open={open}>
+          <ContextMenuLabel className="text-caption font-normal text-ink-3">{targetName(targets)}</ContextMenuLabel>
+          {PICKERS.map(({ kind, name, hint }) => (
+            <ContextMenuSub key={kind}>
+              <ContextMenuSubTrigger className="text-body [&>svg:last-child]:ml-1">
+                {name}
+                <ContextMenuShortcut>{hint}</ContextMenuShortcut>
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent
+                className="max-h-80 w-64 overflow-y-auto"
+                aria-label={name}
+                collisionPadding={12}
+                // A submenu only flips to the other side, never shifts across; overlapping its menu by 10 rem on a
+                // phone keeps it on screen from either side.
+                sideOffset={narrow ? -160 : 0}
+                onKeyDown={tabThrough}
+              >
+                <Choose
+                  kind={kind}
+                  targets={targets}
+                  context={context}
+                  parts={CONTEXT_PARTS}
+                  onApply={onApply}
+                  onMove={onMove}
+                />
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ))}
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className="text-body"
+            onSelect={() => {
+              const ids = targets.map((row) => row.issue.id).join(', ')
+              navigator.clipboard.writeText(ids).then(
+                () => toast.success(`Copied ${ids}`),
+                () => toast.error('The browser did not allow copying.'),
+              )
+            }}
+          >
+            Copy ID
+          </ContextMenuItem>
+        </WhileOpen>
       </ContextMenuContent>
     </ContextMenu>
   )

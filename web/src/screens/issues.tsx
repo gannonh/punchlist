@@ -678,6 +678,7 @@ export function IssuesScreen({
             }}
             onApply={(action, edits, untouched) => void bulkEdit(action, edits, untouched)}
             onMove={(ids, to) => void moveAll(ids, to)}
+            narrow={narrow}
           >
             <ListView {...viewProps} checked={checked} onCheck={check} />
           </RowMenu>
