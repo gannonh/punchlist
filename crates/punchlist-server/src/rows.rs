@@ -12,7 +12,7 @@ use punchlist_core::display_name;
 use uuid::Uuid;
 
 use crate::auth::parse_role;
-use crate::issues::evaluate_gates;
+use crate::issues::{evaluate_gates, waiting_on_person};
 use crate::workflow::active_workflow;
 
 /// The issue, as every response that carries one shows it. `None` when it is not in the
@@ -46,8 +46,13 @@ pub(crate) async fn issue_rows(
     workspace_id: Uuid,
     ids: Option<&[String]>,
 ) -> sqlx::Result<Vec<IssueRow>> {
-    let loaded = load(conn, workspace_id, ids).await?;
+    let mut loaded = load(conn, workspace_id, ids).await?;
     let (workflow, _) = active_workflow(conn, workspace_id).await?;
+    let issues: Vec<&Issue> = loaded.iter().map(|loaded| &loaded.issue).collect();
+    let mut waiting = waiting_on_person(conn, &issues).await?;
+    for loaded in &mut loaded {
+        loaded.issue.waiting_on_person = waiting.remove(&loaded.issue.id);
+    }
     let mut rows = Vec::with_capacity(loaded.len());
     for Parsed {
         issue,

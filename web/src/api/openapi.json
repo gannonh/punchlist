@@ -5406,7 +5406,7 @@
               "string",
               "null"
             ],
-            "description": "Why the issue waits on a person, when it does: every run this entry into its status\ngets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;\nevery other response that carries an issue leaves it out."
+            "description": "Why the issue waits on a person, when it does: its agent called `wait_for_person`, or\nevery run this entry into its status gets has ended and the issue has not moved.\n`GET /api/issues/{id}` and the issue's row (`IssueRow`, so the list and the event\nstream) fill this; every other response that carries an issue leaves it out."
           },
           "waiting_to_run": {
             "type": [

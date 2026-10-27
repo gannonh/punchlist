@@ -28,6 +28,22 @@ test('g then p opens the Pull requests page, which moves a pull request between 
   await expect(page.locator('[data-section="in-review"]').locator(pr)).toBeVisible({ timeout: 2000 })
   await expect(page.locator('[data-section="draft"]').locator(pr)).toHaveCount(0)
 
+  // Esc on a menu item closes the workspace menu and the page stays.
+  await page.locator('[data-workspace-menu]').focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('menuitemradio').first()).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('menu')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/w\/PL\/pull-requests$/)
+  await expect(page.locator('[data-workspace-menu]')).toBeFocused()
+  // The account menu's Sessions dialog too, with focus on no control: Radix closes it before the page's Esc runs.
+  await page.locator('[data-account-menu]').click()
+  await page.locator('[data-sessions-item]').click()
+  await page.locator('[data-sessions]').getByRole('heading', { name: 'Sessions' }).click()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-sessions]')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/w\/PL\/pull-requests$/)
+
   await pr.focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${id}$`))

@@ -112,6 +112,7 @@
   .run-queued .run-dot { border: 1.5px solid #71717a; }
   .run-failed .run-dot { @apply bg-bad; }
   .run-idle .run-dot { background: #d4d4d8; }
+  .run-waiting .run-dot { @apply bg-warn; }
 
   /* Lucide's external-link icon after a link out, drawn by CSS: the list can hold hundreds, and an SVG element each
      costs render time. */
@@ -163,7 +164,10 @@
   .issue-page > .rail { position: sticky; top: 62px; max-height: calc(100vh - 110px); overflow-y: auto; }
   @media (max-width: 899px) {
     .issue-page { grid-template-columns: minmax(0, 1fr); }
-    .issue-page > .head { order: -2; }
+    /* The main column's panels join the page's grid, so its notice goes between the header and the rail. */
+    .issue-page > .head { order: -3; }
+    .issue-page > .main { display: contents; }
+    .issue-page > .main > .notice { order: -2; }
     .issue-page > .rail { position: static; order: -1; max-height: none; overflow: visible; }
     .issue-page .rail-only-wide { display: none; }
   }

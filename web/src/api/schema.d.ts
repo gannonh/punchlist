@@ -1844,9 +1844,10 @@ export interface components {
              */
             waiting_for_usage_limit?: string | null;
             /**
-             * @description Why the issue waits on a person, when it does: every run this entry into its status
-             *     gets has ended and the issue has not moved. Only `GET /api/issues/{id}` fills this;
-             *     every other response that carries an issue leaves it out.
+             * @description Why the issue waits on a person, when it does: its agent called `wait_for_person`, or
+             *     every run this entry into its status gets has ended and the issue has not moved.
+             *     `GET /api/issues/{id}` and the issue's row (`IssueRow`, so the list and the event
+             *     stream) fill this; every other response that carries an issue leaves it out.
              */
             waiting_on_person?: string | null;
             /**

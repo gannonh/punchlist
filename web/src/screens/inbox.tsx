@@ -8,7 +8,7 @@ import { useEventStream, useInbox, useIssues, useMarkRead, usePullRequests } fro
 import { ageText, canRunAgain, ordered, refusalParts, runLines, type InboxItem } from '@/model/inbox'
 import { agentName } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
-import { RunAgain } from '@/screens/issue'
+import { RunAgain } from '@/components/waiting-notice'
 import { useNow } from '@/screens/issues'
 
 /** Records a `pl:render` measure for each commit of the page with its items, as the list does. */
@@ -128,7 +128,7 @@ export function InboxScreen({ workspace, me }: { workspace: Workspace; me: strin
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || inField(event.target)) return
-      if (document.querySelector('[role="dialog"], [role="menu"]')) return
+      if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]')) return
       event.preventDefault()
       void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
     }

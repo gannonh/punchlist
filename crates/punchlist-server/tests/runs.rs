@@ -2741,6 +2741,52 @@ async fn run_again_clears_an_agent_waiting_on_a_person(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn a_waiting_issues_row_says_why_and_anothers_says_nothing(pool: PgPool) {
+    let (app, person) = setup(&pool, Duration::from_secs(30)).await;
+    let r = register(&app, &person.token, "r", &["claude-code"]).await;
+    create_and_move(&app, &person.token, "Build", &["todo", "start"]).await;
+    create_and_move(&app, &person.token, "Later", &[]).await;
+    let (_, claimed) = claim(&app, &r, 0).await;
+    wait_on_person(&app, &claimed).await;
+    let run_id = claimed["run_id"].as_str().unwrap();
+    assert_eq!(
+        finish(&app, &r, run_id, succeeded()).await.0,
+        StatusCode::OK
+    );
+
+    let rows = || async {
+        let (status, list) = call(&app, &person.token, "GET", "/api/issues", None).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        (list["issues"].as_array().unwrap().iter())
+            .map(|row| {
+                (
+                    row["issue"]["id"].clone(),
+                    row["issue"]["waiting_on_person"].clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows().await,
+        [
+            (
+                json!("PL-1"),
+                json!("Claude Code is waiting on a person: A check failed.")
+            ),
+            (json!("PL-2"), Value::Null),
+        ]
+    );
+    assert_eq!(
+        run_again(&app, &person.token, "PL-1").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        rows().await,
+        [(json!("PL-1"), Value::Null), (json!("PL-2"), Value::Null)]
+    );
+}
+
+#[sqlx::test]
 async fn run_again_refuses_an_issue_not_waiting_on_a_person_and_writes_nothing(pool: PgPool) {
     let (app, person) = setup(&pool, Duration::from_secs(30)).await;
     let r = register(&app, &person.token, "r", &["claude-code"]).await;
