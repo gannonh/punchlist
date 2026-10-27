@@ -1183,6 +1183,10 @@ pub struct Run {
     pub agent: String,
     /// The agent as people read it, such as `Claude Code`.
     pub agent_name: String,
+    /// The agent of the dispatch rule this run stood in for, such as `codex`, when that agent
+    /// was paused for its usage limit and the rule's `fallback` ran instead.
+    #[serde(default)]
+    pub fallback_for: Option<String>,
     pub branch: String,
     pub outcome: RunOutcome,
     pub started_at: DateTime<Utc>,
@@ -1658,12 +1662,29 @@ pub struct StatusInfo {
     /// dispatch rule's `runs_per_entry` (default 3); `None` when it does not dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatch_runs_per_entry: Option<u32>,
+    /// The agent its dispatch rule's `fallback` names, which takes a dispatch while the rule's
+    /// agent is paused for its usage limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_fallback: Option<DispatchFallback>,
     /// No transition leaves it, as with Done and Canceled. The list hides these by default.
     pub closed: bool,
     /// The status, as people read it (`Done`), that a merge of the issue's pull request
     /// moves an issue in it to; `None` when it does not wait on a merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_merge_to: Option<String>,
+}
+
+/// A dispatch rule's `fallback`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DispatchFallback {
+    /// An agent key, such as `claude-code`.
+    pub agent: String,
+    /// `None`: the runner's flag for the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Codex's reasoning effort; `None`: the runner's flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// A pushed `workflow.toml` the server refused to load.

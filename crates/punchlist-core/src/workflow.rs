@@ -189,10 +189,24 @@ pub struct Dispatch {
     pub effort: Option<String>,
     /// The most tokens, input plus output, an attempt may use before the runner stops it.
     pub max_tokens: Option<i64>,
+    /// The agent a dispatch goes to while `agent` is paused for its usage limit.
+    pub fallback: Option<Fallback>,
     /// The line of `agent` in the file, for an error about it.
     agent_line: usize,
     /// The line of `prompt` in the file, for an error about it.
     prompt_line: Option<usize>,
+}
+
+/// `fallback = { agent = "claude-code", model = "sonnet" }` on a dispatch rule: the agent,
+/// never the rule's own, that takes a dispatch while the rule's agent is paused for its
+/// usage limit. It does not fall back in turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    pub agent: String,
+    /// As on the rule: `None` is the runner's flag for the agent.
+    pub model: Option<String>,
+    /// Codex's reasoning effort, only when `agent` is `codex`.
+    pub effort: Option<String>,
 }
 
 /// A parsed and validated workflow, with the prompt files it names.
@@ -298,6 +312,12 @@ pub enum Problem {
     BadEffort,
     #[error("`effort` applies only to agent `codex`")]
     EffortNotCodex,
+    #[error(
+        "`fallback` is a table such as `{{ agent = \"claude-code\", model = \"sonnet\" }}`, with `agent` and optionally `model` and `effort`"
+    )]
+    BadFallback,
+    #[error("the fallback agent `{0}` is the rule's own agent")]
+    FallbackSameAgent(String),
     #[error("the runtime needs the status `{0}`")]
     MissingStatus(&'static str),
     #[error("the runtime needs a transition from `start` to `in_progress`")]
@@ -722,10 +742,18 @@ impl Workflow {
             }
             let model = name("model", Problem::BadModel, rule.model)?;
             let effort = name("effort", Problem::BadEffort, rule.effort)?;
+            let fallback = match rule.fallback {
+                None => None,
+                Some(value) => {
+                    let refuse = |problem| errors.at(value.span(), key("fallback"), problem);
+                    Some(fallback(value.get_ref(), rule.agent.get_ref()).map_err(refuse)?)
+                }
+            };
             dispatch.push(Dispatch {
                 status,
                 model,
                 effort,
+                fallback,
                 agent_line: errors.line(rule.agent.span().start),
                 agent: rule.agent.into_inner(),
                 prompt_line: rule.prompt.as_ref().map(|p| errors.line(p.span().start)),
@@ -1085,7 +1113,47 @@ impl Workflow {
     }
 }
 
-/// A plain relative path with no `..`, so a prompt cannot name a file outside `.punchlist/`.
+/// A rule's `fallback` table, read for a rule whose agent is `own`.
+fn fallback(value: &toml::Value, own: &str) -> Result<Fallback, Problem> {
+    let toml::Value::Table(table) = value else {
+        return Err(Problem::BadFallback);
+    };
+    let text = |field: &str| match table.get(field) {
+        None => Ok(None),
+        Some(toml::Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(Problem::BadFallback),
+    };
+    if table
+        .keys()
+        .any(|k| !["agent", "model", "effort"].contains(&k.as_str()))
+    {
+        return Err(Problem::BadFallback);
+    }
+    let agent = text("agent")?.ok_or(Problem::BadFallback)?;
+    if unknown_agent_kind(&agent).is_some() {
+        return Err(Problem::UnknownAgent(agent));
+    }
+    if agent == own {
+        return Err(Problem::FallbackSameAgent(agent));
+    }
+    let model = text("model")?;
+    if model.as_deref().is_some_and(|m| !is_plain_name(m)) {
+        return Err(Problem::BadModel);
+    }
+    let effort = text("effort")?;
+    if effort.is_some() && agent != "codex" {
+        return Err(Problem::EffortNotCodex);
+    }
+    if effort.as_deref().is_some_and(|e| !is_plain_name(e)) {
+        return Err(Problem::BadEffort);
+    }
+    Ok(Fallback {
+        agent,
+        model,
+        effort,
+    })
+}
+
 /// A model or effort the runner can pass as one argument after its flag.
 fn is_plain_name(name: &str) -> bool {
     !name.is_empty()
@@ -1294,6 +1362,26 @@ struct RawDispatchRule {
     #[serde(default)]
     #[schemars(with = "Option<i64>", range(min = 1))]
     max_tokens: Option<Spanned<toml::Value>>,
+    /// The agent a dispatch goes to while this rule's agent is paused for its account's usage
+    /// limit, such as `{ agent = "claude-code", model = "sonnet" }`; not the rule's own agent.
+    /// The fallback does not fall back: with both paused, the dispatch waits for the earlier
+    /// reset.
+    #[serde(default)]
+    #[schemars(with = "Option<RawFallback>")]
+    fallback: Option<Spanned<toml::Value>>,
+}
+
+/// Schema only: `fallback` is read by `fallback()`, so a wrong field names its key.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RawFallback {
+    /// One of `claude-code`, `codex`, `opencode`, `pi` and `cursor`.
+    agent: String,
+    /// The model the fallback agent runs on; without it, the runner's flag for the agent.
+    model: Option<String>,
+    /// Codex's reasoning effort; only for agent `codex`.
+    effort: Option<String>,
 }
 
 // Schema-only types: the names a field accepts.
@@ -1897,6 +1985,79 @@ mod tests {
                 Workflow::from_toml(&text(value)).unwrap_err().to_string(),
                 "line 9, `dispatch.status.in_progress.max_tokens`: `max_tokens` must be at least 1"
             );
+        }
+    }
+
+    #[test]
+    fn a_fallback_is_kept() {
+        let rule = |fallback: &str| {
+            let text = runnable(&format!(
+                "[dispatch.status.a]\nagent = \"codex\"\nfallback = {fallback}"
+            ));
+            Workflow::from_toml(&text).map(|w| w.dispatch_for("a").unwrap().fallback.clone())
+        };
+        assert_eq!(
+            rule("{ agent = \"claude-code\", model = \"sonnet\" }").unwrap(),
+            Some(Fallback {
+                agent: "claude-code".into(),
+                model: Some("sonnet".into()),
+                effort: None,
+            })
+        );
+        assert_eq!(rule("{ agent = \"cursor\" }").unwrap().unwrap().model, None);
+        let none = Workflow::from_toml(&runnable("")).unwrap();
+        assert_eq!(none.dispatch_for("in_progress").unwrap().fallback, None);
+        let text = runnable("").replace(
+            "agent = \"claude-code\"\n",
+            "agent = \"claude-code\"\nfallback = { agent = \"codex\", effort = \"low\" }\n",
+        );
+        let fallback = Workflow::from_toml(&text).unwrap();
+        let fallback = fallback
+            .dispatch_for("in_progress")
+            .unwrap()
+            .fallback
+            .clone();
+        assert_eq!(fallback.unwrap().effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn a_bad_fallback_is_refused_naming_its_key() {
+        let refused = |fallback: &str| {
+            let text = runnable(&format!(
+                "[dispatch.status.a]\nagent = \"codex\"\nfallback = {fallback}"
+            ));
+            Workflow::from_toml(&text).unwrap_err().to_string()
+        };
+        let at = "line 4, `dispatch.status.a.fallback`: ";
+        assert_eq!(
+            refused("{ agent = \"opncode\" }"),
+            format!(
+                "{at}unknown agent kind `opncode`; the kinds are claude-code, codex, opencode, pi, cursor"
+            )
+        );
+        assert_eq!(
+            refused("{ agent = \"codex\" }"),
+            format!("{at}the fallback agent `codex` is the rule's own agent")
+        );
+        assert_eq!(
+            refused("{ agent = \"claude-code\", effort = \"low\" }"),
+            format!("{at}`effort` applies only to agent `codex`")
+        );
+        assert_eq!(
+            refused("{ agent = \"claude-code\", model = \"a b\" }"),
+            format!(
+                "{at}`model` is a model's name, such as `haiku`: not empty, no spaces, not starting with `-`"
+            )
+        );
+        let shape = "`fallback` is a table such as `{ agent = \"claude-code\", model = \"sonnet\" }`, \
+                     with `agent` and optionally `model` and `effort`";
+        for fallback in [
+            "\"claude-code\"",
+            "{ model = \"sonnet\" }",
+            "{ agent = \"claude-code\", modle = \"sonnet\" }",
+            "{ agent = 3 }",
+        ] {
+            assert_eq!(refused(fallback), format!("{at}{shape}"), "{fallback}");
         }
     }
 

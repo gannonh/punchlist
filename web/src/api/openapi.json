@@ -4872,6 +4872,33 @@
           }
         }
       },
+      "DispatchFallback": {
+        "type": "object",
+        "description": "A dispatch rule's `fallback`.",
+        "required": [
+          "agent"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string",
+            "description": "An agent key, such as `claude-code`."
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Codex's reasoning effort; `None`: the runner's flag."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None`: the runner's flag for the agent."
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "description": "The body of every error response.",
@@ -7227,6 +7254,13 @@
               "null"
             ]
           },
+          "fallback_for": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent of the dispatch rule this run stood in for, such as `codex`, when that agent\nwas paused for its usage limit and the rule's `fallback` ran instead."
+          },
           "finished_at": {
             "type": [
               "string",
@@ -7719,6 +7753,17 @@
               "null"
             ],
             "description": "The Codex reasoning effort its dispatch rule names; `None`: the runner's flag."
+          },
+          "dispatch_fallback": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DispatchFallback",
+                "description": "The agent its dispatch rule's `fallback` names, which takes a dispatch while the rule's\nagent is paused for its usage limit."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "dispatch_model": {
             "type": [

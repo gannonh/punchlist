@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.status AS \"from\", r.id AS \"run_id?\",\n                  CASE WHEN r.id IS NOT NULL THEN r.agent\n                       WHEN i.status = $3 THEN $4\n                       WHEN own.ok THEN d.agent ELSE fb.agent END AS \"agent!\",\n                  CASE WHEN r.id IS NULL AND i.status <> $3 AND own.ok IS NOT TRUE\n                       THEN d.agent END AS fallback_for\n           FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL\n           LEFT JOIN run r ON r.issue_id = i.id AND r.outcome = 'running' AND r.status = i.status\n                AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id\n                                AND a.state = 'running')\n           CROSS JOIN LATERAL (SELECT d.agent = ANY($2)\n                                      AND (d.not_before IS NULL OR d.not_before <= now()) AS ok) own\n           LEFT JOIN LATERAL (\n                SELECT f.agent FROM unnest($9::text[], $10::text[]) AS f (status, agent)\n                WHERE f.status = i.status AND f.agent = ANY($2) AND f.agent <> d.agent\n                  AND (d.not_before > now()\n                       OR (EXISTS (SELECT 1 FROM runner_pause p JOIN runner n ON n.id = p.runner_id\n                                   WHERE n.workspace_id = $1 AND p.agent = d.agent\n                                     AND p.until > now())\n                           AND NOT EXISTS (\n                                SELECT 1 FROM runner n\n                                WHERE n.workspace_id = $1 AND d.agent = ANY(n.agents)\n                                  AND n.last_heartbeat > now() - make_interval(secs => $11)\n                                  AND NOT EXISTS (SELECT 1 FROM runner_pause p\n                                                  WHERE p.runner_id = n.id AND p.agent = d.agent\n                                                    AND p.until > now()))))) fb ON true\n           WHERE i.workspace_id = $1\n             AND NOT i.status = ANY($5)\n             AND CASE WHEN r.id IS NOT NULL THEN r.agent = ANY($2)\n                      WHEN i.status = $3 THEN $4::text IS NOT NULL\n                      ELSE (own.ok OR fb.agent IS NOT NULL)\n                           AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id\n                                           AND run.outcome = 'running')\n                 END\n             AND (r.id IS NOT NULL\n                  OR NOT CASE WHEN i.status = $3 THEN $6 ELSE i.status END = ANY($7)\n                  OR NOT EXISTS (SELECT 1 FROM run s WHERE s.workspace_id = $1\n                                 AND s.outcome = 'running'\n                                 AND s.status = CASE WHEN i.status = $3 THEN $6\n                                                     ELSE i.status END))\n           ORDER BY array_position($8::text[], i.status) DESC NULLS LAST, i.number\n           LIMIT 1 FOR UPDATE OF i SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "from",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "issue",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "run_id?",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "run",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "agent!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "fallback_for",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Text",
+        "Text",
+        "TextArray",
+        "Text",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "0279af2370f5eb5b6caa0fa6d419184b8f72d9017ec152bcd418c59eb3732090"
+}

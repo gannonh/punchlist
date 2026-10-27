@@ -1605,6 +1605,15 @@ export interface components {
             /** @description The agent's bearer token. Shown once; only its hash is stored. */
             token: string;
         };
+        /** @description A dispatch rule's `fallback`. */
+        DispatchFallback: {
+            /** @description An agent key, such as `claude-code`. */
+            agent: string;
+            /** @description Codex's reasoning effort; `None`: the runner's flag. */
+            effort?: string | null;
+            /** @description `None`: the runner's flag for the agent. */
+            model?: string | null;
+        };
         /** @description The body of every error response. */
         ErrorBody: {
             /** @description A stable code, such as `role_not_allowed`, `gate_failed` or `not_found`. */
@@ -2517,6 +2526,11 @@ export interface components {
             /** Format: int64 */
             duration_ms?: number | null;
             failure_reason?: string | null;
+            /**
+             * @description The agent of the dispatch rule this run stood in for, such as `codex`, when that agent
+             *     was paused for its usage limit and the rule's `fallback` ran instead.
+             */
+            fallback_for?: string | null;
             /** Format: date-time */
             finished_at?: string | null;
             /** Format: uuid */
@@ -2683,6 +2697,7 @@ export interface components {
             dispatch?: string | null;
             /** @description The Codex reasoning effort its dispatch rule names; `None`: the runner's flag. */
             dispatch_effort?: string | null;
+            dispatch_fallback?: components["schemas"]["DispatchFallback"] | null;
             /** @description The model its dispatch rule names, such as `haiku`; `None`: the runner's flag. */
             dispatch_model?: string | null;
             /**

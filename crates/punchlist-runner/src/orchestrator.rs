@@ -1280,6 +1280,7 @@ mod tests {
                         issue_id: "PL-1".into(),
                         agent: "claude-code".into(),
                         agent_name: "Claude Code".into(),
+                        fallback_for: None,
                         branch: "feature/pl-1".into(),
                         outcome: RunOutcome::Succeeded,
                         started_at: now,
