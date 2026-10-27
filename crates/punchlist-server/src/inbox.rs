@@ -15,7 +15,7 @@ use utoipa_axum::routes;
 
 use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
-use crate::issues::runs_ended;
+use crate::issues::{runs_ended, waiting_reasons};
 use crate::rows::issue_runs;
 use crate::workflow::active_workflow;
 use crate::{ApiError, AppState};
@@ -114,7 +114,8 @@ async fn waiting_items(
 
 /// The issues whose latest run in their status ended and has nothing after it, by an agent the
 /// caller owns: the row's run is `Failed` (`rows::issue_runs`), or `Idle` after the entry's
-/// last run (`runs_ended`, as `get_issue` says). Newest `run` event first.
+/// last run (`runs_ended`) or after a run whose agent said it waits on a person
+/// (`waiting_reasons`), as `get_issue` says. Newest `run` event first.
 async fn run_items(
     conn: &mut sqlx::PgConnection,
     actor: &Actor,
@@ -150,15 +151,17 @@ async fn run_items(
     ids.sort();
     ids.dedup();
     let limits = runs_ended(conn, &ids).await?;
+    let mut waiting = waiting_reasons(conn, &ids).await?;
     let mut items = Vec::new();
     for (issue, summary, last) in issue_runs(conn, actor.workspace_id, &ids).await? {
         let Some(run) = last.and_then(|last| ended.iter().find(|run| run.id == last)) else {
             continue;
         };
         let limit = limits.get(&issue.id);
+        let waiting_reason = waiting.remove(&issue.id).map(|(_, reason)| reason);
         let reason = match summary {
             RunSummary::Failed { reason, .. } => reason,
-            RunSummary::Idle if limit.is_some() => None,
+            RunSummary::Idle if limit.is_some() || waiting_reason.is_some() => None,
             _ => continue,
         };
         let last_outcome = RunOutcome::parse(&run.outcome).ok_or_else(|| {
@@ -178,6 +181,7 @@ async fn run_items(
             runs: limit.copied().unwrap_or(run.runs),
             last_outcome,
             reason,
+            waiting_reason,
             limit_reached: limit.is_some(),
             since: run.since,
             since_seq: run.since_seq,
