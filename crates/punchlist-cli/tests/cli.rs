@@ -2398,7 +2398,7 @@ async fn invite_create_list_and_revoke(pool: PgPool) {
 
     let list = pl.run(&["invite", "list"]).await;
     let expires: String =
-        sqlx::query_scalar("SELECT to_char(created_at + interval '7 days', 'YYYY-MM-DD') FROM invite")
+        sqlx::query_scalar("SELECT to_char((created_at + interval '7 days') AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM invite")
             .fetch_one(&pool)
             .await
             .unwrap();
