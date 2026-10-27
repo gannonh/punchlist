@@ -30,7 +30,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::RunnerConfig;
 use crate::agent::{
-    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, USAGE_LIMIT, kill_group, read_record,
+    AgentExit, AgentResult, MAX_RECORD_BYTES, RUNNER_MARKER, RunHome, USAGE_LIMIT, kill_group,
+    read_record,
 };
 
 const INITIALIZE_ID: u64 = 1;
@@ -68,71 +69,46 @@ pub(crate) fn mcp_servers(config: &RunnerConfig, claim: &Claim) -> Value {
 /// one. It is the only one: the app-server does not read `CODEX_API_KEY` or `OPENAI_API_KEY`.
 const SIGN_IN_ENV: &str = "CODEX_ACCESS_TOKEN";
 
-/// The `CODEX_HOME` of one run: a directory only this user can read, holding a link to the
-/// person's Codex sign-in and, while the run goes on, Codex's own state (its databases and
-/// shell snapshots). A link, not a copy: Codex writes a refreshed token in place, through
-/// the link, so the person's sign-in stays current and removing the directory removes no
-/// credential. Dropping this removes the directory.
-pub(crate) struct CodexHome(PathBuf);
-
-impl CodexHome {
-    /// Makes `<root>/codex-home/<run_id>`, outside the worktree, linked to the sign-in in the
-    /// person's own Codex home.
-    pub(crate) fn create(root: &Path, run_id: &str) -> std::io::Result<CodexHome> {
-        let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
-        let env_sign_in = std::env::var_os(SIGN_IN_ENV).is_some_and(|token| !token.is_empty());
-        CodexHome::linked_to(&person, &run_home(root, run_id)?, env_sign_in)
-    }
-
-    /// The link is made whenever the person has an `auth.json`. Without one the home has no
-    /// link, which is enough when `env_sign_in` says the runner's environment signs Codex
-    /// in, and is refused otherwise.
-    // ponytail: a stored sign-in reaches the run only from `auth.json`. One kept in the
-    // keyring (`cli_auth_credentials_store`) has no file to link; have the runner pass the
-    // tokens over the app-server's `account/login/start` when someone needs that.
-    fn linked_to(person_home: &Path, home: &Path, env_sign_in: bool) -> std::io::Result<CodexHome> {
-        use std::os::unix::fs::DirBuilderExt;
-        let sign_in = person_home.join("auth.json");
-        let stored = sign_in.is_file();
-        if !stored && !env_sign_in {
-            return Err(std::io::Error::other(format!(
-                "no Codex sign-in at {} and no {SIGN_IN_ENV}: run `codex login` as the person \
-                 who runs the runner (a sign-in kept in the keyring is not supported)",
-                sign_in.display()
-            )));
-        }
-        // What a run killed with its runner left behind.
-        let _ = std::fs::remove_dir_all(home);
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(home)?;
-        // From here a failure removes the directory.
-        let home = CodexHome(home.to_path_buf());
-        if stored {
-            std::os::unix::fs::symlink(sign_in, home.0.join("auth.json"))?;
-        }
-        Ok(home)
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.0
-    }
+/// The `CODEX_HOME` of one run: a `RunHome` holding a link to the person's Codex sign-in and,
+/// while the run goes on, Codex's own state (its databases and shell snapshots). A link, not
+/// a copy: Codex writes a refreshed token in place, through the link, so the person's sign-in
+/// stays current and removing the directory removes no credential.
+///
+/// Makes `<root>/codex-home/<run_id>`, outside the worktree, linked to the sign-in in the
+/// person's own Codex home.
+pub(crate) fn codex_home(root: &Path, run_id: &str) -> std::io::Result<RunHome> {
+    let person = person_home(std::env::var_os("CODEX_HOME"), std::env::home_dir())?;
+    let env_sign_in = std::env::var_os(SIGN_IN_ENV).is_some_and(|token| !token.is_empty());
+    linked_to(&person, &run_home(root, run_id)?, env_sign_in)
 }
 
-impl Drop for CodexHome {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.0) {
-            tracing::warn!("cannot remove the Codex home {}: {e}", self.0.display());
-        }
+/// The link is made whenever the person has an `auth.json`. Without one the home has no
+/// link, which is enough when `env_sign_in` says the runner's environment signs Codex in,
+/// and is refused otherwise.
+// ponytail: a stored sign-in reaches the run only from `auth.json`. One kept in the
+// keyring (`cli_auth_credentials_store`) has no file to link; have the runner pass the
+// tokens over the app-server's `account/login/start` when someone needs that.
+fn linked_to(person_home: &Path, home: &Path, env_sign_in: bool) -> std::io::Result<RunHome> {
+    let sign_in = person_home.join("auth.json");
+    let stored = sign_in.is_file();
+    if !stored && !env_sign_in {
+        return Err(std::io::Error::other(format!(
+            "no Codex sign-in at {} and no {SIGN_IN_ENV}: run `codex login` as the person \
+             who runs the runner (a sign-in kept in the keyring is not supported)",
+            sign_in.display()
+        )));
     }
+    // From here a failure removes the directory.
+    let home = RunHome::create(home)?;
+    if stored {
+        std::os::unix::fs::symlink(sign_in, home.path().join("auth.json"))?;
+    }
+    Ok(home)
 }
 
-/// Where one run's home goes under the runner's state directory. Absolute: Codex gets it as
-/// `CODEX_HOME` with the worktree as its directory, and a relative root would name another
-/// place from there.
+/// Where one run's home goes under the runner's state directory.
 fn run_home(root: &Path, run_id: &str) -> std::io::Result<PathBuf> {
-    Ok(std::path::absolute(root)?.join("codex-home").join(run_id))
+    RunHome::path_for(root, "codex-home", run_id)
 }
 
 /// The person's own Codex home, as Codex finds it: `CODEX_HOME` when it is set and not
@@ -450,7 +426,7 @@ impl Session {
     }
 }
 
-/// Runs one Codex turn in `worktree` with `prompt`, with `home` (a `CodexHome`) as its
+/// Runs one Codex turn in `worktree` with `prompt`, with `home` (from `codex_home`) as its
 /// `CODEX_HOME` and `thread_params` (from `thread_params`) for its thread. The app-server's
 /// messages go to `lines` as they arrive, without the streaming deltas; its stderr lines go
 /// there prefixed with `stderr: `. Like `run_claude`, the agent runs in its own process group, which is killed
@@ -739,7 +715,7 @@ done"#
 
         // No sign-in, stored or in the environment: refused, naming both, and nothing is made.
         std::fs::create_dir(&person).unwrap();
-        let refused = CodexHome::linked_to(&person, &home, false).err().unwrap();
+        let refused = linked_to(&person, &home, false).err().unwrap();
         assert_eq!(
             refused.to_string(),
             format!(
@@ -756,7 +732,7 @@ done"#
             let entries = std::fs::read_dir(home).unwrap();
             entries.map(|entry| entry.unwrap().file_name()).collect()
         };
-        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        let made = linked_to(&person, &home, true).unwrap();
         assert_eq!(entries(&home), Vec::<OsString>::new());
         drop(made);
         assert!(!home.exists());
@@ -765,7 +741,7 @@ done"#
         std::fs::write(person.join("auth.json"), "the sign-in").unwrap();
         std::fs::write(person.join("config.toml"), "[mcp_servers.other]").unwrap();
         std::fs::create_dir_all(home.join("shell_snapshots")).unwrap();
-        let made = CodexHome::linked_to(&person, &home, false).unwrap();
+        let made = linked_to(&person, &home, false).unwrap();
         assert_eq!(made.path(), home);
         let mode = std::fs::metadata(&home).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
@@ -784,7 +760,7 @@ done"#
         assert!(!home.exists());
 
         // With both, the stored sign-in is still linked.
-        let made = CodexHome::linked_to(&person, &home, true).unwrap();
+        let made = linked_to(&person, &home, true).unwrap();
         assert_eq!(entries(&home), ["auth.json"]);
         drop(made);
         assert_eq!(

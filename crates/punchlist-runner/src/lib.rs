@@ -1,6 +1,6 @@
 //! The Punchlist runner (ADR 0005). It registers with the server, heartbeats, claims issues
 //! in Start and issues waiting in a status with a dispatch rule, prepares a worktree on the
-//! issue's branch, runs the agent named by the dispatch rule (Claude Code or Codex), streams
+//! issue's branch, runs the agent named by the dispatch rule (Claude Code, Codex or OpenCode), streams
 //! the agent's output to the server and reports the outcome. It keeps no
 //! database: the server holds runs, attempts and leases. A runner started again under the
 //! same name gets the same runner back and carries on the attempts it still holds.
@@ -19,10 +19,12 @@ pub struct RunnerConfig {
     pub workspace: Option<String>,
     /// The name people read in `pl runner list`.
     pub name: String,
-    /// Agent keys this runner can start, reported when it registers: `claude-code`, `codex`.
+    /// Agent keys this runner can start, reported when it registers: `claude-code`, `codex`,
+    /// `opencode`.
     pub agents: Vec<String>,
     /// The runner's state: repository clones (`repos/`), worktrees (`worktrees/`), MCP configs
-    /// (`mcp/`), run credentials (`github/`) and Codex homes (`codex-home/`).
+    /// (`mcp/`), run credentials (`github/`), and Codex and OpenCode homes (`codex-home/`,
+    /// `opencode-home/`).
     pub state_dir: PathBuf,
     /// The `claude` executable.
     pub claude_command: PathBuf,
@@ -37,6 +39,10 @@ pub struct RunnerConfig {
     pub codex_model: Option<String>,
     /// The reasoning effort a Codex thread starts with, such as `medium`.
     pub codex_effort: String,
+    /// The `opencode` executable, run as `opencode run --standalone`.
+    pub opencode_command: PathBuf,
+    /// The model an OpenCode run starts with when set, as `provider/model`.
+    pub opencode_model: Option<String>,
     /// Issues this runner works on at once.
     pub max_concurrent: usize,
     pub heartbeat_interval: Duration,
@@ -48,6 +54,7 @@ mod agent;
 mod codex;
 pub mod error;
 mod github;
+mod opencode;
 mod orchestrator;
 pub mod path_safety;
 pub mod workspace;

@@ -247,12 +247,15 @@ cmd_runner() {
   # Its own state directory, so two runners in one run never share a checkout.
   local root="$RUN_DIR/runner/$name"
   mkdir -p "$root"
-  # The live-check models (SKILL.md). `--codex-model` and `--state-dir` only where this
-  # checkout's `pl` has them, so the same script drives an older `main`.
+  # The live-check models (SKILL.md). `--codex-model`, `--opencode-model` and `--state-dir`
+  # only where this checkout's `pl` has them, so the same script drives an older `main`.
   local help models=(--model haiku) state=(--worktree-root "$root")
   help="$("$REPO/target/debug/pl" runner start --help)"
   if grep -q -- --codex-model <<<"$help"; then
     models+=(--codex-model gpt-6-luna)
+  fi
+  if grep -q -- --opencode-model <<<"$help"; then
+    models+=(--opencode-model opencode-go/gpt-6-luna)
   fi
   if grep -q -- --state-dir <<<"$help"; then
     state=(--state-dir "$root")

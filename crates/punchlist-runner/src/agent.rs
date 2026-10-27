@@ -4,7 +4,7 @@
 //! New code. The Codex adapter is `codex.rs`; both take the prompt built here.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -81,7 +81,7 @@ pub fn write_mcp_config(
     run_id: &str,
     config: &crate::RunnerConfig,
     claim: &punchlist_api::Claim,
-) -> std::io::Result<std::path::PathBuf> {
+) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir)?;
@@ -240,7 +240,7 @@ struct Cost<'a> {
 /// A JSON number as plain decimal digits, such as `0.0000001` for `1e-7`, the exponent form
 /// JavaScript prints a small number in; other numbers keep their text. `None` for a negative
 /// number, anything not a number, or more than the 30 characters the server takes.
-fn plain_decimal(number: &str) -> Option<String> {
+pub(crate) fn plain_decimal(number: &str) -> Option<String> {
     let (mantissa, exponent) = match number.split_once(['e', 'E']) {
         Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
         None => (number, 0),
@@ -388,12 +388,8 @@ fn outcome_of(exit_code: Option<i32>, stream: Stream) -> AgentResult {
     }
 }
 
-/// Runs `claude` in `worktree` with `prompt` on stdin. Stdout lines go to `lines` as they
-/// arrive; stderr lines go there prefixed with `stderr: `. The channel is bounded, so a slow
-/// server slows the agent rather than growing the runner's memory. The agent runs in its own
-/// process group; when `stop` becomes true the whole group is killed and this returns
-/// `Stopped`. Anything left in the group after the agent exits is killed too. `env` goes over
-/// the runner's environment; `None` removes a variable.
+/// Runs `claude` in `worktree` with `prompt` on stdin, as `run_streaming` does, and reads its
+/// outcome, tokens and cost from the final `result` line.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_claude(
     claude_command: &Path,
@@ -403,8 +399,53 @@ pub async fn run_claude(
     prompt: &str,
     marker: &str,
     lines: mpsc::Sender<String>,
+    stop: watch::Receiver<bool>,
+) -> AgentExit {
+    let agent = Agent {
+        name: "claude",
+        command: claude_command,
+        args,
+        env,
+        read: Stream::read,
+        outcome: outcome_of,
+    };
+    run_streaming(agent, worktree, prompt, marker, lines, stop).await
+}
+
+/// An agent that takes its prompt on stdin and writes one record per line to stdout: how to
+/// start it, how to read each record into `S`, and the outcome `S` and the exit code make.
+pub(crate) struct Agent<'a, S> {
+    /// How the failure reasons name it, such as `claude`.
+    pub(crate) name: &'static str,
+    pub(crate) command: &'a Path,
+    pub(crate) args: &'a [String],
+    pub(crate) env: &'a [(&'static str, Option<OsString>)],
+    pub(crate) read: fn(&mut S, &str),
+    pub(crate) outcome: fn(Option<i32>, S) -> AgentResult,
+}
+
+/// Runs `agent` in `worktree` with `prompt` on stdin. Stdout lines go to `lines` as they
+/// arrive; stderr lines go there prefixed with `stderr: `. The channel is bounded, so a slow
+/// server slows the agent rather than growing the runner's memory. The agent runs in its own
+/// process group; when `stop` becomes true the whole group is killed and this returns
+/// `Stopped`. Anything left in the group after the agent exits is killed too. `env` goes over
+/// the runner's environment; `None` removes a variable.
+pub(crate) async fn run_streaming<S: Default + Send + 'static>(
+    agent: Agent<'_, S>,
+    worktree: &Path,
+    prompt: &str,
+    marker: &str,
+    lines: mpsc::Sender<String>,
     mut stop: watch::Receiver<bool>,
 ) -> AgentExit {
+    let Agent {
+        name,
+        command: agent_command,
+        args,
+        env,
+        read,
+        outcome,
+    } = agent;
     let failed = |reason: String| {
         AgentExit::Finished(AgentResult {
             outcome: RunOutcome::Failed,
@@ -415,7 +456,7 @@ pub async fn run_claude(
             cost_usd: None,
         })
     };
-    let mut command = Command::new(claude_command);
+    let mut command = Command::new(agent_command);
     with_env(&mut command, env);
     let spawned = command
         .args(args)
@@ -430,7 +471,7 @@ pub async fn run_claude(
     let mut child = match spawned {
         Ok(child) => child,
         Err(e) => {
-            return failed(format!("cannot start `{}`: {e}", claude_command.display()));
+            return failed(format!("cannot start `{}`: {e}", agent_command.display()));
         }
     };
 
@@ -446,9 +487,9 @@ pub async fn run_claude(
     let stdout_lines = lines.clone();
     let mut stdout_task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
-        let mut stream = Stream::default();
+        let mut stream = S::default();
         while let Ok(Some(line)) = read_record(&mut reader, MAX_RECORD_BYTES).await {
-            stream.read(&line);
+            read(&mut stream, &line);
             let _ = stdout_lines.send(line).await;
         }
         stream
@@ -474,7 +515,7 @@ pub async fn run_claude(
     // Nothing the agent left behind may hold its pipes open, so the readers reach the end.
     kill_group(group);
     // Wait for every record to be read and handed to the log, however slowly the server
-    // takes them: the result line may be among the last. Only a stop cuts this short.
+    // takes them: the last record may say how it ended. Only a stop cuts this short.
     let drained = tokio::select! {
         drained = async {
             let result = (&mut stdout_task).await.unwrap_or_default();
@@ -489,8 +530,8 @@ pub async fn run_claude(
         return AgentExit::Stopped;
     };
     match status {
-        Ok(status) => AgentExit::Finished(outcome_of(status.code(), result)),
-        Err(e) => failed(format!("cannot wait for claude: {e}")),
+        Ok(status) => AgentExit::Finished(outcome(status.code(), result)),
+        Err(e) => failed(format!("cannot wait for {name}: {e}")),
     }
 }
 
@@ -642,6 +683,42 @@ pub(crate) fn remove_attempt_tmp(dir: &Path) -> std::io::Result<u64> {
     Ok(size)
 }
 
+/// The home of one run's agent, `<state dir>/<dir>/<run id>` (`codex-home`, `opencode-home`):
+/// a directory only this user can read, outside the worktree, holding the agent's state and
+/// sign-in for the run alone. Dropping this removes the directory.
+pub(crate) struct RunHome(PathBuf);
+
+impl RunHome {
+    /// Where a run's home goes. Absolute: the agent gets it in a variable with the worktree as
+    /// its directory, and a relative root would name another place from there.
+    pub(crate) fn path_for(root: &Path, dir: &str, run_id: &str) -> std::io::Result<PathBuf> {
+        Ok(std::path::absolute(root)?.join(dir).join(run_id))
+    }
+
+    /// Makes `home`, mode 0700, first removing what a run killed with its runner left there.
+    pub(crate) fn create(home: &Path) -> std::io::Result<RunHome> {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::remove_dir_all(home);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home)?;
+        Ok(RunHome(home.to_path_buf()))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for RunHome {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!("cannot remove the run's home {}: {e}", self.0.display());
+        }
+    }
+}
+
 /// `104.9 MB`: a size for the runner's log, in powers of 1000.
 pub(crate) fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1e6)
@@ -689,7 +766,6 @@ pub(crate) fn kill_group(leader: Option<u32>) {
 pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
@@ -1307,7 +1383,7 @@ echo '{"type":"result","is_error":false,"total_cost_usd":0.5}'"#;
         }
     }
 
-    async fn assert_dies(pid: &str) {
+    pub(crate) async fn assert_dies(pid: &str) {
         for _ in 0..40 {
             if dead(pid) {
                 return;

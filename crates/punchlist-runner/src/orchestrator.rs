@@ -19,15 +19,18 @@ use uuid::Uuid;
 
 use crate::RunnerConfig;
 use crate::agent::{
-    ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
-    kill_runner, megabytes, remove_attempt_tmp, run_claude, write_mcp_config,
+    ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, RunHome, build_prompt, claude_args,
+    end_attempt, kill_runner, megabytes, remove_attempt_tmp, run_claude, write_mcp_config,
 };
-use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
+use crate::codex::{codex_home, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
+use crate::opencode::{
+    copy_sign_in, opencode_args, person_gh_dir, run_env, run_opencode, write_config,
+};
 use crate::worktree::Worktrees;
 
 /// The agent keys this runner has an adapter for.
-const AGENTS: [&str; 2] = ["claude-code", "codex"];
+const AGENTS: [&str; 3] = ["claude-code", "codex", "opencode"];
 
 /// What a resumed Claude Code session is told on stdin.
 const RESUME_PROMPT: &str = "Punchlist's runner restarted while you were working on this issue. \
@@ -129,11 +132,12 @@ pub(crate) async fn run_with_worktrees(
     }
     if let Some(unsupported) = (config.agents.iter()).find(|a| !AGENTS.contains(&a.as_str())) {
         anyhow::bail!(
-            "unsupported agent `{unsupported}`; this runner can run {}",
-            AGENTS.join(" and ")
+            "unsupported agent `{unsupported}`; this runner can run {} and {}",
+            AGENTS[..AGENTS.len() - 1].join(", "),
+            AGENTS[AGENTS.len() - 1]
         );
     }
-    for dir in ["repos", "worktrees", "mcp", "codex-home"] {
+    for dir in ["repos", "worktrees", "mcp", "codex-home", "opencode-home"] {
         let dir = config.state_dir.join(dir);
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", dir.display()))?;
@@ -149,6 +153,7 @@ pub(crate) async fn run_with_worktrees(
             models: [
                 ("claude-code", &config.model),
                 ("codex", &config.codex_model),
+                ("opencode", &config.opencode_model),
             ]
             .into_iter()
             .filter_map(|(agent, model)| Some((agent.to_string(), model.clone()?)))
@@ -844,7 +849,7 @@ async fn run_agent(
     match claim.agent.as_str() {
         "codex" => {
             // Outside the worktree, and removed when this returns or is dropped.
-            let home = match CodexHome::create(&config.state_dir, &claim.run_id.to_string()) {
+            let home = match codex_home(&config.state_dir, &claim.run_id.to_string()) {
                 Ok(home) => home,
                 Err(e) => return failed(format!("cannot make the Codex home: {e}")),
             };
@@ -896,6 +901,38 @@ async fn run_agent(
             .await;
             let _ = std::fs::remove_file(&mcp_config);
             exit
+        }
+        "opencode" => {
+            // Outside the worktree, so the agent cannot commit its token, and removed when
+            // this returns or is dropped.
+            let run_id = claim.run_id.to_string();
+            let made = RunHome::path_for(&config.state_dir, "opencode-home", &run_id)
+                .and_then(|path| RunHome::create(&path))
+                .and_then(|home| write_config(home.path(), config, claim).map(|_| home));
+            let home = match made {
+                Ok(home) => home,
+                Err(e) => return failed(format!("cannot make the OpenCode home: {e}")),
+            };
+            let command = &config.opencode_command;
+            match copy_sign_in(command, home.path()).await {
+                Ok(line) => {
+                    let _ = lines.send(line).await;
+                }
+                Err(reason) => return failed(reason),
+            }
+            let env = run_env(home.path(), env, person_gh_dir());
+            let model = claim.model.as_deref().or(config.opencode_model.as_deref());
+            run_opencode(
+                command,
+                &opencode_args(model),
+                &env,
+                worktree,
+                prompt,
+                marker,
+                lines,
+                stop,
+            )
+            .await
         }
         other => failed(format!("this runner has no adapter for agent `{other}`")),
     }
@@ -1175,6 +1212,8 @@ mod tests {
     const RESUMED: Uuid = Uuid::from_u128(0xa);
     const MISSING: Uuid = Uuid::from_u128(0xb);
     const FRESH: Uuid = Uuid::from_u128(0xc);
+    /// An OpenCode attempt on PL-1's worktree, which a restart reports lost all the same.
+    const OPENCODE: Uuid = Uuid::from_u128(0xe);
     const RESUMED_SESSION: Uuid = Uuid::from_u128(0x5a);
     const FRESH_SESSION: Uuid = Uuid::from_u128(0x5c);
 
@@ -1301,8 +1340,15 @@ mod tests {
                             StatusCode::NO_CONTENT.into_response()
                         }
                         ("GET", p) if p == format!("/api/runners/{RUNNER}/leases") => {
-                            axum::Json(vec![lease(RESUMED, "PL-1"), lease(MISSING, "PL-2")])
-                                .into_response()
+                            axum::Json(vec![
+                                lease(RESUMED, "PL-1"),
+                                lease(MISSING, "PL-2"),
+                                Lease {
+                                    agent: "opencode".into(),
+                                    ..lease(OPENCODE, "PL-1")
+                                },
+                            ])
+                            .into_response()
                         }
                         ("POST", p) if p == resume => {
                             axum::Json(fake_claim(RESUMED, "PL-1", RESUMED_SESSION, 4))
@@ -1354,6 +1400,8 @@ mod tests {
             codex_command: "codex".into(),
             codex_model: None,
             codex_effort: "medium".into(),
+            opencode_command: "opencode".into(),
+            opencode_model: None,
             max_concurrent: 2,
             heartbeat_interval: Duration::from_secs(1),
             claim_wait: Duration::ZERO,
@@ -1383,7 +1431,7 @@ mod tests {
         );
         assert_eq!(
             refused("pi").await.unwrap_err().to_string(),
-            "unsupported agent `pi`; this runner can run claude-code and codex"
+            "unsupported agent `pi`; this runner can run claude-code, codex and opencode"
         );
     }
 
@@ -1406,18 +1454,22 @@ mod tests {
             ran.unwrap_err().to_string(),
             "another `pl runner start` registered runner `sartre`; this one stopped"
         );
-        // It made its state directory's four parts before registering.
+        // It made its state directory's five parts before registering.
         let mut made: Vec<_> = std::fs::read_dir(temp.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         made.sort();
-        assert_eq!(made, ["codex-home", "mcp", "repos", "worktrees"]);
+        assert_eq!(
+            made,
+            ["codex-home", "mcp", "opencode-home", "repos", "worktrees"]
+        );
     }
 
-    /// A runner restarts holding two Claude Code attempts: it resumes the one whose worktree
-    /// is still on its branch in the attempt's session, reports the one with no worktree
-    /// lost, and starts a fresh claim in a new session.
+    /// A runner restarts holding two Claude Code attempts and an OpenCode one: it resumes the
+    /// Claude Code one whose worktree is still on its branch in the attempt's session, reports
+    /// the one with no worktree lost, and the OpenCode one on that same worktree too, and
+    /// starts a fresh claim in a new session.
     #[tokio::test]
     async fn a_restarted_runner_resumes_an_intact_worktree_and_reports_a_missing_one_lost() {
         let temp = tempfile::tempdir().unwrap();
@@ -1509,11 +1561,15 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
         let startup: Vec<(&str, &str, &serde_json::Value)> = (seen.iter())
             .filter(|(_, p, _)| !p.ends_with("/heartbeat") && !p.ends_with("/log"))
             .map(|(m, p, b)| (m.as_str(), p.as_str(), b))
-            .take(4)
+            .take(5)
             .collect();
         let leases = format!("/api/runners/{RUNNER}/leases");
         let resume = format!("/api/runs/{RESUMED}/resume");
         let lost = format!("/api/runs/{MISSING}/finish");
+        let opencode_lost = format!("/api/runs/{OPENCODE}/finish");
+        let lost_body = serde_json::json!({"attempt": 1, "outcome": "failed",
+            "reason": "runner restarted", "lost": true, "duration_ms": 0,
+            "input_tokens": null, "output_tokens": null, "cost_usd": null});
         let register = serde_json::json!({"name": "sartre", "agents": ["claude-code"]});
         assert_eq!(
             startup,
@@ -1521,13 +1577,8 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
                 ("POST", "/api/runners", &register),
                 ("GET", leases.as_str(), &serde_json::Value::Null),
                 ("POST", resume.as_str(), &serde_json::json!({"attempt": 1})),
-                (
-                    "POST",
-                    lost.as_str(),
-                    &serde_json::json!({"attempt": 1, "outcome": "failed",
-                        "reason": "runner restarted", "lost": true, "duration_ms": 0,
-                        "input_tokens": null, "output_tokens": null, "cost_usd": null})
-                ),
+                ("POST", lost.as_str(), &lost_body),
+                ("POST", opencode_lost.as_str(), &lost_body),
             ]
         );
         // The resumed attempt's log goes on after the 3 lines the server has.

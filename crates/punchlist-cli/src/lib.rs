@@ -310,7 +310,8 @@ pub struct RunnerStart {
     /// The name `pl runner list` shows. Default: the machine's hostname.
     #[arg(long)]
     pub name: Option<String>,
-    /// The runner's state: repository clones, worktrees, MCP configs and Codex homes.
+    /// The runner's state: repository clones, worktrees, MCP configs, and Codex and OpenCode
+    /// homes.
     /// Default: `~/.local/share/punchlist/runner`.
     #[arg(long)]
     pub state_dir: Option<String>,
@@ -324,7 +325,7 @@ pub struct RunnerStart {
     #[arg(long)]
     pub claude_command: Option<String>,
     /// The agents this runner can run, reported to the server when it registers:
-    /// `claude-code`, `codex`. Default: `claude-code`.
+    /// `claude-code`, `codex`, `opencode`. Default: `claude-code`.
     #[arg(long, value_delimiter = ',')]
     pub agents: Option<Vec<String>>,
     /// The model a Codex run starts with, such as `gpt-6-luna`. Default: Codex's built-in
@@ -339,6 +340,13 @@ pub struct RunnerStart {
     /// The `codex` executable.
     #[arg(long)]
     pub codex_command: Option<String>,
+    /// The model an OpenCode run starts with, as `provider/model`, such as
+    /// `opencode-go/gpt-6-luna`. Default: OpenCode's own choice.
+    #[arg(long)]
+    pub opencode_model: Option<String>,
+    /// The `opencode` executable, run as `opencode run --standalone`.
+    #[arg(long)]
+    pub opencode_command: Option<String>,
     /// Issues to work on at once.
     #[arg(long)]
     pub max_concurrent: Option<usize>,
@@ -416,6 +424,8 @@ pub struct RunnerSection {
     pub codex_command: Option<String>,
     pub codex_model: Option<String>,
     pub codex_effort: Option<String>,
+    pub opencode_command: Option<String>,
+    pub opencode_model: Option<String>,
     pub max_concurrent: Option<usize>,
 }
 
@@ -956,6 +966,10 @@ pub fn runner_config(
         .codex_command
         .or_else(|| table.codex_command.clone())
         .unwrap_or_else(|| "codex".to_string());
+    let opencode_command = flags
+        .opencode_command
+        .or_else(|| table.opencode_command.clone())
+        .unwrap_or_else(|| "opencode".to_string());
     let runner = punchlist_runner::RunnerConfig {
         server_url: config.server_url.clone(),
         token: config.token.clone(),
@@ -978,6 +992,10 @@ pub fn runner_config(
             .codex_effort
             .or_else(|| table.codex_effort.clone())
             .unwrap_or_else(|| "medium".to_string()),
+        opencode_command: expand_home(&opencode_command, home),
+        opencode_model: flags
+            .opencode_model
+            .or_else(|| table.opencode_model.clone()),
         max_concurrent: flags.max_concurrent.or(table.max_concurrent).unwrap_or(1),
         heartbeat_interval: Duration::from_secs(10),
         claim_wait: Duration::from_secs(20),
@@ -2370,17 +2388,31 @@ mod tests {
         assert_eq!(defaults.codex_command, PathBuf::from("codex"));
         assert_eq!(defaults.codex_model, None);
         assert_eq!(defaults.codex_effort, "medium");
+        assert_eq!(defaults.opencode_command, PathBuf::from("opencode"));
+        assert_eq!(defaults.opencode_model, None);
         assert_eq!((defaults.model, defaults.max_concurrent), (None, 1));
 
         let table = config(
-            "[runner]\nname = \"t\"\nstate_dir = \"~/wt\"\nmodel = \"haiku\"\nmax_concurrent = 3\n",
+            "[runner]\nname = \"t\"\nstate_dir = \"~/wt\"\nmodel = \"haiku\"\nmax_concurrent = 3\n\
+             opencode_model = \"opencode-go/glm-5.3\"\nopencode_command = \"~/bin/opencode\"\n",
         )
         .unwrap();
+        let (from_table, _) =
+            runner_config(&table, RunnerStart::default(), Some("/h"), "box", |_| false);
+        assert_eq!(
+            from_table.opencode_model.as_deref(),
+            Some("opencode-go/glm-5.3")
+        );
+        assert_eq!(
+            from_table.opencode_command,
+            PathBuf::from("/h/bin/opencode")
+        );
         let flags = RunnerStart {
             name: Some("f".into()),
             agents: Some(vec!["claude-code".into(), "codex".into()]),
             codex_model: Some("gpt-6-luna".into()),
             codex_effort: Some("low".into()),
+            opencode_model: Some("opencode-go/gpt-6-luna".into()),
             ..RunnerStart::default()
         };
         let (merged, _) = runner_config(&table, flags, Some("/h"), "box", |_| false);
@@ -2388,6 +2420,10 @@ mod tests {
         assert_eq!(merged.agents, ["claude-code", "codex"]);
         assert_eq!(merged.codex_model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(merged.codex_effort, "low");
+        assert_eq!(
+            merged.opencode_model.as_deref(),
+            Some("opencode-go/gpt-6-luna")
+        );
         assert_eq!(merged.state_dir, PathBuf::from("/h/wt"));
         assert_eq!(merged.model.as_deref(), Some("haiku"));
         assert_eq!(merged.max_concurrent, 3);
