@@ -1,5 +1,6 @@
 // The list's selection and what a change to every selected issue does, as pure functions. No React here.
-import type { ErrorBody } from './issues'
+import type { ErrorBody, IssueRow, StatusInfo } from './issues'
+import type { TransitionList } from './issue-page'
 
 /** Issue ids. */
 export type Selection = ReadonlySet<string>
@@ -49,4 +50,45 @@ export const refusedText = (id: string, statusName: string, error: ErrorBody): s
 export function bulkSummary(action: string, updated: number, refused: readonly string[]): string {
   if (refused.length > 0) return [`${String(updated)} updated`, ...refused].join('; ')
   return `${action} on ${String(updated)} ${updated === 1 ? 'issue' : 'issues'}`
+}
+
+/** One issue's answer to a move of several: `error` is its refusal, absent when it moved. */
+export interface MoveResult {
+  id: string
+  error?: ErrorBody
+}
+
+const refusalName = (error: ErrorBody) =>
+  error.code === 'gate_failed' && error.gate ? `gate ${error.gate} failed` : error.message
+
+/** The one toast of a move of several issues: `Moved 2 to Todo; PL-12 refused: gate ci_green failed`. */
+export function moveSummary(toName: string, results: readonly MoveResult[]): string {
+  const refused = results.flatMap(({ id, error }) => (error ? [`${id} refused: ${refusalName(error)}`] : []))
+  return [`Moved ${String(results.length - refused.length)} to ${toName}`, ...refused].join('; ')
+}
+
+/**
+ * Why the caller can move none of `issues` to `to`, from each issue's `GET /api/issues/{id}/transitions` (`lists`,
+ * in the same order, `undefined` while it loads): each distinct reason, or null when one issue can move, or may
+ * once its moves load. A move a gate blocks can still be requested, since the request reads GitHub first.
+ */
+export function moveDisabled(
+  to: StatusInfo,
+  issues: readonly IssueRow['issue'][],
+  lists: readonly (TransitionList | undefined)[],
+): string | null {
+  const reasons = new Set<string>()
+  for (const [index, issue] of issues.entries()) {
+    if (issue.status === to.key) {
+      reasons.add(`already in ${to.name}`)
+      continue
+    }
+    const list = lists[index]
+    if (!list) return null
+    const verdict = list.transitions.find((option) => option.to.key === to.key)?.verdict
+    if (!verdict) reasons.add(`${issue.status_name} → ${to.name} cannot be requested`)
+    else if (verdict.kind === 'refused') reasons.add(verdict.message)
+    else return null
+  }
+  return reasons.size > 0 ? [...reasons].join('; ') : null
 }
