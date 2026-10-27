@@ -193,7 +193,7 @@ export function IssuesScreen({
   const edit = useEditOne(workspaceId)
   const bulkEdit = useBulkEdit(workspaceId)
   const navigate = useNavigate()
-  const { transitions, request, dismiss } = useTransitions(workspaceId)
+  const { transitions, request, requestAll, dismiss } = useTransitions(workspaceId)
   useEventStream(workspaceId, issues.isSuccess)
   const pullRequests = usePullRequests(workspaceId, issues.isSuccess)
   const inbox = useInbox(workspaceId, issues.isSuccess)
@@ -281,10 +281,22 @@ export function IssuesScreen({
 
   const move = useCallback(
     async (id: string, to: StatusInfo) => {
-      const moved = await request(id, to)
-      if (moved && layout === 'board' && narrow) setColumn(to.key)
+      const { error } = await request(id, to)
+      if (!error && layout === 'board' && narrow) setColumn(to.key)
     },
     [request, layout, narrow],
+  )
+
+  // The targets already in the status, or with a move on its way, are left alone. A move every target made
+  // clears them from the selection; a refusal keeps it, to try again.
+  const moveAll = useCallback(
+    async (ids: readonly string[], to: StatusInfo) => {
+      const moving = ids.filter((id) => rowById(id)?.issue.status !== to.key && transitions[id]?.state !== 'pending')
+      if (moving.length === 0) return
+      if (await requestAll(moving, to))
+        setChecked((selection) => new Set([...selection].filter((id) => !ids.includes(id))))
+    },
+    [requestAll, rowById, transitions],
   )
 
   // Reads the selection through a ref, so a new selection does not re-render every row.
@@ -362,7 +374,10 @@ export function IssuesScreen({
           void navigate({ to: '/issues/$id', params: { id: current }, hash: seq == null ? undefined : `seq-${String(seq)}` })
         },
         s: () => {
-          if (current) openMenu(current)
+          const ids = targets()
+          const at = current ?? ids[0]
+          if (layout === 'list' && checked.size > 0 && at) setPicker({ kind: 'status', ids, ...below(at) })
+          else if (current) openMenu(current)
         },
         '/': () => search.current?.focus(),
         '1': () => {
@@ -395,7 +410,7 @@ export function IssuesScreen({
             setChecked(new Set())
           },
           ...Object.fromEntries(
-            PICKERS.map(({ kind, key }) => [
+            PICKERS.filter(({ kind }) => kind !== 'status').map(({ kind, key }) => [
               key,
               () => {
                 const ids = targets()
@@ -416,7 +431,7 @@ export function IssuesScreen({
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [sheet, menu, creating, picker, rowMenu.open, order, current, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate, targets])
+  }, [sheet, menu, creating, picker, rowMenu.open, order, current, checked, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate, targets])
 
   const filtered = Object.values({ ...filter }).some((value) => value.length > 0)
   const projectList = projects.data ?? []
@@ -433,6 +448,7 @@ export function IssuesScreen({
   const sheetRow = rowById(sheet)
   const rowsOf = (ids: readonly string[]) => ids.flatMap((id) => rowById(id) ?? [])
   const pickerContext: PickerContext = {
+    statuses,
     actors: actors.data ?? [],
     projects: projectList,
     labels: labelOptions.map((option) => option.value),
@@ -661,6 +677,7 @@ export function IssuesScreen({
               setRowMenu((state) => ({ ...state, open }))
             }}
             onApply={(action, edits, untouched) => void bulkEdit(action, edits, untouched)}
+            onMove={(ids, to) => void moveAll(ids, to)}
           >
             <ListView {...viewProps} checked={checked} onCheck={check} />
           </RowMenu>
@@ -719,6 +736,7 @@ export function IssuesScreen({
             setPicker(null)
           }}
           onApply={(action, edits, untouched) => void bulkEdit(action, edits, untouched)}
+          onMove={(ids, to) => void moveAll(ids, to)}
         />
       )}
 

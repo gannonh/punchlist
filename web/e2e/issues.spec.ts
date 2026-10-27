@@ -739,6 +739,87 @@ test('select three rows by key, set their project and a label from the right-cli
   expect((await issue(b)).labels).toEqual(['idea'])
 })
 
+test('move three selected rows to Todo from the right-click menu, then a selection where one is refused', async ({
+  page,
+  request,
+}) => {
+  const person = bearer(personToken())
+  const marker = `Move ${randomUUID().slice(0, 8)}`
+  const ids: string[] = []
+  for (const n of [1, 2, 3, 4, 5]) {
+    const { row } = await ok<{ row: { issue: { id: string } } }>(
+      await request.post('/api/issues', { headers: person, data: { title: `${marker} ${String(n)}`, body: '' } }),
+    )
+    ids.push(row.issue.id)
+  }
+  const [a, b, c, d, e] = ids as [string, string, string, string, string]
+  const moves = async (id: string) =>
+    (
+      await ok<{ detail: { kind: string; to?: string } }[]>(await request.get(`/api/issues/${id}/events`, { headers: person }))
+    ).filter((event) => event.detail.kind === 'transition')
+  const box = (id: string) => row(page, id).locator('.check').click({ position: { x: 7, y: 8 } })
+
+  await signIn(page)
+  await page.getByLabel('Filter issues').fill(marker)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('[data-issue]')).toHaveCount(5)
+  for (const id of [a, b, c]) await box(id)
+  await expect(page.locator('[data-selection]')).toContainText('3 selected')
+
+  await row(page, b).click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Status' }).click()
+  // Every status is listed; one no selected issue can move to is disabled with the reason.
+  await expect(page.getByRole('menuitemcheckbox')).toHaveCount(9)
+  const backlog = page.getByRole('menuitemcheckbox', { name: 'Backlog' })
+  await expect(backlog).toHaveAttribute('aria-checked', 'true')
+  await expect(backlog).toHaveAttribute('title', 'already in Backlog')
+  const start = page.getByRole('menuitemcheckbox', { name: 'Start' })
+  await expect(start).toHaveAttribute('aria-disabled', 'true')
+  await expect(start).toHaveAttribute('title', 'Backlog → Start cannot be requested')
+  await expect(page.getByRole('menuitemcheckbox', { name: 'Todo' })).not.toHaveAttribute('aria-disabled', 'true')
+  await page.getByRole('menuitemcheckbox', { name: 'Todo' }).click()
+  await expect(page.getByText('Moved 3 to Todo')).toBeVisible()
+  for (const id of [a, b, c]) {
+    await expect(row(page, id)).toHaveAttribute('data-status', 'todo')
+    expect((await moves(id)).map((event) => event.detail.to)).toEqual(['todo'])
+  }
+  // Every one moved, so the selection is cleared.
+  await expect(page.locator('[data-selection]')).toHaveCount(0)
+
+  // `s` opens the same picker for a selection. d's move waits, so it shows pending; e's is refused by a gate.
+  let release = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route(`**/api/issues/${d}/transitions`, async (route) => {
+    if (route.request().method() !== 'POST') return route.continue()
+    await held
+    return route.continue()
+  })
+  await page.route(`**/api/issues/${e}/transitions`, (route) =>
+    route.request().method() === 'POST'
+      ? route.fulfill({
+          status: 409,
+          json: { code: 'gate_failed', gate: 'ci_green', reason: 'no check run has reported', message: 'backlog → todo needs gate ci_green: no check run has reported' },
+        })
+      : route.continue(),
+  )
+  for (const id of [d, e]) await box(id)
+  await page.keyboard.press('s')
+  await expect(page.getByRole('menu', { name: 'Status of 2 issues' })).toBeVisible()
+  await page.getByRole('menuitemcheckbox', { name: 'Todo' }).click()
+  await expect(row(page, d).locator('[data-transition=pending]')).toContainText('Moving to Todo')
+  release()
+  await expect(page.getByText(`Moved 1 to Todo; ${e} refused: gate ci_green failed`)).toBeVisible()
+  await expect(row(page, d)).toHaveAttribute('data-status', 'todo')
+  await expect(row(page, e).locator('[data-transition=refused]')).toContainText(
+    'Refused (gate_failed): gate ci_green failed: no check run has reported',
+  )
+  expect(await moves(e)).toHaveLength(0)
+  // A refusal keeps the selection, to try again.
+  await expect(page.locator('[data-selection]')).toContainText('2 selected')
+})
+
 test('Run again on the waiting notice queues another run, and the notice goes without a reload', async ({
   page,
   request,

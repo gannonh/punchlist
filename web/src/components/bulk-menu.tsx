@@ -1,6 +1,7 @@
 // The list's menu for a selection: a right-click opens it with a picker per property in a submenu, and a key
-// opens one picker at the focused row. Both pick through the same `Picker`.
+// opens one picker at the focused row. Both pick through the same `Picker`, or for Status `StatusPicker`.
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react'
+import { useQueries } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   ContextMenu,
@@ -22,25 +23,31 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { agentName, type ActorInfo, type IssueRow } from '@/model/issues'
-import { labelMark, mark, withLabel, type Mark } from '@/model/selection'
-import type { Edit } from '@/lib/queries'
+import { LockBadge, StatusDot } from '@/components/atoms'
+import { agentName, type ActorInfo, type IssueRow, type StatusInfo } from '@/model/issues'
+import { labelMark, mark, moveDisabled, withLabel, type Mark } from '@/model/selection'
+import { issuePageQueries, type Edit } from '@/lib/queries'
 import type { components } from '@/api/schema'
 
 type Project = components['schemas']['Project']
 
-export type PickerKind = 'assignee' | 'labels' | 'project' | 'milestone'
+export type PickerKind = 'status' | 'assignee' | 'labels' | 'project' | 'milestone'
 
-/** Each picker with the key that opens it on the list: `key` is `KeyboardEvent.key`, `hint` how the menu shows it. */
+/**
+ * Each picker with the key that opens it on the list: `key` is `KeyboardEvent.key`, `hint` how the menu shows it.
+ * `s` opens Status only for checked rows; without any it opens the focused row's own status menu.
+ */
 export const PICKERS: readonly { kind: PickerKind; name: string; key: string; hint: string }[] = [
+  { kind: 'status', name: 'Status', key: 's', hint: 'S' },
   { kind: 'assignee', name: 'Assignee', key: 'a', hint: 'A' },
   { kind: 'labels', name: 'Labels', key: 'l', hint: 'L' },
   { kind: 'project', name: 'Project', key: 'P', hint: '⇧P' },
   { kind: 'milestone', name: 'Milestone', key: 'M', hint: '⇧M' },
 ]
 
-/** What a picker can choose from: the workspace's actors, projects and the labels its issues have. */
+/** What a picker can choose from: the workflow's statuses, the workspace's actors, projects and its issues' labels. */
 export interface PickerContext {
+  statuses: readonly StatusInfo[]
   actors: readonly ActorInfo[]
   projects: readonly Project[]
   labels: readonly string[]
@@ -48,6 +55,9 @@ export interface PickerContext {
 
 /** A choice made: the toast's words, one edit per issue it changes, and how many already had it. */
 export type Apply = (action: string, edits: readonly Edit[], untouched: number) => void
+
+/** A status chosen for the targets: each issue gets its own transition request. */
+export type Move = (ids: readonly string[], to: StatusInfo) => void
 
 interface Option {
   value: string
@@ -65,7 +75,7 @@ interface Model {
 
 const NONE = 'none'
 
-function model(kind: PickerKind, targets: readonly IssueRow[], context: PickerContext): Model {
+function model(kind: Exclude<PickerKind, 'status'>, targets: readonly IssueRow[], context: PickerContext): Model {
   const issues = targets.map((row) => row.issue)
   const markOf = (has: (issue: IssueRow['issue']) => boolean) => mark(issues.map(has))
   switch (kind) {
@@ -189,6 +199,8 @@ interface Parts {
     checked: Mark
     onSelect: (event: Event) => void
     className?: string
+    disabled?: boolean
+    title?: string
     'data-option'?: string
     children: ReactNode
   }) => ReactNode
@@ -211,6 +223,54 @@ function tabThrough(event: KeyboardEvent<HTMLElement>) {
   stops.at((at + (event.shiftKey ? -1 : 1)) % stops.length)?.focus()
 }
 
+/**
+ * Every status of the workflow, checked when every target is in it. A move the caller can make on none of them,
+ * by the server's verdicts for each (the issue page's `transitions` read), is disabled with the reason as its title.
+ */
+function StatusPicker({
+  targets,
+  statuses,
+  parts,
+  onMove,
+}: {
+  targets: readonly IssueRow[]
+  statuses: readonly StatusInfo[]
+  parts: Parts
+  onMove: Move
+}) {
+  const issues = targets.map((row) => row.issue)
+  const lists = useQueries({
+    queries: issues.map((issue) => issuePageQueries(issue.id).transitions),
+    combine: (results) => results.map((result) => result.data),
+  })
+  return statuses.map((status) => {
+    const why = moveDisabled(status, issues, lists)
+    return (
+      <parts.CheckboxItem
+        key={status.key}
+        // A disabled item takes no pointer events, which its title needs.
+        className="text-body data-[disabled]:pointer-events-auto"
+        checked={mark(issues.map((issue) => issue.status === status.key))}
+        disabled={why !== null}
+        title={why ?? undefined}
+        data-option={status.name}
+        onSelect={() => {
+          onMove(
+            issues.map((issue) => issue.id),
+            status,
+          )
+        }}
+      >
+        <StatusDot status={status.key} />
+        <span className="truncate">{status.name}</span>
+        <span className="ml-auto">
+          <LockBadge status={status} />
+        </span>
+      </parts.CheckboxItem>
+    )
+  })
+}
+
 function Picker({
   kind,
   targets,
@@ -218,7 +278,7 @@ function Picker({
   parts,
   onApply,
 }: {
-  kind: PickerKind
+  kind: Exclude<PickerKind, 'status'>
   targets: readonly IssueRow[]
   context: PickerContext
   parts: Parts
@@ -295,6 +355,28 @@ function Picker({
   )
 }
 
+function Choose({
+  kind,
+  targets,
+  context,
+  parts,
+  onApply,
+  onMove,
+}: {
+  kind: PickerKind
+  targets: readonly IssueRow[]
+  context: PickerContext
+  parts: Parts
+  onApply: Apply
+  onMove: Move
+}) {
+  return kind === 'status' ? (
+    <StatusPicker targets={targets} statuses={context.statuses} parts={parts} onMove={onMove} />
+  ) : (
+    <Picker kind={kind} targets={targets} context={context} parts={parts} onApply={onApply} />
+  )
+}
+
 const targetName = (targets: readonly IssueRow[]) =>
   targets.length === 1 ? (targets[0]?.issue.id ?? '') : `${String(targets.length)} issues`
 
@@ -308,6 +390,7 @@ export function RowMenu({
   onTarget,
   onOpenChange,
   onApply,
+  onMove,
   children,
 }: {
   targets: readonly IssueRow[]
@@ -315,6 +398,7 @@ export function RowMenu({
   onTarget: (id: string | null) => boolean
   onOpenChange: (open: boolean) => void
   onApply: Apply
+  onMove: Move
   children: ReactNode
 }) {
   const target = (event: SyntheticEvent) => {
@@ -353,7 +437,14 @@ export function RowMenu({
               collisionPadding={12}
               onKeyDown={tabThrough}
             >
-              <Picker kind={kind} targets={targets} context={context} parts={CONTEXT_PARTS} onApply={onApply} />
+              <Choose
+                kind={kind}
+                targets={targets}
+                context={context}
+                parts={CONTEXT_PARTS}
+                onApply={onApply}
+                onMove={onMove}
+              />
             </ContextMenuSubContent>
           </ContextMenuSub>
         ))}
@@ -383,6 +474,7 @@ export function PickerMenu({
   context,
   onClose,
   onApply,
+  onMove,
 }: {
   kind: PickerKind
   at: { left: number; top: number }
@@ -390,6 +482,7 @@ export function PickerMenu({
   context: PickerContext
   onClose: () => void
   onApply: Apply
+  onMove: Move
 }) {
   const name = PICKERS.find((picker) => picker.kind === kind)?.name ?? kind
   return (
@@ -409,7 +502,14 @@ export function PickerMenu({
         collisionPadding={12}
         onKeyDown={tabThrough}
       >
-        <Picker kind={kind} targets={targets} context={context} parts={DROPDOWN_PARTS} onApply={onApply} />
+        <Choose
+          kind={kind}
+          targets={targets}
+          context={context}
+          parts={DROPDOWN_PARTS}
+          onApply={onApply}
+          onMove={onMove}
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   )

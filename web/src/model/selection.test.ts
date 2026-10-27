@@ -1,5 +1,18 @@
 import { describe, expect, test } from 'vitest'
-import { addRange, bulkSummary, keepShown, labelMark, mark, refusedText, toggle, withLabel } from './selection'
+import type { IssueRow, StatusInfo } from './issues'
+import type { TransitionList } from './issue-page'
+import {
+  addRange,
+  bulkSummary,
+  keepShown,
+  labelMark,
+  mark,
+  moveDisabled,
+  moveSummary,
+  refusedText,
+  toggle,
+  withLabel,
+} from './selection'
 
 const ORDER = ['PL-1', 'PL-2', 'PL-3', 'PL-4', 'PL-5']
 
@@ -64,5 +77,51 @@ describe('the toast', () => {
     expect(bulkSummary('Set Milestone to M1', 0, [locked, other])).toBe(
       '0 updated; PL-12 is in Human Review, locked; PL-3: milestone outside the project',
     )
+  })
+})
+
+describe('a move of several issues', () => {
+  test('the toast says how many moved, then names each refusal', () => {
+    expect(moveSummary('Todo', [{ id: 'PL-1' }, { id: 'PL-2' }, { id: 'PL-3' }])).toBe('Moved 3 to Todo')
+    expect(
+      moveSummary('Start', [
+        { id: 'PL-11' },
+        { id: 'PL-12', error: { code: 'gate_failed', gate: 'ci_green', reason: 'no check run', message: 'todo → start needs gate ci_green: no check run' } },
+        { id: 'PL-13' },
+        { id: 'PL-14', error: { code: 'role_not_allowed', message: 'only a person makes todo → start, not an agent' } },
+      ]),
+    ).toBe('Moved 2 to Start; PL-12 refused: gate ci_green failed; PL-14 refused: only a person makes todo → start, not an agent')
+    expect(moveSummary('Todo', [{ id: 'PL-4', error: { code: 'locked', message: 'human_review is locked' } }])).toBe(
+      'Moved 0 to Todo; PL-4 refused: human_review is locked',
+    )
+  })
+
+  const todo: StatusInfo = { key: 'todo', name: 'Todo', locked_to: [], closed: false }
+  const start: StatusInfo = { key: 'start', name: 'Start', locked_to: [], closed: false }
+  const done: StatusInfo = { key: 'done', name: 'Done', locked_to: [], closed: false }
+  const issue = (id: string, status: StatusInfo) =>
+    ({ id, title: id, body: '', status: status.key, status_name: status.name, created_at: '', updated_at: '' }) as IssueRow['issue']
+  const moves = (from: StatusInfo, verdict: TransitionList['transitions'][number]['verdict']): TransitionList => ({
+    status: from,
+    viewer_locked: false,
+    transitions: [{ to: start, by: ['person'], verdict }],
+  })
+  const roleRefused = moves(todo, { kind: 'refused', code: 'role_not_allowed', message: 'only a person makes todo → start, not an agent' })
+
+  test('a move no selected issue can make is disabled with each reason once', () => {
+    expect(moveDisabled(start, [issue('PL-1', todo), issue('PL-2', todo)], [roleRefused, roleRefused])).toBe(
+      'only a person makes todo → start, not an agent',
+    )
+    expect(moveDisabled(done, [issue('PL-1', todo), issue('PL-2', done)], [roleRefused, undefined])).toBe(
+      'Todo → Done cannot be requested; already in Done',
+    )
+  })
+
+  test('a move one selected issue can make, or may once its moves load, is enabled; a blocked one too', () => {
+    const allowed = moves(todo, { kind: 'allowed' })
+    const blocked = moves(todo, { kind: 'blocked', gate: 'ci_green', passed: false, reason: 'no check run' })
+    expect(moveDisabled(start, [issue('PL-1', todo), issue('PL-2', todo)], [roleRefused, allowed])).toBeNull()
+    expect(moveDisabled(start, [issue('PL-1', todo)], [blocked])).toBeNull()
+    expect(moveDisabled(start, [issue('PL-1', todo), issue('PL-2', todo)], [roleRefused, undefined])).toBeNull()
   })
 })
