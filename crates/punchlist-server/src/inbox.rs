@@ -30,7 +30,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
 /// waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
 /// or to an agent the caller owns; and the issues whose latest run, by an agent the caller
 /// owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
-/// asked to move, refused by a gate, with no move since. A person's token.
+/// asked to move, refused by a gate, with no move since and no run running or queued. A
+/// person's token.
 #[utoipa::path(
     get,
     path = "/api/inbox",
@@ -193,7 +194,10 @@ async fn run_items(
 }
 
 /// Per issue, the newest refusal of a move asked for by an agent the caller owns, while the
-/// issue is still in the status it was refused from and no transition came after it.
+/// issue is still in the status it was refused from and no transition came after it, and only
+/// once nothing runs or waits to run there (the row's run is `Idle` or `Failed`): a refusal
+/// the agent is still working through is not the person's. An issue whose agent said it waits
+/// on a person (`waiting_reasons`) is that run item's alone.
 async fn refusal_items(
     conn: &mut sqlx::PgConnection,
     actor: &Actor,
@@ -220,8 +224,19 @@ async fn refusal_items(
     )
     .fetch_all(&mut *conn)
     .await?;
+    let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let waiting = waiting_reasons(conn, &ids).await?;
+    let settled: Vec<String> = (issue_runs(conn, actor.workspace_id, &ids)
+        .await?
+        .into_iter())
+    .filter(|(issue, summary, _)| {
+        matches!(summary, RunSummary::Idle | RunSummary::Failed { .. })
+            && !waiting.contains_key(&issue.id)
+    })
+    .map(|(issue, _, _)| issue.id)
+    .collect();
     let mut items = Vec::new();
-    for row in rows {
+    for row in rows.into_iter().filter(|row| settled.contains(&row.id)) {
         let item = InboxItem::Refusal {
             issue: PullRequestIssue {
                 id: row.id,

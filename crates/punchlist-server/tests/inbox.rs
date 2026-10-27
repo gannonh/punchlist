@@ -713,3 +713,164 @@ async fn the_owner_sees_a_run_whose_agent_waits_on_a_person_once_it_ends(pool: P
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(inbox(&app, a).await, (vec!["PL-2".into()], 1));
 }
+
+/// Each item in a person's inbox as its kind and issue id, newest first, and the unread count.
+async fn kinds(app: &Router, token: &str) -> (Vec<(String, String)>, i64) {
+    let (status, body) = call(app, Some(token), "GET", "/api/inbox", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let items = (body["items"].as_array().unwrap().iter())
+        .map(|item| {
+            let kind = item["kind"].as_str().unwrap().to_string();
+            (kind, item["issue"]["id"].as_str().unwrap().to_string())
+        })
+        .collect();
+    (items, body["unread"].as_i64().unwrap())
+}
+
+fn of(kind: &str, id: &str) -> (String, String) {
+    (kind.to_string(), id.to_string())
+}
+
+/// A workspace with a runner for Claude Code and an issue in Start for each title, PL-1 first;
+/// returns the router, the person's token and the runner's.
+async fn one_runner(pool: &PgPool, titles: &[&str]) -> (Router, String, String) {
+    let app = router(AppState::new(pool.clone()));
+    let a = workspace(pool, "PL").await.token;
+    let (status, runner) = call(
+        &app,
+        Some(&a),
+        "POST",
+        "/api/runners",
+        Some(json!({"name": "r", "agents": ["claude-code"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{runner}");
+    for (n, title) in titles.iter().enumerate() {
+        let body = Some(json!({"title": title}));
+        let (status, body) = call(&app, Some(&a), "POST", "/api/issues", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = format!("PL-{}", n + 1);
+        move_to(&app, &a, &id, "todo").await;
+        move_to(&app, &a, &id, "start").await;
+    }
+    (app, a, runner["token"].as_str().unwrap().to_string())
+}
+
+/// Claims PL-`n`'s run and has its agent ask for Agent Review, which `pr_open` refuses;
+/// returns the run's id and the agent's token.
+async fn claim_and_refuse(app: &Router, runner: &str, id: &str) -> (String, String) {
+    let body = json!({"wait_seconds": 0});
+    let (status, claimed) = call(app, Some(runner), "POST", "/api/runs/claim", Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["issue"]["id"], id);
+    let agent = claimed["agent_token"].as_str().unwrap().to_string();
+    let uri = format!("/api/issues/{id}/transitions");
+    let request = json!({"to": "agent_review"});
+    let (status, body) = call(app, Some(&agent), "POST", &uri, Some(request)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    (claimed["run_id"].as_str().unwrap().to_string(), agent)
+}
+
+async fn finish(app: &Router, runner: &str, run_id: &str) {
+    let uri = format!("/api/runs/{run_id}/finish");
+    let body = json!({"attempt": 1, "duration_ms": 1, "outcome": "succeeded"});
+    let (status, body) = call(app, Some(runner), "POST", &uri, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[sqlx::test]
+async fn a_refusal_is_listed_only_once_the_run_has_ended_on_it(pool: PgPool) {
+    let (app, a, r) = one_runner(&pool, &["Refused"]).await;
+    let (a, r) = (a.as_str(), r.as_str());
+
+    // Refused while its run runs: nothing, the count included. Its end queues the next run.
+    for _ in 0..2 {
+        let (run, _) = claim_and_refuse(&app, r, "PL-1").await;
+        assert_eq!(kinds(&app, a).await, (vec![], 0));
+        finish(&app, r, &run).await;
+        assert_eq!(kinds(&app, a).await, (vec![], 0));
+    }
+
+    // The entry's last run ends on a refusal, with nothing queued: the refusal is listed.
+    let (run, _) = claim_and_refuse(&app, r, "PL-1").await;
+    assert_eq!(kinds(&app, a).await, (vec![], 0));
+    finish(&app, r, &run).await;
+    let refusal_seq: i64 = sqlx::query_scalar(
+        "SELECT max(seq) FROM event WHERE issue_id = 'PL-1' AND kind = 'refusal'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let refused = item_of(&app, a, "refusal", "PL-1").await;
+    assert_eq!(
+        refused,
+        json!({
+            "kind": "refusal",
+            "issue": {"id": "PL-1", "title": "Refused", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": {"id": refused["agent"]["id"], "name": "Claude Code", "role": "agent",
+                      "kind": "claude-code"},
+            "from": "in_progress",
+            "from_name": "In Progress",
+            "to": "agent_review",
+            "to_name": "Agent Review",
+            "gate": "pr_open",
+            "reason": "no open pull request is linked to PL-1",
+            "since": refused["since"],
+            "since_seq": refusal_seq,
+            "unread": true,
+        })
+    );
+    assert_eq!(
+        kinds(&app, a).await,
+        (vec![of("run", "PL-1"), of("refusal", "PL-1")], 2)
+    );
+
+    // Run again queues a run: the refusal leaves with the run item.
+    let (status, body) = call(&app, Some(a), "POST", "/api/issues/PL-1/retry", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(kinds(&app, a).await, (vec![], 0));
+    let (run, _) = claim_and_refuse(&app, r, "PL-1").await;
+    assert_eq!(kinds(&app, a).await, (vec![], 0));
+    finish(&app, r, &run).await;
+    assert_eq!(kinds(&app, a).await, (vec![], 0));
+}
+
+#[sqlx::test]
+async fn an_issue_refused_then_waiting_on_a_person_is_listed_once_as_waiting(pool: PgPool) {
+    let (app, a, r) = one_runner(&pool, &["Waits"]).await;
+    let (run, agent) = claim_and_refuse(&app, &r, "PL-1").await;
+    let uri = format!("/api/runs/{run}/waiting");
+    let body = json!({"reason": "Needs a key."});
+    let (status, body) = call(&app, Some(&agent), "POST", &uri, Some(body)).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(kinds(&app, &a).await, (vec![], 0));
+    finish(&app, &r, &run).await;
+    assert_eq!(kinds(&app, &a).await, (vec![of("run", "PL-1")], 1));
+    let waits = item_of(&app, &a, "run", "PL-1").await;
+    assert_eq!(
+        waits,
+        json!({
+            "kind": "run",
+            "issue": {"id": "PL-1", "title": "Waits", "status": "in_progress",
+                      "status_name": "In Progress"},
+            "agent": "claude-code",
+            "runs": 1,
+            "last_outcome": "succeeded",
+            "reason": null,
+            "waiting_reason": "Needs a key.",
+            "limit_reached": false,
+            "since": waits["since"],
+            "since_seq": newest_run_event(&pool, "PL-1").await,
+            "unread": true,
+        })
+    );
+}
+
+async fn item_of(app: &Router, token: &str, kind: &str, id: &str) -> Value {
+    let (_, body) = call(app, Some(token), "GET", "/api/inbox", None).await;
+    (body["items"].as_array().unwrap().iter())
+        .find(|item| item["kind"] == kind && item["issue"]["id"] == id)
+        .unwrap_or_else(|| panic!("no {kind} item for {id} in {body}"))
+        .clone()
+}

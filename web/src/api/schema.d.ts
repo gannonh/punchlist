@@ -209,7 +209,8 @@ export interface paths {
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
          *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
-         *     asked to move, refused by a gate, with no move since. A person's token.
+         *     asked to move, refused by a gate, with no move since and no run running or queued. A
+         *     person's token.
          */
         get: operations["inbox"];
         put?: never;
@@ -1072,7 +1073,8 @@ export interface paths {
          *     waits on a person (`Workflow::person_statuses`) that are unassigned, assigned to the caller
          *     or to an agent the caller owns; and the issues whose latest run, by an agent the caller
          *     owns, ended with nothing to dispatch them again; and the issues an agent the caller owns
-         *     asked to move, refused by a gate, with no move since. A person's token.
+         *     asked to move, refused by a gate, with no move since and no run running or queued. A
+         *     person's token.
          */
         get: operations["inbox_in_workspace"];
         put?: never;
