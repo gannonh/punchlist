@@ -1,0 +1,352 @@
+[
+  {
+    "check": 1,
+    "pass": true,
+    "observed": {
+      "mainFocused": "PL-1",
+      "mainButtons": 0,
+      "branchFocused": "PL-3",
+      "url": "http://100.96.231.20:40353/issues/PL-3"
+    }
+  },
+  {
+    "check": 2,
+    "pass": true,
+    "observed": {
+      "issue": "PL-2",
+      "status": "todo",
+      "timeline": [
+        {
+          "seq": 3,
+          "issue_id": "PL-2",
+          "actor": {
+            "id": "1b578404-f3df-41fb-a432-d9e1e33b02d3",
+            "name": "Verify Person",
+            "role": "person"
+          },
+          "created_at": "2026-10-27T21:09:00.322947Z",
+          "detail": {
+            "kind": "created"
+          }
+        },
+        {
+          "seq": 4,
+          "issue_id": "PL-2",
+          "actor": {
+            "id": "1b578404-f3df-41fb-a432-d9e1e33b02d3",
+            "name": "Verify Person",
+            "role": "person"
+          },
+          "created_at": "2026-10-27T21:09:00.340271Z",
+          "detail": {
+            "kind": "edited",
+            "fields": [
+              "labels"
+            ]
+          }
+        },
+        {
+          "seq": 7,
+          "issue_id": "PL-2",
+          "actor": {
+            "id": "1b578404-f3df-41fb-a432-d9e1e33b02d3",
+            "name": "Verify Person",
+            "role": "person"
+          },
+          "created_at": "2026-10-27T21:09:02.798606Z",
+          "detail": {
+            "kind": "transition",
+            "from": "backlog",
+            "from_name": "Backlog",
+            "to": "todo",
+            "to_name": "Todo",
+            "workflow_version": "sha256:5c2a23effebcc35a855e4cb7000f9eb0f7e116d382e5bdd501ade03ad784f5cb"
+          }
+        }
+      ],
+      "transitions": {
+        "status": {
+          "key": "todo",
+          "name": "Todo",
+          "locked_to": [],
+          "dispatch": null,
+          "closed": false
+        },
+        "viewer_locked": false,
+        "transitions": [
+          {
+            "to": {
+              "key": "start",
+              "name": "Start",
+              "locked_to": [],
+              "dispatch": null,
+              "closed": false
+            },
+            "by": [
+              "person"
+            ],
+            "verdict": {
+              "kind": "allowed"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "check": 3,
+    "pass": true,
+    "observed": "Five actions disabled with title Focus an issue first"
+  },
+  {
+    "check": 4,
+    "pass": true,
+    "observed": [
+      {
+        "url": "http://100.96.231.20:40353/api/issues/PL-1",
+        "body": {
+          "labels": []
+        }
+      },
+      {
+        "url": "http://100.96.231.20:40353/api/issues/PL-3",
+        "body": {
+          "labels": []
+        }
+      },
+      {
+        "url": "http://100.96.231.20:40353/api/issues/PL-2",
+        "body": {
+          "labels": []
+        }
+      }
+    ]
+  },
+  {
+    "check": 5,
+    "pass": true,
+    "observed": {
+      "ids": [
+        "PL-1",
+        "PL-2"
+      ],
+      "inbox": {
+        "items": [
+          {
+            "kind": "waiting",
+            "issue": {
+              "id": "PL-1",
+              "title": "Touch issue 1",
+              "status": "todo",
+              "status_name": "Todo"
+            },
+            "since": "2026-10-27T21:09:03.791031Z",
+            "since_seq": 11,
+            "unread": true
+          },
+          {
+            "kind": "waiting",
+            "issue": {
+              "id": "PL-2",
+              "title": "Touch issue 2",
+              "status": "todo",
+              "status_name": "Todo"
+            },
+            "since": "2026-10-27T21:09:02.798606Z",
+            "since_seq": 7,
+            "unread": false
+          }
+        ],
+        "unread": 1
+      }
+    }
+  },
+  {
+    "check": 6,
+    "pass": true,
+    "observed": {
+      "gates": {
+        "top": 61.890625,
+        "height": 844
+      },
+      "activity": {
+        "top": 486.25,
+        "height": 844
+      }
+    }
+  },
+  {
+    "check": 7,
+    "pass": true,
+    "observed": [
+      {
+        "screen": "list",
+        "action": "next",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "previous",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "open",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "status",
+        "typing": false,
+        "active": "DIV"
+      },
+      {
+        "screen": "list",
+        "action": "select",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "range",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "assignee",
+        "typing": false,
+        "active": "DIV"
+      },
+      {
+        "screen": "list",
+        "action": "labels",
+        "typing": false,
+        "active": "DIV"
+      },
+      {
+        "screen": "list",
+        "action": "project",
+        "typing": false,
+        "active": "DIV"
+      },
+      {
+        "screen": "list",
+        "action": "milestone",
+        "typing": false,
+        "active": "DIV"
+      },
+      {
+        "screen": "list",
+        "action": "filter",
+        "typing": true,
+        "active": "INPUT"
+      },
+      {
+        "screen": "list",
+        "action": "list",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "board",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "pull-requests",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "projects",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "list",
+        "action": "close",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "issue",
+        "action": "gates",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "issue",
+        "action": "activity",
+        "typing": false,
+        "active": "BODY"
+      },
+      {
+        "screen": "issue",
+        "action": "comment",
+        "typing": true,
+        "active": "TEXTAREA"
+      },
+      {
+        "screen": "issue",
+        "action": "issues",
+        "typing": false,
+        "active": "BODY"
+      }
+    ]
+  },
+  {
+    "check": 8,
+    "pass": true,
+    "observed": {
+      "bottom": 763.734375,
+      "top": 786.734375,
+      "heights": [
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44,
+        44
+      ]
+    }
+  },
+  {
+    "check": 10,
+    "pass": false,
+    "partial": "Recording passed; lasting phone URL and private access remain unavailable in an attempt-scoped instance.",
+    "observed": {
+      "url": "http://100.96.231.20:40353",
+      "seconds": 34.223,
+      "video": "/home/gannonh/.local/share/punchlist/runner/worktrees/gannonh/punchlist/PL-167/verify-artifacts/pl167-independent/c10-phone-flow.webm",
+      "phoneHandoff": "Instance is attempt-scoped; token kept private per verification skill."
+    }
+  },
+  {
+    "check": 9,
+    "pass": true,
+    "observed": {
+      "pixelDiff": {
+        "list": 0,
+        "issue": 0
+      },
+      "keys": "j k s x g t c Escape passed on both"
+    }
+  }
+]
