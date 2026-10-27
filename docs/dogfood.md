@@ -15,6 +15,16 @@ Gate 1 passes when Punchlist's own issues run from Punchlist for 14 consecutive 
 | Workspaces | `Punchlist` (prefix `PL`, `gannonh/punchlist`) and `Groundwork` (prefix `GW`, `gannonh/groundwork`, its workflow in that repository's `.punchlist/`) |
 | `pl` config | `~/.config/punchlist/config.toml` (Gannon's account; `pl --workspace PL` names the workspace), `~/.config/punchlist/orchestrator.toml` (the orchestrator) |
 
+Sign in with GitHub needs the App's OAuth client, which Gannon sets up once:
+
+1. GitHub, Settings, Developer settings, GitHub Apps, `punchlist-sartre`, Edit.
+2. Make `https://sartre.tail984796.ts.net:7880/api/auth/github/callback` the first Callback URL. The server sends GitHub no `redirect_uri` (GitHub refused it, PL-171), so GitHub sends every sign-in and link to the App's first Callback URL.
+3. Under Client secrets choose Generate a new client secret and copy it.
+4. In the Punchlist 1Password Environment add `DOGFOOD_GITHUB_APP_CLIENT_ID` (the App's Client ID) and `DOGFOOD_GITHUB_APP_CLIENT_SECRET`.
+5. On sartre run `scripts/dogfood.sh up -d --build --wait`.
+
+`scripts/dogfood.sh` sets `PUNCHLIST_PUBLIC_URL=https://sartre.tail984796.ts.net:7880`. Browsers must open the app at that URL: the server refuses a write whose `Origin` is another one. Without the two variables GitHub sign-in is off and the token field is the only way in. A person links GitHub once, from a token sign-in, with `Link GitHub` in the account menu. The upgrade that added sessions signs every browser out once; each signs in again.
+
 Start or update it:
 
 ```sh

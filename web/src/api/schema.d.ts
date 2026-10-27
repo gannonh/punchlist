@@ -29,6 +29,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The ways the sign-in page offers. */
+        get: operations["options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/github/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GitHub sends the browser back here. The `state` must be the one the browser's cookie holds.
+         *     A link stores the GitHub user on the account and goes to `/`; a sign-in starts a session of
+         *     the account linked to the user and goes to `/`, or, with none linked, goes to
+         *     `/sign-in?unlinked=<login>`.
+         */
+        get: operations["callback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/github/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Sends the browser to GitHub to authorize the App, with a fresh `state` kept in a cookie for
+         *     ten minutes.
+         */
+        get: operations["start"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/github/webhook": {
         parameters: {
             query?: never;
@@ -269,7 +328,7 @@ export interface paths {
         put?: never;
         /**
          * Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
-         *     `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+         *     runs in its status, as many as the active workflow's `runs_per_entry`, without a transition. Queues the entry's next dispatch,
          *     starting a round (`runs_before`) under the active workflow's agent and version, and writes
          *     the person's `run_again` event, in one transaction. Person token.
          */
@@ -704,11 +763,11 @@ export interface paths {
         get: operations["show_session"];
         put?: never;
         /**
-         * Sign in with a person's token: the answer sets the session cookie to it, which reaches every
-         *     workspace of the person's account (ADR 0011).
+         * Sign in with a person's token: the answer sets the session cookie to a new session of the
+         *     token's account, which reaches every workspace of the account (ADR 0011, 0013).
          */
         post: operations["sign_in"];
-        /** Sign out: the answer clears the session cookie. */
+        /** Sign out: the answer deletes the cookie's session and clears the cookie. */
         delete: operations["sign_out"];
         options?: never;
         head?: never;
@@ -1063,6 +1122,8 @@ export interface components {
     schemas: {
         /** @description The identity above a person's actors, one per workspace they belong to (ADR 0011). */
         Account: {
+            /** @description The GitHub user the account signs in as, once linked (ADR 0013). */
+            github_login?: string | null;
             /** Format: uuid */
             id: string;
             name: string;
@@ -2319,6 +2380,11 @@ export interface components {
             /** @description A person's bearer token. */
             token: string;
         };
+        /** @description `GET /api/auth`: the ways the sign-in page offers. */
+        SignInOptions: {
+            /** @description Sign-in with GitHub is configured: the server has the GitHub App's client id and secret. */
+            github: boolean;
+        };
         /**
          * @description One line around the first match, with whitespace runs and control characters made one
          *     space. `before` starts and `after` ends with `…` where the text was cut.
@@ -2349,6 +2415,12 @@ export interface components {
             dispatch_effort?: string | null;
             /** @description The model its dispatch rule names, such as `haiku`; `None`: the runner's flag. */
             dispatch_model?: string | null;
+            /**
+             * Format: int32
+             * @description How many runs one entry into it gets before the issue waits on a person, from its
+             *     dispatch rule's `runs_per_entry` (default 3); `None` when it does not dispatch.
+             */
+            dispatch_runs_per_entry?: number | null;
             /** @description The status key, such as `in_progress`. */
             key: string;
             /** @description The roles that may not act on an issue in it, from the workflow's `[lock]`. */
@@ -2587,6 +2659,112 @@ export interface operations {
             };
             /** @description An unknown kind or owner, or a name over 100 characters. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignInOptions"];
+                };
+            };
+        };
+    };
+    callback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                code: string | null;
+                state: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description To the app, or to the sign-in page when no account is linked. */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A wrong or missing `state` or code. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The GitHub user is linked to another account. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description GitHub refused the code or could not be read. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `1` links GitHub to the signed-in account instead of signing in. */
+                link: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description To GitHub's authorization page. */
+            303: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A link without a session. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Sign-in with GitHub is not configured. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4530,7 +4708,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The session cookie is cleared. */
+            /** @description The session is deleted and its cookie cleared. */
             204: {
                 headers: {
                     [name: string]: unknown;

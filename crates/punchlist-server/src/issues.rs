@@ -30,7 +30,7 @@ use crate::github::{
     newest_check_runs, refresh_pull_requests, written_since,
 };
 use crate::rows::{issue, issue_rows};
-use crate::runs::{RUNS_PER_ENTRY, why_unclaimed};
+use crate::runs::why_unclaimed;
 use crate::workflow::{active_workflow, lock_workspace, status_info, stored_workflow};
 use crate::{ApiError, AppState};
 
@@ -272,7 +272,7 @@ pub(crate) async fn runs_ended(
     let rows = sqlx::query!(
         r#"SELECT d.issue_id, d.run_number - d.runs_before AS "runs!"
            FROM dispatch d JOIN run r ON r.id = d.run_id
-           WHERE d.issue_id = ANY($1) AND d.run_number - d.runs_before >= $2
+           WHERE d.issue_id = ANY($1) AND d.run_number - d.runs_before >= d.runs_per_entry
              AND r.outcome <> 'running'
              AND d.run_number = (SELECT max(run_number) FROM dispatch
                                  WHERE transition_id = d.transition_id)
@@ -280,7 +280,6 @@ pub(crate) async fn runs_ended(
                                     WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
                                     ORDER BY e.seq DESC LIMIT 1)"#,
         ids,
-        RUNS_PER_ENTRY,
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -291,7 +290,7 @@ pub(crate) async fn runs_ended(
 }
 
 /// Run again: an issue that waits on a person (`waiting_on_person`) gets another set of
-/// `RUNS_PER_ENTRY` runs in its status, without a transition. Queues the entry's next dispatch,
+/// runs in its status, as many as the active workflow's `runs_per_entry`, without a transition. Queues the entry's next dispatch,
 /// starting a round (`runs_before`) under the active workflow's agent and version, and writes
 /// the person's `run_again` event, in one transaction. Person token.
 #[utoipa::path(
@@ -349,8 +348,8 @@ async fn run_again(
     // Waiting on a person means the entry has a dispatch whose run ended.
     sqlx::query!(
         "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
-                               workflow_version)
-         SELECT d.issue_id, d.transition_id, $2, d.run_number + 1, d.run_number, $3
+                               workflow_version, runs_per_entry)
+         SELECT d.issue_id, d.transition_id, $2, d.run_number + 1, d.run_number, $3, $4
          FROM dispatch d
          WHERE d.issue_id = $1
            AND d.transition_id = (SELECT e.transition_id FROM event e
@@ -360,6 +359,7 @@ async fn run_again(
         id,
         rule.agent,
         workflow.version(),
+        rule.runs_per_entry as i32,
     )
     .execute(&mut *tx)
     .await?;
@@ -837,10 +837,12 @@ async fn queue_dispatch(
         return Ok(false);
     };
     sqlx::query!(
-        "INSERT INTO dispatch (issue_id, transition_id, agent) VALUES ($1, $2, $3)",
+        "INSERT INTO dispatch (issue_id, transition_id, agent, runs_per_entry)
+         VALUES ($1, $2, $3, $4)",
         id,
         transition_id,
         dispatch.agent,
+        dispatch.runs_per_entry as i32,
     )
     .execute(&mut *tx)
     .await?;

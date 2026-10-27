@@ -284,6 +284,9 @@ async fn openapi_document_lists_the_routes(pool: PgPool) {
         paths,
         [
             "/api/actors",
+            "/api/auth",
+            "/api/auth/github/callback",
+            "/api/auth/github/start",
             "/api/github/webhook",
             "/api/inbox",
             "/api/inbox/read",

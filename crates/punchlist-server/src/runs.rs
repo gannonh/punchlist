@@ -39,14 +39,10 @@ const MAX_LOG_LINES: usize = 1000;
 const MAX_LOG_LINE_BYTES: usize = 64 * 1024;
 const LOG_TAIL: i64 = 20;
 const MAX_WAITING_REASON_CHARS: usize = 500;
-/// How many runs one entry into a status gets before the issue waits on a person.
-// ponytail: one limit for every status of every workspace. Upgrade path: a `[dispatch]`
-// field in the workflow file, read from the version of the entering transition.
-pub(crate) const RUNS_PER_ENTRY: i32 = 3;
 /// How many attempts one run gets when its runner loses them, such as in a restart, before
 /// the run fails and the issue is dispatched again.
 // ponytail: one limit for every run of every workspace. Upgrade path: a `[dispatch]` field
-// in the workflow file, beside `RUNS_PER_ENTRY`'s.
+// in the workflow file, beside `runs_per_entry`.
 pub(crate) const ATTEMPTS_PER_RUN: i32 = 2;
 /// How long an issue whose run hit its agent's usage limit, and the runner's claims for that
 /// agent, wait when the agent did not say when the limit resets.
@@ -1279,7 +1275,7 @@ async fn settle_run(
 /// gives its run the prompt of the round's workflow version. Nothing is queued for a run
 /// without a dispatch, an issue that moved, a status the active workflow now locks to agents
 /// or runners or gives no dispatch rule (the test `queue_dispatch` makes on entry), or run
-/// `RUNS_PER_ENTRY` of the round (a Run again starts the next, `runs_before`), or a run whose
+/// `dispatch.runs_per_entry` of the round (a Run again starts the next, `runs_before`), or a run whose
 /// agent said it waits on a person (`wait_for_person`): that issue waits on a person. Nor when
 /// the active workflow cannot be read, which is logged. `waiting_on_person` reads the same
 /// three rules, the latest transition, the limit and the waiting reason, to say so; change
@@ -1336,16 +1332,15 @@ async fn queue_redispatch(
     }
     sqlx::query!(
         "INSERT INTO dispatch (issue_id, transition_id, agent, run_number, runs_before,
-                               workflow_version)
+                               workflow_version, runs_per_entry)
          SELECT d.issue_id, d.transition_id, d.agent, d.run_number + 1, d.runs_before,
-                d.workflow_version
+                d.workflow_version, d.runs_per_entry
          FROM dispatch d
-         WHERE d.run_id = $1 AND d.run_number - d.runs_before < $2
+         WHERE d.run_id = $1 AND d.run_number - d.runs_before < d.runs_per_entry
            AND d.transition_id = (SELECT e.transition_id FROM event e
                                   WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
                                   ORDER BY e.seq DESC LIMIT 1)",
         run_id,
-        RUNS_PER_ENTRY,
     )
     .execute(&mut *tx)
     .await?;

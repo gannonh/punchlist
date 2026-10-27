@@ -101,7 +101,7 @@ URL=$($C sign-in-url "$RUN")                           # a page that signs the b
 Drive it one of two ways:
 
 - **T3 Code integrated browser** (it runs on the Mac mini, so the run must be bound to the Tailscale address). Load the tools with ToolSearch `select:mcp__t3-code__preview_open,mcp__t3-code__preview_click,mcp__t3-code__preview_evaluate,mcp__t3-code__preview_snapshot,mcp__t3-code__preview_type,mcp__t3-code__preview_press,mcp__t3-code__preview_resize,mcp__t3-code__preview_recording_start,mcp__t3-code__preview_recording_stop`, then `preview_open` the URL. Assert with `preview_evaluate` on the DOM, not by looking at a screenshot.
-- **Headless Chromium on sartre**, through Playwright from this repository (`node_modules/.pnpm/node_modules/playwright`), for scripted checks and timings.
+- **Headless Chromium on sartre**, through Playwright from this repository (`node_modules/.pnpm/node_modules/playwright`), for scripted checks and timings. Launch it with `chromium.launch({ ignoreDefaultArgs: ['--disable-dev-shm-usage'] })`, as `web/playwright.config.ts` does: Playwright's default puts the renderer's shared memory in `/tmp`, a quota-limited tmpfs on sartre, and renderers crash when that quota fills.
 
 [features/web-app.md](features/web-app.md) lists the selectors, the keys, the render measure and the recipes, including an In Progress issue without a model call. `pnpm e2e` runs `web/e2e/` against a run of its own.
 
@@ -126,6 +126,8 @@ A GitHub delivery, signed with the run's webhook secret: `$C webhook "$RUN" pull
 What an agent's `get_issue` prints, without a model: `$C get-issue "$RUN" PL-1` calls the MCP tool through `pl mcp` with the run's person token and records the text ([features/workflow-and-gates.md](features/workflow-and-gates.md)).
 
 Raw HTTP, for API checks: `source /tmp/punchlist-verify/$RUN/run.env`, then `$C curl "$RUN" "$SERVER_URL/api/issues"`. It runs `curl -s` with the run's token passed on stdin, so the token stays out of process listings; any other curl arguments pass through. Do not paste the token into evidence.
+
+`$C fake-github "$RUN"` starts `bin/fake-github` and restarts the run's server with GitHub sign-in on, so the web app's `Sign in with GitHub` and `Link GitHub` can be driven ([features/sign-in.md](features/sign-in.md)).
 
 `pl import linear` reads Linear with `LINEAR_API_KEY` (run it under `with-env`); `bin/fake-linear` stands in for Linear when the key cannot reach it ([features/linear-import.md](features/linear-import.md)).
 

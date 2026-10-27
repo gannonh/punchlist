@@ -7,6 +7,7 @@ mod error;
 mod events;
 mod github;
 mod github_api;
+mod github_sign_in;
 mod inbox;
 mod issues;
 mod jobs;
@@ -37,6 +38,7 @@ pub use error::ApiError;
 pub use events::write_pull_request_events;
 pub use github::catch_up_at_start;
 pub use github_api::GithubClient;
+pub use github_sign_in::GithubSignIn;
 pub use jobs::{run_jobs_until_idle, run_next_job, work_jobs};
 pub use runs::expire_leases;
 pub use workflow::{queue_workflow_load, queue_workflow_loads_at_start, warn_invalid_workflows};
@@ -65,6 +67,12 @@ pub struct AppState {
     /// Turns true when the server begins to shut down. Open event streams end on it, since
     /// graceful shutdown waits for every open response and a stream never finishes by itself.
     pub shutdown: tokio::sync::watch::Receiver<bool>,
+    /// Sign-in with GitHub (ADR 0013). Without it the sign-in page offers the token alone.
+    pub github_sign_in: Option<std::sync::Arc<GithubSignIn>>,
+    /// The instance's own origin, such as `https://sartre.tail984796.ts.net:7880`: the GitHub
+    /// callback's and the only `Origin` a browser's write may come from. Without it both come
+    /// from the request's `Host` (or `X-Forwarded-Host`).
+    pub public_url: Option<std::sync::Arc<str>>,
 }
 
 /// Proof files on local disk, each named by its storage key.
@@ -88,7 +96,20 @@ impl AppState {
                 max_bytes: 100 * 1024 * 1024,
             },
             shutdown: tokio::sync::watch::channel(false).1,
+            github_sign_in: None,
+            public_url: None,
         }
+    }
+
+    pub fn with_github_sign_in(mut self, github_sign_in: GithubSignIn) -> AppState {
+        self.github_sign_in = Some(std::sync::Arc::new(github_sign_in));
+        self
+    }
+
+    /// `url` is an origin, such as `https://example.com:7880`, with no path.
+    pub fn with_public_url(mut self, url: &str) -> AppState {
+        self.public_url = Some(url.trim_end_matches('/').into());
+        self
     }
 
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> AppState {
@@ -145,6 +166,7 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
         .merge(runs::routes())
         .merge(search::routes())
         .merge(session::routes())
+        .merge(github_sign_in::routes())
         .merge(workflow::routes())
         .merge(workspaces::routes())
 }
@@ -154,6 +176,10 @@ fn api_routes(proof_max_bytes: u64) -> OpenApiRouter<AppState> {
 pub fn router(state: AppState) -> Router {
     let (router, api) = routes_and_document(state.proof.max_bytes);
     router
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::same_origin,
+        ))
         .with_state(state)
         .route("/api/openapi.json", get(move || async move { Json(api) }))
 }

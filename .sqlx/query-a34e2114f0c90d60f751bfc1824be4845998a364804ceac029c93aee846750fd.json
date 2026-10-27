@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT acc.id AS account_id, acc.name AS account_name, a.id, a.workspace_id,\n                      a.name, w.issue_prefix\n               FROM account acc\n               JOIN actor a ON a.account_id = acc.id\n               JOIN workspace w ON w.id = a.workspace_id\n               WHERE acc.token_hash = $1\n               ORDER BY w.created_at, w.id",
+  "query": "SELECT acc.id AS account_id, acc.name AS account_name, acc.github_login, a.id,\n                      a.workspace_id, a.name, w.issue_prefix\n               FROM account acc\n               JOIN actor a ON a.account_id = acc.id\n               JOIN workspace w ON w.id = a.workspace_id\n               WHERE acc.id = $1 OR acc.token_hash = $2\n               ORDER BY w.created_at, w.id",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "github_login",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "account",
+            "name": "github_login"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "id",
         "type_info": "Uuid",
         "origin": {
@@ -37,7 +48,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "workspace_id",
         "type_info": "Uuid",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "name",
         "type_info": "Text",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "issue_prefix",
         "type_info": "Text",
         "origin": {
@@ -72,17 +83,19 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Text"
       ]
     },
     "nullable": [
       false,
       false,
+      true,
       false,
       false,
       false,
       false
     ]
   },
-  "hash": "7bc360f2f470b0a1bbc1f5e386fb44c091d39271c675493dc05fc637a7aaf483"
+  "hash": "a34e2114f0c90d60f751bfc1824be4845998a364804ceac029c93aee846750fd"
 }

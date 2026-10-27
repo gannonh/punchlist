@@ -61,6 +61,16 @@ pub enum ApiError {
     #[error("{0}")]
     Invalid(String),
     #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    Conflict(String),
+    /// A feature the server has no configuration for, such as sign-in with GitHub.
+    #[error("{0}")]
+    NotConfigured(String),
+    /// Sign-in with GitHub could not read GitHub, or GitHub refused it.
+    #[error("{0}")]
+    GithubSignIn(String),
+    #[error("{0}")]
     TooLarge(String),
     #[error(transparent)]
     Refused(#[from] Refusal),
@@ -96,9 +106,12 @@ impl ApiError {
             | ApiError::ProjectNotFound(_)
             | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
-            | ApiError::WorkspaceNotFound(_) => StatusCode::NOT_FOUND,
+            | ApiError::WorkspaceNotFound(_)
+            | ApiError::NotConfigured(_) => StatusCode::NOT_FOUND,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
-            ApiError::WorkspaceNotNamed(_) => StatusCode::BAD_REQUEST,
+            ApiError::WorkspaceNotNamed(_) | ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::GithubSignIn(_) => StatusCode::BAD_GATEWAY,
             ApiError::ClaimTaken(_) | ApiError::StaleAttempt(_) | ApiError::NotWaiting(_) => {
                 StatusCode::CONFLICT
             }
@@ -123,8 +136,12 @@ impl ApiError {
             | ApiError::ProjectNotFound(_)
             | ApiError::MilestoneNotFound(_)
             | ApiError::ImportNotFound(_)
-            | ApiError::WorkspaceNotFound(_) => "not_found",
+            | ApiError::WorkspaceNotFound(_)
+            | ApiError::NotConfigured(_) => "not_found",
             ApiError::Forbidden(_) => "forbidden",
+            ApiError::BadRequest(_) => "bad_request",
+            ApiError::Conflict(_) => "conflict",
+            ApiError::GithubSignIn(_) => "github_sign_in_failed",
             ApiError::WorkspaceNotNamed(_) => "workspace_not_named",
             ApiError::ClaimTaken(_) => "claim_taken",
             ApiError::StaleAttempt(_) => "stale_attempt",
