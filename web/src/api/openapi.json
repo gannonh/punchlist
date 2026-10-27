@@ -2555,6 +2555,111 @@
         ]
       }
     },
+    "/api/sessions": {
+      "get": {
+        "summary": "The account's live sessions, newest use first.",
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An agent's or a runner's token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Ends every session of the account but the one the request came with; with a token, every\nsession.",
+        "operationId": "revoke_other_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsRevoked"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}": {
+      "delete": {
+        "summary": "Ends one of the account's sessions: that browser's next request answers 401.",
+        "operationId": "revoke_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The session's `id` in `GET /api/sessions`.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session is ended."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such session of this account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/workflow": {
       "get": {
         "summary": "The workspace's active workflow: its version, the commit it came from, its statuses and\nthe last push that was refused.",
@@ -6849,6 +6954,54 @@
           "workspace_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "SessionInfo": {
+        "type": "object",
+        "description": "One of `GET /api/sessions`: a browser the account is signed in on.",
+        "required": [
+          "id",
+          "device",
+          "created_at",
+          "last_used_at",
+          "current"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "The session the request came with."
+          },
+          "device": {
+            "type": "string",
+            "description": "The browser and OS its user agent names, such as `Safari on iPhone`, else\n`Unknown device`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The id to revoke it by, which is not its cookie's value."
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SessionsRevoked": {
+        "type": "object",
+        "description": "`DELETE /api/sessions`: how many sessions it ended.",
+        "required": [
+          "revoked"
+        ],
+        "properties": {
+          "revoked": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

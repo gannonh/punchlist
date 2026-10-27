@@ -4,6 +4,7 @@ import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient }
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { api, ApiError, call } from '@/api/client'
+import type { components } from '@/api/schema'
 import {
   applyMove,
   applyStream,
@@ -220,6 +221,41 @@ export function useSignOut() {
       client.clear()
       client.setQueryData(sessionQuery.queryKey, null)
     },
+  })
+}
+
+type SessionInfo = components['schemas']['SessionInfo']
+
+/** The account's browser sessions, newest use first. Read again each time the list opens. */
+export const sessionsQuery = queryOptions({
+  queryKey: ['sessions'],
+  queryFn: () => call(api.GET('/api/sessions')),
+})
+
+/**
+ * Ends one other session (`id`), or every session but this one (`'others'`). The list drops them at once and gets them
+ * back, with a toast, when the server refuses.
+ */
+export function useRevokeSessions() {
+  const client = useQueryClient()
+  const key = sessionsQuery.queryKey
+  return useMutation({
+    mutationFn: (which: string): Promise<unknown> =>
+      which === 'others'
+        ? call(api.DELETE('/api/sessions'))
+        : call(api.DELETE('/api/sessions/{id}', { params: { path: { id: which } } })),
+    onMutate: async (which) => {
+      await client.cancelQueries({ queryKey: key })
+      const before = client.getQueryData(key)
+      const kept = (s: SessionInfo) => (which === 'others' ? s.current : s.id !== which)
+      client.setQueryData(key, (sessions) => sessions?.filter(kept))
+      return { before }
+    },
+    onError: (error, _which, context) => {
+      client.setQueryData(key, context?.before)
+      toast.error(`Not signed out. ${error instanceof ApiError ? error.body.message : String(error)}`)
+    },
+    onSettled: () => client.invalidateQueries({ queryKey: key }),
   })
 }
 

@@ -292,6 +292,26 @@ pub struct Account {
     pub github_login: Option<String>,
 }
 
+/// One of `GET /api/sessions`: a browser the account is signed in on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SessionInfo {
+    /// The id to revoke it by, which is not its cookie's value.
+    pub id: Uuid,
+    /// The browser and OS its user agent names, such as `Safari on iPhone`, else
+    /// `Unknown device`.
+    pub device: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+    /// The session the request came with.
+    pub current: bool,
+}
+
+/// `DELETE /api/sessions`: how many sessions it ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SessionsRevoked {
+    pub revoked: u64,
+}
+
 /// `GET /api/auth`: the ways the sign-in page offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SignInOptions {

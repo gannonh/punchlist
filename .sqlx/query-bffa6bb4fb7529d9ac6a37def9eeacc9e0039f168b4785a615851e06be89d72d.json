@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM session WHERE public_id = $1 AND account_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bffa6bb4fb7529d9ac6a37def9eeacc9e0039f168b4785a615851e06be89d72d"
+}
