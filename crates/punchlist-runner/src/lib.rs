@@ -55,10 +55,21 @@ mod worktree;
 
 pub use worktree::move_state_dir;
 
+/// How a runner stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// Stops each agent and reports its attempt lost (`runner stopped`), so its run gets
+    /// the next attempt at once.
+    Finish,
+    /// Stops each agent and reports nothing, so the next `pl runner start` within the
+    /// lease resumes its attempts as after a crash, and the leases lapse if none comes.
+    Restart,
+}
+
 /// Registers, then heartbeats and claims until `shutdown` resolves.
 pub async fn run(
     config: RunnerConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send,
+    shutdown: impl std::future::Future<Output = Stop> + Send,
 ) -> anyhow::Result<()> {
     orchestrator::run(config, shutdown).await
 }
