@@ -1113,7 +1113,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The workspace's open invites, oldest first. Person token. */
+        /** The workspace's open invites, oldest first, leaving out expired ones. Person token. */
         get: operations["list_invites"];
         put?: never;
         /** Invite a GitHub user to the workspace. Person token. */
@@ -1996,6 +1996,12 @@ export interface components {
         Invite: {
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: date-time
+             * @description 7 days after `created_at`. From then on a sign-in by the login accepts nothing, since
+             *     GitHub gives a renamed user's old login to whoever registers it next.
+             */
+            expires_at: string;
             github_login: string;
             /** Format: uuid */
             id: string;

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE invite SET revoked_at = created_at + interval '7 days'\n         WHERE workspace_id = $1 AND github_login = $2::text::citext\n           AND accepted_at IS NULL AND revoked_at IS NULL\n           AND created_at + interval '7 days' <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9d2661a8b15a68387a0104d75f177fdc833292861e39c11e093f2c1aa906e70f"
+}
