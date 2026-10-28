@@ -1,0 +1,9 @@
+  id  |     title     | body_length | status  
+------+---------------+-------------+---------
+ PL-1 | One-word body |        2000 | backlog
+(1 row)
+
+ issue_id | waiting_reason | outcome 
+----------+----------------+---------
+(0 rows)
+
