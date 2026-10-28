@@ -329,6 +329,9 @@ pub struct Invite {
     /// The name of the person who invited them.
     pub invited_by: String,
     pub created_at: DateTime<Utc>,
+    /// 7 days after `created_at`. From then on a sign-in by the login accepts nothing, since
+    /// GitHub gives a renamed user's old login to whoever registers it next.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// `POST /api/cli-logins`: a `pl auth login` waiting for a person to approve it in a browser.

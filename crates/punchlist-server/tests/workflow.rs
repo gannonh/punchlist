@@ -972,6 +972,69 @@ async fn a_closed_delivered_after_the_reopened_of_the_same_second_leaves_it_open
     );
 }
 
+/// `ready_for_review` and an `edited` that still carries `draft: true`, both from READY's
+/// second (18:05:00), as GitHub sends them when a pull request is edited and readied at once.
+fn ready_and_draft_edit_of_one_second() -> (String, String) {
+    let edit = edited(READY, |v| {
+        v["action"] = json!("edited");
+        v["pull_request"]["draft"] = json!(true);
+    });
+    (READY.to_string(), edit)
+}
+
+async fn draft(pool: &PgPool) -> bool {
+    sqlx::query_scalar("SELECT draft FROM pull_request WHERE number = 12")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_draft_edit_delivered_after_the_ready_of_the_same_second_leaves_it_ready(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    s.github.lock().unwrap().pulls = vec![pull_request_now(READY)];
+
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+
+    assert!(!draft(&pool).await);
+}
+
+#[sqlx::test]
+async fn a_ready_delivered_after_the_draft_edit_of_the_same_second_leaves_it_ready(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    // GitHub reports it ready, though the edit is the last delivery to say otherwise.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(READY)];
+
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+    assert!(draft(&pool).await, "the edit is newer than the opened");
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+
+    assert!(!draft(&pool).await);
+}
+
+#[sqlx::test]
+async fn a_tie_github_reports_as_a_draft_is_recorded_a_draft(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    // Made a draft again within the second: GitHub's answer decides, not the order the
+    // deliveries came in.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(&edit)];
+
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+
+    assert!(draft(&pool).await);
+}
+
 #[sqlx::test]
 async fn deliveries_are_retried_not_recorded_while_github_is_down(pool: PgPool) {
     let s = setup(&pool).await;

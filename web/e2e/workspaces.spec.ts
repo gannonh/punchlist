@@ -1,19 +1,7 @@
-import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
-import { bearer, ok } from './support'
+import { bearer, bootstrap, ok } from './support'
 
-const server = new URL('../../target/debug/punchlist-server', import.meta.url).pathname
-
-// A workspace of its own account, so the run's person stays in one workspace for the other specs.
-function bootstrap(name: string, prefix: string, account?: string): string {
-  const database = process.env.E2E_DATABASE_URL
-  if (!database) throw new Error('E2E_DATABASE_URL is not set; run `pnpm e2e`')
-  const args = ['--database-url', database, 'bootstrap', '--person', 'Workspace Person', '--workspace', name]
-  args.push('--prefix', prefix, '--repository', `gannonh/e2e-${prefix.toLowerCase()}`)
-  if (account) args.push('--account', account)
-  return execFileSync(server, args, { stdio: ['ignore', 'pipe', 'ignore'] }).toString()
-}
-
+// Workspaces of their own account, so the run's person stays in one workspace for the other specs.
 test('one sign-in reaches both workspaces of the account, and the menu switches between them', async ({
   page,
   request,

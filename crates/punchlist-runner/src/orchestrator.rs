@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,6 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::RunnerConfig;
 use crate::agent::{
     ATTEMPT_GRACE, ATTEMPT_MARKER, AgentExit, AgentResult, build_prompt, claude_args, end_attempt,
     kill_runner, megabytes, remove_attempt_docker, remove_attempt_tmp, run_claude,
@@ -26,6 +26,7 @@ use crate::agent::{
 use crate::codex::{CodexHome, mcp_servers, run_codex, thread_params};
 use crate::github::{GithubAccess, refresh_at};
 use crate::worktree::Worktrees;
+use crate::{RunnerConfig, Stop};
 
 /// The agent keys this runner has an adapter for.
 const AGENTS: [&str; 2] = ["claude-code", "codex"];
@@ -110,11 +111,14 @@ struct Context {
     client: Client,
     worktrees: Worktrees,
     shutdown: watch::Receiver<bool>,
+    /// Set before `shutdown` when the runner stops for a restart: a stopped attempt is left
+    /// to its lease, unreported, for the next start to resume.
+    restarting: AtomicBool,
 }
 
 pub async fn run(
     config: RunnerConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send,
+    shutdown: impl std::future::Future<Output = Stop> + Send,
 ) -> anyhow::Result<()> {
     run_with_worktrees(Worktrees::new(config.state_dir.clone()), config, shutdown).await
 }
@@ -122,7 +126,7 @@ pub async fn run(
 pub(crate) async fn run_with_worktrees(
     worktrees: Worktrees,
     config: RunnerConfig,
-    shutdown: impl std::future::Future<Output = ()> + Send,
+    shutdown: impl std::future::Future<Output = Stop> + Send,
 ) -> anyhow::Result<()> {
     // A word that is no agent kind is a typo; a kind with no adapter here is a missing feature.
     if let Some(unknown) = (config.agents.iter()).find_map(|a| unknown_agent_kind(a)) {
@@ -233,6 +237,7 @@ pub(crate) async fn run_with_worktrees(
         client,
         worktrees,
         shutdown: shutdown_rx,
+        restarting: AtomicBool::new(false),
     });
     let permits = Arc::new(Semaphore::new(max_concurrent));
     let mut attempts = JoinSet::new();
@@ -241,8 +246,8 @@ pub(crate) async fn run_with_worktrees(
         let mut displaced = displaced.clone();
         async move {
             tokio::select! {
-                () = shutdown => {}
-                _ = displaced.wait_for(|d| *d) => {}
+                stop = shutdown => stop,
+                _ = displaced.wait_for(|d| *d) => Stop::Finish,
             }
         }
     };
@@ -288,9 +293,10 @@ pub(crate) async fn run_with_worktrees(
                         let key = (claim.run_id, claim.attempt);
                         let guard = HeldGuard::new(held.clone(), key, stop.clone());
                         attempts.spawn(async move {
-                            run_attempt(&ctx, claim, stop, Some(worktree)).await;
+                            let left = run_attempt(&ctx, claim, stop, Some(worktree)).await;
                             drop(guard);
                             drop(permit);
+                            left
                         });
                     }
                     Err(e) if is_code(&e, "stale_attempt") => {
@@ -321,9 +327,9 @@ pub(crate) async fn run_with_worktrees(
         }
     }
 
-    loop {
+    let stop = loop {
         let permit = tokio::select! {
-            _ = &mut shutdown => break,
+            stop = &mut shutdown => break stop,
             Some(done) = attempts.join_next(), if !attempts.is_empty() => {
                 if let Err(e) = done {
                     tracing::error!("attempt task failed: {e}");
@@ -333,7 +339,7 @@ pub(crate) async fn run_with_worktrees(
             permit = permits.clone().acquire_owned() => permit.expect("semaphore is open"),
         };
         let claimed = tokio::select! {
-            _ = &mut shutdown => break,
+            stop = &mut shutdown => break stop,
             claimed = ctx.client.claim(claim_wait) => claimed,
         };
         match claimed {
@@ -344,9 +350,10 @@ pub(crate) async fn run_with_worktrees(
                 let key = (claim.run_id, claim.attempt);
                 let guard = HeldGuard::new(held.clone(), key, stop.clone());
                 attempts.spawn(async move {
-                    run_attempt(&ctx, claim, stop, None).await;
+                    let left = run_attempt(&ctx, claim, stop, None).await;
                     drop(guard);
                     drop(permit);
+                    left
                 });
             }
             Ok(None) => failures = 0,
@@ -362,24 +369,32 @@ pub(crate) async fn run_with_worktrees(
                 tracing::warn!("claim failed: {e}; retrying in {delay} ms");
                 drop(permit);
                 tokio::select! {
-                    _ = &mut shutdown => break,
+                    stop = &mut shutdown => break stop,
                     _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
                 }
             }
         }
-    }
+    };
 
     tracing::info!(
         "shutting down; stopping {} running attempt(s)",
         attempts.len()
     );
+    ctx.restarting
+        .store(stop == Stop::Restart, Ordering::SeqCst);
     let _ = shutdown_tx.send(true);
+    let mut left = 0;
     while let Some(done) = attempts.join_next().await {
-        if let Err(e) = done {
-            tracing::error!("attempt task failed: {e}");
+        match done {
+            Ok(true) => left += 1,
+            Ok(false) => {}
+            Err(e) => tracing::error!("attempt task failed: {e}"),
         }
     }
     heartbeat.abort();
+    if stop == Stop::Restart {
+        tracing::info!("stopped for a restart; {left} attempt(s) left to resume");
+    }
     if *displaced.borrow() {
         anyhow::bail!(
             "another `pl runner start` registered runner `{}`; this one stopped",
@@ -534,12 +549,13 @@ async fn flush_logs(
 
 /// Runs one attempt and reports its outcome. `resume_in` is the worktree of an attempt this
 /// runner held before it restarted: its agent carries on there in the attempt's session.
+/// True when the runner stopped for a restart and left the attempt to resume, unreported.
 async fn run_attempt(
     ctx: &Context,
     claim: Claim,
     stop_tx: Arc<watch::Sender<bool>>,
     resume_in: Option<PathBuf>,
-) {
+) -> bool {
     let start = Instant::now();
     let run_id = claim.run_id.to_string();
     let attempt = claim.attempt;
@@ -697,14 +713,21 @@ async fn run_attempt(
             }
         }
     };
+    // Left for the next start, which resumes the attempt with its `TMPDIR`, or removes the
+    // directory once the lease has lapsed.
+    let restarting = matches!(exit, AgentExit::Stopped) && ctx.restarting.load(Ordering::SeqCst);
     // Before the outcome, so the next run of the issue finds its ports free.
     let (processes, docker) = end_attempt(&attempt_id, ATTEMPT_GRACE).await;
-    let line = match remove_attempt_tmp(&tmp) {
-        Ok(size) => format!(
+    let removed = (!restarting).then(|| remove_attempt_tmp(&tmp));
+    let line = match removed {
+        None => format!(
+            "attempt {attempt_id} stopped for a restart: removed {processes} process(es) and {docker} it left; kept its temporary directory"
+        ),
+        Some(Ok(size)) => format!(
             "attempt {attempt_id} ended: removed {processes} process(es), {docker} it left, and its temporary directory ({})",
             megabytes(size)
         ),
-        Err(e) => format!(
+        Some(Err(e)) => format!(
             "attempt {attempt_id} ended: removed {processes} process(es), {docker} it left; cannot remove {}: {e}",
             tmp.display()
         ),
@@ -726,7 +749,13 @@ async fn run_attempt(
         AgentExit::Finished(result) => (result, false),
         AgentExit::Stopped if stale => {
             tracing::warn!("run {run_id}: agent stopped, lease lost; not reporting an outcome");
-            return;
+            return false;
+        }
+        AgentExit::Stopped if restarting => {
+            tracing::info!(
+                "run {run_id}: agent stopped for a restart; attempt {attempt} is left to resume"
+            );
+            return true;
         }
         AgentExit::Stopped => (
             AgentResult {
@@ -775,6 +804,7 @@ async fn run_attempt(
         FINAL_REPORT_TIMEOUT,
     )
     .await;
+    false
 }
 
 /// How long a failed token refresh waits before it asks again.
@@ -1186,6 +1216,10 @@ mod tests {
     type Seen = Arc<Mutex<Vec<(String, String, serde_json::Value)>>>;
 
     const RUNNER: Uuid = Uuid::from_u128(1);
+    /// Held by each test that runs a runner as `RUNNER`: its start kills every process
+    /// marked with that id, and an attempt's end those marked with the attempt, so two at
+    /// once would kill each other's agents.
+    static ONE_RUNNER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     const RESUMED: Uuid = Uuid::from_u128(0xa);
     const MISSING: Uuid = Uuid::from_u128(0xb);
     const FRESH: Uuid = Uuid::from_u128(0xc);
@@ -1405,6 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_runner_whose_name_was_registered_again_shuts_down() {
+        let _one = ONE_RUNNER.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let url = fake_server(Arc::default(), true).await;
         let config = fake_config(url, temp.path().into(), "claude".into());
@@ -1436,6 +1471,7 @@ mod tests {
     /// lost, and starts a fresh claim in a new session.
     #[tokio::test]
     async fn a_restarted_runner_resumes_an_intact_worktree_and_reports_a_missing_one_lost() {
+        let _one = ONE_RUNNER.lock().await;
         let temp = tempfile::tempdir().unwrap();
         let origin = temp.path().join("origin");
         crate::worktree::tests::make_origin(&origin);
@@ -1512,6 +1548,7 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let runner = tokio::spawn(run_with_worktrees(worktrees, config, async {
             let _ = stopped.await;
+            Stop::Finish
         }));
         let deadline = Instant::now() + Duration::from_secs(20);
         while !(finished(&seen, RESUMED) && finished(&seen, FRESH)) {
@@ -1629,6 +1666,82 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'"#,
         assert!(
             models[0].ends_with(&format!("--session-id {FRESH_SESSION}")),
             "{argv}"
+        );
+    }
+
+    /// Stops a runner with `stop` while the agent of its fresh claim runs, and answers the
+    /// outcome reports it sent for that claim, and whether the attempt's temporary directory
+    /// is still there.
+    async fn stop_mid_attempt(stop: Stop) -> (Vec<serde_json::Value>, bool) {
+        let _one = ONE_RUNNER.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin");
+        crate::worktree::tests::make_origin(&origin);
+        let root = temp.path().join("root");
+        let remote = origin.to_string_lossy().to_string();
+        let worktrees = Worktrees::with_remote_base(root.clone(), remote);
+        let started = temp.path().join("started");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = crate::agent::tests::fake_agent(
+            &bin,
+            &format!(
+                "touch {}
+exec sleep 300",
+                started.display()
+            ),
+        );
+        let seen: Seen = Arc::default();
+        let url = fake_server(seen.clone(), false).await;
+        let config = fake_config(url, root.clone(), claude);
+        let (send, stopped) = tokio::sync::oneshot::channel::<()>();
+        let runner = tokio::spawn(run_with_worktrees(worktrees, config, async move {
+            let _ = stopped.await;
+            stop
+        }));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "{:?}", seen.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        send.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), runner)
+            .await
+            .expect("the runner stops")
+            .unwrap()
+            .unwrap();
+        let finish = format!("/api/runs/{FRESH}/finish");
+        let reports = (seen.lock().unwrap().iter())
+            .filter(|(_, p, _)| *p == finish)
+            .map(|(_, _, body)| body.clone())
+            .collect();
+        let tmp = attempt_tmp(&root, &RUNNER.to_string()).join(format!("{FRESH}-1"));
+        (reports, tmp.exists())
+    }
+
+    #[tokio::test]
+    async fn a_runner_stopped_for_a_restart_leaves_its_attempt_unreported() {
+        assert_eq!(stop_mid_attempt(Stop::Restart).await, (vec![], true));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_runner_reports_its_attempt_lost() {
+        let (reports, tmp) = stop_mid_attempt(Stop::Finish).await;
+        let report = (reports.iter())
+            .map(|r| {
+                (
+                    r["outcome"].as_str(),
+                    r["reason"].as_str(),
+                    r["lost"].as_bool(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (report, tmp),
+            (
+                vec![(Some("failed"), Some("runner stopped"), Some(true))],
+                false
+            )
         );
     }
 

@@ -28,12 +28,18 @@ test('a person signs a phone out from the Sessions list and the phone lands on t
   await expect(dialog.locator('li:has([data-current]) [data-device]')).toHaveText('Chrome on Windows')
   await expect(dialog.locator('[data-current]')).toHaveText('This device')
 
+  // The row drops before the server answers, so the phone's read waits for the DELETE.
+  const revoked = page.waitForResponse(
+    (response) => response.request().method() === 'DELETE' && response.url().endsWith(`/api/sessions/${String(phoneId)}`),
+  )
   await phoneRow.getByRole('button', { name: /^Sign out Safari on iPhone/ }).click()
   await expect(phoneRow).toHaveCount(0)
+  expect((await revoked).status()).toBe(204)
   expect((await phone.request.get('/api/session')).status()).toBe(401)
 
-  // The phone's next request in the app answers 401 and shows the sign-in page, with no reload.
-  await phone.getByRole('link', { name: /^Inbox/ }).click()
+  // Open Inbox to make the phone's next request. A background read may already have noticed the revoked
+  // session and removed its links, so send the shortcut without waiting for a link that can disappear.
+  await phone.keyboard.press('i')
   await expect(phone).toHaveURL(/\/sign-in$/)
   await expect(phone.getByLabel('Token')).toBeVisible()
   // This browser is still signed in.

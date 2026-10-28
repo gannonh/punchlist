@@ -284,6 +284,40 @@ async fn an_older_delivery_arriving_late_does_not_overwrite_newer_state(pool: Pg
 }
 
 #[sqlx::test]
+async fn without_a_github_app_a_delivery_tied_with_the_recorded_one_changes_nothing(pool: PgPool) {
+    let s = setup(&pool).await;
+    create_issue(&s, "Fix the thing").await;
+    // An `edited` from the same second as the `ready_for_review` (18:05:00), still a draft.
+    let edit = edited(READY, |v| {
+        v["action"] = json!("edited");
+        v["pull_request"]["draft"] = json!(true);
+        v["pull_request"]["title"] = json!("Fix the thing, edited");
+    });
+    deliver(&s, "pull_request", "d-ready", READY).await;
+    let before: (bool, String, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT draft, title, updated_at FROM pull_request WHERE number = 12")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+
+    let after: (bool, String, chrono::DateTime<chrono::Utc>) =
+        sqlx::query_as("SELECT draft, title, updated_at FROM pull_request WHERE number = 12")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+    assert_eq!((after.0, after.1.as_str()), (false, "Fix the thing"));
+    let job: String =
+        sqlx::query_scalar("SELECT state FROM job WHERE idempotency_key = 'd-edited'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(job, "done");
+}
+
+#[sqlx::test]
 async fn a_failing_check_makes_the_checks_failing(pool: PgPool) {
     let s = setup(&pool).await;
     create_issue(&s, "Fix the thing").await;
