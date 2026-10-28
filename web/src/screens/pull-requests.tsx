@@ -7,7 +7,7 @@ import { AppHeader, inField, useScreenActions } from '@/components/app-header'
 import { ShortcutStrip, focusNext, focused } from '@/components/shortcut-strip'
 import { STRIPS } from '@/model/shortcuts'
 import { GithubLink, StatusDot } from '@/components/atoms'
-import { useEventStream, useInbox, useIssues, usePullRequests } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, usePullRequestsPage } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
@@ -110,7 +110,7 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
 export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me: string }) {
   const issues = useIssues(workspace.id)
   useEventStream(workspace.id, issues.isSuccess)
-  const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
+  const pullRequests = usePullRequestsPage(workspace.id, issues.isSuccess)
   const inbox = useInbox(workspace.id, issues.isSuccess)
   const navigate = useNavigate()
   const screenActions = useScreenActions(workspace.issue_prefix)
