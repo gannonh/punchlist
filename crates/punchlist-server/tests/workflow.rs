@@ -5276,6 +5276,32 @@ async fn a_review_that_hits_the_usage_limit_falls_back_until_the_pause_ends(pool
             ("codex".to_string(), Value::Null, Value::Null),
         ]
     );
+
+    // A fallback run that waits on a person is named as itself, not as the rule's agent.
+    finish_on(
+        &s,
+        &codex_runner,
+        &third,
+        usage_limit("2099-01-01T00:00:00Z"),
+    )
+    .await;
+    let (status, fourth) = claim(&s, &claude_runner).await;
+    assert_eq!(status, StatusCode::OK, "{fourth}");
+    let uri = format!("/api/runs/{}/waiting", fourth["run_id"].as_str().unwrap());
+    let agent = fourth["agent_token"].as_str().unwrap();
+    let (status, body) = call(
+        &s.app,
+        agent,
+        "POST",
+        &uri,
+        Some(json!({"reason": "No PR."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "Claude Code is waiting on a person: No PR."
+    );
 }
 
 #[sqlx::test]
