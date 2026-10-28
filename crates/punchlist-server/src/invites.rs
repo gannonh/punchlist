@@ -76,6 +76,18 @@ async fn create_invite(
             "{login} is a member of this workspace already"
         )));
     }
+    // An expired invite stays open in `invite_open` until something closes it: revoked at its
+    // expiry, so the login can be invited again.
+    sqlx::query!(
+        "UPDATE invite SET revoked_at = created_at + interval '7 days'
+         WHERE workspace_id = $1 AND github_login = $2::text::citext
+           AND accepted_at IS NULL AND revoked_at IS NULL
+           AND created_at + interval '7 days' <= now()",
+        id,
+        login,
+    )
+    .execute(&state.pool)
+    .await?;
     let invite = sqlx::query_as!(
         Invite,
         r#"WITH created AS (
@@ -86,7 +98,7 @@ async fn create_invite(
                RETURNING id, github_login, invited_by, created_at
            )
            SELECT c.id, c.github_login::text AS "github_login!", a.name AS invited_by,
-                  c.created_at
+                  c.created_at, c.created_at + interval '7 days' AS "expires_at!"
            FROM created c JOIN actor a ON a.id = c.invited_by"#,
         id,
         login,
@@ -98,7 +110,7 @@ async fn create_invite(
     Ok((StatusCode::CREATED, Json(invite)))
 }
 
-/// The workspace's open invites, oldest first. Person token.
+/// The workspace's open invites, oldest first, leaving out expired ones. Person token.
 #[utoipa::path(
     get,
     path = "/api/workspaces/{id}/invites",
@@ -119,9 +131,10 @@ async fn list_invites(
     let invites = sqlx::query_as!(
         Invite,
         r#"SELECT i.id, i.github_login::text AS "github_login!", a.name AS invited_by,
-                  i.created_at
+                  i.created_at, i.created_at + interval '7 days' AS "expires_at!"
            FROM invite i JOIN actor a ON a.id = i.invited_by
            WHERE i.workspace_id = $1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+             AND i.created_at + interval '7 days' > now()
            ORDER BY i.created_at, i.id"#,
         id,
     )
@@ -154,7 +167,8 @@ async fn revoke_invite(
     check_workspace(&actor, id)?;
     let revoked = sqlx::query!(
         "UPDATE invite SET revoked_at = now()
-         WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL",
+         WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND revoked_at IS NULL
+           AND created_at + interval '7 days' > now()",
         invite,
         id,
     )

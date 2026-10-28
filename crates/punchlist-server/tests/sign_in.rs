@@ -754,6 +754,61 @@ async fn a_revoked_invite_or_none_signs_nobody_in_and_creates_nothing(pool: PgPo
 }
 
 #[sqlx::test]
+async fn an_invite_expires_after_7_days_and_the_login_can_be_invited_again(pool: PgPool) {
+    let person = workspace(&pool, "PL").await;
+    let app = app_with_github(&pool).await;
+    let (_, created) = invite(&app, &person, "octo-cat").await;
+    let created_at: chrono::DateTime<chrono::Utc> =
+        created["created_at"].as_str().unwrap().parse().unwrap();
+    let expires_at: chrono::DateTime<chrono::Utc> =
+        created["expires_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(expires_at - created_at, chrono::Duration::days(7));
+    sqlx::query("UPDATE invite SET created_at = now() - interval '7 days 1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let list = format!("/api/workspaces/{}/invites", person.workspace_id);
+    let (_, _, open) = send(&app, with_token("GET", &list, &person.token, None)).await;
+    assert_eq!(open, json!([]));
+    let revoke = format!("{list}/{}", created["id"].as_str().unwrap());
+    let (status, _, _) = send(&app, with_token("DELETE", &revoke, &person.token, None)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, headers, _) = github_flow(&app, "", false, "octo-cat").await;
+    assert_eq!(
+        (status, &headers["location"]),
+        (
+            StatusCode::SEE_OTHER,
+            &"/sign-in?unlinked=octo-cat".parse().unwrap()
+        )
+    );
+    assert_eq!(accounts(&pool).await, [("Gannon".into(), true, None, None)]);
+    assert_eq!(invites(&pool).await, [("octo-cat".into(), false, false)]);
+
+    // Inviting the login again closes the expired invite and opens a new one.
+    let (status, again) = invite(&app, &person, "octo-cat").await;
+    assert_eq!(status, StatusCode::CREATED, "{again}");
+    let (_, _, open) = send(&app, with_token("GET", &list, &person.token, None)).await;
+    assert_eq!(open, json!([again]));
+    assert_eq!(
+        invites(&pool).await,
+        [
+            ("octo-cat".into(), false, true),
+            ("octo-cat".into(), false, false)
+        ]
+    );
+    let (status, headers, _) = github_flow(&app, "", false, "octo-cat").await;
+    assert_eq!(
+        (status, &headers["location"]),
+        (StatusCode::SEE_OTHER, &"/".parse().unwrap())
+    );
+    assert_eq!(
+        people_of(&pool, "octo-cat").await,
+        [("PL".into(), "Octo Cat".into())]
+    );
+}
+
+#[sqlx::test]
 async fn an_invite_refuses_a_malformed_login_a_member_and_an_agent(pool: PgPool) {
     let person = workspace(&pool, "PL").await;
     let other = workspace(&pool, "GW").await;

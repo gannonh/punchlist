@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH created AS (\n               INSERT INTO invite (workspace_id, github_login, invited_by)\n               VALUES ($1, $2::text, $3)\n               ON CONFLICT (workspace_id, github_login)\n                   WHERE accepted_at IS NULL AND revoked_at IS NULL DO NOTHING\n               RETURNING id, github_login, invited_by, created_at\n           )\n           SELECT c.id, c.github_login::text AS \"github_login!\", a.name AS invited_by,\n                  c.created_at\n           FROM created c JOIN actor a ON a.id = c.invited_by",
+  "query": "SELECT i.id, i.github_login::text AS \"github_login!\", a.name AS invited_by,\n                  i.created_at, i.created_at + interval '7 days' AS \"expires_at!\"\n           FROM invite i JOIN actor a ON a.id = i.invited_by\n           WHERE i.workspace_id = $1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL\n             AND i.created_at + interval '7 days' > now()\n           ORDER BY i.created_at, i.id",
   "describe": {
     "columns": [
       {
@@ -41,12 +41,16 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
         "Uuid"
       ]
     },
@@ -54,8 +58,9 @@
       false,
       null,
       false,
-      false
+      false,
+      null
     ]
   },
-  "hash": "5e020b2b46c28fc27882397daf8025c7bd417784c06171c84aa7a6b25a6299e4"
+  "hash": "ff19f1ec1aa406eddc5f5c92084db5358cedbbeac3a80bc47f698a180e9e7ff1"
 }
