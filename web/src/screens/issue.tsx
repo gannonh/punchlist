@@ -1145,7 +1145,7 @@ function TransitionsPanel({
             <button
               key={view.to}
               type="button"
-              className={cn('transition', view.state)}
+              className={cn('move', view.state)}
               data-transition={view.to}
               data-verdict={view.state}
               aria-disabled={view.disabled || move.isPending}
