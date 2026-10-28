@@ -1,0 +1,11 @@
+  id  |     title     | body_length |   status    
+------+---------------+-------------+-------------
+ PL-1 | One-word body |           6 | backlog
+ PL-2 | Waiting issue |           6 | in_progress
+(2 rows)
+
+ issue_id | waiting_reason |  outcome  
+----------+----------------+-----------
+ PL-2     | Choose a name. | succeeded
+(1 row)
+
