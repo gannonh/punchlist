@@ -1,17 +1,37 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
-import { bearer, deliver, deliverPullRequest, fixture, headerMatches, inbox, ok, personToken, signIn } from './support'
+import {
+  bearer,
+  claim as claimOf,
+  deliver,
+  deliverPullRequest,
+  fixture,
+  headerMatches,
+  inbox,
+  ok,
+  personToken,
+  repositoryOf,
+  signIn,
+  workspace as ownWorkspace,
+  type Claim,
+  type Workspace,
+} from './support'
 
 interface Claimed {
   id: string
   runner: string
-  claim: { run_id: string; attempt: number }
+  claim: Claim
+  workspace: Workspace
 }
 
-/** An issue in In Progress without a model: moved to Start by the person, then claimed by a runner through the API. */
+/**
+ * An issue in In Progress without a model, in a workspace of its own: moved to Start by the person, then claimed by a
+ * runner through the API.
+ */
 async function claimedInProgress(request: APIRequestContext, title: string): Promise<Claimed> {
-  const person = bearer(personToken())
+  const workspace = ownWorkspace()
+  const person = bearer(workspace.token)
   const { row } = await ok<{ row: { issue: { id: string } } }>(
     await request.post('/api/issues', { headers: person, data: { title, body: '' } }),
   )
@@ -21,31 +41,24 @@ async function claimedInProgress(request: APIRequestContext, title: string): Pro
   const runner = await ok<{ token: string }>(
     await request.post('/api/runners', { headers: person, data: { name: `e2e-${id}`, agents: ['claude-code'] } }),
   )
-  // Claims go in issue order, so an earlier test's attempt whose lease lapsed comes first: this runner takes it
-  // too, and claims again.
-  let claim: Claimed['claim'] & { issue: { id: string; status: string } }
-  do {
-    claim = await ok(await request.post('/api/runs/claim', { headers: bearer(runner.token), data: {} }))
-  } while (claim.issue.id !== id)
-  expect(claim.issue).toMatchObject({ id, status: 'in_progress' })
-  return { id, runner: runner.token, claim }
+  const claim = await claimOf(request, runner.token, id)
+  expect(claim.issue.status).toBe('in_progress')
+  return { id, runner: runner.token, claim, workspace }
 }
-
-const issueInProgress = async (request: APIRequestContext, title: string) =>
-  (await claimedInProgress(request, title)).id
 
 /** Waits until the jobs behind the 202s have recorded what `seen` looks for in the issue's pull requests. */
 async function recorded(
   request: APIRequestContext,
+  token: string,
   id: string,
   seen: (pulls: { draft: boolean; check_runs?: { name: string; conclusion?: string | null }[] }[]) => boolean,
 ) {
   await expect
-    .poll(async () => seen(await ok(await request.get(`/api/issues/${id}/pull-requests`, { headers: bearer(personToken()) }))))
+    .poll(async () => seen(await ok(await request.get(`/api/issues/${id}/pull-requests`, { headers: bearer(token) }))))
     .toBe(true)
 }
 
-/** A completed check run named `e2e` on the head commit of the issue's pull request. */
+/** A completed check run named `e2e` on the head commit of the issue's pull request, one check run per commit. */
 async function deliverCheck(
   request: APIRequestContext,
   id: string,
@@ -55,16 +68,19 @@ async function deliverCheck(
   const payload = fixture('check_run_completed') as {
     repository: { name: string }
     check_run: {
+      id: number
       name: string
       head_sha: string
       conclusion: string
       pull_requests: { number: number; head: { ref: string; sha: string } }[]
     }
   }
-  Object.assign(payload.check_run, { name: 'e2e', head_sha: head.sha, conclusion })
+  // GitHub's check run ids are global: the fixture's one, recorded on another workspace's repository, stays there.
+  const checkRun = Number.parseInt(head.sha.slice(0, 12), 16)
+  Object.assign(payload.check_run, { id: checkRun, name: 'e2e', head_sha: head.sha, conclusion })
   const linked = payload.check_run.pull_requests[0]
   if (linked) Object.assign(linked, { number: head.number, head: { ...linked.head, ref: `feature/${id.toLowerCase()}-live`, sha: head.sha } })
-  await deliver(request, 'check_run', payload)
+  await deliver(request, 'check_run', payload, repositoryOf(id))
 }
 
 const row = (page: Page, id: string) => page.locator(`[data-issue="${id}"]`)
@@ -79,15 +95,12 @@ async function openSheet(page: Page, id: string) {
   return page.getByRole('dialog')
 }
 
-// Every test that claims runs is in this file, which one worker runs in order: a claim takes any waiting work, so
-// a test in another file would take the dispatch a test here waits to show as queued.
-// First in the file: its runner claims the dispatch its own run's end queues, before another test's runner could.
 test('a run ending, the next claim and a pull request turning ready show on the open list', async ({
   page,
   request,
 }) => {
-  const { id, runner, claim } = await claimedInProgress(request, 'Updated live')
-  await signIn(page)
+  const { id, runner, claim, workspace } = await claimedInProgress(request, 'Updated live')
+  await signIn(page, workspace)
   const run = row(page, id).locator('[data-run]')
   const pr = row(page, id).locator('[data-pr]')
   await expect(run).toHaveAttribute('data-run', 'running')
@@ -103,7 +116,7 @@ test('a run ending, the next claim and a pull request turning ready show on the 
     }),
   )
   await expect(run).toHaveText('Queued', live)
-  await ok(await request.post('/api/runs/claim', { headers: bearer(runner), data: {} }))
+  await claimOf(request, runner, id)
   await expect(run).toHaveAttribute('data-run', 'running', live)
 
   await deliverPullRequest(request, id, 'opened')
@@ -119,7 +132,8 @@ test('Run again on a run item whose runs are used up queues a run, and the item 
   page,
   request,
 }) => {
-  const person = bearer(personToken())
+  const workspace = ownWorkspace()
+  const person = bearer(workspace.token)
   const { row } = await ok<{ row: { issue: { id: string } } }>(
     await request.post('/api/issues', { headers: person, data: { title: 'Ran out of runs', body: '' } }),
   )
@@ -130,24 +144,20 @@ test('Run again on a run item whose runs are used up queues a run, and the item 
   const runner = await ok<{ token: string }>(
     await request.post('/api/runners', { headers: person, data: { name: `e2e-${id}`, agents: ['claude-code'] } }),
   )
-  // Three runs in In Progress that end without moving it. Claims go in issue order, so an earlier test's waiting
-  // work can come first: this runner takes it too, and claims again.
+  // Three runs in In Progress that end without moving it.
   for (let runs = 0; runs < 3; runs++) {
-    let claim: { run_id: string; attempt: number; issue: { id: string } }
-    do {
-      claim = await ok(await request.post('/api/runs/claim', { headers: bearer(runner.token), data: {} }))
-    } while (claim.issue.id !== id)
+    const { run_id, attempt } = await claimOf(request, runner.token, id)
     await ok(
-      await request.post(`/api/runs/${claim.run_id}/finish`, {
+      await request.post(`/api/runs/${run_id}/finish`, {
         headers: bearer(runner.token),
-        data: { attempt: claim.attempt, outcome: 'succeeded', duration_ms: 1 },
+        data: { attempt, outcome: 'succeeded', duration_ms: 1 },
       }),
     )
   }
-  expect((await inbox(request)).items.find((item) => item.issue.id === id)).toMatchObject({ kind: 'run' })
+  expect((await inbox(request, workspace.token)).items.find((item) => item.issue.id === id)).toMatchObject({ kind: 'run' })
 
-  await signIn(page)
-  await page.goto('/w/PL/inbox')
+  await signIn(page, workspace)
+  await page.goto(`/w/${workspace.prefix}/inbox`)
   await expect(page.locator(`[data-item="${id}"]`)).toContainText('3 runs in In Progress ended without moving it')
   await expect(page.locator('[data-section="waiting"] [data-run-again]')).toHaveCount(0)
   const retries: string[] = []
@@ -156,17 +166,17 @@ test('Run again on a run item whose runs are used up queues a run, and the item 
   })
   await page.getByRole('button', { name: `Run again ${id}` }).click()
   await expect(page.locator(`[data-item="${id}"]`)).toHaveCount(0, { timeout: 2000 })
-  expect(new URL(page.url()).pathname).toBe('/w/PL/inbox')
+  expect(new URL(page.url()).pathname).toBe(`/w/${workspace.prefix}/inbox`)
   expect(retries).toEqual([expect.stringContaining(`/api/issues/${id}/retry`)])
-  await headerMatches(page, request)
+  await headerMatches(page, request, workspace.token)
 })
 
 test('create, edit, roll back a refused edit, and show a refused transition as pending then refused', async ({
   page,
   request,
 }) => {
-  const inProgress = await issueInProgress(request, 'Claimed by a runner')
-  await signIn(page)
+  const { id: inProgress, workspace } = await claimedInProgress(request, 'Claimed by a runner')
+  await signIn(page, workspace)
   await expect(row(page, inProgress)).toBeVisible()
 
   await page.getByRole('button', { name: 'New issue' }).click()
@@ -215,7 +225,7 @@ test('create, edit, roll back a refused edit, and show a refused transition as p
   )
   await expect(page.locator(`[data-group="in_progress"] [data-issue="${inProgress}"]`)).toBeVisible()
   const stored = await ok<{ status: string }>(
-    await request.get(`/api/issues/${inProgress}`, { headers: bearer(personToken()) }),
+    await request.get(`/api/issues/${inProgress}`, { headers: bearer(workspace.token) }),
   )
   expect(stored.status).toBe('in_progress')
 })
@@ -464,7 +474,7 @@ test('the filter finds bodies and comments with a marked snippet, and Enter open
   await expect(page.locator(`#seq-${String(seq)}`)).toHaveAttribute('data-target', 'true')
 })
 
-// The issue page. These come last: their runs and dispatches must not be what an earlier test's runner claims.
+// The issue page.
 
 /** A 1×1 PNG. */
 const PNG = Buffer.from(
@@ -476,12 +486,12 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   browser,
   request,
 }) => {
-  const person = bearer(personToken())
-  const { id, runner, claim } = await claimedInProgress(request, 'Blocked by a check')
+  const { id, runner, claim, workspace } = await claimedInProgress(request, 'Blocked by a check')
+  const person = bearer(workspace.token)
   const head = { number: 300 + Number(id.split('-')[1]), sha: randomUUID().replaceAll('-', '').padEnd(40, '0') }
   await deliverPullRequest(request, id, 'opened', head)
   await deliverPullRequest(request, id, 'ready_for_review', head)
-  await recorded(request, id, (pulls) => pulls.some((pull) => !pull.draft))
+  await recorded(request, workspace.token, id, (pulls) => pulls.some((pull) => !pull.draft))
   const agent = await ok<{ token: string }>(await request.post('/api/actors', { headers: person, data: { kind: 'codex' } }))
   await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'agent_review' } }))
   // Ended after the move, so the end queues no run in In Progress.
@@ -492,7 +502,7 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
     }),
   )
   await deliverCheck(request, id, head, 'failure')
-  await recorded(request, id, (pulls) =>
+  await recorded(request, workspace.token, id, (pulls) =>
     pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e' && run.conclusion === 'failure')),
   )
 
@@ -521,7 +531,7 @@ test('the Human Review move shows blocked by ci_green, then a standalone agent i
   await expect(page.locator('#checks [data-check="e2e"]')).toHaveAttribute('data-check-state', 'failing')
 
   await deliverCheck(request, id, head, 'success')
-  await recorded(request, id, (pulls) =>
+  await recorded(request, workspace.token, id, (pulls) =>
     pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e' && run.conclusion === 'success')),
   )
   const upload = await request.post(`/api/issues/${id}/proof`, {
@@ -543,13 +553,13 @@ test('an issue in Merging waits on the merge, and its pull request links open Gi
   page,
   request,
 }) => {
-  const person = bearer(personToken())
-  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a merge')
+  const { id, runner, claim, workspace } = await claimedInProgress(request, 'Waits on a merge')
+  const person = bearer(workspace.token)
   const head = { number: 400 + Number(id.split('-')[1]), sha: randomUUID().replaceAll('-', '').padEnd(40, '0') }
-  const url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(head.number)}`
+  const url = `https://github.com/gannonh/${repositoryOf(id)}/pull/${String(head.number)}`
   await deliverPullRequest(request, id, 'opened', head)
   await deliverPullRequest(request, id, 'ready_for_review', head)
-  await recorded(request, id, (pulls) => pulls.some((pull) => !pull.draft))
+  await recorded(request, workspace.token, id, (pulls) => pulls.some((pull) => !pull.draft))
   const agent = await ok<{ token: string }>(await request.post('/api/actors', { headers: person, data: { kind: 'codex' } }))
   await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'agent_review' } }))
   await ok(
@@ -559,7 +569,7 @@ test('an issue in Merging waits on the merge, and its pull request links open Gi
     }),
   )
   await deliverCheck(request, id, head, 'success')
-  await recorded(request, id, (pulls) => pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e')))
+  await recorded(request, workspace.token, id, (pulls) => pulls.some((pull) => (pull.check_runs ?? []).some((run) => run.name === 'e2e')))
   await ok(
     await request.post(`/api/issues/${id}/proof`, {
       headers: bearer(agent.token),
@@ -569,7 +579,7 @@ test('an issue in Merging waits on the merge, and its pull request links open Gi
   await ok(await request.post(`/api/issues/${id}/transitions`, { headers: bearer(agent.token), data: { to: 'human_review' } }))
   await ok(await request.post(`/api/issues/${id}/transitions`, { headers: person, data: { to: 'merging' } }))
 
-  await signIn(page)
+  await signIn(page, workspace)
   const merging = row(page, id)
   await expect(merging).toHaveAttribute('data-waits-on-merge', '')
   await expect(merging).toContainText('Waits on the merge')
@@ -578,12 +588,14 @@ test('an issue in Merging waits on the merge, and its pull request links open Gi
   const chip = merging.locator('a[data-pr-link]')
   await expect(chip).toHaveAttribute('aria-label', `Open on GitHub: pull request #${String(head.number)}`)
   const selected = await merging.getAttribute('aria-selected')
+  // The generated repository is a fixture. Keep popup navigation independent of GitHub and the network.
+  await page.context().route(url, (route) => route.fulfill({ contentType: 'text/html', body: '<title>Pull request</title>' }))
   const popup = page.waitForEvent('popup')
   await chip.click()
   expect((await popup).url()).toContain(`/pull/${String(head.number)}`)
   await expect(merging).toHaveAttribute('aria-selected', selected ?? 'false')
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(page).toHaveURL(/\/w\/PL$/)
+  await expect(page).toHaveURL(new RegExp(`/w/${workspace.prefix}$`))
 
   await page.goto(`/issues/${id}`)
   await expect(page.locator('#pr [data-open-on-github]')).toHaveAttribute('href', url)
@@ -602,7 +614,7 @@ test('an unresolved review thread shows on the open issue page as text with its 
   const id = created.issue.id
   const number = 500 + Number(id.split('-')[1])
   await deliverPullRequest(request, id, 'opened', { number, sha: randomUUID().replaceAll('-', '').padEnd(40, '0') })
-  await recorded(request, id, (pulls) => pulls.length === 1)
+  await recorded(request, personToken(), id, (pulls) => pulls.length === 1)
   const url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(number)}#discussion_r1700001`
   const thread = (action: 'resolved' | 'unresolved') => {
     const payload = fixture('pull_request_review_thread_resolved') as {
@@ -877,11 +889,9 @@ test('the issue page, the list row and the side sheet show an issue waiting on a
   page,
   request,
 }) => {
-  // One claim only: the runs of earlier tests' claims may hold the workspace's `max_concurrent`.
-  const { id, runner, claim } = await claimedInProgress(request, 'Waits on a person')
-  const { agent_token } = claim as Claimed['claim'] & { agent_token: string }
+  const { id, runner, claim, workspace } = await claimedInProgress(request, 'Waits on a person')
   const waiting = await request.post(`/api/runs/${claim.run_id}/waiting`, {
-    headers: bearer(agent_token),
+    headers: bearer(claim.agent_token),
     data: { reason: 'Pick a <b>name</b>.' },
   })
   expect(waiting.status()).toBe(204)
@@ -892,7 +902,7 @@ test('the issue page, the list row and the side sheet show an issue waiting on a
     }),
   )
   const reason = 'Claude Code is waiting on a person: Pick a <b>name</b>.'
-  await signIn(page)
+  await signIn(page, workspace)
   await page.goto(`/issues/${id}`)
   await expect(page.locator('[data-notice="waiting"]')).toContainText(reason)
   await expect(page.locator('[data-notice="waiting"] [data-run-again]')).toBeVisible()
@@ -910,4 +920,33 @@ test('the issue page, the list row and the side sheet show an issue waiting on a
   await page.keyboard.press('Escape')
   await page.keyboard.press('Enter')
   await expect(page.locator('[data-kind="run_again"]')).toContainText('Run again in In Progress (claude-code)')
+})
+
+test('the side sheet\'s fields and body share the header\'s left edge and width, at 1280 and 390 px', async ({
+  page,
+  request,
+}) => {
+  const { row: created } = await ok<{ row: { issue: { id: string } } }>(
+    await request.post('/api/issues', { headers: bearer(personToken()), data: { title: 'One-word body', body: 'Waits.' } }),
+  )
+  const id = created.issue.id
+  await signIn(page)
+  for (const width of ['1280', '390']) {
+    await page.setViewportSize({ width: Number(width), height: 800 })
+    const sheet = await openSheet(page, id)
+    // Measure once the sheet has slid in, so every box is read at one position.
+    await sheet.evaluate((element) => Promise.all(element.getAnimations().map((animation) => animation.finished)))
+    const box = async (part: string) => {
+      const found = await sheet.locator(part).boundingBox()
+      if (!found) throw new Error(`no ${part} in the sheet at ${width} px`)
+      return found
+    }
+    const header = await box('h2')
+    for (const part of ['dl', 'text=Waits.']) {
+      const { x, width: partWidth } = await box(part)
+      expect(Math.abs(x - header.x), `${part}'s left edge at ${width} px`).toBeLessThanOrEqual(1)
+      expect(Math.abs(partWidth - header.width), `${part}'s width at ${width} px`).toBeLessThanOrEqual(2)
+    }
+    await page.keyboard.press('Escape')
+  }
 })

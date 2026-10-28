@@ -98,6 +98,35 @@ impl PullRequestData {
     fn is_merged(&self) -> bool {
         self.merged || self.merged_at.is_some()
     }
+
+    /// `pull_request.state`: `open`, `closed` or `merged`.
+    fn recorded_state(&self) -> &'static str {
+        match (self.is_merged(), self.state.as_str()) {
+            (true, _) => "merged",
+            (false, "closed") => "closed",
+            _ => "open",
+        }
+    }
+
+    /// True when this payload is from the same second as the recorded row (`updated_at` is in
+    /// whole seconds) and says something else: neither can be ordered before the other.
+    fn ties(
+        &self,
+        at: DateTime<Utc>,
+        title: &str,
+        head_sha: &str,
+        state: &str,
+        draft: bool,
+    ) -> bool {
+        at == self.updated_at
+            && (title, head_sha, state, draft)
+                != (
+                    &self.title,
+                    &self.head.sha,
+                    self.recorded_state(),
+                    self.draft,
+                )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -423,7 +452,8 @@ async fn webhook(
 /// it was not read, or GitHub says the pull request is gone: the payload is then recorded.
 #[derive(Default)]
 pub(crate) struct Current {
-    /// For a payload that would close the pull request: `updated_at` is in whole seconds.
+    /// For a payload that would close the pull request, or that ties with the recorded row
+    /// (`PullRequestData::ties`): `updated_at` is in whole seconds.
     pull_request: Option<PullRequestData>,
     /// For a review thread event: it carries no time, and none is sent for a new thread.
     threads: Option<Vec<GithubThread>>,
@@ -451,7 +481,8 @@ pub(crate) async fn read_current(
     let repository = job.event.repository();
     let (owner, name) = (&repository.owner.login, &repository.name);
     let recorded = sqlx::query!(
-        "SELECT state, version FROM pull_request WHERE repository_id = $1 AND number = $2",
+        "SELECT state, version, github_updated_at, title, head_sha, draft FROM pull_request
+         WHERE repository_id = $1 AND number = $2",
         job.repository_id,
         pr.number,
     )
@@ -462,8 +493,22 @@ pub(crate) async fn read_current(
     // records the pull request only in the second case.
     let closes = pr.state != "open"
         && !pr.is_merged()
-        && recorded.is_none_or(|row| row.state == "open" && !thread_event);
-    if closes {
+        && recorded
+            .as_ref()
+            .is_none_or(|row| row.state == "open" && !thread_event);
+    // Two deliveries from one second cannot be ordered: GitHub says which state is current.
+    let ties = !thread_event
+        && recorded.is_some_and(|row| {
+            row.state != "merged"
+                && pr.ties(
+                    row.github_updated_at,
+                    &row.title,
+                    &row.head_sha,
+                    &row.state,
+                    row.draft,
+                )
+        });
+    if closes || ties {
         current.pull_request = unless_gone(github.pull_request(owner, name, pr.number).await)?;
     }
     if thread_event {
@@ -506,6 +551,7 @@ pub(crate) async fn process(
                 pr,
                 closed_by.map(|account| account.login.as_str()),
                 Some(&job.delivery_id),
+                current.pull_request.is_none(),
             )
             .await?;
             if current.version.is_some() {
@@ -553,6 +599,7 @@ pub(crate) async fn process(
                         pr,
                         None,
                         Some(&job.delivery_id),
+                        false,
                     )
                     .await?
                 }
@@ -742,13 +789,11 @@ async fn record_read_check_runs(
 /// row at `version`, 0 for no row. False if a read has been recorded since: this one may be
 /// the older, so the caller writes nothing and reads again. A read that confirms what is
 /// recorded claims too: it is still newer than an older read in flight. A payload recorded
-/// with no answer from GitHub does not claim, and `github_updated_at` orders it, as before.
+/// with no answer from GitHub does not claim, and `github_updated_at` orders it, a tie aside
+/// (`record_pull_request`).
 ///
 /// The workspace's lock comes first, as the lock order has it, when `pr` may close the pull
 /// request, and when there is no row to lock, so that two first reads do not both insert it.
-// ponytail: that time is in whole seconds, so a read and a payload recorded without one, both
-// from the same second, stand in the order they were written, as two such payloads do. Read
-// GitHub for every pull request payload if that bites.
 async fn claim_read(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
@@ -919,7 +964,10 @@ async fn record_review_threads(
 
 /// Records a pull request from a payload, unless a newer payload was already applied, and
 /// returns its row id. `closed_by` is the GitHub login that closed it, when the payload says;
-/// `delivery_id` is the webhook delivery, when one brought it.
+/// `delivery_id` is the webhook delivery, when one brought it. `unread` when `pr` is a
+/// delivery's payload, not what GitHub answered a read: one that ties with the recorded row
+/// (`PullRequestData::ties`) is not recorded, since only a read of GitHub can say which of the
+/// two is current. `read_current` makes that read when it can.
 ///
 /// A payload closes a pull request when it records it closed or merged and the row was open,
 /// or absent, before. That happens once per close, whichever of a webhook delivery and a read
@@ -932,6 +980,7 @@ async fn record_pull_request(
     pr: &PullRequestData,
     closed_by: Option<&str>,
     delivery_id: Option<&str>,
+    unread: bool,
 ) -> Result<Uuid, ApiError> {
     // A close can move the issue. Before the pull request row's foreign key touches the
     // issue row.
@@ -957,25 +1006,43 @@ async fn record_pull_request(
         }
         None => None,
     };
-    let state = if pr.is_merged() {
-        "merged"
-    } else if pr.state == "closed" {
-        "closed"
-    } else {
-        "open"
-    };
+    let state = pr.recorded_state();
     let merge_state = pr.mergeable_state.as_deref().unwrap_or("unknown");
     // Locks the row: a second payload closing it waits here, then reads the closed state.
     // Two payloads that are both the first to record it closed wait on the workspace lock
     // above instead, so the second still reads the first's row.
     let was = sqlx::query!(
-        "SELECT state, issue_id, updated_at FROM pull_request
-         WHERE repository_id = $1 AND number = $2 FOR UPDATE",
+        "SELECT id, state, issue_id, updated_at, github_updated_at, title, head_sha, draft
+         FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
         repository_id,
         pr.number
     )
     .fetch_optional(&mut *tx)
     .await?;
+    if let Some(was) = &was
+        && unread
+        && was.state != "merged"
+        && pr.ties(
+            was.github_updated_at,
+            &was.title,
+            &was.head_sha,
+            &was.state,
+            was.draft,
+        )
+    {
+        // ponytail: with a GitHub App, `read_current` read GitHub for this tie unless another
+        // server's job wrote the row between its read and this lock; that payload then stands
+        // as here. Return a dropped read to the job loop if servers ever share a database.
+        tracing::info!(
+            %repository_id,
+            number = pr.number,
+            delivery_id,
+            updated_at = %pr.updated_at,
+            "a delivery ties with the recorded pull request: same updated_at, another state; \
+             the recorded row stands"
+        );
+        return Ok(was.id);
+    }
     let applied = sqlx::query!(
         "INSERT INTO pull_request
              (repository_id, number, github_id, title, branch, head_sha, url, author_login,
@@ -1019,9 +1086,8 @@ async fn record_pull_request(
     .await?;
     let Some(applied) = applied else {
         // A payload older than the stored state changes nothing, and nothing changes a merged
-        // pull request: it cannot reopen. GitHub's `updated_at` is in whole seconds, so two
-        // actions in one second still apply in delivery order; `read_current` covers the one
-        // that would close it.
+        // pull request: it cannot reopen. One from the same second is recorded only when it
+        // agrees with the row or GitHub was read (`unread`).
         let id = sqlx::query_scalar!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2",
             repository_id,
@@ -1392,8 +1458,16 @@ async fn refresh_once(
             dropped.push(pr.number);
             continue;
         }
-        let id =
-            record_pull_request(&mut tx, workspace_id, repository.id, pr, merged_by, None).await?;
+        let id = record_pull_request(
+            &mut tx,
+            workspace_id,
+            repository.id,
+            pr,
+            merged_by,
+            None,
+            false,
+        )
+        .await?;
         // A payload newer than GitHub's answer, recorded since, kept its row: that is not
         // what this request read (it may be ready where this read a draft, or open, with runs
         // never read, where this read it closed), so this is read again. Newer, not different:

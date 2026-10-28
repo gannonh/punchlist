@@ -1,11 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { GitMerge } from 'lucide-react'
 import { cn } from 'cn'
 import { AccountMenu } from '@/components/account-menu'
-import { AppHeader, inField } from '@/components/app-header'
+import { AppHeader, inField, useScreenActions } from '@/components/app-header'
+import { ShortcutStrip, focusNext, focused } from '@/components/shortcut-strip'
+import { STRIPS } from '@/model/shortcuts'
 import { GithubLink, StatusDot } from '@/components/atoms'
-import { useEventStream, useInbox, useIssues, usePullRequests } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, usePullRequestsPage } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
@@ -108,24 +110,29 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
 export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me: string }) {
   const issues = useIssues(workspace.id)
   useEventStream(workspace.id, issues.isSuccess)
-  const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
+  const pullRequests = usePullRequestsPage(workspace.id, issues.isSuccess)
   const inbox = useInbox(workspace.id, issues.isSuccess)
   const navigate = useNavigate()
+  const screenActions = useScreenActions(workspace.issue_prefix)
   const grouped = useMemo(() => sections(pullRequests.data ?? []), [pullRequests.data])
   useRenderMeasure(pullRequests.data?.length)
 
+  const toList = useCallback(
+    () => void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } }),
+    [navigate, workspace.issue_prefix],
+  )
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || inField(event.target)) return
       if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]')) return
       event.preventDefault()
-      void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
+      toList()
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate, workspace.issue_prefix])
+  }, [toList])
 
   const open = (pr: OpenPullRequest) => {
     if (pr.issue) void navigate({ to: '/issues/$id', params: { id: pr.issue.id } })
@@ -173,24 +180,22 @@ export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me
         )}
       </main>
 
-      <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
-        <span className="font-semibold text-foreground">Pull requests shortcuts</span>
-        {(
-          [
-            ['Tab', 'next pull request'],
-            ['Enter', 'open issue or pull request'],
-            ['g p', 'pull requests'],
-            ['Esc', 'issues'],
-          ] as const
-        ).map(([keys, what]) => (
-          <span key={what} className="inline-flex items-center gap-1.25 whitespace-nowrap">
-            {keys.split(' ').map((key) => (
-              <kbd key={key}>{key}</kbd>
-            ))}{' '}
-            {what}
-          </span>
-        ))}
-      </footer>
+      <ShortcutStrip
+        title="Pull requests shortcuts"
+        items={STRIPS['pull-requests']}
+        actions={{
+          ...screenActions,
+          next: () => {
+            focusNext('[data-pr-row]')
+          },
+          open: () => {
+            const row = focused('[data-pr-row]')
+            const pr = row && pullRequests.data?.find((p) => String(p.number) === row.dataset.prRow)
+            if (pr) open(pr)
+          },
+          issues: toList,
+        }}
+      />
     </div>
   )
 }

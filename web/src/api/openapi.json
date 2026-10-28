@@ -3440,7 +3440,7 @@
     },
     "/api/workspaces/{id}/invites": {
       "get": {
-        "summary": "The workspace's open invites, oldest first. Person token.",
+        "summary": "The workspace's open invites, oldest first, leaving out expired ones. Person token.",
         "operationId": "list_invites",
         "parameters": [
           {
@@ -5867,12 +5867,18 @@
           "id",
           "github_login",
           "invited_by",
-          "created_at"
+          "created_at",
+          "expires_at"
         ],
         "properties": {
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "7 days after `created_at`. From then on a sign-in by the login accepts nothing, since\nGitHub gives a renamed user's old login to whoever registers it next."
           },
           "github_login": {
             "type": "string"

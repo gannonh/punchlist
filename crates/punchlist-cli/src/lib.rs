@@ -143,7 +143,7 @@ pub enum InviteCommand {
         /// Their GitHub login, such as `octocat`, in any case.
         github_login: String,
     },
-    /// Print the workspace's open invites: id, login, who invited them and when.
+    /// Print the workspace's open invites: id, login, who invited them and when, and the expiry.
     List,
     /// Revoke an open invite: that GitHub user's sign-in no longer joins the workspace.
     Revoke {
@@ -958,16 +958,22 @@ fn init_logging() {
         .try_init();
 }
 
-/// Resolves on Ctrl-C or SIGTERM.
-async fn shutdown_signal() {
+/// Resolves on Ctrl-C or SIGTERM, which stop the runner, or on SIGHUP, which stops it for a
+/// restart (an upgrade): its attempts are left for the next start to resume.
+async fn shutdown_signal() -> punchlist_runner::Stop {
+    use punchlist_runner::Stop;
     use tokio::signal::unix::{SignalKind, signal};
-    let Ok(mut term) = signal(SignalKind::terminate()) else {
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
         let _ = tokio::signal::ctrl_c().await;
-        return;
+        return Stop::Finish;
     };
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => Stop::Finish,
+        _ = term.recv() => Stop::Finish,
+        _ = hup.recv() => Stop::Restart,
     }
 }
 
@@ -1246,7 +1252,7 @@ fn actor_marking(actor: &punchlist_api::Actor) -> String {
     }
 }
 
-/// `pl session list`: id, device, last use and sign-in, `*` on the current one.
+/// `pl invite list`: id, login, who invited them and when, and the day it expires.
 fn render_invites(invites: &[Invite]) -> String {
     if invites.is_empty() {
         return "No open invites.\n".to_string();
@@ -1255,11 +1261,12 @@ fn render_invites(invites: &[Invite]) -> String {
     (invites.iter())
         .map(|i| {
             format!(
-                "{}  {:login_width$}  invited by {} {}\n",
+                "{}  {:login_width$}  invited by {} {}  expires {}\n",
                 i.id,
                 i.github_login,
                 i.invited_by,
                 i.created_at.format("%Y-%m-%d %H:%M UTC"),
+                i.expires_at.format("%Y-%m-%d"),
             )
         })
         .collect()
