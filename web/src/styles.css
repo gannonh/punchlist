@@ -177,15 +177,15 @@
   .empty { @apply rounded-md border border-dashed p-3.5 text-center text-meta text-ink-3; }
   .notice { @apply flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-meta; }
 
-  .transition {
-    @apply grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-1 rounded-md border bg-card px-2.5 py-2 text-left;
+  .move {
+    @apply grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-1 rounded-md border bg-card px-2.5 py-2 text-left transition;
   }
-  .transition:hover { border-color: #d6d3d1; }
-  .transition[aria-disabled="true"] { @apply cursor-not-allowed bg-stone-50; }
-  .transition .verdict { @apply col-span-full flex items-start gap-1.5 text-meta; }
-  .transition.allowed .verdict { @apply text-ok; }
-  .transition.blocked .verdict { @apply text-bad; }
-  .transition.locked .verdict { @apply text-warn; }
+  .move:hover { border-color: #d6d3d1; }
+  .move[aria-disabled="true"] { @apply cursor-not-allowed bg-stone-50; }
+  .move .verdict { @apply col-span-full flex items-start gap-1.5 text-meta; }
+  .move.allowed .verdict { @apply text-ok; }
+  .move.blocked .verdict { @apply text-bad; }
+  .move.locked .verdict { @apply text-warn; }
 
   .run-log {
     @apply m-0 grid max-h-64 list-none content-start gap-px overflow-x-hidden overflow-y-auto rounded-md border bg-muted px-2.5 py-2 font-mono text-caption text-foreground;

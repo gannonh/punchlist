@@ -143,7 +143,7 @@ pub enum InviteCommand {
         /// Their GitHub login, such as `octocat`, in any case.
         github_login: String,
     },
-    /// Print the workspace's open invites: id, login, who invited them and when.
+    /// Print the workspace's open invites: id, login, who invited them and when, and the expiry.
     List,
     /// Revoke an open invite: that GitHub user's sign-in no longer joins the workspace.
     Revoke {
@@ -1252,7 +1252,7 @@ fn actor_marking(actor: &punchlist_api::Actor) -> String {
     }
 }
 
-/// `pl session list`: id, device, last use and sign-in, `*` on the current one.
+/// `pl invite list`: id, login, who invited them and when, and the day it expires.
 fn render_invites(invites: &[Invite]) -> String {
     if invites.is_empty() {
         return "No open invites.\n".to_string();
@@ -1261,11 +1261,12 @@ fn render_invites(invites: &[Invite]) -> String {
     (invites.iter())
         .map(|i| {
             format!(
-                "{}  {:login_width$}  invited by {} {}\n",
+                "{}  {:login_width$}  invited by {} {}  expires {}\n",
                 i.id,
                 i.github_login,
                 i.invited_by,
                 i.created_at.format("%Y-%m-%d %H:%M UTC"),
+                i.expires_at.format("%Y-%m-%d"),
             )
         })
         .collect()
