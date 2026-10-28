@@ -2397,8 +2397,13 @@ async fn invite_create_list_and_revoke(pool: PgPool) {
     );
 
     let list = pl.run(&["invite", "list"]).await;
+    let expires: String =
+        sqlx::query_scalar("SELECT to_char((created_at + interval '7 days') AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM invite")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     insta::with_settings!({filters => vec![(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", "[time]"), (r"[0-9a-f]{8}-[0-9a-f-]{27}", "[id]")]}, {
-        insta::assert_snapshot!(list.stdout, @"[id]  octo-cat  invited by Gannon [time]");
+        insta::assert_snapshot!(list.stdout.replace(&expires, "[day]"), @"[id]  octo-cat  invited by Gannon [time]  expires [day]");
     });
 
     let refused = pl.run(&["invite", "create", "octo--cat"]).await;

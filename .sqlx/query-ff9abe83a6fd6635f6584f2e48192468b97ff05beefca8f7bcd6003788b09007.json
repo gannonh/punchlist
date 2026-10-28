@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM invite\n         WHERE github_login = $1::text::citext AND accepted_at IS NULL AND revoked_at IS NULL\n         FOR UPDATE",
+  "query": "SELECT id FROM invite\n         WHERE github_login = $1::text::citext AND accepted_at IS NULL AND revoked_at IS NULL\n           AND created_at + interval '7 days' > now()\n         FOR UPDATE",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "89524c370bab070fd63d6a9e3277e5cfbbaab6606d1c569e307b3e8d63d74473"
+  "hash": "ff9abe83a6fd6635f6584f2e48192468b97ff05beefca8f7bcd6003788b09007"
 }

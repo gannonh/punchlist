@@ -1,9 +1,11 @@
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { cn } from 'cn'
 import { ApiError } from '@/api/client'
 import { AccountMenu } from '@/components/account-menu'
-import { AppHeader, inField } from '@/components/app-header'
+import { AppHeader, inField, useScreenActions } from '@/components/app-header'
+import { ShortcutStrip, focusNext, focused } from '@/components/shortcut-strip'
+import { STRIPS } from '@/model/shortcuts'
 import { StatusDot } from '@/components/atoms'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog'
@@ -24,6 +26,9 @@ const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' 
 
 /** The form open on the screen: a new project or milestone, or an edit of one. */
 type Form = { kind: 'project'; project?: Project } | { kind: 'milestone'; project: Project; milestone?: Milestone }
+
+/** What the strip's `Tab` and `Enter` walk and open: the milestones and their issues. */
+const ITEMS = '[data-milestone] button[aria-expanded], [data-issue-link]'
 
 const fieldClass =
   'rounded-md border border-input bg-transparent px-3 py-2 shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50'
@@ -293,25 +298,30 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
   const projects = useProjects(workspace.id)
   const workflow = useWorkflow(workspace.id)
   const navigate = useNavigate()
+  const screenActions = useScreenActions(workspace.issue_prefix)
   const [open, setOpen] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const ready = projects.data && issues.data && workflow.data
   const milestones = projects.data?.reduce((n, p) => n + p.milestones.length, 0) ?? 0
   useRenderMeasure(ready ? milestones : undefined)
 
+  const toList = useCallback(
+    () => void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } }),
+    [navigate, workspace.issue_prefix],
+  )
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || inField(event.target)) return
       // Radix closes its dialog or menu on this Esc and marks it handled, and the dialog can already be gone here.
       if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]')) return
       event.preventDefault()
-      void navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
+      toList()
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate, workspace.issue_prefix])
+  }, [toList])
 
   const failed = projects.error ?? issues.error ?? workflow.error
 
@@ -441,24 +451,19 @@ export function ProjectsScreen({ workspace, me }: { workspace: Workspace; me: st
         )}
       </Dialog>
 
-      <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
-        <span className="font-semibold text-foreground">Projects shortcuts</span>
-        {(
-          [
-            ['Tab', 'next milestone or issue'],
-            ['Enter', 'open milestone or issue'],
-            ['g m', 'projects'],
-            ['Esc', 'issues'],
-          ] as const
-        ).map(([keys, what]) => (
-          <span key={what} className="inline-flex items-center gap-1.25 whitespace-nowrap">
-            {keys.split(' ').map((key) => (
-              <kbd key={key}>{key}</kbd>
-            ))}{' '}
-            {what}
-          </span>
-        ))}
-      </footer>
+      <ShortcutStrip
+        title="Projects shortcuts"
+        items={STRIPS.projects}
+        actions={{
+          ...screenActions,
+          next: () => {
+            focusNext(ITEMS)
+          },
+          // The browser's Enter on a button or a link is its click.
+          open: () => focused(ITEMS)?.click(),
+          issues: toList,
+        }}
+      />
     </div>
   )
 }
