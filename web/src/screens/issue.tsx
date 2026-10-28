@@ -1384,6 +1384,11 @@ function AttemptCard({
             <span className="text-meta text-muted-foreground">({model.note})</span>
           </>
         )}
+        {run.fallback_for && (
+          <span className="text-meta text-muted-foreground" data-fallback>
+            (fallback for {run.fallback_for}: usage limit)
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-meta text-muted-foreground" data-facts>
         <span>

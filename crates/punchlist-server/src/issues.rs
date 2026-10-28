@@ -293,7 +293,7 @@ pub(crate) async fn waiting_reasons(
     ids: &[String],
 ) -> sqlx::Result<HashMap<String, (String, String)>> {
     let rows = sqlx::query!(
-        r#"SELECT d.issue_id, d.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
+        r#"SELECT d.issue_id, r.agent, r.waiting_reason AS "waiting_reason!" FROM dispatch d
            JOIN run r ON r.id = d.run_id
            WHERE d.issue_id = ANY($1) AND r.waiting_reason IS NOT NULL
              AND d.run_number = (SELECT max(run_number) FROM dispatch

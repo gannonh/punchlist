@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT d.issue_id, d.agent, r.waiting_reason AS \"waiting_reason!\" FROM dispatch d\n           JOIN run r ON r.id = d.run_id\n           WHERE d.issue_id = ANY($1) AND r.waiting_reason IS NOT NULL\n             AND d.run_number = (SELECT max(run_number) FROM dispatch\n                                 WHERE transition_id = d.transition_id)\n             AND d.transition_id = (SELECT e.transition_id FROM event e\n                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                    ORDER BY e.seq DESC LIMIT 1)",
+  "query": "SELECT d.issue_id, r.agent, r.waiting_reason AS \"waiting_reason!\" FROM dispatch d\n           JOIN run r ON r.id = d.run_id\n           WHERE d.issue_id = ANY($1) AND r.waiting_reason IS NOT NULL\n             AND d.run_number = (SELECT max(run_number) FROM dispatch\n                                 WHERE transition_id = d.transition_id)\n             AND d.transition_id = (SELECT e.transition_id FROM event e\n                                    WHERE e.issue_id = d.issue_id AND e.kind = 'transition'\n                                    ORDER BY e.seq DESC LIMIT 1)",
   "describe": {
     "columns": [
       {
@@ -20,7 +20,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "dispatch",
+            "table": "run",
             "name": "agent"
           }
         }
@@ -48,5 +48,5 @@
       true
     ]
   },
-  "hash": "4b70afa634a60d595418c015cf17d5709b6be48a1bfc75d64880f52015bb0614"
+  "hash": "c73feafe779ff6346e0dcf30c42264b2044f0706914952924c434501e79df756"
 }

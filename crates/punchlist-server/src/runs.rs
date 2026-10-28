@@ -82,6 +82,8 @@ struct Claimable {
     from: String,
     agent: String,
     run_id: Option<Uuid>,
+    /// The dispatch's own agent, when `agent` is its rule's `fallback` standing in for it.
+    fallback_for: Option<String>,
 }
 
 /// Selects what a runner that can run `agents` can claim and locks its issue row: an issue no
@@ -97,12 +99,20 @@ struct Claimable {
 /// never claimed, even with a dispatch waiting there from an older workflow. A new run in a
 /// status whose dispatch rule is `serial` waits while any run in that status is running in
 /// the workspace, which has one repository.
+///
+/// A waiting dispatch in a status whose active rule names a `fallback` goes to the fallback
+/// agent, when this runner can run it, while the dispatch's own agent is paused for its usage
+/// limit: its run hit the limit (`not_before` is ahead), or every runner of the workspace that
+/// lists the agent and heartbeated within `lease` is paused for it (`runner_pause`), one at
+/// least. The dispatch's own agent goes first whenever it can take it. The fallback does not
+/// fall back: its own pause leaves the dispatch to whichever agent's pause ends first.
 async fn select_claimable(
     tx: &mut sqlx::PgConnection,
     workspace_id: Uuid,
     workflow: &Workflow,
     agents: &[String],
     target: &Target,
+    lease: Duration,
 ) -> sqlx::Result<Option<Claimable>> {
     // The agent a claim from Start runs, if this runner can run it.
     let start_agent = workflow
@@ -122,6 +132,14 @@ async fn select_claimable(
         .filter(|status| workflow.dispatch_for(status).is_some_and(|d| d.serial))
         .collect();
     let order: Vec<&str> = workflow.statuses().iter().map(|s| s.as_str()).collect();
+    let (fallback_statuses, fallback_agents): (Vec<&str>, Vec<&str>) = workflow
+        .statuses()
+        .iter()
+        .filter_map(|status| {
+            let fallback = workflow.dispatch_for(status.as_str())?.fallback.as_ref()?;
+            Some((status.as_str(), fallback.agent.as_str()))
+        })
+        .unzip();
     if let Target::Issue(id) = target {
         // Waits for a claim that holds the issue, so the selection reads what it left. The
         // selection still takes the first work in the claim order, which may be another issue.
@@ -138,17 +156,35 @@ async fn select_claimable(
         Claimable,
         r#"SELECT i.id, i.status AS "from", r.id AS "run_id?",
                   CASE WHEN r.id IS NOT NULL THEN r.agent
-                       WHEN i.status = $3 THEN $4 ELSE d.agent END AS "agent!"
+                       WHEN i.status = $3 THEN $4
+                       WHEN own.ok THEN d.agent ELSE fb.agent END AS "agent!",
+                  CASE WHEN r.id IS NULL AND i.status <> $3 AND own.ok IS NOT TRUE
+                       THEN d.agent END AS fallback_for
            FROM issue i LEFT JOIN dispatch d ON d.issue_id = i.id AND d.run_id IS NULL
            LEFT JOIN run r ON r.issue_id = i.id AND r.outcome = 'running' AND r.status = i.status
                 AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.run_id = r.id
                                 AND a.state = 'running')
+           CROSS JOIN LATERAL (SELECT d.agent = ANY($2)
+                                      AND (d.not_before IS NULL OR d.not_before <= now()) AS ok) own
+           LEFT JOIN LATERAL (
+                SELECT f.agent FROM unnest($9::text[], $10::text[]) AS f (status, agent)
+                WHERE f.status = i.status AND f.agent = ANY($2) AND f.agent <> d.agent
+                  AND (d.not_before > now()
+                       OR (EXISTS (SELECT 1 FROM runner_pause p JOIN runner n ON n.id = p.runner_id
+                                   WHERE n.workspace_id = $1 AND p.agent = d.agent
+                                     AND p.until > now())
+                           AND NOT EXISTS (
+                                SELECT 1 FROM runner n
+                                WHERE n.workspace_id = $1 AND d.agent = ANY(n.agents)
+                                  AND n.last_heartbeat > now() - make_interval(secs => $11)
+                                  AND NOT EXISTS (SELECT 1 FROM runner_pause p
+                                                  WHERE p.runner_id = n.id AND p.agent = d.agent
+                                                    AND p.until > now()))))) fb ON true
            WHERE i.workspace_id = $1
              AND NOT i.status = ANY($5)
              AND CASE WHEN r.id IS NOT NULL THEN r.agent = ANY($2)
                       WHEN i.status = $3 THEN $4::text IS NOT NULL
-                      ELSE d.agent = ANY($2)
-                           AND (d.not_before IS NULL OR d.not_before <= now())
+                      ELSE (own.ok OR fb.agent IS NOT NULL)
                            AND NOT EXISTS (SELECT 1 FROM run WHERE run.issue_id = i.id
                                            AND run.outcome = 'running')
                  END
@@ -168,6 +204,9 @@ async fn select_claimable(
         IN_PROGRESS,
         &serial as &[&str],
         &order as &[&str],
+        &fallback_statuses as &[&str],
+        &fallback_agents as &[&str],
+        lease.as_secs_f64(),
     )
     .fetch_optional(&mut *tx)
     .await
@@ -218,13 +257,21 @@ async fn try_claim(
         .filter(|agent| !paused.contains(agent) && !full.contains(&agent.as_str()))
         .cloned()
         .collect();
-    let claimable =
-        select_claimable(&mut tx, actor.workspace_id, &workflow, &agents, target).await?;
+    let claimable = select_claimable(
+        &mut tx,
+        actor.workspace_id,
+        &workflow,
+        &agents,
+        target,
+        state.lease,
+    )
+    .await?;
     let Some(Claimable {
         id,
         from,
         agent,
         run_id: waiting,
+        fallback_for,
     }) = claimable
     else {
         tx.rollback().await?;
@@ -282,7 +329,7 @@ async fn try_claim(
                 actor,
                 runner,
                 &workflow,
-                (id.clone(), from, agent.clone()),
+                (id.clone(), from, agent.clone(), fallback_for),
                 &merged_branches,
                 &agent_token,
             )
@@ -457,15 +504,17 @@ enum Claimed {
     AtLimit,
 }
 
-/// A new run for what `select_claimable` found, `(issue, status it is in, agent)`, and the
-/// agent actor it acts as, with `agent_token`. Returns the run, its branch, the prompt it
-/// stores for all its attempts, and the issue in the status the run is for.
+/// A new run for what `select_claimable` found, `(issue, status it is in, agent, the agent it
+/// stands in for)`, and the agent actor it acts as, with `agent_token`. Returns the run, its
+/// branch, the prompt it stores for all its attempts, and the issue in the status the run is
+/// for. A fallback run takes its model and effort from the active rule's `fallback`, which
+/// chose it, and the rest from the version its dispatch was queued under.
 async fn new_run(
     tx: &mut sqlx::PgConnection,
     actor: &Actor,
     runner: &RunnerRow,
     workflow: &Workflow,
-    (id, from, agent): (String, String, String),
+    (id, from, agent, fallback_for): (String, String, String, Option<String>),
     merged_branches: &[String],
     agent_token: &str,
 ) -> Result<(Uuid, String, String, Issue), ApiError> {
@@ -494,9 +543,15 @@ async fn new_run(
         let rule = queued_under.dispatch_for(&from).cloned();
         (from, issue, prompt, rule)
     };
-    let (model, effort, max_tokens) = rule.map_or((None, None, None), |rule| {
+    let (mut model, mut effort, max_tokens) = rule.map_or((None, None, None), |rule| {
         (rule.model, rule.effort, rule.max_tokens)
     });
+    if fallback_for.is_some() {
+        let fallback = workflow
+            .dispatch_for(&status)
+            .and_then(|d| d.fallback.clone());
+        (model, effort) = fallback.map_or((None, None), |f| (f.model, f.effort));
+    }
     // A branch whose pull request merged is finished: the next lifecycle gets the next
     // name, which still names the issue. An open pull request keeps its branch, and so does
     // a retry, because nothing has merged on the branch it was given. A run dispatched in a
@@ -511,8 +566,8 @@ async fn new_run(
     }
     let run_id = sqlx::query_scalar!(
         "INSERT INTO run (workspace_id, issue_id, status, agent, branch, prompt, model, effort,
-                          max_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                          max_tokens, fallback_for)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
         actor.workspace_id,
         id,
         status,
@@ -522,6 +577,7 @@ async fn new_run(
         model,
         effort,
         max_tokens,
+        fallback_for,
     )
     .fetch_one(&mut *tx)
     .await
@@ -1297,7 +1353,9 @@ async fn settle_run(
 ///
 /// A run that ended on its agent's usage limit, `resets_at`, was not the issue's failure and
 /// takes no run of the entry: its own dispatch waits again, claimable from `resets_at`, so the
-/// next run has the same number.
+/// next run has the same number, or at once by its rule's `fallback` (`select_claimable`). A
+/// fallback run that hit its own limit leaves `not_before` as it was, the rule's agent's
+/// reset: its runner's pause keeps the fallback off it, so the earlier reset takes it.
 ///
 /// Once per run: an attempt leaves `running` once, under its row lock, so one transaction
 /// gets here; and `dispatch` is unique on the transition and the run number.
@@ -1335,7 +1393,10 @@ async fn queue_redispatch(
     }
     if let Some(resets_at) = resets_at {
         sqlx::query!(
-            "UPDATE dispatch d SET run_id = NULL, not_before = $2
+            "UPDATE dispatch d
+             SET run_id = NULL,
+                 not_before = CASE WHEN (SELECT fallback_for FROM run WHERE id = $1) IS NULL
+                                   THEN $2 ELSE d.not_before END
              WHERE d.run_id = $1
                AND d.transition_id = (SELECT e.transition_id FROM event e
                                       WHERE e.issue_id = d.issue_id AND e.kind = 'transition'
@@ -1443,6 +1504,7 @@ struct RunRow {
     id: Uuid,
     issue_id: String,
     agent: String,
+    fallback_for: Option<String>,
     branch: String,
     outcome: String,
     started_at: DateTime<Utc>,
@@ -1498,7 +1560,7 @@ async fn load_runs(
 ) -> Result<Vec<Run>, ApiError> {
     let rows = sqlx::query_as!(
         RunRow,
-        r#"SELECT r.id, r.issue_id, r.agent, r.branch, r.outcome, r.started_at, r.finished_at,
+        r#"SELECT r.id, r.issue_id, r.agent, r.fallback_for, r.branch, r.outcome, r.started_at, r.finished_at,
                   a.attempt AS "attempt!", a.model, a.reported_model, a.runner_id AS "runner_id!",
                   n.name AS "runner_name!", a.failure_reason, a.duration_ms,
                   a.input_tokens, a.output_tokens, a.cost_usd::text AS cost_usd
@@ -1565,6 +1627,7 @@ async fn load_runs(
             issue_id: row.issue_id,
             agent_name: agent_display_name(&row.agent),
             agent: row.agent,
+            fallback_for: row.fallback_for,
             branch: row.branch,
             outcome,
             started_at: row.started_at,

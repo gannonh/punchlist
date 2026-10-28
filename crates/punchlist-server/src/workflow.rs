@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::State;
-use punchlist_api::{ErrorBody, StatusInfo, WorkflowInfo, WorkflowRefusal};
+use punchlist_api::{DispatchFallback, ErrorBody, StatusInfo, WorkflowInfo, WorkflowRefusal};
 use punchlist_core::{Status, Workflow, default_workflow, workflow_schema};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::router::OpenApiRouter;
@@ -355,6 +355,11 @@ pub(crate) fn status_info(workflow: &Workflow, status: &Status) -> StatusInfo {
         dispatch_model: dispatch.and_then(|d| d.model.clone()),
         dispatch_effort: dispatch.and_then(|d| d.effort.clone()),
         dispatch_runs_per_entry: dispatch.map(|d| d.runs_per_entry),
+        dispatch_fallback: (dispatch.and_then(|d| d.fallback.as_ref())).map(|f| DispatchFallback {
+            agent: f.agent.clone(),
+            model: f.model.clone(),
+            effort: f.effort.clone(),
+        }),
         closed: !(workflow.transitions().iter()).any(|transition| transition.from.contains(status)),
         on_merge_to: workflow
             .on_merge_to(status.as_str())

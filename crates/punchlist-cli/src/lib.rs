@@ -1398,7 +1398,7 @@ fn model_label(pinned: Option<&str>, reported: Option<&str>, running: bool) -> S
 /// A run and its latest attempt on one line, indented two spaces.
 fn run_line(run: &Run) -> String {
     let mut text = format!(
-        "  {}  {}  model {}  runner {}  started {}  duration {}  {}",
+        "  {}  {}  model {}{}  runner {}  started {}  duration {}  {}",
         run.id,
         run.agent_name,
         model_label(
@@ -1406,6 +1406,9 @@ fn run_line(run: &Run) -> String {
             run.reported_model.as_deref(),
             run.outcome == RunOutcome::Running
         ),
+        (run.fallback_for.as_ref())
+            .map(|agent| format!("  (fallback for {agent}: usage limit)"))
+            .unwrap_or_default(),
         run.runner.name,
         run.started_at.format("%Y-%m-%d %H:%M:%S UTC"),
         format_duration(run.duration_ms),
@@ -1673,11 +1676,21 @@ fn render_workflow(workflow: &WorkflowInfo) -> String {
         let runs = (status.dispatch_runs_per_entry)
             .filter(|runs| *runs != DEFAULT_RUNS_PER_ENTRY)
             .map(|runs| format!(", {runs} run{} per entry", if runs == 1 { "" } else { "s" }));
+        let fallback = status.dispatch_fallback.as_ref().map(|f| {
+            let effort = (f.effort.as_ref()).map(|effort| format!(", effort {effort}"));
+            format!(
+                ", falls back to {} on {}{}",
+                f.agent,
+                f.model.as_deref().unwrap_or("the runner's model"),
+                effort.unwrap_or_default()
+            )
+        });
         out += &format!(
-            "Dispatch  {}: {agent} on {model}{}{}\n",
+            "Dispatch  {}: {agent} on {model}{}{}{}\n",
             status.key,
             effort.unwrap_or_default(),
-            runs.unwrap_or_default()
+            runs.unwrap_or_default(),
+            fallback.unwrap_or_default()
         );
     }
     if let Some(refused) = &workflow.refused {
@@ -2340,6 +2353,7 @@ mod tests {
                     dispatch_model: None,
                     dispatch_effort: None,
                     dispatch_runs_per_entry: None,
+                    dispatch_fallback: None,
                     closed: false,
                     on_merge_to: None,
                 })
@@ -2365,6 +2379,15 @@ mod tests {
         );
         dispatching.statuses[1].dispatch_runs_per_entry = Some(5);
         assert!(render_workflow(&dispatching).ends_with("effort low, 5 runs per entry\n"));
+        dispatching.statuses[1].dispatch_fallback = Some(punchlist_api::DispatchFallback {
+            agent: "claude-code".into(),
+            model: Some("sonnet".into()),
+            effort: None,
+        });
+        assert!(
+            render_workflow(&dispatching)
+                .ends_with("effort low, 5 runs per entry, falls back to claude-code on sonnet\n")
+        );
         let info = WorkflowInfo {
             invalid: Some("line 4, `statuses`: the runtime needs the status `start`".into()),
             refused: Some(punchlist_api::WorkflowRefusal {
@@ -2436,6 +2459,7 @@ mod tests {
             issue_id: "PL-1".into(),
             agent: "claude-code".into(),
             agent_name: "Claude Code".into(),
+            fallback_for: None,
             branch: "feature/pl-1".into(),
             outcome: RunOutcome::Running,
             started_at: at("2026-10-16T10:00:00Z"),
@@ -2489,6 +2513,10 @@ mod tests {
         assert!(
             run_line(&finished).ends_with("succeeded  tokens 1000 in / 250 out  cost $0.0453\n")
         );
+        finished.fallback_for = Some("codex".into());
+        assert!(run_line(&finished).contains(
+            "  Claude Code  model haiku (pinned)  (fallback for codex: usage limit)  runner sartre  "
+        ));
     }
 
     #[test]
