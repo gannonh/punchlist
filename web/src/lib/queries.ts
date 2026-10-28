@@ -476,6 +476,18 @@ export const useProjects = (workspaceId: string) => useQuery(projectsQuery(works
 export const usePullRequests = (workspaceId: string, ready: boolean) =>
   useQuery({ ...pullRequestsQuery(workspaceId), enabled: ready })
 
+/**
+ * The Pull requests page's read: also every 30 s while the tab is visible, since a pull request that names no issue
+ * writes no event for the stream to carry.
+ */
+export const usePullRequestsPage = (workspaceId: string, ready: boolean) =>
+  useQuery({
+    ...pullRequestsQuery(workspaceId),
+    enabled: ready,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  })
+
 /** What waits on the signed-in person, read once `ready`, as `usePullRequests` is. */
 export const useInbox = (workspaceId: string, ready: boolean) =>
   useQuery({ ...inboxQuery(workspaceId), enabled: ready })

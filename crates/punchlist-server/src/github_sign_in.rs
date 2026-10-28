@@ -210,7 +210,8 @@ async fn callback(
 
 /// The account linked to the GitHub user, created when there is none and an open invite names
 /// the user's login, with a person in each workspace an open invite names, those invites
-/// accepted. None when no account is linked and no invite is open.
+/// accepted. None when no account is linked and no invite is open. An invite expires 7 days
+/// after it was created: GitHub frees a renamed user's login for anyone to register.
 async fn accept_invites(state: &AppState, user: &GithubUser) -> Result<Option<Uuid>, ApiError> {
     let mut tx = state.pool.begin().await?;
     // Locked first, so a second sign-in of the same user waits here and then finds the
@@ -218,6 +219,7 @@ async fn accept_invites(state: &AppState, user: &GithubUser) -> Result<Option<Uu
     let invites = sqlx::query_scalar!(
         "SELECT id FROM invite
          WHERE github_login = $1::text::citext AND accepted_at IS NULL AND revoked_at IS NULL
+           AND created_at + interval '7 days' > now()
          FOR UPDATE",
         user.login,
     )

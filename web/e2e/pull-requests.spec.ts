@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { expect, test } from '@playwright/test'
-import { bearer, deliverPullRequest, ok, personToken, signIn } from './support'
+import { bearer, deliver, deliverPullRequest, fixture, ok, personToken, signIn } from './support'
 
 test('g then p opens the Pull requests page, which moves a pull request between sections as GitHub reports it', async ({
   page,
@@ -47,4 +47,62 @@ test('g then p opens the Pull requests page, which moves a pull request between 
   await pr.focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/issues/${id}$`))
+})
+
+test('the Pull requests page reads again every 30 s while visible, so a pull request that names no issue shows', async ({
+  page,
+  request,
+}) => {
+  // No event reaches the page: the stream answers an empty body, and EventSource keeps reconnecting to it.
+  await page.route('**/api/workspaces/*/events?*', (route) =>
+    route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }),
+  )
+  let reads = 0
+  page.on('request', (r) => {
+    if (/\/api\/workspaces\/[^/]+\/pull-requests$/.test(new URL(r.url()).pathname)) reads += 1
+  })
+  await page.clock.install()
+  await signIn(page)
+  await page.keyboard.press('g')
+  await page.keyboard.press('p')
+  await expect(page).toHaveURL(/\/pull-requests$/)
+  await expect.poll(() => reads).toBe(1)
+
+  const number = 9000 + Math.floor(Math.random() * 900_000)
+  const payload = fixture('pull_request_opened') as {
+    repository: { name: string }
+    pull_request: { number: number; title: string; html_url: string; head: { ref: string; sha: string } }
+  }
+  payload.pull_request.number = number
+  payload.pull_request.title = 'Names no issue'
+  payload.pull_request.html_url = `https://github.com/gannonh/punchlist-sandbox/pull/${String(number)}`
+  payload.pull_request.head.ref = `chore/no-issue-${String(number)}`
+  payload.pull_request.head.sha = randomUUID().replaceAll('-', '').padEnd(40, '0')
+  await deliver(request, 'pull_request', payload)
+  const pr = page.locator('[data-section="names-no-issue"]').locator(`[data-pr-row="${String(number)}"]`)
+  // The first timed read is due 30 s after the page opened, a moment before the delivery.
+  await page.clock.fastForward(25_000)
+  await page.waitForTimeout(500)
+  expect(reads).toBe(1)
+  await expect(pr).toHaveCount(0)
+  await page.clock.fastForward(5_000)
+  await expect(pr).toBeVisible()
+  expect(reads).toBe(2)
+
+  // A hidden tab sends no timed read.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.clock.fastForward(70_000)
+  await page.waitForTimeout(500)
+  expect(reads).toBe(2)
+
+  // Visible again, the next tick reads.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await page.clock.fastForward(30_000)
+  await expect.poll(() => reads).toBe(3)
 })
