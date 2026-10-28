@@ -958,16 +958,22 @@ fn init_logging() {
         .try_init();
 }
 
-/// Resolves on Ctrl-C or SIGTERM.
-async fn shutdown_signal() {
+/// Resolves on Ctrl-C or SIGTERM, which stop the runner, or on SIGHUP, which stops it for a
+/// restart (an upgrade): its attempts are left for the next start to resume.
+async fn shutdown_signal() -> punchlist_runner::Stop {
+    use punchlist_runner::Stop;
     use tokio::signal::unix::{SignalKind, signal};
-    let Ok(mut term) = signal(SignalKind::terminate()) else {
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
         let _ = tokio::signal::ctrl_c().await;
-        return;
+        return Stop::Finish;
     };
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => Stop::Finish,
+        _ = term.recv() => Stop::Finish,
+        _ = hup.recv() => Stop::Restart,
     }
 }
 
