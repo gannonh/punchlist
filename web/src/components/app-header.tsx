@@ -1,8 +1,9 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useMemo, type ReactNode } from 'react'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { cn } from 'cn'
 import { WorkspaceMenu } from '@/components/workspace-menu'
 import { countText } from '@/model/inbox'
+import { HEADER_KEYS } from '@/model/shortcuts'
 import type { Workspace } from '@/model/workspaces'
 
 export const inField = (target: EventTarget | null) =>
@@ -11,37 +12,44 @@ export const inField = (target: EventTarget | null) =>
 
 const CHORD_MS = 1000
 
+/** The app header's screens by action, the handlers its keys and the strips' buttons share. */
+export function useScreenActions(prefix: string): Record<string, () => void> {
+  const navigate = useNavigate()
+  return useMemo(
+    () => ({
+      inbox: () => void navigate({ to: '/w/$prefix/inbox', params: { prefix } }),
+      'pull-requests': () => void navigate({ to: '/w/$prefix/pull-requests', params: { prefix } }),
+      projects: () => void navigate({ to: '/w/$prefix/projects', params: { prefix } }),
+    }),
+    [navigate, prefix],
+  )
+}
+
 /**
  * `g` then `p` within a second opens the Pull requests page, `g` then `m` the projects screen, and `i` the inbox,
  * except while typing or with a dialog or menu open.
  */
 function useScreenKeys(prefix: string) {
-  const navigate = useNavigate()
+  const actions = useScreenActions(prefix)
   useEffect(() => {
     let g = -Infinity
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || inField(event.target)) return
       if (document.querySelector('[role="dialog"], [role="menu"]')) return
-      if (event.key === 'g') g = event.timeStamp
-      else if (event.key === 'i') {
+      const chord = event.timeStamp - g <= CHORD_MS ? HEADER_KEYS[`g ${event.key}`] : undefined
+      const action = chord ?? HEADER_KEYS[event.key]
+      g = event.key === 'g' ? event.timeStamp : -Infinity
+      const run = action && actions[action]
+      if (run) {
         event.preventDefault()
-        g = -Infinity
-        void navigate({ to: '/w/$prefix/inbox', params: { prefix } })
-      } else if (event.key === 'p' && event.timeStamp - g <= CHORD_MS) {
-        event.preventDefault()
-        g = -Infinity
-        void navigate({ to: '/w/$prefix/pull-requests', params: { prefix } })
-      } else if (event.key === 'm' && event.timeStamp - g <= CHORD_MS) {
-        event.preventDefault()
-        g = -Infinity
-        void navigate({ to: '/w/$prefix/projects', params: { prefix } })
-      } else g = -Infinity
+        run()
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate, prefix])
+  }, [actions])
 }
 
 const NAV =

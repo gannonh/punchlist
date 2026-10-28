@@ -9,13 +9,15 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { AccountMenu } from '@/components/account-menu'
-import { AppHeader, inField } from '@/components/app-header'
+import { AppHeader, inField, useScreenActions } from '@/components/app-header'
 import type { Workspace } from '@/model/workspaces'
 import { BoardView, ListView } from '@/components/issue-views'
 import { IssueSheet } from '@/components/issue-sheet'
 import { NewIssue } from '@/components/new-issue'
 import { StatusMenu } from '@/components/status-menu'
-import { PICKERS, PickerMenu, RowMenu, type PickerContext, type PickerKind } from '@/components/bulk-menu'
+import { PickerMenu, RowMenu, type PickerContext, type PickerKind } from '@/components/bulk-menu'
+import { ShortcutStrip, type Run } from '@/components/shortcut-strip'
+import { SCREEN_KEYS, STRIPS } from '@/model/shortcuts'
 import { addRange, keepShown, toggle, type Selection } from '@/model/selection'
 import {
   AGENT_NAMES,
@@ -131,36 +133,6 @@ function navOrder(groups: Group[], layout: Layout, narrow: boolean, column: stri
   return shown.flatMap((g) => g.rows.map((row) => row.issue.id))
 }
 
-const SHORTCUTS: Record<Layout, [string, string][]> = {
-  list: [
-    ['j', 'next issue'],
-    ['k', 'previous issue'],
-    ['Enter', 'open issue'],
-    ['s', 'change status'],
-    ['x', 'select'],
-    ['⇧j ⇧k', 'select range'],
-    ['a l ⇧p ⇧m', 'assignee, labels, project, milestone'],
-    ['/', 'filter'],
-    ['1 2', 'switch layout'],
-    ['g p', 'pull requests'],
-    ['g m', 'projects'],
-    ['Esc', 'close'],
-  ],
-  board: [
-    ['j', 'next issue'],
-    ['k', 'previous issue'],
-    ['Enter', 'open issue'],
-    ['s', 'change status'],
-    ['h', 'move issue left'],
-    ['l', 'move issue right'],
-    ['/', 'filter'],
-    ['1 2', 'switch layout'],
-    ['g p', 'pull requests'],
-    ['g m', 'projects'],
-    ['Esc', 'close'],
-  ],
-}
-
 export function useNow(): Date {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
@@ -193,6 +165,7 @@ export function IssuesScreen({
   const edit = useEditOne(workspaceId)
   const bulkEdit = useBulkEdit(workspaceId)
   const navigate = useNavigate()
+  const screenActions = useScreenActions(workspace.issue_prefix)
   const { transitions, request, requestAll, dismiss } = useTransitions(workspaceId)
   useEventStream(workspaceId, issues.isSuccess)
   const pullRequests = usePullRequests(workspaceId, issues.isSuccess)
@@ -328,6 +301,94 @@ export function IssuesScreen({
     [checked, order, current],
   )
 
+  // One handler per action, for its key and its strip button. Those that act on the focused row have none without
+  // one, which disables the button.
+  const step = (delta: number, range: boolean) => {
+    if (order.length === 0) return
+    const index = Math.max(0, current ? order.indexOf(current) : 0)
+    const next = order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null
+    // A range extends the selection from the focused row to the next.
+    if (range && layout === 'list' && current && next) {
+      setChecked((selection) => addRange(selection, order, current, next))
+      anchor.current = next
+    }
+    setSelected(next)
+  }
+  const shift = (delta: number) => {
+    const row = rowById(current)
+    const to = row && neighbourStatus(statuses, row.issue.status, delta)
+    if (row && to && transitions[row.issue.id]?.state !== 'pending') void move(row.issue.id, to)
+  }
+  const pickerAction = (kind: PickerKind): Run | undefined =>
+    current
+      ? () => {
+          setPicker({ kind, ids: targets(), ...below(current) })
+        }
+      : undefined
+  const actions: Partial<Record<string, Run>> = {
+    ...screenActions,
+    next: (range) => {
+      step(1, range)
+    },
+    previous: (range) => {
+      step(-1, range)
+    },
+    open: current
+      ? () => {
+          const seq = snippets.get(current)?.comment_seq
+          void navigate({ to: '/issues/$id', params: { id: current }, hash: seq == null ? undefined : `seq-${String(seq)}` })
+        }
+      : undefined,
+    status: current
+      ? () => {
+          if (layout === 'list' && checked.size > 0) setPicker({ kind: 'status', ids: targets(), ...below(current) })
+          else openMenu(current)
+        }
+      : undefined,
+    filter: () => search.current?.focus(),
+    list: () => {
+      onLayout('list')
+    },
+    board: () => {
+      onLayout('board')
+    },
+    ...(layout === 'board'
+      ? {
+          left: current
+            ? () => {
+                shift(-1)
+              }
+            : undefined,
+          right: current
+            ? () => {
+                shift(1)
+              }
+            : undefined,
+        }
+      : {
+          select: current
+            ? (range: boolean) => {
+                const from = anchor.current
+                setChecked((selection) =>
+                  range && from ? addRange(selection, order, from, current) : toggle(selection, current),
+                )
+                anchor.current = current
+              }
+            : undefined,
+          close: () => {
+            setChecked(new Set())
+          },
+          assignee: pickerAction('assignee'),
+          labels: pickerAction('labels'),
+          project: pickerAction('project'),
+          milestone: pickerAction('milestone'),
+        }),
+  }
+  const keyState = useRef({ actions, blocked: false, layout })
+  useLayoutEffect(() => {
+    keyState.current = { actions, blocked: !!(sheet || menu || creating || picker || rowMenu.open), layout }
+  })
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return
@@ -338,100 +399,20 @@ export function IssuesScreen({
       // A menu's Escape closes it in the capture phase, and the re-render can add this listener before the event
       // bubbles here; the menu marks it handled.
       if (event.defaultPrevented) return
-      if (sheet || menu || creating || picker || rowMenu.open) return
-      const step = (delta: number) => {
-        if (order.length === 0) return
-        const index = Math.max(0, current ? order.indexOf(current) : 0)
-        const next = order[Math.min(order.length - 1, Math.max(0, index + delta))] ?? null
-        // Shift extends the selection from the focused row to the next.
-        if (event.shiftKey && layout === 'list' && current && next) {
-          setChecked((selection) => addRange(selection, order, current, next))
-          anchor.current = next
-        }
-        setSelected(next)
-      }
-      const shift = (delta: number) => {
-        const row = rowById(current)
-        const to = row && neighbourStatus(statuses, row.issue.status, delta)
-        if (row && to && transitions[row.issue.id]?.state !== 'pending') void move(row.issue.id, to)
-      }
-      const keys: Record<string, (() => void) | undefined> = {
-        j: () => {
-          step(1)
-        },
-        ArrowDown: () => {
-          step(1)
-        },
-        k: () => {
-          step(-1)
-        },
-        ArrowUp: () => {
-          step(-1)
-        },
-        Enter: () => {
-          if (!current) return
-          const seq = snippets.get(current)?.comment_seq
-          void navigate({ to: '/issues/$id', params: { id: current }, hash: seq == null ? undefined : `seq-${String(seq)}` })
-        },
-        s: () => {
-          const ids = targets()
-          const at = current ?? ids[0]
-          if (layout === 'list' && checked.size > 0 && at) setPicker({ kind: 'status', ids, ...below(at) })
-          else if (current) openMenu(current)
-        },
-        '/': () => search.current?.focus(),
-        '1': () => {
-          onLayout('list')
-        },
-        '2': () => {
-          onLayout('board')
-        },
-        ...(layout === 'board' && {
-          h: () => {
-            shift(-1)
-          },
-          l: () => {
-            shift(1)
-          },
-        }),
-        ...(layout === 'list' && {
-          x: () => {
-            if (!current) return
-            setChecked((selection) => toggle(selection, current))
-            anchor.current = current
-          },
-          J: () => {
-            step(1)
-          },
-          K: () => {
-            step(-1)
-          },
-          Escape: () => {
-            setChecked(new Set())
-          },
-          ...Object.fromEntries(
-            PICKERS.filter(({ kind }) => kind !== 'status').map(({ kind, key }) => [
-              key,
-              () => {
-                const ids = targets()
-                const at = current ?? ids[0]
-                if (at) setPicker({ kind, ids, ...below(at) })
-              },
-            ]),
-          ),
-        }),
-      }
-      const action = keys[event.key]
-      if (action) {
+      const { actions, blocked, layout } = keyState.current
+      if (blocked) return
+      const action = SCREEN_KEYS[layout][event.key]
+      const run = action && actions[action]
+      if (run) {
         event.preventDefault()
-        action()
+        run(event.shiftKey)
       }
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [sheet, menu, creating, picker, rowMenu.open, order, current, checked, layout, statuses, transitions, snippets, rowById, move, openMenu, onLayout, navigate, targets])
+  }, [])
 
   const filtered = Object.values({ ...filter }).some((value) => value.length > 0)
   const projectList = projects.data ?? []
@@ -694,17 +675,12 @@ export function IssuesScreen({
         )}
       </main>
 
-      <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
-        <span className="font-semibold text-foreground">{layout === 'list' ? 'List' : 'Board'} shortcuts</span>
-        {SHORTCUTS[layout].map(([keys, what]) => (
-          <span key={what} className="inline-flex items-center gap-1.25 whitespace-nowrap">
-            {keys.split(' ').map((key) => (
-              <kbd key={key}>{key}</kbd>
-            ))}{' '}
-            {what}
-          </span>
-        ))}
-      </footer>
+      <ShortcutStrip
+        title={`${layout === 'list' ? 'List' : 'Board'} shortcuts`}
+        items={STRIPS[layout]}
+        actions={actions}
+        why="Focus an issue first"
+      />
 
       {menu && menuRow && (
         <StatusMenu
