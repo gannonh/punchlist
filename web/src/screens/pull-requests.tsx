@@ -5,7 +5,7 @@ import { cn } from 'cn'
 import { AccountMenu } from '@/components/account-menu'
 import { AppHeader, inField } from '@/components/app-header'
 import { GithubLink, StatusDot } from '@/components/atoms'
-import { useEventStream, useInbox, useIssues, usePullRequests } from '@/lib/queries'
+import { useEventStream, useInbox, useIssues, usePullRequestsPage } from '@/lib/queries'
 import type { Workspace } from '@/model/workspaces'
 import {
   mergeLabel,
@@ -108,7 +108,7 @@ function Row({ pr, onOpen }: { pr: OpenPullRequest; onOpen: (pr: OpenPullRequest
 export function PullRequestsScreen({ workspace, me }: { workspace: Workspace; me: string }) {
   const issues = useIssues(workspace.id)
   useEventStream(workspace.id, issues.isSuccess)
-  const pullRequests = usePullRequests(workspace.id, issues.isSuccess)
+  const pullRequests = usePullRequestsPage(workspace.id, issues.isSuccess)
   const inbox = useInbox(workspace.id, issues.isSuccess)
   const navigate = useNavigate()
   const grouped = useMemo(() => sections(pullRequests.data ?? []), [pullRequests.data])
