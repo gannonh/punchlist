@@ -286,8 +286,9 @@ function Picker({
 }) {
   const [text, setText] = useState('')
   const input = useRef<HTMLInputElement>(null)
-  // After Radix has focused the menu itself.
+  // After Radix has focused the menu itself; not on a touch screen alone, where focusing it puts the keyboard up.
   useEffect(() => {
+    if (!window.matchMedia('(any-pointer: fine)').matches) return
     const frame = requestAnimationFrame(() => input.current?.focus())
     return () => {
       cancelAnimationFrame(frame)
