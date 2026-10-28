@@ -650,9 +650,10 @@ pub(crate) fn kill_runner(runner_id: &str) -> usize {
 
 /// Ends what an attempt left running after its agent exited: every process whose environment
 /// carries `ATTEMPT_MARKER=attempt` gets SIGTERM, and SIGKILL once `grace` has passed, and
-/// every container labeled `punchlist.attempt=<attempt>` is removed. Returns how many
-/// processes and containers it found. Without Docker it removes no container.
-pub(crate) async fn end_attempt(attempt: &str, grace: Duration) -> (usize, usize) {
+/// every container labeled `punchlist.attempt=<attempt>` is removed, with the networks and
+/// volumes it leaves unused (`remove_attempt_docker`). Returns how many processes it found and
+/// what it removed from Docker.
+pub(crate) async fn end_attempt(attempt: &str, grace: Duration) -> (usize, DockerRemoved) {
     let found = marked(ATTEMPT_MARKER, attempt);
     signal("TERM", &found);
     let deadline = tokio::time::Instant::now() + grace;
@@ -665,37 +666,155 @@ pub(crate) async fn end_attempt(attempt: &str, grace: Duration) -> (usize, usize
             signal("KILL", &left);
         }
     }
-    (found.len(), remove_containers(attempt).await)
+    (found.len(), remove_attempt_docker(attempt).await)
 }
 
-/// Removes the containers labeled with `attempt`, running or not. Returns how many.
-async fn remove_containers(attempt: &str) -> usize {
-    let docker = |args: Vec<String>| async move {
+/// How many containers, networks and volumes an attempt's cleanup removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DockerRemoved {
+    pub containers: usize,
+    pub networks: usize,
+    pub volumes: usize,
+}
+
+impl std::fmt::Display for DockerRemoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} container(s), {} network(s) and {} volume(s)",
+            self.containers, self.networks, self.volumes
+        )
+    }
+}
+
+/// What to remove for an attempt: the containers labeled with it, and the networks and volumes
+/// they use that no other container does.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DockerPlan {
+    containers: Vec<String>,
+    networks: Vec<String>,
+    volumes: Vec<String>,
+}
+
+/// Docker's own networks, which are never removed.
+const BUILT_IN_NETWORKS: [&str; 3] = ["bridge", "host", "none"];
+
+/// Reads `docker inspect` output of every container and plans `attempt`'s removal. Output it
+/// cannot parse plans nothing.
+fn docker_plan(inspect: &[u8], attempt: &str) -> DockerPlan {
+    use std::collections::{BTreeMap, BTreeSet};
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Container {
+        id: String,
+        config: Config,
+        mounts: Option<Vec<Mount>>,
+        network_settings: NetworkSettings,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Config {
+        labels: Option<HashMap<String, String>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct Mount {
+        #[serde(rename = "Type")]
+        kind: String,
+        name: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct NetworkSettings {
+        networks: Option<BTreeMap<String, serde::de::IgnoredAny>>,
+    }
+    fn networks(c: &Container) -> impl Iterator<Item = &String> {
+        c.network_settings.networks.iter().flat_map(|n| n.keys())
+    }
+    fn volumes(c: &Container) -> impl Iterator<Item = &String> {
+        c.mounts
+            .iter()
+            .flatten()
+            .filter(|m| m.kind == "volume")
+            .filter_map(|m| m.name.as_ref())
+    }
+    let Ok(all) = serde_json::from_slice::<Vec<Container>>(inspect) else {
+        return DockerPlan::default();
+    };
+    let (ours, others): (Vec<_>, Vec<_>) = all.iter().partition(|c| {
+        c.config
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(ATTEMPT_LABEL))
+            .is_some_and(|value| value == attempt)
+    });
+    let in_use: BTreeSet<&String> = others.iter().flat_map(|c| networks(c)).collect();
+    let mounted: BTreeSet<&String> = others.iter().flat_map(|c| volumes(c)).collect();
+    let unused = |names: BTreeSet<&String>, used: &BTreeSet<&String>| {
+        names
+            .into_iter()
+            .filter(|n| !used.contains(n) && !BUILT_IN_NETWORKS.contains(&n.as_str()))
+            .cloned()
+            .collect()
+    };
+    DockerPlan {
+        containers: ours.iter().map(|c| c.id.clone()).collect(),
+        networks: unused(ours.iter().flat_map(|c| networks(c)).collect(), &in_use),
+        volumes: unused(ours.iter().flat_map(|c| volumes(c)).collect(), &mounted),
+    }
+}
+
+/// Removes the containers labeled with `attempt`, running or not, then the networks and
+/// volumes they used that no other container uses. Without Docker it removes nothing.
+// ponytail: a container another process starts on one of those networks between the inspect
+// and the `network rm` loses it; Docker refuses to remove a network or volume a running
+// container uses, so only a stopped one can.
+pub(crate) async fn remove_attempt_docker(attempt: &str) -> DockerRemoved {
+    async fn docker(args: &[&str]) -> Option<std::process::Output> {
         let output = Command::new("docker")
             .args(args)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .output();
-        match tokio::time::timeout(DOCKER_TIMEOUT, output).await {
-            Ok(Ok(output)) if output.status.success() => Some(output.stdout),
-            _ => None,
-        }
-    };
-    let filter = format!("label={ATTEMPT_LABEL}={attempt}");
-    let Some(listed) = docker(vec!["ps".into(), "-aq".into(), "--filter".into(), filter]).await
-    else {
-        return 0;
-    };
-    let ids: Vec<String> = String::from_utf8_lossy(&listed)
-        .split_whitespace()
-        .map(String::from)
-        .collect();
-    if ids.is_empty() {
-        return 0;
+        tokio::time::timeout(DOCKER_TIMEOUT, output)
+            .await
+            .ok()?
+            .ok()
     }
-    let count = ids.len();
-    let removed = docker([vec!["rm".into(), "-f".into()], ids].concat()).await;
-    if removed.is_some() { count } else { 0 }
+    let ok =
+        |output: &Option<std::process::Output>| output.as_ref().is_some_and(|o| o.status.success());
+    let listed = docker(&["ps", "-aq", "--no-trunc"]).await;
+    let Some(listed) = listed.filter(|o| o.status.success()) else {
+        return DockerRemoved::default();
+    };
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let ids: Vec<&str> = listed.split_whitespace().collect();
+    if ids.is_empty() {
+        return DockerRemoved::default();
+    }
+    // A container removed since the listing makes `inspect` fail, but it still prints the rest.
+    let Some(inspect) = docker(&[&["inspect"], ids.as_slice()].concat()).await else {
+        return DockerRemoved::default();
+    };
+    let plan = docker_plan(&inspect.stdout, attempt);
+    if plan.containers.is_empty() {
+        return DockerRemoved::default();
+    }
+    let rm: Vec<&str> = plan.containers.iter().map(String::as_str).collect();
+    if !ok(&docker(&[&["rm", "-f"], rm.as_slice()].concat()).await) {
+        return DockerRemoved::default();
+    }
+    let mut removed = DockerRemoved {
+        containers: plan.containers.len(),
+        ..DockerRemoved::default()
+    };
+    for network in &plan.networks {
+        removed.networks += usize::from(ok(&docker(&["network", "rm", network]).await));
+    }
+    for volume in &plan.volumes {
+        removed.volumes += usize::from(ok(&docker(&["volume", "rm", volume]).await));
+    }
+    removed
 }
 
 /// Removes an attempt's temporary directory, `TMPDIR` to its agent, and returns the size of
@@ -810,10 +929,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// Starts `sh -c script` with `var=value`, and returns once its environment shows it:
-    /// `spawn` returns once the child has forked, before `execve` has replaced its
-    /// environment, so `/proc/<pid>/environ` reads empty, then holds the test's own
-    /// environment, and only then the marker.
+    /// Starts a script ending in `exec sleep` with `var=value`, and waits for that exec
+    /// and its environment. Seeing the shell's marker alone is not enough: its later
+    /// exec can briefly make `/proc/<pid>/environ` unreadable during cleanup's scan.
     fn spawn_marked(var: &str, value: &str, script: &str) -> std::process::Child {
         let child = std::process::Command::new("sh")
             .args(["-c", script])
@@ -821,12 +939,15 @@ pub(crate) mod tests {
             .spawn()
             .unwrap();
         let environ = format!("/proc/{}/environ", child.id());
+        let exe = format!("/proc/{}/exe", child.id());
         let wanted = format!("{var}={value}").into_bytes();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !std::fs::read(&environ)
-            .unwrap_or_default()
-            .split(|&b| b == 0)
-            .any(|var| var == wanted.as_slice())
+        while !std::fs::read_link(&exe)
+            .is_ok_and(|path| path.file_name().is_some_and(|name| name == "sleep"))
+            || !std::fs::read(&environ)
+                .unwrap_or_default()
+                .split(|&b| b == 0)
+                .any(|var| var == wanted.as_slice())
         {
             assert!(std::time::Instant::now() < deadline, "no marker");
             std::thread::sleep(Duration::from_millis(5));
@@ -885,7 +1006,7 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         assert_eq!(
             end_attempt(&attempt, Duration::from_millis(500)).await,
-            (2, 0)
+            (2, DockerRemoved::default())
         );
         assert!(
             started.elapsed() >= Duration::from_millis(500),
@@ -901,6 +1022,54 @@ pub(crate) mod tests {
         );
         other.kill().unwrap();
         other.wait().unwrap();
+    }
+
+    /// `tests/fixtures/docker/inspect.json` is Docker 29.7.2's `docker inspect` of five
+    /// containers: four of attempt `run-1` (one on `pl175fx_default` and `pl175fx_shared` with
+    /// the volumes `pl175fx_db` and `pl175fx_shared` and a bind mount, and one each on
+    /// `bridge`, `host` and `none`) and one of `run-2` on `pl175fx_shared` with that volume.
+    /// The image declares a volume, so each container also has an anonymous one of its own.
+    #[test]
+    fn an_attempt_removes_the_networks_and_volumes_only_its_containers_use() {
+        let inspect = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/docker/inspect.json"
+        ));
+        let id = |s: &str| s.to_string();
+        assert_eq!(
+            docker_plan(inspect, "run-1"),
+            DockerPlan {
+                containers: vec![
+                    id("28722af939a126e3c74c020568308d3a0fe7031d44cfa3dd0a5ef9163448c33e"),
+                    id("e868868edd7e72cfa73591bae528798e1dfc9bd70d979d736d612220e74b133a"),
+                    id("38c21dbe5f619a4eccce3c3ed3b34a05e506eefa2203a23393026c9b73c8caef"),
+                    id("0a4454695f11020cf24b15fe286e576ca3d8945f5900ab01dd9ba5c586e6a325"),
+                ],
+                networks: vec![id("pl175fx_default")],
+                volumes: vec![
+                    id("4b53245afe72c8eb47f8fe5c4d34785762b7587413e83e029015e8f5ff199d68"),
+                    id("87ae9f2544ce58a6c6a1d5479cfe8f7039522cd0d2056659419b2aeecf68d0d6"),
+                    id("e6d9602ab1171d9defc5a57dc9e7f6b7b33cfd29895bac793bff615da29fec86"),
+                    id("ea48c032a9a5b38c4a25729f99dfabc321c892e8c58b6d22057d6da3de4c6661"),
+                    id("pl175fx_db"),
+                ],
+            }
+        );
+        assert_eq!(
+            docker_plan(inspect, "run-2"),
+            DockerPlan {
+                containers: vec![id(
+                    "de0338c17e319705176b4ca9fbda2a193ed62bd5cd56a440eb2161f617b95f65"
+                )],
+                networks: vec![],
+                volumes: vec![id(
+                    "4e2e3eefdd95cae7d2633bd56cc6dd13303a9de8f157d089dd9683d7bb2f6cb3"
+                )],
+            },
+            "run-1's containers still use the shared network and volume"
+        );
+        assert_eq!(docker_plan(inspect, "run-3"), DockerPlan::default());
+        assert_eq!(docker_plan(b"not json", "run-1"), DockerPlan::default());
     }
 
     async fn records(input: &[u8], max: usize) -> Vec<String> {
