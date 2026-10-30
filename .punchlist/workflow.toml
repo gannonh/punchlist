@@ -81,6 +81,7 @@ prompt = "prompts/in_progress.md"
 [dispatch.status.agent_review]
 agent = "codex"
 prompt = "prompts/agent_review.md"
+fallback = { agent = "claude-code", model = "sonnet" }   # while Codex is at its usage limit (PL-185)
 
 [dispatch.status.merging]
 agent = "claude-code"
