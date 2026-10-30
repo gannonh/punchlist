@@ -63,9 +63,15 @@ test('the Pull requests page reads again every 30 s while visible, so a pull req
   })
   await page.clock.install()
   await signIn(page)
+  // Counted requests can still be in flight: deliver only after the initial snapshot
+  // has arrived, or it can already contain the PR whose timed refresh we are testing.
+  const initialRead = page.waitForResponse((response) =>
+    /\/api\/workspaces\/[^/]+\/pull-requests$/.test(new URL(response.url()).pathname),
+  )
   await page.keyboard.press('g')
   await page.keyboard.press('p')
   await expect(page).toHaveURL(/\/pull-requests$/)
+  await (await initialRead).finished()
   await expect.poll(() => reads).toBe(1)
 
   const number = 9000 + Math.floor(Math.random() * 900_000)
