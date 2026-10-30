@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::actors::person_only;
 use crate::auth::Actor;
+use crate::db;
 use crate::events::record_row_event;
 use crate::workflow::lock_workspace;
 use crate::{ApiError, AppState};
@@ -230,7 +231,7 @@ async fn update_project(
             .ok_or_else(|| nothing_to_change("name"))?,
         "project",
     )?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let old = sqlx::query_scalar!(
         "SELECT name FROM project WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
@@ -300,7 +301,7 @@ async fn update_milestone(
         .map(|name| parse_name(name, "milestone"))
         .transpose()?;
     let pass_when = request.pass_when.as_deref().map(str::trim);
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let project = sqlx::query_scalar!(
         "SELECT name FROM project WHERE id = $1 AND workspace_id = $2",

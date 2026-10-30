@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
+use crate::db;
 use crate::events::next_event_seq;
 use crate::issues::{
     end_dispatches, insert_transition, is_signed_by_agent, record_event, record_transition_event,
@@ -133,7 +134,7 @@ async fn start_import(
     Json(snapshot): Json<LinearImport>,
 ) -> Result<(StatusCode, Json<ImportRun>), ApiError> {
     check_workspace(&actor, id)?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     let (workflow, _) = active_workflow(&mut tx, id).await?;
     map_states(&workflow, &snapshot.issues).map_err(ApiError::Invalid)?;
     if let Some(repeat) = repeated_id(&snapshot.issues) {

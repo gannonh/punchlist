@@ -15,6 +15,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
+use crate::db;
 use crate::workflow::lock_workspace;
 use crate::{ApiError, AppState};
 
@@ -127,7 +128,7 @@ pub(crate) async fn register_runner(
         return Err(ApiError::Invalid(unknown));
     }
     let token = new_token();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // Two registrations of one name serialize here, so they cannot both create a runner.
     // Older data may hold one name twice, so the name has no unique index.
     lock_workspace(&mut tx, actor.workspace_id).await?;
@@ -270,7 +271,7 @@ async fn heartbeat(
     own_runner(&state, &actor, id).await?;
     let run_ids: Vec<Uuid> = held.held.iter().map(|h| h.run_id).collect();
     let attempts: Vec<i32> = held.held.iter().map(|h| h.attempt).collect();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     let row = sqlx::query_as!(
         RunnerRow,
         "UPDATE runner SET last_heartbeat = now() WHERE id = $1

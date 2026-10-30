@@ -14,6 +14,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::auth::{Actor, hash_token};
+use crate::db;
 use crate::session::{account_of, cli_device, https, random_id, user_agent};
 use crate::{ApiError, AppState};
 
@@ -127,7 +128,7 @@ async fn poll_login(
     State(state): State<AppState>,
     Json(poll): Json<CliLoginPoll>,
 ) -> Result<Json<CliLoginToken>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     let login = sqlx::query!(
         r#"SELECT code, state, account_id, user_agent, expires_at > now() AS "live!"
            FROM cli_login WHERE secret_hash = $1 FOR UPDATE"#,

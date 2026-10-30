@@ -135,7 +135,9 @@ export interface Inbox {
 export const inbox = async (request: APIRequestContext, token = personToken()) =>
   ok<Inbox>(await request.get('/api/inbox', { headers: bearer(token) }))
 
-// Other spec files move issues meanwhile, so the header is checked against the inbox as the server has it then.
+// Other spec files move issues meanwhile, so the header is checked against the inbox as the server has it then. The
+// header trails the server by up to 600 ms (the stream's 500 ms poll and the inbox's 100 ms wait), so the check
+// samples every 100 ms until the two agree between other workers' moves (PL-178).
 export async function headerMatches(page: Page, request: APIRequestContext, token = personToken()) {
   await expect
     .poll(
@@ -143,7 +145,7 @@ export async function headerMatches(page: Page, request: APIRequestContext, toke
         const [shown, now] = [await page.locator('[data-inbox-count]').textContent(), await inbox(request, token)]
         return shown === String(now.unread)
       },
-      { timeout: 2000 },
+      { intervals: [100] },
     )
     .toBe(true)
 }

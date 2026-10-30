@@ -20,6 +20,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
+use crate::db;
 use crate::github::github_actor;
 use crate::rows::issue_rows;
 use crate::workflow::lock_workspace;
@@ -105,7 +106,7 @@ pub async fn write_pull_request_events(pool: &PgPool) -> sqlx::Result<usize> {
     .await?;
     let mut written = 0;
     for workspace_id in workspaces {
-        let mut tx = pool.begin().await?;
+        let mut tx = db::begin(pool).await?;
         lock_workspace(&mut tx, workspace_id).await?;
         let mut issues = sqlx::query_scalar!(
             "DELETE FROM pull_request_change c USING issue i
@@ -344,7 +345,7 @@ async fn next_items(
     workspace_id: Uuid,
     after: i64,
 ) -> sqlx::Result<Vec<StreamItem>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;

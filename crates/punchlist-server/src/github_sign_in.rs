@@ -15,6 +15,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{hash_token, request_cookie, session_account, session_id};
+use crate::db;
 use crate::session::{cookie, https, random_id, start_session};
 use crate::{ApiError, AppState};
 
@@ -213,7 +214,7 @@ async fn callback(
 /// accepted. None when no account is linked and no invite is open. An invite expires 7 days
 /// after it was created: GitHub frees a renamed user's login for anyone to register.
 async fn accept_invites(state: &AppState, user: &GithubUser) -> Result<Option<Uuid>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // Locked first, so a second sign-in of the same user waits here and then finds the
     // account this one creates, with no invite left.
     let invites = sqlx::query_scalar!(
