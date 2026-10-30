@@ -215,7 +215,7 @@ async fn the_list_and_the_stream_agree_over_a_concurrent_write(pool: PgPool) {
     assert_eq!(created["row"]["issue"]["id"], "PL-1");
 
     // A write that has taken sequence number 2 and not committed.
-    let mut held = pool.begin().await.unwrap();
+    let mut held = punchlist_server::db::begin(&pool).await.unwrap();
     let seq: i64 = sqlx::query_scalar(
         "UPDATE workspace SET last_event_seq = last_event_seq + 1 WHERE id = $1
          RETURNING last_event_seq",

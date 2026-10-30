@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 
 use crate::AppState;
+use crate::db;
 
 /// How long a claimed job is leased before another worker may take it.
 const LEASE_SECONDS: i32 = 30;
@@ -43,7 +44,7 @@ pub async fn run_jobs_until_idle(state: &AppState) -> Result<(), sqlx::Error> {
 /// Claims and runs the oldest ready job. Returns false when no job was ready. A job that
 /// fails is rescheduled; only a database failure while claiming or rescheduling is an error.
 pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     let Some(job) = sqlx::query!(
         "SELECT id, kind, payload FROM job
          WHERE (state = 'queued' AND run_after <= now())
@@ -86,7 +87,7 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
                     let (event, current) = tokio::time::timeout_at(deadline, read)
                         .await
                         .context("GitHub did not answer in time")??;
-                    let mut tx = state.pool.begin().await?;
+                    let mut tx = db::begin(&state.pool).await?;
                     if crate::github::process(&mut tx, &event, current).await? {
                         break tx;
                     }
@@ -105,11 +106,11 @@ pub async fn run_next_job(state: &AppState) -> Result<bool, sqlx::Error> {
             // ponytail: the GitHub reads run inside the transaction, holding a connection
             // for their few seconds; fine at one load per push to `.punchlist/`.
             "workflow_load" => {
-                tx = state.pool.begin().await?;
+                tx = db::begin(&state.pool).await?;
                 crate::workflow::load(state, &mut tx, job.payload).await?;
             }
             "linear_import" => {
-                tx = state.pool.begin().await?;
+                tx = db::begin(&state.pool).await?;
                 result = Some(crate::linear_import::run(&mut tx, job.payload).await?);
             }
             other => anyhow::bail!("unknown job kind `{other}`"),

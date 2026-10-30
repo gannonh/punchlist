@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::actors::person_only;
 use crate::auth::{Actor, parse_role};
+use crate::db;
 use crate::error::GateFailure;
 use crate::events::{events, next_event_seq, record_row_event};
 use crate::github::{
@@ -65,7 +66,7 @@ pub(crate) async fn create_issue(
     if title.is_empty() {
         return Err(ApiError::Invalid("an issue needs a title".into()));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, actor.workspace_id).await?;
     let next = sqlx::query!(
@@ -154,7 +155,7 @@ pub(crate) async fn list_issues(
     actor: Actor,
 ) -> Result<Json<IssueList>, ApiError> {
     // One snapshot for the list and the sequence number (ADR 0006).
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
@@ -362,7 +363,7 @@ async fn run_again(
     Path(id): Path<String>,
 ) -> Result<Json<RunAgainResult>, ApiError> {
     person_only(&actor)?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let status = sqlx::query_scalar!(
         "SELECT status FROM issue WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
@@ -495,7 +496,7 @@ async fn request_move(
     request: &MoveIssue,
 ) -> Result<Moved, ApiError> {
     let read = refresh_evidence(state, actor, id, &request.to).await?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     if let Some(read) = &read {
         lock_pull_requests(&mut tx, id, read).await?;
@@ -1382,7 +1383,7 @@ async fn add_comment(
     if request.body.trim().is_empty() {
         return Err(ApiError::Invalid("a comment needs a body".into()));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // Workspace before issue, as everywhere; the comment event updates the workspace row.
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let status = sqlx::query_scalar!(
@@ -1611,7 +1612,7 @@ async fn update_issue(
     Json(request): Json<UpdateIssue>,
 ) -> Result<Json<IssueWritten>, ApiError> {
     let edit = parse_edit(request)?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let current = sqlx::query!(
         "SELECT status, title, body, labels, assignee_id, parent_id, project_id, milestone_id

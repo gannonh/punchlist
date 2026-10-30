@@ -61,11 +61,24 @@ test('the Pull requests page reads again every 30 s while visible, so a pull req
   page.on('request', (r) => {
     if (/\/api\/workspaces\/[^/]+\/pull-requests$/.test(new URL(r.url()).pathname)) reads += 1
   })
-  await page.clock.install()
+  // Keep initial fetches, React's notifications and the refetch interval on one
+  // controlled timeline. A running clock plus fastForward can jump before the
+  // observer has finished installing/resetting its interval (PL-186).
+  await page.clock.install({ time: new Date('2026-01-01T00:00:00Z') })
+  await page.clock.pauseAt(new Date('2026-01-01T00:00:01Z'))
   await signIn(page)
+  // Counted requests can still be in flight: deliver only after the initial snapshot
+  // has arrived, or it can already contain the PR whose timed refresh we are testing.
+  const initialRead = page.waitForResponse((response) =>
+    /\/api\/workspaces\/[^/]+\/pull-requests$/.test(new URL(response.url()).pathname),
+  )
   await page.keyboard.press('g')
   await page.keyboard.press('p')
   await expect(page).toHaveURL(/\/pull-requests$/)
+  const initialResponse = await initialRead
+  await initialResponse.finished()
+  await page.clock.runFor(1_000)
+  await expect(page.getByRole('heading', { level: 1 })).toContainText(/\d+ open/)
   await expect.poll(() => reads).toBe(1)
 
   const number = 9000 + Math.floor(Math.random() * 900_000)
@@ -79,14 +92,30 @@ test('the Pull requests page reads again every 30 s while visible, so a pull req
   payload.pull_request.head.ref = `chore/no-issue-${String(number)}`
   payload.pull_request.head.sha = randomUUID().replaceAll('-', '').padEnd(40, '0')
   await deliver(request, 'pull_request', payload)
+  // A webhook's 202 only queues its job. Establish the server's new snapshot
+  // before advancing the browser's timer, without refetching in the browser.
+  await expect
+    .poll(async () => {
+      const pulls = await ok<{ number: number }[]>(
+        await request.get(initialResponse.url(), { headers: bearer(personToken()) }),
+      )
+      return pulls.some((pull) => pull.number === number)
+    })
+    .toBe(true)
   const pr = page.locator('[data-section="names-no-issue"]').locator(`[data-pr-row="${String(number)}"]`)
-  // The first timed read is due 30 s after the page opened, a moment before the delivery.
-  await page.clock.fastForward(25_000)
-  await page.waitForTimeout(500)
+  // The first timed read is due 30 s after the initial snapshot, settled above.
+  await page.clock.runFor(25_000)
   expect(reads).toBe(1)
   await expect(pr).toHaveCount(0)
-  await page.clock.fastForward(5_000)
-  await expect(pr).toBeVisible()
+  await page.clock.runFor(5_000)
+  await expect
+    .poll(async () => {
+      // Query notifications are timers too; allow the completed fetch to render
+      // while keeping the next 30 s poll out of reach.
+      await page.clock.runFor(10)
+      return pr.isVisible()
+    })
+    .toBe(true)
   expect(reads).toBe(2)
 
   // A hidden tab sends no timed read.
@@ -94,8 +123,7 @@ test('the Pull requests page reads again every 30 s while visible, so a pull req
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
     document.dispatchEvent(new Event('visibilitychange'))
   })
-  await page.clock.fastForward(70_000)
-  await page.waitForTimeout(500)
+  await page.clock.runFor(70_000)
   expect(reads).toBe(2)
 
   // Visible again, the next tick reads.
@@ -103,6 +131,6 @@ test('the Pull requests page reads again every 30 s while visible, so a pull req
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
     document.dispatchEvent(new Event('visibilitychange'))
   })
-  await page.clock.fastForward(30_000)
+  await page.clock.runFor(30_000)
   await expect.poll(() => reads).toBe(3)
 })

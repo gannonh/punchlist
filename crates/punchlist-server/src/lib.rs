@@ -4,6 +4,7 @@ mod actors;
 mod auth;
 mod bootstrap;
 mod cli_login;
+pub mod db;
 mod error;
 mod events;
 mod github;

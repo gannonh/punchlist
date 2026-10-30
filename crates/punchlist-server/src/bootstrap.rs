@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::db;
 use crate::hash_token;
 
 /// What `punchlist-server bootstrap` creates: one workspace, its repository and one person.
@@ -26,7 +27,7 @@ pub struct Bootstrapped {
 /// person, with a new token.
 pub async fn bootstrap(pool: &PgPool, input: &Bootstrap) -> anyhow::Result<Bootstrapped> {
     let token = crate::auth::new_token();
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     let account_id = sqlx::query_scalar!(
         "INSERT INTO account (name, token_hash) VALUES ($1, $2) RETURNING id",
         input.person_name,
@@ -51,7 +52,7 @@ pub async fn join(
     account_id: Uuid,
     input: &Bootstrap,
 ) -> anyhow::Result<(Uuid, Uuid)> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     sqlx::query_scalar!("SELECT id FROM account WHERE id = $1", account_id)
         .fetch_optional(&mut *tx)
         .await?

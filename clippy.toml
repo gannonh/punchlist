@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "sqlx::Pool::begin", reason = "a begin cut short leaves its connection in a transaction (PL-178); use punchlist_server::db::begin" },
+  { path = "sqlx::Connection::begin", reason = "a begin cut short leaves its connection in a transaction (PL-178); use punchlist_server::db::begin" },
+]

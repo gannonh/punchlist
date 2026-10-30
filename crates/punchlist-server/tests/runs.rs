@@ -843,7 +843,7 @@ async fn reporting_a_model_locks_the_workspace_before_the_attempt(pool: PgPool) 
 
     // A finisher already owns the workspace; a log append must wait before
     // owning the attempt, so the finisher can still acquire that attempt.
-    let mut finisher = pool.begin().await.unwrap();
+    let mut finisher = punchlist_server::db::begin(&pool).await.unwrap();
     sqlx::query("SELECT id FROM workspace FOR NO KEY UPDATE")
         .fetch_all(&mut *finisher)
         .await

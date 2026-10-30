@@ -16,6 +16,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, parse_role};
+use crate::db;
 use crate::events::record_row_event;
 use crate::issues::current_attempt;
 use crate::workflow::{active_workflow, lock_workspace};
@@ -213,7 +214,7 @@ async fn attach(
     tokio::fs::rename(part, path).await?;
     // ponytail: a crash between this rename and the commit leaves a file no row names.
     // Upgrade path: a sweep that deletes stored keys with no `proof` row.
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // Workspace before issue, as everywhere.
     lock_workspace(&mut tx, actor.workspace_id).await?;
     let status = sqlx::query_scalar!(

@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::GithubClient;
 use crate::auth::Actor;
+use crate::db;
 use crate::events::{mark_pull_request_change, record_row_event};
 use crate::github_api::{
     CommentBody, GithubThread, MAX_COMMENTS, ThreadCommentNode, ThreadComments, unless_gone,
@@ -765,7 +766,7 @@ async fn record_read_check_runs(
     // The head asked for is the head judged: a run listed for another is not this commit's.
     runs.retain(|run| run.head_sha == head_sha);
     runs.sort_by_key(|run| run.id);
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     let mut changed = false;
     for run in &runs {
         let job = jobs.get(&run.id).filter(|job| job.is_behind(run));
@@ -1447,7 +1448,7 @@ async fn refresh_once(
             .iter()
             .find(|row| row.number == pr.number)
             .map_or(0, |row| row.version);
-        let mut tx = pool.begin().await?;
+        let mut tx = db::begin(pool).await?;
         if !claim_read(&mut tx, workspace_id, repository.id, pr, version).await? {
             tracing::info!(
                 issue_id,
@@ -1499,7 +1500,7 @@ async fn refresh_once(
         if fresh.iter().any(|pr| pr.number == number) {
             continue;
         }
-        let mut tx = pool.begin().await?;
+        let mut tx = db::begin(pool).await?;
         sqlx::query!(
             "SELECT id FROM pull_request WHERE repository_id = $1 AND number = $2 FOR UPDATE",
             repository.id,
@@ -1718,7 +1719,7 @@ async fn catch_up_workspace_merges(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
 ) -> Result<(), ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     lock_workspace(&mut tx, workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
     let issues = sqlx::query!(
@@ -1740,7 +1741,7 @@ async fn catch_up_workspace_children_done(
     pool: &sqlx::PgPool,
     workspace_id: Uuid,
 ) -> Result<(), ApiError> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     lock_workspace(&mut tx, workspace_id).await?;
     let (workflow, _) = active_workflow(&mut tx, workspace_id).await?;
     let parents = sqlx::query_scalar!(

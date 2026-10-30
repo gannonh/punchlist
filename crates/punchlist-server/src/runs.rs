@@ -22,6 +22,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 
 use crate::auth::{Actor, hash_token, new_token};
+use crate::db;
 use crate::events::record_row_event;
 use crate::issues::{check_move, record_comment, record_transition, signed_by_agent};
 use crate::rows::issue;
@@ -226,7 +227,7 @@ async fn try_claim(
     runner: &RunnerRow,
     target: &Target,
 ) -> Result<Claimed, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // Before the workflow is read, so a claim waiting behind a load uses the new one.
     lock_workspace(&mut tx, actor.workspace_id).await?;
     // A claim that waited through a re-registration of its runner holds the old token: the
@@ -771,7 +772,7 @@ async fn append_log(
         hold_attempt(&state.pool, id, request.attempt, &runner).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // A first reported model writes an event. Take its workspace lock before the
     // attempt lock, in the same order as finish and lease expiry.
     lock_workspace(&mut tx, actor.workspace_id).await?;
@@ -991,7 +992,7 @@ async fn finish_run(
         RunOutcome::Failed => reason,
         _ => None,
     };
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // The workspace, then the issue, before the attempt, as a claim, a move and a pull
     // request close lock them. They serialize the end of the run with a workflow load and
     // with a move of the issue, so the dispatch queued below is for the status the issue is
@@ -1098,7 +1099,7 @@ async fn resume_run(
 ) -> Result<Json<Claim>, ApiError> {
     let runner = runner_of(&state, &actor).await?;
     ensure_run(&state.pool, &actor, id).await?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     let Some(held) = sqlx::query!(
         "UPDATE attempt SET lease_expires_at = now() + make_interval(secs => $4)
          WHERE run_id = $1 AND attempt = $2 AND runner_id = $3 AND state = 'running'
@@ -1247,7 +1248,7 @@ async fn wait_for_person(
         )));
     }
     ensure_run(&state.pool, &actor, id).await?;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = db::begin(&state.pool).await?;
     // The workspace, then the issue, as `finish_run` locks them, so the run cannot end
     // between the check and the write.
     lock_workspace(&mut tx, actor.workspace_id).await?;
@@ -1466,7 +1467,7 @@ async fn expire_lease(
     issue_id: &str,
     run_id: Uuid,
 ) -> sqlx::Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = db::begin(pool).await?;
     lock_workspace(&mut tx, workspace_id).await?;
     sqlx::query!("SELECT FROM issue WHERE id = $1 FOR UPDATE", issue_id)
         .fetch_one(&mut *tx)

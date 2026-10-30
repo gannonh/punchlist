@@ -2824,7 +2824,7 @@ async fn a_load_waits_for_a_move_in_flight_and_then_refuses(pool: PgPool) {
     put_workflow(&s, "a", PRD_WORKFLOW.replace("todo", "ready"));
 
     // A move in flight: it holds the workspace lock and has put the issue in Todo.
-    let mut mover = pool.begin().await.unwrap();
+    let mut mover = punchlist_server::db::begin(&pool).await.unwrap();
     sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
         .fetch_one(&mut *mover)
         .await
@@ -2867,7 +2867,7 @@ async fn a_move_waiting_behind_a_load_is_decided_by_the_new_workflow(pool: PgPoo
     );
 
     // A load in flight: it holds the workspace lock and has switched to a version with `ready`.
-    let mut load = pool.begin().await.unwrap();
+    let mut load = punchlist_server::db::begin(&pool).await.unwrap();
     sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
         .fetch_one(&mut *load)
         .await
@@ -4623,7 +4623,7 @@ async fn request_held_before_the_evaluation(
     token: &str,
     during: impl Future<Output = ()>,
 ) -> (StatusCode, Value) {
-    let mut lock = pool.begin().await.unwrap();
+    let mut lock = punchlist_server::db::begin(pool).await.unwrap();
     sqlx::query!("SELECT id FROM workspace FOR NO KEY UPDATE")
         .fetch_one(&mut *lock)
         .await
