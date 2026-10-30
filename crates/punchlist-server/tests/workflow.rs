@@ -972,6 +972,69 @@ async fn a_closed_delivered_after_the_reopened_of_the_same_second_leaves_it_open
     );
 }
 
+/// `ready_for_review` and an `edited` that still carries `draft: true`, both from READY's
+/// second (18:05:00), as GitHub sends them when a pull request is edited and readied at once.
+fn ready_and_draft_edit_of_one_second() -> (String, String) {
+    let edit = edited(READY, |v| {
+        v["action"] = json!("edited");
+        v["pull_request"]["draft"] = json!(true);
+    });
+    (READY.to_string(), edit)
+}
+
+async fn draft(pool: &PgPool) -> bool {
+    sqlx::query_scalar("SELECT draft FROM pull_request WHERE number = 12")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn a_draft_edit_delivered_after_the_ready_of_the_same_second_leaves_it_ready(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    s.github.lock().unwrap().pulls = vec![pull_request_now(READY)];
+
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+
+    assert!(!draft(&pool).await);
+}
+
+#[sqlx::test]
+async fn a_ready_delivered_after_the_draft_edit_of_the_same_second_leaves_it_ready(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    // GitHub reports it ready, though the edit is the last delivery to say otherwise.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(READY)];
+
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+    assert!(draft(&pool).await, "the edit is newer than the opened");
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+
+    assert!(!draft(&pool).await);
+}
+
+#[sqlx::test]
+async fn a_tie_github_reports_as_a_draft_is_recorded_a_draft(pool: PgPool) {
+    let s = setup(&pool).await;
+    claimed_issue(&s).await;
+    deliver(&s, "pull_request", "d-opened", OPENED).await;
+    let (ready, edit) = ready_and_draft_edit_of_one_second();
+    // Made a draft again within the second: GitHub's answer decides, not the order the
+    // deliveries came in.
+    s.github.lock().unwrap().pulls = vec![pull_request_now(&edit)];
+
+    deliver(&s, "pull_request", "d-edited", &edit).await;
+    deliver(&s, "pull_request", "d-ready", &ready).await;
+
+    assert!(draft(&pool).await);
+}
+
 #[sqlx::test]
 async fn deliveries_are_retried_not_recorded_while_github_is_down(pool: PgPool) {
     let s = setup(&pool).await;
@@ -5152,4 +5215,215 @@ async fn a_run_over_its_token_budget_waits_on_a_person_until_the_issue_moves(poo
         dispatches_into(&pool, "agent_review").await,
         [(1, false), (1, false), (2, true)]
     );
+}
+
+/// `load_a_workflow_a_person_can_move_through`, with Agent Review falling back to Claude Code
+/// on `haiku`. Returns the Codex runner's token after PL-1 has entered Agent Review.
+async fn in_agent_review_with_a_fallback(s: &Setup, pool: &PgPool) -> String {
+    let rule = "agent = \"codex\"\nprompt = \"prompts/agent_review.md\"\n";
+    let workflow = PRD_WORKFLOW.replace(
+        rule,
+        &format!("{rule}fallback = {{ agent = \"claude-code\", model = \"haiku\" }}\n"),
+    );
+    assert_ne!(workflow, PRD_WORKFLOW);
+    let gated = "to = \"agent_review\"\nby = [\"agent\"]\ngates = [\"pr_open\", \"pr_ready\", \"pr_names_issue\"]";
+    let workflow = workflow.replace(gated, "to = \"agent_review\"\nby = [\"agent\", \"person\"]")
+        + "\n[[transition]]\nfrom = \"agent_review\"\nto = \"in_progress\"\nby = [\"person\"]\n";
+    put_workflow(s, "b", workflow);
+    let system = "Call request_transition.\n".to_string();
+    (s.github.lock().unwrap().files).insert("prompts/system.md".into(), system);
+    deliver(s, "push", "push-1", PUSH).await;
+    assert_eq!(workflow_versions(pool).await, 1);
+    let (_, claude_runner, first) = claimed_by_runner(s).await;
+    person_moves(s, "agent_review").await;
+    finish(s, &claude_runner, &first).await;
+    register(s, "codex", &["codex"]).await
+}
+
+fn usage_limit(resets_at: &str) -> Value {
+    json!({"attempt": 1, "outcome": "failed", "reason": "usage limit", "duration_ms": 1,
+           "usage_limit": {"resets_at": resets_at}})
+}
+
+async fn pause_passes(pool: &PgPool, agent: &str) {
+    sqlx::query("UPDATE runner_pause SET until = now() - interval '1 second' WHERE agent = $1")
+        .bind(agent)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Each run of PL-1 in Agent Review, oldest first: its agent, model and `fallback_for`.
+async fn review_runs(s: &Setup) -> Vec<(String, Value, Value)> {
+    let (status, runs) = call(
+        &s.app,
+        &s.person.token,
+        "GET",
+        "/api/issues/PL-1/runs",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{runs}");
+    let mut runs: Vec<_> = (runs.as_array().unwrap().iter())
+        .filter(|run| run["agent"] != "claude-code" || run["fallback_for"] != Value::Null)
+        .map(|run| {
+            let agent = run["agent"].as_str().unwrap().to_string();
+            (agent, run["model"].clone(), run["fallback_for"].clone())
+        })
+        .collect();
+    runs.reverse();
+    runs
+}
+
+#[sqlx::test]
+async fn a_review_that_hits_the_usage_limit_falls_back_until_the_pause_ends(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex_runner = in_agent_review_with_a_fallback(&s, &pool).await;
+    let claude_runner = register(&s, "claude", &["claude-code"]).await;
+    // Codex is not paused: Claude Code does not take its review.
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    let (status, review) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    assert_eq!(review["agent"], "codex");
+
+    // The Codex review stops on its usage limit: Claude Code takes the same dispatch at once,
+    // on the fallback's model, so the entry uses no run for the limited one.
+    finish_on(
+        &s,
+        &codex_runner,
+        &review,
+        usage_limit("2099-01-01T00:00:00Z"),
+    )
+    .await;
+    let (status, fallback) = claim(&s, &claude_runner).await;
+    assert_eq!(status, StatusCode::OK, "{fallback}");
+    assert_eq!(
+        (&fallback["agent"], &fallback["model"]),
+        (&json!("claude-code"), &json!("haiku"))
+    );
+    assert_eq!(fallback["branch"], review["branch"]);
+    assert_eq!(fallback["prompt"], review["prompt"]);
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, false)]);
+
+    // It counts as a run of the entry. The next dispatch has no reset of its own, but every
+    // runner that can run Codex and heartbeats is paused for it, so it falls back too; a
+    // runner that stopped heartbeating does not hold it back.
+    finish(&s, &claude_runner, &fallback).await;
+    assert_eq!(
+        dispatches_into(&pool, "agent_review").await,
+        [(1, false), (2, true)]
+    );
+    register(&s, "gone", &["codex"]).await;
+    sqlx::query("UPDATE runner SET last_heartbeat = now() - interval '1 hour' WHERE name = 'gone'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, second) = claim(&s, &claude_runner).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_eq!(second["agent"], "claude-code");
+
+    // The pause ends: the next dispatch goes to Codex, not to Claude Code.
+    pause_passes(&pool, "codex").await;
+    finish(&s, &claude_runner, &second).await;
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    let (status, third) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    assert_eq!(third["agent"], "codex");
+
+    assert_eq!(
+        review_runs(&s).await,
+        [
+            ("codex".to_string(), Value::Null, Value::Null),
+            ("claude-code".to_string(), json!("haiku"), json!("codex")),
+            ("claude-code".to_string(), json!("haiku"), json!("codex")),
+            ("codex".to_string(), Value::Null, Value::Null),
+        ]
+    );
+
+    // A fallback run that waits on a person is named as itself, not as the rule's agent.
+    finish_on(
+        &s,
+        &codex_runner,
+        &third,
+        usage_limit("2099-01-01T00:00:00Z"),
+    )
+    .await;
+    let (status, fourth) = claim(&s, &claude_runner).await;
+    assert_eq!(status, StatusCode::OK, "{fourth}");
+    let uri = format!("/api/runs/{}/waiting", fourth["run_id"].as_str().unwrap());
+    let agent = fourth["agent_token"].as_str().unwrap();
+    let (status, body) = call(
+        &s.app,
+        agent,
+        "POST",
+        &uri,
+        Some(json!({"reason": "No PR."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        waiting_on_person(&s).await,
+        "Claude Code is waiting on a person: No PR."
+    );
+}
+
+#[sqlx::test]
+async fn with_both_agents_paused_a_review_waits_for_the_earlier_reset(pool: PgPool) {
+    let s = setup(&pool).await;
+    let codex_runner = in_agent_review_with_a_fallback(&s, &pool).await;
+    let claude_runner = register(&s, "claude", &["claude-code"]).await;
+    let (status, review) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{review}");
+    sqlx::query(
+        "INSERT INTO runner_pause (runner_id, agent, until)
+         SELECT id, 'claude-code', '2098-01-01T00:00:00Z' FROM runner WHERE name = 'claude'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    finish_on(
+        &s,
+        &codex_runner,
+        &review,
+        usage_limit("2099-01-01T00:00:00Z"),
+    )
+    .await;
+    // Both paused: no run starts.
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+
+    // Claude Code's reset comes first: it takes the review.
+    pause_passes(&pool, "claude-code").await;
+    let (status, fallback) = claim(&s, &claude_runner).await;
+    assert_eq!(status, StatusCode::OK, "{fallback}");
+    assert_eq!(fallback["agent"], "claude-code");
+
+    // The fallback hits its own limit, later than Codex's: the dispatch keeps Codex's reset,
+    // and nothing runs until then.
+    finish_on(
+        &s,
+        &claude_runner,
+        &fallback,
+        usage_limit("2099-06-01T00:00:00Z"),
+    )
+    .await;
+    let not_before: String = sqlx::query_scalar(
+        "SELECT to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD') FROM dispatch
+         WHERE run_id IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(not_before, "2099-01-01");
+    assert_eq!(dispatches_into(&pool, "agent_review").await, [(1, true)]);
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(claim(&s, &codex_runner).await.0, StatusCode::NO_CONTENT);
+
+    // Codex's reset comes: Codex takes it.
+    reset_passes(&pool).await;
+    pause_passes(&pool, "codex").await;
+    assert_eq!(claim(&s, &claude_runner).await.0, StatusCode::NO_CONTENT);
+    let (status, again) = claim(&s, &codex_runner).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["agent"], "codex");
 }

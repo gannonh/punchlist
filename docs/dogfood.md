@@ -70,7 +70,16 @@ The runner works on one issue at a time unless told otherwise, whatever the work
 max_concurrent = 3
 ```
 
-A runner keeps its name, so starting it again re-adopts the same runner. Stopping it with `Ctrl-C` (or SIGTERM) stops its agents and finishes each attempt `failed (runner stopped)`; the next claim starts attempt 2 of the same run on the same branch, with a new agent session. Only a runner that died without stopping them (a crash, `kill -9`, power loss) resumes its Claude Code attempts when it starts again. A stack restart needs nothing from the runners: they warn while the server is down and heartbeat again when it is back.
+A runner keeps its name, so starting it again re-adopts the same runner. Stopping it with `Ctrl-C` (or SIGTERM) stops its agents and finishes each attempt `failed (runner stopped)`; the next claim starts attempt 2 of the same run on the same branch, with a new agent session. A runner that died without stopping them (a crash, `kill -9`, power loss) resumes its Claude Code attempts when it starts again within the lease (30 s), and so does one stopped with SIGHUP.
+
+Upgrade a runner with SIGHUP, and start it again at once in its pane:
+
+```sh
+kill -HUP "$(pgrep -f 'runner start --name sartre-punchlist')"
+pl --workspace PL runner start --name sartre-punchlist --agents claude-code,codex
+```
+
+SIGHUP stops each agent as `Ctrl-C` does but reports none of its attempts, and the runner exits 0 with `stopped for a restart; N attempt(s) left to resume`. The next start resumes each Claude Code attempt whose worktree is still on its branch in its session (`claude --resume`), and reports any other, Codex included, lost (`runner restarted`), so its run gets attempt 2. A runner not started again within 30 s leaves its leases to lapse, and the sweep fails the attempts, so each run's next attempt goes to any runner. A stack restart needs nothing from the runners: they warn while the server is down and heartbeat again when it is back.
 
 ## A day
 

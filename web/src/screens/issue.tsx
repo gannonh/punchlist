@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Assignee, GithubLink, Labels, LockBadge, PullRequest, StatusDot } from '@/components/atoms'
 import { WaitingNotice } from '@/components/waiting-notice'
 import { WorkspaceMenu } from '@/components/workspace-menu'
+import { ShortcutStrip } from '@/components/shortcut-strip'
 import {
   issuePageQueries,
   issuesQuery,
@@ -23,6 +24,7 @@ import {
 } from '@/lib/queries'
 import { age, agentName, assigneeView, pullRequestView, waitsOnMerge, type Actor, type WaitsOnMerge } from '@/model/issues'
 import type { Workspace } from '@/model/workspaces'
+import { SCREEN_KEYS, STRIPS } from '@/model/shortcuts'
 import {
   GATE_EVIDENCE,
   actorMark,
@@ -208,6 +210,26 @@ export function IssueScreen({
     if (target && timelineLoaded) document.getElementById(target)?.scrollIntoView({ block: 'center' })
   }, [target, timelineLoaded])
 
+  // One handler per action, for its key and its strip button.
+  const actions = useMemo<Record<string, () => void>>(
+    () => ({
+      gates: () => {
+        jump('gates')
+      },
+      activity: () => {
+        jump('timeline')
+      },
+      comment: () => {
+        jump('timeline')
+        if (composer.current && !composer.current.disabled) composer.current.focus()
+      },
+      issues: () =>
+        void (workspace
+          ? navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
+          : navigate({ to: '/' })),
+    }),
+    [navigate, workspace],
+  )
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // An open dialog handles its own keys, `Esc` included, wherever focus is.
@@ -216,33 +238,18 @@ export function IssueScreen({
         if (event.key === 'Escape') (event.target as HTMLElement).blur()
         return
       }
-      const keys: Record<string, (() => void) | undefined> = {
-        g: () => {
-          jump('gates')
-        },
-        t: () => {
-          jump('timeline')
-        },
-        c: () => {
-          jump('timeline')
-          if (composer.current && !composer.current.disabled) composer.current.focus()
-        },
-        Escape: () =>
-          void (workspace
-            ? navigate({ to: '/w/$prefix', params: { prefix: workspace.issue_prefix } })
-            : navigate({ to: '/' })),
-      }
-      const action = keys[event.key]
-      if (action) {
+      const action = SCREEN_KEYS.issue[event.key]
+      const run = action && actions[action]
+      if (run) {
         event.preventDefault()
-        action()
+        run()
       }
     }
     document.addEventListener('keydown', onKey)
     return () => {
       document.removeEventListener('keydown', onKey)
     }
-  }, [navigate, workspace])
+  }, [actions])
 
   const header = (
     <header className="sticky top-0 z-5 flex flex-wrap items-center gap-x-3.5 gap-y-1 border-b bg-background px-3 py-2 sm:px-4 sm:py-2.5">
@@ -403,21 +410,7 @@ export function IssueScreen({
           </aside>
         </div>
       </main>
-      <footer className="sticky bottom-0 z-5 flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-card px-3 py-1.5 text-caption text-muted-foreground sm:gap-x-4 sm:px-4 sm:py-2 sm:text-meta">
-        <span className="font-semibold text-foreground">Issue shortcuts</span>
-        {(
-          [
-            ['g', 'gates'],
-            ['t', 'activity'],
-            ['c', 'comment'],
-            ['Esc', 'back to the list'],
-          ] as const
-        ).map(([key, what]) => (
-          <span key={key} className="inline-flex items-center gap-1.25 whitespace-nowrap">
-            <kbd>{key}</kbd> {what}
-          </span>
-        ))}
-      </footer>
+      <ShortcutStrip title="Issue shortcuts" items={STRIPS.issue} actions={actions} />
     </div>
   )
 }
@@ -1152,7 +1145,7 @@ function TransitionsPanel({
             <button
               key={view.to}
               type="button"
-              className={cn('transition', view.state)}
+              className={cn('move', view.state)}
               data-transition={view.to}
               data-verdict={view.state}
               aria-disabled={view.disabled || move.isPending}
@@ -1390,6 +1383,11 @@ function AttemptCard({
             <span className="font-mono font-medium text-foreground wrap-anywhere">{model.name}</span>
             <span className="text-meta text-muted-foreground">({model.note})</span>
           </>
+        )}
+        {run.fallback_for && (
+          <span className="text-meta text-muted-foreground" data-fallback>
+            (fallback for {run.fallback_for}: usage limit)
+          </span>
         )}
       </div>
       <div className="flex flex-wrap gap-x-3.5 gap-y-1 text-meta text-muted-foreground" data-facts>
